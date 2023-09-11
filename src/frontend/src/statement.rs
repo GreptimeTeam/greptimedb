@@ -25,9 +25,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
 use catalog::CatalogManagerRef;
-use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlTaskExecutorRef;
@@ -47,16 +45,15 @@ use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 use table::engine::TableReference;
-use table::requests::{
-    CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
-};
+use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::TableRef;
 
+use crate::delete::DeleterRef;
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
-    RequestDatanodeSnafu, Result, TableNotFoundSnafu,
+    Result, TableNotFoundSnafu,
 };
-use crate::req_convert::{delete, insert};
+use crate::insert::InserterRef;
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
 use crate::table::table_idents_to_full_name;
 
@@ -64,30 +61,33 @@ use crate::table::table_idents_to_full_name;
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    region_request_handler: RegionRequestHandlerRef,
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
+    inserter: InserterRef,
+    deleter: DeleterRef,
 }
 
 impl StatementExecutor {
     pub(crate) fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        region_request_handler: RegionRequestHandlerRef,
         ddl_task_executor: DdlTaskExecutorRef,
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
+        inserter: InserterRef,
+        deleter: DeleterRef,
     ) -> Self {
         Self {
             catalog_manager,
             query_engine,
-            region_request_handler,
             ddl_executor: ddl_task_executor,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
+            inserter,
+            deleter,
         }
     }
 
@@ -223,70 +223,6 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })
-    }
-
-    async fn handle_table_insert_request(
-        &self,
-        request: InsertRequest,
-        query_ctx: QueryContextRef,
-    ) -> Result<usize> {
-        let table_ref = TableReference::full(
-            &request.catalog_name,
-            &request.schema_name,
-            &request.table_name,
-        );
-        let table = self.get_table(&table_ref).await?;
-        let table_info = table.table_info();
-
-        let inserts = insert::TableToRegion::new(&table_info, &self.partition_manager)
-            .convert(request)
-            .await?;
-        let region_request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: query_ctx.trace_id(),
-                span_id: 0,
-            }),
-            body: Some(region_request::Body::Inserts(inserts)),
-        };
-
-        let affected_rows = self
-            .region_request_handler
-            .handle(region_request)
-            .await
-            .context(RequestDatanodeSnafu)?;
-        Ok(affected_rows as _)
-    }
-
-    async fn handle_table_delete_request(
-        &self,
-        request: DeleteRequest,
-        query_ctx: QueryContextRef,
-    ) -> Result<usize> {
-        let table_ref = TableReference::full(
-            &request.catalog_name,
-            &request.schema_name,
-            &request.table_name,
-        );
-        let table = self.get_table(&table_ref).await?;
-        let table_info = table.table_info();
-
-        let deletes = delete::TableToRegion::new(&table_info, &self.partition_manager)
-            .convert(request)
-            .await?;
-        let region_request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: query_ctx.trace_id(),
-                span_id: 0,
-            }),
-            body: Some(region_request::Body::Deletes(deletes)),
-        };
-
-        let affected_rows = self
-            .region_request_handler
-            .handle(region_request)
-            .await
-            .context(RequestDatanodeSnafu)?;
-        Ok(affected_rows as _)
     }
 }
 

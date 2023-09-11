@@ -12,27 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{
-    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
-};
+use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::RowInsertRequests;
 use catalog::CatalogManager;
+use partition::manager::PartitionRuleManager;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, Result, TableNotFoundSnafu};
+use crate::req_convert::common::partitioner::Partitioner;
 
 pub struct RowToRegion<'a> {
     catalog_manager: &'a dyn CatalogManager,
+    partition_manager: &'a PartitionRuleManager,
     ctx: &'a QueryContext,
 }
 
 impl<'a> RowToRegion<'a> {
-    pub fn new(catalog_manager: &'a dyn CatalogManager, ctx: &'a QueryContext) -> Self {
+    pub fn new(
+        catalog_manager: &'a dyn CatalogManager,
+        partition_manager: &'a PartitionRuleManager,
+        ctx: &'a QueryContext,
+    ) -> Self {
         Self {
             catalog_manager,
+            partition_manager,
             ctx,
         }
     }
@@ -41,13 +46,13 @@ impl<'a> RowToRegion<'a> {
         let mut region_request = Vec::with_capacity(requests.inserts.len());
         for request in requests.inserts {
             let table = self.get_table(&request.table_name).await?;
+            let table_id = table.table_info().table_id();
 
-            let region_id = RegionId::new(table.table_info().table_id(), request.region_number);
-            let insert_request = RegionInsertRequest {
-                region_id: region_id.into(),
-                rows: request.rows,
-            };
-            region_request.push(insert_request);
+            let requests = Partitioner::new(self.partition_manager)
+                .partition_insert_requests(table_id, request.rows.unwrap_or_default())
+                .await?;
+
+            region_request.extend(requests.requests);
         }
 
         Ok(RegionInsertRequests {

@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion_expr::{DmlStatement, LogicalPlan as DfLogicalPlan, WriteOp};
@@ -35,35 +34,16 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     BuildColumnVectorsSnafu, ExecLogicalPlanSnafu, MissingTimeIndexColumnSnafu,
-    ReadRecordBatchSnafu, RequestDatanodeSnafu, Result, UnexpectedSnafu,
+    ReadRecordBatchSnafu, Result, UnexpectedSnafu,
 };
-use crate::req_convert::insert::StatementToRegion;
 
 impl StatementExecutor {
     pub async fn insert(&self, insert: Box<Insert>, query_ctx: QueryContextRef) -> Result<Output> {
         if insert.can_extract_values() {
             // Fast path: plain insert ("insert with literal values") is executed directly
-            let inserts = StatementToRegion::new(
-                self.catalog_manager.as_ref(),
-                &self.partition_manager,
-                &query_ctx,
-            )
-            .convert(&insert)
-            .await?;
-            let region_request = RegionRequest {
-                header: Some(RegionRequestHeader {
-                    trace_id: query_ctx.trace_id(),
-                    span_id: 0,
-                }),
-                body: Some(region_request::Body::Inserts(inserts)),
-            };
-
-            let affected_rows = self
-                .region_request_handler
-                .handle(region_request)
+            self.inserter
+                .handle_statement_insert(insert.as_ref(), &query_ctx)
                 .await
-                .context(RequestDatanodeSnafu)?;
-            Ok(Output::AffectedRows(affected_rows as _))
         } else {
             // Slow path: insert with subquery. Execute the subquery first, via query engine. Then
             // insert the results by sending insert requests.
@@ -94,7 +74,8 @@ impl StatementExecutor {
                 let insert_request =
                     build_insert_request(record_batch, table.schema(), &table_info)?;
                 affected_rows += self
-                    .handle_table_insert_request(insert_request, query_ctx.clone())
+                    .inserter
+                    .handle_table_insert(insert_request, query_ctx.clone())
                     .await?;
             }
 
@@ -126,13 +107,14 @@ impl StatementExecutor {
         let table_info = table.table_info();
         while let Some(batch) = stream.next().await {
             let record_batch = batch.context(ReadRecordBatchSnafu)?;
-            let delete_request = build_delete_request(record_batch, table.schema(), &table_info)?;
+            let request = build_delete_request(record_batch, table.schema(), &table_info)?;
             affected_rows += self
-                .handle_table_delete_request(delete_request, query_ctx.clone())
+                .deleter
+                .handle_table_delete(request, query_ctx.clone())
                 .await?;
         }
 
-        Ok(Output::AffectedRows(affected_rows))
+        Ok(Output::AffectedRows(affected_rows as _))
     }
 
     async fn execute_dml_subquery(

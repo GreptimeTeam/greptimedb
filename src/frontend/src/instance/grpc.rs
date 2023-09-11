@@ -27,11 +27,9 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::delete::Deleter;
 use crate::error::{
     self, Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, PermissionSnafu, Result,
 };
-use crate::insert::Inserter;
 use crate::instance::Instance;
 
 #[async_trait]
@@ -143,12 +141,9 @@ impl Instance {
         requests: InsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let inserter = Inserter::new(
-            self.catalog_manager.as_ref(),
-            self.statement_executor.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        inserter.handle_column_inserts(requests, ctx).await
+        self.inserter
+            .handle_column_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
     }
 
     pub async fn handle_row_inserts(
@@ -156,12 +151,9 @@ impl Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let inserter = Inserter::new(
-            self.catalog_manager.as_ref(),
-            self.statement_executor.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        inserter.handle_row_inserts(requests, ctx).await
+        self.inserter
+            .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
     }
 
     pub async fn handle_deletes(
@@ -169,11 +161,7 @@ impl Instance {
         requests: DeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let deleter = Deleter::new(
-            self.catalog_manager.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        deleter.handle_column_deletes(requests, ctx).await
+        self.deleter.handle_column_deletes(requests, ctx).await
     }
 
     pub async fn handle_row_deletes(
@@ -181,10 +169,6 @@ impl Instance {
         requests: RowDeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        let deleter = Deleter::new(
-            self.catalog_manager.as_ref(),
-            self.region_request_handler.as_ref(),
-        );
-        deleter.handle_row_deletes(requests, ctx).await
+        self.deleter.handle_row_deletes(requests, ctx).await
     }
 }

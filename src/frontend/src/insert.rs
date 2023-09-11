@@ -12,47 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use api::v1::alter_expr::Kind;
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
+use api::v1::region::{
+    region_request, InsertRequests as RegionInsertRequests, RegionRequest, RegionRequestHeader,
+};
 use api::v1::{
     AlterExpr, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest, RowInsertRequests,
 };
-use catalog::CatalogManager;
-use client::region_handler::RegionRequestHandler;
+use catalog::CatalogManagerRef;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
+use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::peer::Peer;
 use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
+use futures_util::future;
+use metrics::counter;
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use sql::statements::insert::Insert;
+use store_api::storage::RegionId;
 use table::engine::TableReference;
+use table::requests::InsertRequest as TableInsertRequest;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu, RequestDatanodeSnafu,
-    Result,
+    CatalogSnafu, FindDatanodeSnafu, FindNewColumnsOnInsertionSnafu, FindTableRouteSnafu,
+    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
-use crate::req_convert::insert::{ColumnToRow, RowToRegion};
+use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
 use crate::statement::StatementExecutor;
 
-pub(crate) struct Inserter<'a> {
-    catalog_manager: &'a dyn CatalogManager,
-    statement_executor: &'a StatementExecutor,
-    region_request_handler: &'a dyn RegionRequestHandler,
+pub(crate) struct Inserter {
+    catalog_manager: CatalogManagerRef,
+    partition_manager: PartitionRuleManagerRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
-impl<'a> Inserter<'a> {
+pub(crate) type InserterRef = Arc<Inserter>;
+
+impl Inserter {
     pub fn new(
-        catalog_manager: &'a dyn CatalogManager,
-        statement_executor: &'a StatementExecutor,
-        region_request_handler: &'a dyn RegionRequestHandler,
+        catalog_manager: CatalogManagerRef,
+        partition_manager: PartitionRuleManagerRef,
+        datanode_manager: DatanodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
-            statement_executor,
-            region_request_handler,
+            partition_manager,
+            datanode_manager,
         }
     }
 
@@ -60,15 +74,18 @@ impl<'a> Inserter<'a> {
         &self,
         requests: InsertRequests,
         ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let row_inserts = ColumnToRow::convert(requests)?;
-        self.handle_row_inserts(row_inserts, ctx).await
+        self.handle_row_inserts(row_inserts, ctx, statement_executor)
+            .await
     }
 
     pub async fn handle_row_inserts(
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         // remove empty requests
         requests.inserts.retain(|req| {
@@ -79,29 +96,116 @@ impl<'a> Inserter<'a> {
         });
         validate_column_count_match(&requests)?;
 
-        self.create_or_alter_tables_on_demand(&requests, &ctx)
+        self.create_or_alter_tables_on_demand(&requests, &ctx, statement_executor)
             .await?;
-        let inserts = RowToRegion::new(self.catalog_manager, &ctx)
-            .convert(requests)
-            .await?;
-        let region_request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: ctx.trace_id(),
-                span_id: 0,
-            }),
-            body: Some(region_request::Body::Inserts(inserts)),
-        };
+        let inserts = RowToRegion::new(
+            self.catalog_manager.as_ref(),
+            self.partition_manager.as_ref(),
+            &ctx,
+        )
+        .convert(requests)
+        .await?;
 
-        let affected_rows = self
-            .region_request_handler
-            .handle(region_request)
-            .await
-            .context(RequestDatanodeSnafu)?;
+        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        Ok(Output::AffectedRows(affected_rows as _))
+    }
+
+    pub async fn handle_table_insert(
+        &self,
+        request: TableInsertRequest,
+        ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let catalog = request.catalog_name.as_str();
+        let schema = request.schema_name.as_str();
+        let table_name = request.table_name.as_str();
+        let table = self.get_table(catalog, schema, table_name).await?;
+        let table = table.with_context(|| TableNotFoundSnafu {
+            table_name: format!("{}.{}.{}", catalog, schema, table_name),
+        })?;
+        let table_info = table.table_info();
+
+        let inserts = TableToRegion::new(&table_info, &self.partition_manager)
+            .convert(request)
+            .await?;
+
+        Ok(self.do_request(inserts, ctx.trace_id(), 0).await? as _)
+    }
+
+    pub async fn handle_statement_insert(
+        &self,
+        insert: &Insert,
+        ctx: &QueryContextRef,
+    ) -> Result<Output> {
+        let inserts =
+            StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
+                .convert(insert)
+                .await?;
+        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 }
 
-impl<'a> Inserter<'a> {
+impl Inserter {
+    async fn do_request(
+        &self,
+        requests: RegionInsertRequests,
+        trace_id: u64,
+        span_id: u64,
+    ) -> Result<AffectedRows> {
+        let tasks = self
+            .group_requests_by_peer(requests)
+            .await?
+            .into_iter()
+            .map(|(peer, inserts)| {
+                let datanode_manager = self.datanode_manager.clone();
+                common_runtime::spawn_write(async move {
+                    let request = RegionRequest {
+                        header: Some(RegionRequestHeader { trace_id, span_id }),
+                        body: Some(region_request::Body::Inserts(inserts)),
+                    };
+                    datanode_manager
+                        .datanode(&peer)
+                        .await
+                        .handle(request)
+                        .await
+                        .context(RequestInsertsSnafu)
+                })
+            });
+        let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
+
+        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
+        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows);
+        Ok(affected_rows)
+    }
+
+    async fn group_requests_by_peer(
+        &self,
+        requests: RegionInsertRequests,
+    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+
+        for req in requests.requests {
+            let region_id = RegionId::from_u64(req.region_id);
+            let table_id = region_id.table_id();
+            let region_number = region_id.region_number();
+            let table_route = self
+                .partition_manager
+                .find_table_route(table_id)
+                .await
+                .context(FindTableRouteSnafu { table_id })?;
+            let peer =
+                table_route
+                    .find_region_leader(region_number)
+                    .context(FindDatanodeSnafu {
+                        region: region_number,
+                    })?;
+
+            inserts.entry(peer.clone()).or_default().requests.push(req);
+        }
+
+        Ok(inserts)
+    }
+
     // check if tables already exist:
     // - if table does not exist, create table by inferred CreateExpr
     // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -109,15 +213,20 @@ impl<'a> Inserter<'a> {
         &self,
         requests: &RowInsertRequests,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
         // TODO(jeremy): create and alter in batch?
         for req in &requests.inserts {
-            match self.get_table(req, ctx).await? {
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
+            let table = self.get_table(catalog, schema, &req.table_name).await?;
+            match table {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx).await?
+                    self.alter_table_on_demand(req, table, ctx, statement_executor)
+                        .await?
                 }
-                None => self.create_table(req, ctx).await?,
+                None => self.create_table(req, ctx, statement_executor).await?,
             }
         }
 
@@ -126,11 +235,12 @@ impl<'a> Inserter<'a> {
 
     async fn get_table(
         &self,
-        req: &RowInsertRequest,
-        ctx: &QueryContextRef,
+        catalog: &str,
+        schema: &str,
+        table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(ctx.current_catalog(), ctx.current_schema(), &req.table_name)
+            .table(catalog, schema, table)
             .await
             .context(CatalogSnafu)
     }
@@ -140,6 +250,7 @@ impl<'a> Inserter<'a> {
         req: &RowInsertRequest,
         table: TableRef,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
@@ -165,10 +276,7 @@ impl<'a> Inserter<'a> {
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
-        let res = self
-            .statement_executor
-            .alter_table_inner(alter_table_expr)
-            .await;
+        let res = statement_executor.alter_table_inner(alter_table_expr).await;
 
         match res {
             Ok(_) => {
@@ -188,7 +296,12 @@ impl<'a> Inserter<'a> {
         }
     }
 
-    async fn create_table(&self, req: &RowInsertRequest, ctx: &QueryContextRef) -> Result<()> {
+    async fn create_table(
+        &self,
+        req: &RowInsertRequest,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
         let table_ref =
             TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
 
@@ -201,8 +314,7 @@ impl<'a> Inserter<'a> {
         );
 
         // TODO(weny): multiple regions table.
-        let res = self
-            .statement_executor
+        let res = statement_executor
             .create_table_inner(create_table_expr, None)
             .await;
 

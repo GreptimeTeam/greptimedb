@@ -30,7 +30,6 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
-use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_config::KvStoreConfig;
 use common_error::ext::BoxedError;
@@ -51,6 +50,7 @@ use common_telemetry::{error, timer};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
+use partition::manager::PartitionRuleManager;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
@@ -79,8 +79,9 @@ use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
-use self::standalone::{StandaloneRegionRequestHandler, StandaloneTableMetadataCreator};
+use self::standalone::StandaloneTableMetadataCreator;
 use crate::catalog::FrontendCatalogManager;
+use crate::delete::{Deleter, DeleterRef};
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
@@ -88,6 +89,7 @@ use crate::error::{
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
+use crate::insert::{Inserter, InserterRef};
 use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
@@ -120,12 +122,13 @@ pub struct Instance {
     script_executor: Arc<ScriptExecutor>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
-    region_request_handler: RegionRequestHandlerRef,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
     plugins: Arc<Plugins>,
     servers: Arc<ServerHandlers>,
     heartbeat_task: Option<HeartbeatTask>,
+    inserter: InserterRef,
+    deleter: DeleterRef,
 }
 
 impl Instance {
@@ -164,15 +167,27 @@ impl Instance {
         )
         .query_engine();
 
-        let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
+        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
+
+        let inserter = Arc::new(Inserter::new(
+            catalog_manager.clone(),
+            partition_manager.clone(),
+            datanode_clients.clone(),
+        ));
+        let deleter = Arc::new(Deleter::new(
+            catalog_manager.clone(),
+            partition_manager,
+            datanode_clients,
+        ));
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
-            region_request_handler.clone(),
             meta_client.clone(),
             meta_backend.clone(),
             catalog_manager.clone(),
+            inserter.clone(),
+            deleter.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
@@ -186,7 +201,7 @@ impl Instance {
         ]);
 
         let heartbeat_task = Some(HeartbeatTask::new(
-            meta_client,
+            meta_client.clone(),
             opts.heartbeat.clone(),
             Arc::new(handlers_executor),
         ));
@@ -198,10 +213,11 @@ impl Instance {
             script_executor,
             statement_executor,
             query_engine,
-            region_request_handler,
             plugins: plugins.clone(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task,
+            inserter,
+            deleter,
         })
     }
 
@@ -282,26 +298,39 @@ impl Instance {
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
-        let region_request_handler = StandaloneRegionRequestHandler::arc(region_server.clone());
-
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
+        let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
         let cache_invalidator = Arc::new(DummyCacheInvalidator);
         let ddl_executor = Arc::new(DdlManager::new(
             procedure_manager,
-            Arc::new(StandaloneDatanodeManager(region_server)),
+            datanode_manager.clone(),
             cache_invalidator.clone(),
             table_metadata_manager.clone(),
             Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
         ));
 
+        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
+
+        let inserter = Arc::new(Inserter::new(
+            catalog_manager.clone(),
+            partition_manager.clone(),
+            datanode_manager.clone(),
+        ));
+        let deleter = Arc::new(Deleter::new(
+            catalog_manager.clone(),
+            partition_manager,
+            datanode_manager,
+        ));
+
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
-            region_request_handler.clone(),
             ddl_executor,
             kv_backend.clone(),
             cache_invalidator,
+            inserter.clone(),
+            deleter.clone(),
         ));
 
         Ok(Instance {
@@ -309,10 +338,11 @@ impl Instance {
             script_executor,
             statement_executor,
             query_engine,
-            region_request_handler,
             plugins: Default::default(),
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
+            inserter,
+            deleter,
         })
     }
 

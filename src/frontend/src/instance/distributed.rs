@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod deleter;
-pub(crate) mod inserter;
-
 use std::sync::Arc;
 
-use api::v1::region::{region_request, QueryRequest, RegionRequest};
+use api::v1::region::{QueryRequest, RegionRequest};
 use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region_handler::RegionRequestHandler;
@@ -29,11 +26,8 @@ use store_api::storage::RegionId;
 
 use crate::catalog::FrontendCatalogManager;
 use crate::error::{
-    FindDatanodeSnafu, FindTableRouteSnafu, InvalidRegionRequestSnafu, NotSupportedSnafu,
-    RequestQuerySnafu, Result,
+    FindDatanodeSnafu, FindTableRouteSnafu, NotSupportedSnafu, RequestQuerySnafu, Result,
 };
-use crate::instance::distributed::deleter::DistDeleter;
-use crate::instance::distributed::inserter::DistInserter;
 
 pub(crate) struct DistRegionRequestHandler {
     catalog_manager: Arc<FrontendCatalogManager>,
@@ -63,54 +57,11 @@ impl RegionRequestHandler for DistRegionRequestHandler {
 }
 
 impl DistRegionRequestHandler {
-    async fn handle_inner(&self, request: RegionRequest) -> Result<AffectedRows> {
-        let body = request.body.with_context(|| InvalidRegionRequestSnafu {
-            reason: "body not found",
-        })?;
-        let header = request.header.with_context(|| InvalidRegionRequestSnafu {
-            reason: "header not found",
-        })?;
-
-        match body {
-            region_request::Body::Inserts(inserts) => {
-                DistInserter::new(&self.catalog_manager, header.trace_id, header.span_id)
-                    .insert(inserts)
-                    .await
-            }
-            region_request::Body::Deletes(deletes) => {
-                DistDeleter::new(&self.catalog_manager, header.trace_id, header.span_id)
-                    .delete(deletes)
-                    .await
-            }
-            region_request::Body::Create(_) => NotSupportedSnafu {
-                feat: "region create",
-            }
-            .fail(),
-            region_request::Body::Drop(_) => NotSupportedSnafu {
-                feat: "region drop",
-            }
-            .fail(),
-            region_request::Body::Open(_) => NotSupportedSnafu {
-                feat: "region open",
-            }
-            .fail(),
-            region_request::Body::Close(_) => NotSupportedSnafu {
-                feat: "region close",
-            }
-            .fail(),
-            region_request::Body::Alter(_) => NotSupportedSnafu {
-                feat: "region alter",
-            }
-            .fail(),
-            region_request::Body::Flush(_) => NotSupportedSnafu {
-                feat: "region flush",
-            }
-            .fail(),
-            region_request::Body::Compact(_) => NotSupportedSnafu {
-                feat: "region compact",
-            }
-            .fail(),
+    async fn handle_inner(&self, _request: RegionRequest) -> Result<AffectedRows> {
+        NotSupportedSnafu {
+            feat: "region request",
         }
+        .fail()
     }
 
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {

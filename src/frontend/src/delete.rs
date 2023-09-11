@@ -12,37 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::{iter, mem};
 
-use api::v1::region::{region_request, RegionRequest, RegionRequestHeader};
-use api::v1::{DeleteRequests, RowDeleteRequest, RowDeleteRequests};
-use catalog::CatalogManager;
-use client::region_handler::RegionRequestHandler;
+use api::v1::region::{
+    region_request, DeleteRequests as RegionDeleteRequests, RegionRequest, RegionRequestHeader,
+};
+use api::v1::{DeleteRequests, RowDeleteRequests};
+use catalog::CatalogManagerRef;
+use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::peer::Peer;
 use common_query::Output;
+use futures_util::future;
+use metrics::counter;
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::storage::RegionId;
+use table::requests::DeleteRequest as TableDeleteRequest;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, InvalidDeleteRequestSnafu, MissingTimeIndexColumnSnafu, RequestDatanodeSnafu,
-    Result, TableNotFoundSnafu,
+    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu,
+    MissingTimeIndexColumnSnafu, RequestDeletesSnafu, Result, TableNotFoundSnafu,
 };
-use crate::req_convert::delete::{ColumnToRow, RowToRegion};
+use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 
-pub(crate) struct Deleter<'a> {
-    catalog_manager: &'a dyn CatalogManager,
-    region_request_handler: &'a dyn RegionRequestHandler,
+pub(crate) struct Deleter {
+    catalog_manager: CatalogManagerRef,
+    partition_manager: PartitionRuleManagerRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
-impl<'a> Deleter<'a> {
+pub(crate) type DeleterRef = Arc<Deleter>;
+
+impl Deleter {
     pub fn new(
-        catalog_manager: &'a dyn CatalogManager,
-        region_request_handler: &'a dyn RegionRequestHandler,
+        catalog_manager: CatalogManagerRef,
+        partition_manager: PartitionRuleManagerRef,
+        datanode_manager: DatanodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
-            region_request_handler,
+            partition_manager,
+            datanode_manager,
         }
     }
 
@@ -70,34 +84,106 @@ impl<'a> Deleter<'a> {
         validate_column_count_match(&requests)?;
 
         let requests = self.trim_columns(requests, &ctx).await?;
-        let deletes = RowToRegion::new(self.catalog_manager, &ctx)
-            .convert(requests)
-            .await?;
-        let region_request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                trace_id: ctx.trace_id(),
-                span_id: 0,
-            }),
-            body: Some(region_request::Body::Deletes(deletes)),
-        };
+        let deletes = RowToRegion::new(
+            self.catalog_manager.as_ref(),
+            self.partition_manager.as_ref(),
+            &ctx,
+        )
+        .convert(requests)
+        .await?;
 
-        let affected_rows = self
-            .region_request_handler
-            .handle(region_request)
-            .await
-            .context(RequestDatanodeSnafu)?;
+        let affected_rows = self.do_request(deletes, ctx.trace_id(), 0).await?;
         Ok(Output::AffectedRows(affected_rows as _))
+    }
+
+    pub async fn handle_table_delete(
+        &self,
+        request: TableDeleteRequest,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let catalog = request.catalog_name.as_str();
+        let schema = request.schema_name.as_str();
+        let table = request.table_name.as_str();
+        let table = self.get_table(catalog, schema, table).await?;
+        let table_info = table.table_info();
+
+        let deletes = TableToRegion::new(&table_info, &self.partition_manager)
+            .convert(request)
+            .await?;
+        self.do_request(deletes, ctx.trace_id(), 0).await
     }
 }
 
-impl<'a> Deleter<'a> {
+impl Deleter {
+    async fn do_request(
+        &self,
+        requests: RegionDeleteRequests,
+        trace_id: u64,
+        span_id: u64,
+    ) -> Result<AffectedRows> {
+        let tasks = self
+            .group_requests_by_peer(requests)
+            .await?
+            .into_iter()
+            .map(|(peer, deletes)| {
+                let datanode_manager = self.datanode_manager.clone();
+                common_runtime::spawn_write(async move {
+                    let request = RegionRequest {
+                        header: Some(RegionRequestHeader { trace_id, span_id }),
+                        body: Some(region_request::Body::Deletes(deletes)),
+                    };
+                    datanode_manager
+                        .datanode(&peer)
+                        .await
+                        .handle(request)
+                        .await
+                        .context(RequestDeletesSnafu)
+                })
+            });
+        let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
+
+        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
+        counter!(crate::metrics::DIST_DELETE_ROW_COUNT, affected_rows);
+        Ok(affected_rows)
+    }
+
+    async fn group_requests_by_peer(
+        &self,
+        requests: RegionDeleteRequests,
+    ) -> Result<HashMap<Peer, RegionDeleteRequests>> {
+        let mut deletes: HashMap<Peer, RegionDeleteRequests> = HashMap::new();
+
+        for req in requests.requests {
+            let region_id = RegionId::from_u64(req.region_id);
+            let table_id = region_id.table_id();
+            let region_number = region_id.region_number();
+            let table_route = self
+                .partition_manager
+                .find_table_route(table_id)
+                .await
+                .context(FindTableRouteSnafu { table_id })?;
+            let peer =
+                table_route
+                    .find_region_leader(region_number)
+                    .context(FindDatanodeSnafu {
+                        region: region_number,
+                    })?;
+
+            deletes.entry(peer.clone()).or_default().requests.push(req);
+        }
+
+        Ok(deletes)
+    }
+
     async fn trim_columns(
         &self,
         mut requests: RowDeleteRequests,
         ctx: &QueryContextRef,
     ) -> Result<RowDeleteRequests> {
         for req in &mut requests.deletes {
-            let table = self.get_table(req, ctx).await?;
+            let table = self
+                .get_table(ctx.current_catalog(), ctx.current_schema(), &req.table_name)
+                .await?;
             let key_column_names = self.key_column_names(&table)?;
 
             let rows = req.rows.as_mut().unwrap();
@@ -148,13 +234,13 @@ impl<'a> Deleter<'a> {
         Ok(key_column_names)
     }
 
-    async fn get_table(&self, req: &RowDeleteRequest, ctx: &QueryContextRef) -> Result<TableRef> {
+    async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
         self.catalog_manager
-            .table(ctx.current_catalog(), ctx.current_schema(), &req.table_name)
+            .table(catalog, schema, table)
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: req.table_name.clone(),
+                table_name: format!("{}.{}.{}", catalog, schema, table),
             })
     }
 }
