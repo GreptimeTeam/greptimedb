@@ -22,7 +22,6 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
-use store_api::storage::ScanRequest;
 use table::predicate::Predicate;
 
 use crate::access_layer::AccessLayerRef;
@@ -31,7 +30,7 @@ use crate::memtable::MemtableRef;
 use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
-use crate::read::BatchReader;
+use crate::read::{BatchReader, BoxedBatchReader};
 use crate::sst::file::FileHandle;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -42,10 +41,6 @@ pub struct SeqScan {
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
     mapper: Arc<ProjectionMapper>,
-    /// Original scan request to scan memtable.
-    // TODO(yingwen): Remove this if memtable::iter() takes another struct.
-    request: ScanRequest,
-
     /// Time range filter for time index.
     time_range: Option<TimestampRange>,
     /// Predicate to push down.
@@ -59,11 +54,7 @@ pub struct SeqScan {
 impl SeqScan {
     /// Creates a new [SeqScan].
     #[must_use]
-    pub(crate) fn new(
-        access_layer: AccessLayerRef,
-        mapper: ProjectionMapper,
-        request: ScanRequest,
-    ) -> SeqScan {
+    pub(crate) fn new(access_layer: AccessLayerRef, mapper: ProjectionMapper) -> SeqScan {
         SeqScan {
             access_layer,
             mapper: Arc::new(mapper),
@@ -71,7 +62,6 @@ impl SeqScan {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            request,
         }
     }
 
@@ -104,11 +94,32 @@ impl SeqScan {
     }
 
     /// Builds a stream for the query.
-    pub async fn build(&self) -> Result<SendableRecordBatchStream> {
+    pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
+        // Scans all memtables and SSTs. Builds a merge reader to merge results.
+        let mut reader = self.build_reader().await?;
+
+        // Creates a stream to poll the batch reader and convert batch into record batch.
+        let mapper = self.mapper.clone();
+        let stream = try_stream! {
+            while let Some(batch) = reader.next_batch().await.map_err(BoxedError::new).context(ExternalSnafu)? {
+                yield mapper.convert(&batch)?;
+            }
+        };
+        let stream = Box::pin(RecordBatchStreamAdaptor::new(
+            self.mapper.output_schema(),
+            Box::pin(stream),
+        ));
+
+        Ok(stream)
+    }
+
+    /// Builds a [BoxedBatchReader] from sequential scan.
+    pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
         for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), &self.request.filters);
+            // TODO(hl): pass filters once memtable supports filter pushdown.
+            let iter = mem.iter(Some(self.mapper.column_ids()), &[]);
             builder.push_batch_iter(iter);
         }
         for file in &self.files {
@@ -130,20 +141,7 @@ impl SeqScan {
                 builder.push_batch_reader(Box::new(compat_reader));
             }
         }
-        let mut reader = builder.build().await?;
-        // Creates a stream to poll the batch reader and convert batch into record batch.
-        let mapper = self.mapper.clone();
-        let stream = try_stream! {
-            while let Some(batch) = reader.next_batch().await.map_err(BoxedError::new).context(ExternalSnafu)? {
-                yield mapper.convert(&batch)?;
-            }
-        };
-        let stream = Box::pin(RecordBatchStreamAdaptor::new(
-            self.mapper.output_schema(),
-            Box::pin(stream),
-        ));
-
-        Ok(stream)
+        Ok(Box::new(builder.build().await?))
     }
 }
 

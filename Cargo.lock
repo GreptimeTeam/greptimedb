@@ -5479,6 +5479,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "futures",
  "humantime-serde",

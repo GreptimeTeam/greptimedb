@@ -25,6 +25,9 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
+use common_query::Output::AffectedRows;
+use common_telemetry::tracing::log::info;
+use common_telemetry::warn;
 use datatypes::prelude::DataType;
 use prost::Message;
 use smallvec::SmallVec;
@@ -64,7 +67,7 @@ impl Default for RegionOptions {
         RegionOptions {
             write_buffer_size: Some(DEFAULT_WRITE_BUFFER_SIZE),
             ttl: None,
-            compaction_strategy: CompactionStrategy::LeveledTimeWindow,
+            compaction_strategy: CompactionStrategy::default(),
         }
     }
 }
@@ -503,10 +506,14 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
-    /// Flush is finished.
+    /// Flush has finished.
     FlushFinished(FlushFinished),
-    /// Flush is failed.
+    /// Flush has failed.
     FlushFailed(FlushFailed),
+    /// Compaction has finished.
+    CompactionFinished(CompactionFinished),
+    /// Compaction has failed.
+    CompactionFailed(CompactionFailed),
 }
 
 /// Notifies a flush job is finished.
@@ -555,6 +562,54 @@ impl FlushFinished {
 /// Notifies a flush job is failed.
 #[derive(Debug)]
 pub(crate) struct FlushFailed {
+    /// The error source of the failure.
+    pub(crate) err: Arc<Error>,
+}
+
+/// Notifies a compaction job has finished.
+#[derive(Debug)]
+pub(crate) struct CompactionFinished {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Compaction output files that are to be added to region version.
+    pub(crate) compaction_outputs: Vec<FileMeta>,
+    /// Compacted files that are to be removed from region version.
+    pub(crate) compacted_files: Vec<FileMeta>,
+    /// Compaction result sender.
+    pub(crate) sender: Option<oneshot::Sender<Result<Output>>>,
+    /// File purger for cleaning files on failure.
+    pub(crate) file_purger: FilePurgerRef,
+}
+
+impl CompactionFinished {
+    pub fn on_success(self) {
+        if let Some(sender) = self.sender {
+            let _ = sender.send(Ok(AffectedRows(0)));
+        }
+        info!("Successfully compacted region: {}", self.region_id);
+    }
+
+    /// Compaction succeeded but failed to update manifest or region's already been dropped,
+    /// clean compaction output files.
+    pub fn on_failure(self, _err: Error) {
+        for file in &self.compacted_files {
+            let file_id = file.file_id;
+            warn!(
+                "Cleaning region {} compaction output file: {}",
+                self.region_id, file_id
+            );
+            self.file_purger.send_request(PurgeRequest {
+                region_id: self.region_id,
+                file_id,
+            });
+        }
+    }
+}
+
+/// A failing compaction result.
+#[derive(Debug)]
+pub(crate) struct CompactionFailed {
+    pub(crate) region_id: RegionId,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }
