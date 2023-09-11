@@ -116,6 +116,10 @@ impl RegionRequest {
                 compact.region_id.into(),
                 Self::Compact(RegionCompactRequest {}),
             )]),
+            region_request::Body::Truncate(truncate) => Ok(vec![(
+                truncate.region_id.into(),
+                Self::Truncate(RegionTruncateRequest {}),
+            )]),
         }
     }
 }

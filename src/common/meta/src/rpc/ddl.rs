@@ -65,8 +65,18 @@ impl DdlTask {
         DdlTask::AlterTable(AlterTableTask { alter_table })
     }
 
-    pub fn new_truncate_table(truncate_table: TruncateTableExpr) -> Self {
-        DdlTask::TruncateTable(TruncateTableTask { truncate_table })
+    pub fn new_truncate_table(
+        catalog: String,
+        schema: String,
+        table: String,
+        table_id: TableId,
+    ) -> Self {
+        DdlTask::TruncateTable(TruncateTableTask {
+            catalog,
+            schema,
+            table,
+            table_id,
+        })
     }
 }
 
@@ -112,7 +122,12 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                 alter_table: Some(task.alter_table),
             }),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(PbTruncateTableTask {
-                truncate_table: Some(task.truncate_table),
+                truncate_table: Some(TruncateTableExpr {
+                    catalog_name: task.catalog,
+                    schema_name: task.schema,
+                    table_name: task.table,
+                    table_id: Some(api::v1::TableId { id: task.table_id }),
+                }),
             }),
         };
 
@@ -358,27 +373,28 @@ impl<'de> Deserialize<'de> for AlterTableTask {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct TruncateTableTask {
-    pub truncate_table: TruncateTableExpr,
+    pub catalog: String,
+    pub schema: String,
+    pub table: String,
+    pub table_id: TableId,
 }
 
 impl TruncateTableTask {
     pub fn table_ref(&self) -> TableReference {
         TableReference {
-            catalog: &self.truncate_table.catalog_name,
-            schema: &self.truncate_table.schema_name,
-            table: &self.truncate_table.table_name,
+            catalog: &self.catalog,
+            schema: &self.schema,
+            table: &self.table,
         }
     }
 
     pub fn table_name(&self) -> TableName {
-        let table = &self.truncate_table;
-
         TableName {
-            catalog_name: table.catalog_name.to_string(),
-            schema_name: table.schema_name.to_string(),
-            table_name: table.table_name.to_string(),
+            catalog_name: self.catalog.to_string(),
+            schema_name: self.schema.to_string(),
+            table_name: self.table.to_string(),
         }
     }
 }
@@ -388,39 +404,20 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
 
     fn try_from(pb: PbTruncateTableTask) -> Result<Self> {
         let truncate_table = pb.truncate_table.context(error::InvalidProtoMsgSnafu {
-            err_msg: "expected truncate_table",
+            err_msg: "expected drop table",
         })?;
 
-        Ok(TruncateTableTask { truncate_table })
-    }
-}
-
-impl Serialize for TruncateTableTask {
-    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let pb = PbTruncateTableTask {
-            truncate_table: Some(self.truncate_table.clone()),
-        };
-        let buf = pb.encode_to_vec();
-        serializer.serialize_bytes(&buf)
-    }
-}
-
-impl<'de> Deserialize<'de> for TruncateTableTask {
-    fn deserialize<D>(deserializer: D) -> result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let buf = Vec::<u8>::deserialize(deserializer)?;
-        let task: PbTruncateTableTask = PbTruncateTableTask::decode(&*buf)
-            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-
-        let task = TruncateTableTask::try_from(task)
-            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-
-        Ok(task)
+        Ok(Self {
+            catalog: truncate_table.catalog_name,
+            schema: truncate_table.schema_name,
+            table: truncate_table.table_name,
+            table_id: truncate_table
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
+        })
     }
 }
 
