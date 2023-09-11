@@ -39,13 +39,13 @@ use crate::error::{
 };
 use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 
-pub(crate) struct Deleter {
+pub struct Deleter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
 }
 
-pub(crate) type DeleterRef = Arc<Deleter>;
+pub type DeleterRef = Arc<Deleter>;
 
 impl Deleter {
     pub fn new(
@@ -126,12 +126,12 @@ impl Deleter {
             .await?
             .into_iter()
             .map(|(peer, deletes)| {
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader { trace_id, span_id }),
+                    body: Some(region_request::Body::Deletes(deletes)),
+                };
                 let datanode_manager = self.datanode_manager.clone();
                 common_runtime::spawn_write(async move {
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader { trace_id, span_id }),
-                        body: Some(region_request::Body::Deletes(deletes)),
-                    };
                     datanode_manager
                         .datanode(&peer)
                         .await
@@ -181,9 +181,9 @@ impl Deleter {
         ctx: &QueryContextRef,
     ) -> Result<RowDeleteRequests> {
         for req in &mut requests.deletes {
-            let table = self
-                .get_table(ctx.current_catalog(), ctx.current_schema(), &req.table_name)
-                .await?;
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
+            let table = self.get_table(catalog, schema, &req.table_name).await?;
             let key_column_names = self.key_column_names(&table)?;
 
             let rows = req.rows.as_mut().unwrap();

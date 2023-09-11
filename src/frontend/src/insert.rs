@@ -49,13 +49,13 @@ use crate::expr_factory::CreateExprFactory;
 use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
 use crate::statement::StatementExecutor;
 
-pub(crate) struct Inserter {
+pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
 }
 
-pub(crate) type InserterRef = Arc<Inserter>;
+pub type InserterRef = Arc<Inserter>;
 
 impl Inserter {
     pub fn new(
@@ -157,12 +157,12 @@ impl Inserter {
             .await?
             .into_iter()
             .map(|(peer, inserts)| {
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader { trace_id, span_id }),
+                    body: Some(region_request::Body::Inserts(inserts)),
+                };
                 let datanode_manager = self.datanode_manager.clone();
                 common_runtime::spawn_write(async move {
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader { trace_id, span_id }),
-                        body: Some(region_request::Body::Inserts(inserts)),
-                    };
                     datanode_manager
                         .datanode(&peer)
                         .await
