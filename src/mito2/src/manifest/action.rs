@@ -232,7 +232,9 @@ mod tests {
                 {"column_schema":{"name":"a","data_type":{"Int64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Tag","column_id":1},{"column_schema":{"name":"b","data_type":{"Float64":{}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Field","column_id":2},{"column_schema":{"name":"c","data_type":{"Timestamp":{"Millisecond":null}},"is_nullable":false,"is_time_index":false,"default_constraint":null,"metadata":{}},"semantic_type":"Timestamp","column_id":3}
                 ],
                 "primary_key":[1],
-                "region_id":5299989648942}
+                "region_id":5299989648942,
+                "schema_version":0
+            }
             }"#;
         let _ = serde_json::from_str::<RegionChange>(region_change).unwrap();
 

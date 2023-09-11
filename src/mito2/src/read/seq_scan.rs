@@ -147,6 +147,11 @@ impl SeqScan {
 
 #[cfg(test)]
 impl SeqScan {
+    /// Returns number of memtables to scan.
+    pub(crate) fn num_memtables(&self) -> usize {
+        self.memtables.len()
+    }
+
     /// Returns number of SST files to scan.
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()

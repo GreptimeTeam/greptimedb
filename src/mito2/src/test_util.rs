@@ -137,25 +137,6 @@ impl TestEnv {
         )
     }
 
-    /// Reopen the engine.
-    pub async fn reopen_engine_with(
-        &self,
-        engine: MitoEngine,
-        config: MitoConfig,
-        manager: WriteBufferManagerRef,
-        listener: Option<EventListenerRef>,
-    ) -> MitoEngine {
-        engine.stop().await.unwrap();
-
-        MitoEngine::new_for_test(
-            config,
-            self.logstore.clone().unwrap(),
-            self.object_store.clone().unwrap(),
-            manager,
-            listener,
-        )
-    }
-
     /// Creates a new [WorkerGroup] with specific config under this env.
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store) = self.create_log_and_object_store().await;
@@ -404,6 +385,8 @@ pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch
     }
 
     assert_eq!(expect, result);
+    // Next call to `next_batch()` still returns None.
+    assert!(reader.next_batch().await.unwrap().is_none());
 }
 
 /// A mock [WriteBufferManager] that supports controlling whether to flush/stall.
