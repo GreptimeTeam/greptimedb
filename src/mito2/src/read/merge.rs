@@ -341,22 +341,13 @@ mod tests {
     use api::v1::OpType;
 
     use super::*;
-    use crate::test_util::{new_batch, VecBatchReader};
+    use crate::test_util::{check_reader_result, new_batch, VecBatchReader};
 
     #[tokio::test]
     async fn test_merge_reader_empty() {
         let mut reader = MergeReaderBuilder::new().build().await.unwrap();
         assert!(reader.next_batch().await.unwrap().is_none());
         assert!(reader.next_batch().await.unwrap().is_none());
-    }
-
-    async fn check_merge_result(reader: &mut MergeReader, expect: &[Batch]) {
-        let mut result = Vec::new();
-        while let Some(batch) = reader.next_batch().await.unwrap() {
-            result.push(batch);
-        }
-
-        assert_eq!(expect, result);
     }
 
     #[tokio::test]
@@ -397,7 +388,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        check_merge_result(
+        check_reader_result(
             &mut reader,
             &[
                 new_batch(
@@ -468,7 +459,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        check_merge_result(
+        check_reader_result(
             &mut reader,
             &[
                 new_batch(

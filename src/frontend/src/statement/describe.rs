@@ -14,7 +14,6 @@
 
 use common_error::ext::BoxedError;
 use common_query::Output;
-use datanode::instance::sql::table_idents_to_full_name;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
@@ -23,6 +22,7 @@ use crate::error::{
     CatalogSnafu, DescribeStatementSnafu, ExternalSnafu, Result, TableNotFoundSnafu,
 };
 use crate::statement::StatementExecutor;
+use crate::table::table_idents_to_full_name;
 
 impl StatementExecutor {
     pub(super) async fn describe_table(

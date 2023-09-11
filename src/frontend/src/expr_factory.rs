@@ -22,7 +22,6 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
-use datanode::instance::sql::table_idents_to_full_name;
 use datatypes::schema::ColumnSchema;
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
 use query::sql::prepare_immutable_file_table_files_and_schema;
@@ -41,6 +40,7 @@ use crate::error::{
     EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu, NotSupportedSnafu,
     ParseSqlSnafu, PrepareImmutableTableSnafu, Result, UnrecognizedTableOptionSnafu,
 };
+use crate::table::table_idents_to_full_name;
 
 #[derive(Debug, Copy, Clone)]
 pub struct CreateExprFactory;

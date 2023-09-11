@@ -14,50 +14,38 @@
 
 use std::sync::Arc;
 
-use api::v1::greptime_request::Request;
-use api::v1::region::{region_request, QueryRequest};
+use api::v1::meta::Partition;
+use api::v1::region::{region_request, QueryRequest, RegionRequest};
 use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region::check_response_header;
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
-use common_meta::datanode_manager::AffectedRows;
-use common_query::Output;
+use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
+use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::peer::Peer;
+use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::sequence::{Sequence, SequenceRef};
 use common_recordbatch::SendableRecordBatchStream;
-use datanode::error::Error as DatanodeError;
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
-use servers::query_handler::grpc::{GrpcQueryHandler, GrpcQueryHandlerRef};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
+use store_api::storage::{RegionId, TableId};
+use table::metadata::RawTableInfo;
 
-use crate::error::{Error, InvokeDatanodeSnafu, InvokeRegionServerSnafu, Result};
+use crate::error::InvokeRegionServerSnafu;
 
-pub(crate) struct StandaloneGrpcQueryHandler(GrpcQueryHandlerRef<DatanodeError>);
-
-impl StandaloneGrpcQueryHandler {
-    pub(crate) fn arc(handler: GrpcQueryHandlerRef<DatanodeError>) -> Arc<Self> {
-        Arc::new(Self(handler))
-    }
-}
-
-#[async_trait]
-impl GrpcQueryHandler for StandaloneGrpcQueryHandler {
-    type Error = Error;
-
-    async fn do_query(&self, query: Request, ctx: QueryContextRef) -> Result<Output> {
-        self.0
-            .do_query(query, ctx)
-            .await
-            .context(InvokeDatanodeSnafu)
-    }
-}
+const TABLE_ID_SEQ: &str = "table_id";
 
 pub(crate) struct StandaloneRegionRequestHandler {
     region_server: RegionServer,
 }
 
 impl StandaloneRegionRequestHandler {
+    #[allow(dead_code)]
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
@@ -88,5 +76,86 @@ impl RegionRequestHandler for StandaloneRegionRequestHandler {
             .await
             .map_err(BoxedError::new)
             .context(HandleRequestSnafu)
+    }
+}
+
+pub(crate) struct StandaloneDatanode(pub(crate) RegionServer);
+
+#[async_trait]
+impl Datanode for StandaloneDatanode {
+    async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
+        let body = request.body.context(meta_error::UnexpectedSnafu {
+            err_msg: "body not found",
+        })?;
+        let resp = self
+            .0
+            .handle(body)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
+
+        Ok(resp.affected_rows)
+    }
+
+    async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        self.0
+            .handle_read(request)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+}
+
+pub struct StandaloneDatanodeManager(pub RegionServer);
+
+#[async_trait]
+impl DatanodeManager for StandaloneDatanodeManager {
+    async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+        Arc::new(StandaloneDatanode(self.0.clone()))
+    }
+}
+
+pub(crate) struct StandaloneTableMetadataCreator {
+    table_id_sequence: SequenceRef,
+}
+
+impl StandaloneTableMetadataCreator {
+    pub fn new(kv_backend: KvBackendRef) -> Self {
+        Self {
+            table_id_sequence: Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend)),
+        }
+    }
+}
+
+#[async_trait]
+impl TableMetadataAllocator for StandaloneTableMetadataCreator {
+    async fn create(
+        &self,
+        _ctx: &TableMetadataAllocatorContext,
+        raw_table_info: &mut RawTableInfo,
+        partitions: &[Partition],
+    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
+        let table_id = self.table_id_sequence.next().await? as u32;
+        raw_table_info.ident.table_id = table_id;
+        let region_routes = partitions
+            .iter()
+            .enumerate()
+            .map(|(i, partition)| {
+                let region = Region {
+                    id: RegionId::new(table_id, i as u32),
+                    partition: Some(partition.clone().into()),
+                    ..Default::default()
+                };
+                // It's only a placeholder.
+                let peer = Peer::default();
+                RegionRoute {
+                    region,
+                    leader_peer: Some(peer),
+                    follower_peers: vec![],
+                }
+            })
+            .collect::<Vec<_>>();
+
+        Ok((table_id, region_routes))
     }
 }

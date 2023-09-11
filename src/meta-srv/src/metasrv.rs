@@ -22,7 +22,7 @@ use api::v1::meta::Peer;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
-use common_meta::ddl::DdlExecutorRef;
+use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
@@ -198,7 +198,7 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
-    ddl_executor: DdlExecutorRef,
+    ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     pubsub: Option<(PublishRef, SubscribeManagerRef)>,
@@ -239,9 +239,10 @@ impl MetaSrv {
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
-                                    let _ = task_handler.start(common_runtime::bg_runtime())
-                                    .map_err(|e| {
-                                        debug!("Failed to start greptimedb telemetry task, error: {e}");
+                                    let _ = task_handler.start().map_err(|e| {
+                                        debug!(
+                                            "Failed to start greptimedb telemetry task, error: {e}"
+                                        );
                                     });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
@@ -349,7 +350,7 @@ impl MetaSrv {
         &self.mailbox
     }
 
-    pub fn ddl_executor(&self) -> &DdlExecutorRef {
+    pub fn ddl_executor(&self) -> &DdlTaskExecutorRef {
         &self.ddl_executor
     }
 

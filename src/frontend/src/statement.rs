@@ -15,6 +15,7 @@
 mod backup;
 mod copy_table_from;
 mod copy_table_to;
+mod ddl;
 mod describe;
 mod dml;
 mod show;
@@ -22,23 +23,29 @@ mod tql;
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use api::v1::region::region_request;
 use catalog::CatalogManagerRef;
 use client::region_handler::RegionRequestHandlerRef;
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
+use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::table_name::TableName;
 use common_query::Output;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
-use datanode::instance::sql::{idents_to_full_database_name, table_idents_to_full_name};
+use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use query::parser::QueryStatement;
 use query::plan::LogicalPlan;
-use query::query_engine::SqlStatementExecutorRef;
 use query::QueryEngineRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
+use sqlparser::ast::ObjectName;
 use table::engine::TableReference;
 use table::requests::{
     CopyDatabaseRequest, CopyDirection, CopyTableRequest, DeleteRequest, InsertRequest,
@@ -46,32 +53,41 @@ use table::requests::{
 use table::TableRef;
 
 use crate::error::{
-    self, CatalogSnafu, ExecLogicalPlanSnafu, ExecuteStatementSnafu, ExternalSnafu,
-    PlanStatementSnafu, RequestDatanodeSnafu, Result, TableNotFoundSnafu,
+    self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
+    RequestDatanodeSnafu, Result, TableNotFoundSnafu,
 };
 use crate::req_convert::{delete, insert};
 use crate::statement::backup::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
+use crate::table::table_idents_to_full_name;
 
 #[derive(Clone)]
 pub struct StatementExecutor {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
-    sql_stmt_executor: SqlStatementExecutorRef,
     region_request_handler: RegionRequestHandlerRef,
+    ddl_executor: DdlTaskExecutorRef,
+    table_metadata_manager: TableMetadataManagerRef,
+    partition_manager: PartitionRuleManagerRef,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 impl StatementExecutor {
     pub(crate) fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
-        sql_stmt_executor: SqlStatementExecutorRef,
         region_request_handler: RegionRequestHandlerRef,
+        ddl_task_executor: DdlTaskExecutorRef,
+        kv_backend: KvBackendRef,
+        cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         Self {
             catalog_manager,
             query_engine,
-            sql_stmt_executor,
             region_request_handler,
+            ddl_executor: ddl_task_executor,
+            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
+            partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
+            cache_invalidator,
         }
     }
 
@@ -122,17 +138,59 @@ impl StatementExecutor {
                 self.copy_database(to_copy_database_request(arg, &query_ctx)?)
                     .await
             }
-            Statement::CreateTable(_)
-            | Statement::CreateExternalTable(_)
-            | Statement::CreateDatabase(_)
-            | Statement::Alter(_)
-            | Statement::DropTable(_)
-            | Statement::TruncateTable(_)
-            | Statement::ShowCreateTable(_) => self
-                .sql_stmt_executor
-                .execute_sql(stmt, query_ctx)
+
+            Statement::CreateTable(stmt) => {
+                let _ = self.create_table(stmt, query_ctx).await?;
+                Ok(Output::AffectedRows(0))
+            }
+            Statement::CreateExternalTable(stmt) => {
+                let _ = self.create_external_table(stmt, query_ctx).await?;
+                Ok(Output::AffectedRows(0))
+            }
+            Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
+            Statement::DropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.drop_table(table_name).await
+            }
+            Statement::TruncateTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+                let table_name = TableName::new(catalog, schema, table);
+                self.truncate_table(table_name).await
+            }
+
+            Statement::CreateDatabase(stmt) => {
+                self.create_database(
+                    query_ctx.current_catalog(),
+                    &stmt.name.to_string(),
+                    stmt.if_not_exists,
+                )
                 .await
-                .context(ExecuteStatementSnafu),
+            }
+
+            Statement::ShowCreateTable(show) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(&show.table_name, query_ctx.clone())
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?;
+
+                let table_ref = self
+                    .catalog_manager
+                    .table(&catalog, &schema, &table)
+                    .await
+                    .context(error::CatalogSnafu)?
+                    .context(error::TableNotFoundSnafu { table_name: &table })?;
+                let table_name = TableName::new(catalog, schema, table);
+
+                self.show_create_table(table_name, table_ref, query_ctx)
+                    .await
+            }
         }
     }
 
@@ -288,4 +346,23 @@ fn extract_timestamp(map: &HashMap<String, String>, key: &str) -> Result<Option<
                 .map_err(|_| error::InvalidCopyParameterSnafu { key, value: v }.build())
         })
         .transpose()
+}
+
+fn idents_to_full_database_name(
+    obj_name: &ObjectName,
+    query_ctx: &QueryContextRef,
+) -> Result<(String, String)> {
+    match &obj_name.0[..] {
+        [database] => Ok((
+            query_ctx.current_catalog().to_owned(),
+            database.value.clone(),
+        )),
+        [catalog, database] => Ok((catalog.value.clone(), database.value.clone())),
+        _ => InvalidSqlSnafu {
+            err_msg: format!(
+                "expect database name to be <catalog>.<database>, <database>, found: {obj_name}",
+            ),
+        }
+        .fail(),
+    }
 }

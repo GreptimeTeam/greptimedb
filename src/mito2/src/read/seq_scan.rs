@@ -1,3 +1,4 @@
+
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -27,6 +28,7 @@ use table::predicate::Predicate;
 use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
+use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
 use crate::read::{BatchReader, BoxedBatchReader};
@@ -130,7 +132,15 @@ impl SeqScan {
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .build()
                 .await?;
-            builder.push_batch_reader(Box::new(reader));
+            if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
+                builder.push_batch_reader(Box::new(reader));
+            } else {
+                // They have different schema. We need to adapt the batch first so the
+                // mapper can convert the it.
+                let compat_reader =
+                    CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
+                builder.push_batch_reader(Box::new(compat_reader));
+            }
         }
         Ok(Box::new(builder.build().await?))
     }

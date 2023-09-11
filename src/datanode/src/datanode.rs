@@ -23,6 +23,7 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::WalConfig;
 use common_error::ext::BoxedError;
+use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::info;
@@ -32,7 +33,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::util::normalize_dir;
-use query::QueryEngineFactory;
+use query::{QueryEngineFactory, QueryEngineRef};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
@@ -52,6 +53,7 @@ use tokio::fs;
 use crate::error::{
     CreateDirSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
 };
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::RegionServer;
 use crate::server::Services;
@@ -399,6 +401,8 @@ pub struct Datanode {
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
     region_server: RegionServer,
+    query_engine: QueryEngineRef,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 impl Datanode {
@@ -420,7 +424,7 @@ impl Datanode {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let mut region_server = RegionServer::new(query_engine, runtime);
+        let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
         let log_store = Self::build_log_store(&opts).await?;
         let object_store = store::new_object_store(&opts).await?;
         let engines = Self::build_store_engines(&opts, log_store, object_store).await?;
@@ -439,12 +443,20 @@ impl Datanode {
             }
             Mode::Standalone => None,
         };
+        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
+            Some(opts.storage.data_home.clone()),
+            &opts.mode,
+            opts.enable_telemetry,
+        )
+        .await;
 
         Ok(Self {
             opts,
             services,
             heartbeat_task,
             region_server,
+            query_engine,
+            greptimedb_telemetry_task,
         })
     }
 
@@ -453,6 +465,7 @@ impl Datanode {
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
+        let _ = self.greptimedb_telemetry_task.start();
         self.start_services().await
     }
 
@@ -476,6 +489,7 @@ impl Datanode {
     pub async fn shutdown(&self) -> Result<()> {
         // We must shutdown services first
         self.shutdown_services().await?;
+        let _ = self.greptimedb_telemetry_task.stop().await;
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task
                 .close()
@@ -488,6 +502,10 @@ impl Datanode {
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
+    }
+
+    pub fn query_engine(&self) -> QueryEngineRef {
+        self.query_engine.clone()
     }
 
     // internal utils
