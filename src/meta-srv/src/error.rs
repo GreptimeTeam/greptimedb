@@ -228,6 +228,12 @@ pub enum Error {
         source: common_catalog::error::Error,
     },
 
+    #[snafu(display("Cannot parse full table name, source: {}", source))]
+    InvalidFullTableName {
+        location: Location,
+        source: common_catalog::error::Error,
+    },
+
     #[snafu(display("Failed to decode table route, source: {}", source))]
     DecodeTableRoute {
         source: prost::DecodeError,
@@ -580,7 +586,8 @@ impl ErrorExt for Error {
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
-            Error::InvalidCatalogValue { source, .. } => source.status_code(),
+            Error::InvalidCatalogValue { source, .. }
+            | Error::InvalidFullTableName { source, .. } => source.status_code(),
             Error::RecoverProcedure { source, .. }
             | Error::SubmitProcedure { source, .. }
             | Error::WaitProcedure { source, .. } => source.status_code(),
