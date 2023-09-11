@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::ops::Range;
 
 use api::v1::{ColumnSchema, Rows};
@@ -29,7 +28,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::test_util::{
-    build_rows, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
+    build_rows_for_key, column_metadata_to_column_schema, put_rows, CreateRequestBuilder, TestEnv,
 };
 
 async fn put_and_flush(
@@ -40,7 +39,7 @@ async fn put_and_flush(
 ) {
     let rows = Rows {
         schema: column_schemas.to_vec(),
-        rows: build_rows(rows.start, rows.end),
+        rows: build_rows_for_key("a", rows.start, rows.end, 0),
     };
     put_rows(engine, region_id, rows).await;
 
@@ -63,7 +62,7 @@ async fn delete_and_flush(
     let row_cnt = rows.len();
     let rows = Rows {
         schema: column_schemas.to_vec(),
-        rows: build_rows(rows.start, rows.end),
+        rows: build_rows_for_key("a", rows.start, rows.end, 0),
     };
 
     let deleted = engine
@@ -89,8 +88,8 @@ async fn delete_and_flush(
     assert_eq!(0, rows);
 }
 
-async fn collect_stream_ts(stream: SendableRecordBatchStream) -> HashSet<i64> {
-    let mut res = HashSet::new();
+async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
+    let mut res = Vec::new();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     for batch in batches {
         let ts_col = batch
@@ -139,5 +138,5 @@ async fn test_compaction_region() {
         .unwrap();
 
     let vec = collect_stream_ts(stream).await;
-    assert_eq!((0..25).map(|v| v * 1000).collect::<HashSet<_>>(), vec);
+    assert_eq!((0..25).map(|v| v * 1000).collect::<Vec<_>>(), vec);
 }
