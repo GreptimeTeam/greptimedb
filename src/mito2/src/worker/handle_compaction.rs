@@ -91,7 +91,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn new_compaction_request(
         &self,
         region: &MitoRegionRef,
-        waiters: Option<oneshot::Sender<Result<Output>>>,
+        waiter: Option<oneshot::Sender<Result<Output>>>,
     ) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();
@@ -103,7 +103,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ttl: None,                    // TODO(hl): get TTL info from region metadata
             compaction_time_window: None, // TODO(hl): get persisted region compaction time window
             request_sender: self.sender.clone(),
-            waiter: waiters,
+            waiter,
             file_purger,
         }
     }
