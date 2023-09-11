@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::{Debug, Formatter};
-
 use common_base::readable_size::ReadableSize;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
