@@ -116,7 +116,7 @@ impl MergeReaderBuilder {
         MergeReaderBuilder::default()
     }
 
-    /// Pushs a batch reader to sources.
+    /// Pushes a batch reader to sources.
     pub fn push_batch_reader(&mut self, reader: BoxedBatchReader) -> &mut Self {
         self.sources.push(Source::Reader(reader));
         self

@@ -25,7 +25,7 @@ use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
-use common_meta::key::table_route::{NextTableRouteKey, TableRouteValue as NextTableRouteValue};
+use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
 use common_meta::key::{RegionDistribution, TableMetaKey};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::router::TableRoute;
@@ -154,7 +154,7 @@ impl MigrateTableMetadata {
         let new_table_value = NextTableRouteValue::new(table_route.region_routes);
 
         let table_id = table_route.table.id as u32;
-        let new_key = NextTableRouteKey::new(table_id);
+        let new_key = TableRouteKey::new(table_id);
         info!("Creating '{new_key}'");
 
         if self.dryrun {

@@ -16,6 +16,7 @@
 
 mod handle_alter;
 mod handle_close;
+mod handle_compaction;
 mod handle_create;
 mod handle_drop;
 mod handle_flush;
@@ -38,6 +39,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
@@ -256,7 +258,8 @@ impl<S: LogStore> WorkerStarter<S> {
             ))),
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
-            flush_scheduler: FlushScheduler::new(self.scheduler),
+            flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
+            compaction_scheduler: CompactionScheduler::new(self.scheduler),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
         };
@@ -407,6 +410,8 @@ struct RegionWorkerLoop<S> {
     write_buffer_manager: WriteBufferManagerRef,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
+    /// Scheduler for compaction tasks.
+    compaction_scheduler: CompactionScheduler,
     /// Stalled write requests.
     stalled_requests: StalledRequests,
     /// Event listener for tests.
@@ -503,7 +508,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.handle_flush_request(ddl.region_id, ddl.sender).await;
                     continue;
                 }
-                DdlRequest::Compact(_) => todo!(),
+                DdlRequest::Compact(_) => {
+                    self.handle_compaction_request(ddl.region_id, ddl.sender);
+                    continue;
+                }
             };
 
             if let Some(sender) = ddl.sender {
@@ -520,6 +528,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_flush_finished(region_id, req).await
             }
             BackgroundNotify::FlushFailed(req) => self.handle_flush_failed(region_id, req).await,
+            BackgroundNotify::CompactionFinished(req) => {
+                self.handle_compaction_finished(region_id, req).await
+            }
+            BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
         }
     }
 }

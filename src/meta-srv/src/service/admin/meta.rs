@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_catalog::parse_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
@@ -135,10 +136,10 @@ impl HttpHandler for TableHandler {
                     param: "full_table_name",
                 })?;
 
-        let key: TableNameKey = table_name
-            .as_str()
-            .try_into()
-            .context(TableMetadataManagerSnafu)?;
+        let (catalog, schema, table) =
+            parse_full_table_name(table_name).context(error::InvalidFullTableNameSnafu)?;
+
+        let key = TableNameKey::new(catalog, schema, table);
 
         let mut result = HashMap::with_capacity(2);
 
