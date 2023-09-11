@@ -15,6 +15,8 @@
 //! Mito region engine.
 
 #[cfg(test)]
+mod alter_test;
+#[cfg(test)]
 mod close_test;
 #[cfg(test)]
 mod compaction_test;

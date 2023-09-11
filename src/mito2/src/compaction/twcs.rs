@@ -39,6 +39,7 @@ use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, Wor
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
+use crate::worker::send_result;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
 
@@ -122,7 +123,7 @@ impl Picker for TwcsPicker {
             ttl,
             compaction_time_window,
             request_sender,
-            waiter: waiters,
+            waiter,
             file_purger,
         } = req;
 
@@ -155,6 +156,8 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
+            // Nothing to compact.
+            send_result(waiter, Ok(Output::AffectedRows(0)));
             return None;
         }
         let task = TwcsCompactionTask {
@@ -166,7 +169,7 @@ impl Picker for TwcsPicker {
             sst_write_buffer_size: ReadableSize::mb(4),
             compaction_time_window: None,
             request_sender,
-            sender: waiters,
+            sender: waiter,
             file_purger,
         };
         Some(Box::new(task))
@@ -267,7 +270,8 @@ impl TwcsCompactionTask {
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             info!(
-                "Compaction output [{}]-> {}",
+                "Compaction region {} output [{}]-> {}",
+                self.region_id,
                 output
                     .inputs
                     .iter()
@@ -315,15 +319,6 @@ impl TwcsCompactionTask {
         Ok((output, compacted))
     }
 
-    /// Handles compaction success.
-    fn early_success(&mut self) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(Ok(Output::AffectedRows(0)).context(CompactRegionSnafu {
-                region_id: self.region_id,
-            }));
-        }
-    }
-
     /// Handles compaction failure, notifies all waiters.
     fn on_failure(&mut self, err: Arc<error::Error>) {
         if let Some(sender) = self.sender.take() {
@@ -353,7 +348,6 @@ impl CompactionTask for TwcsCompactionTask {
                     "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
                     added, deleted, self.compaction_time_window
                 );
-                self.early_success();
 
                 BackgroundNotify::CompactionFinished(CompactionFinished {
                     region_id: self.region_id,

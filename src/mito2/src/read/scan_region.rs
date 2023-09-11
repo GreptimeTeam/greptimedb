@@ -52,6 +52,13 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.num_files(),
         }
     }
+
+    /// Returns number of memtables to scan.
+    pub(crate) fn num_memtables(&self) -> usize {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.num_memtables(),
+        }
+    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
@@ -139,6 +146,11 @@ impl ScanRegion {
         }
 
         let memtables = self.version.memtables.list_memtables();
+        // Skip empty memtables.
+        let memtables: Vec<_> = memtables
+            .into_iter()
+            .filter(|mem| !mem.is_empty())
+            .collect();
 
         debug!(
             "Seq scan region {}, memtables: {}, ssts_to_read: {}, total_ssts: {}",

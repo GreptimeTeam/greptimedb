@@ -14,6 +14,7 @@
 
 //! Structs and utilities for writing regions.
 
+mod handle_alter;
 mod handle_close;
 mod handle_compaction;
 mod handle_create;
@@ -27,6 +28,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -35,7 +37,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
@@ -172,6 +174,14 @@ impl WorkerGroup {
         let index = value_to_index(value, self.workers.len());
 
         &self.workers[index]
+    }
+}
+
+/// Send result to the sender.
+pub(crate) fn send_result(sender: Option<oneshot::Sender<Result<Output>>>, res: Result<Output>) {
+    if let Some(sender) = sender {
+        // Ignore send result.
+        let _ = sender.send(res);
     }
 }
 
@@ -489,7 +499,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 DdlRequest::Drop(_) => self.handle_drop_request(ddl.region_id).await,
                 DdlRequest::Open(req) => self.handle_open_request(ddl.region_id, req).await,
                 DdlRequest::Close(_) => self.handle_close_request(ddl.region_id).await,
-                DdlRequest::Alter(_) => todo!(),
+                DdlRequest::Alter(req) => {
+                    self.handle_alter_request(ddl.region_id, req, ddl.sender)
+                        .await;
+                    continue;
+                }
                 DdlRequest::Flush(_) => {
                     self.handle_flush_request(ddl.region_id, ddl.sender).await;
                     continue;
