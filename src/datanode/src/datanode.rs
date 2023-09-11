@@ -371,7 +371,7 @@ impl Default for DatanodeOptions {
             meta_client_options: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            region_engine: vec![],
+            region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::default(),
             enable_telemetry: true,
