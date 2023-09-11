@@ -74,6 +74,7 @@ impl AccessLayer {
     }
 
     /// Returns a new parquet writer to write the SST for specific `file_id`.
+    // TODO(hl): maybe rename to [sst_writer].
     pub(crate) fn write_sst(
         &self,
         file_id: FileId,

@@ -28,7 +28,6 @@ use crate::storage::descriptors::RegionDescriptor;
 use crate::storage::region::Region;
 
 const COMPACTION_STRATEGY_KEY: &str = "compaction";
-const COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE: &str = "LTW";
 const COMPACTION_STRATEGY_TWCS_VALUE: &str = "TWCS";
 const TWCS_MAX_ACTIVE_WINDOW_FILES_KEY: &str = "compaction.twcs.max_active_window_files";
 const TWCS_TIME_WINDOW_SECONDS_KEY: &str = "compaction.twcs.time_window_seconds";
@@ -125,13 +124,16 @@ pub struct CloseOptions {
 }
 
 /// Options for compactions
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum CompactionStrategy {
-    /// Leveled time window compaction strategy
-    #[default]
-    LeveledTimeWindow,
     /// TWCS
     Twcs(TwcsOptions),
+}
+
+impl Default for CompactionStrategy {
+    fn default() -> Self {
+        Self::Twcs(TwcsOptions::default())
+    }
 }
 
 /// TWCS compaction options.
@@ -160,9 +162,7 @@ impl From<&HashMap<String, String>> for CompactionStrategy {
         let Some(strategy_name) = opts.get(COMPACTION_STRATEGY_KEY) else {
             return CompactionStrategy::default();
         };
-        if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_LEVELED_TIME_WINDOW_VALUE) {
-            CompactionStrategy::LeveledTimeWindow
-        } else if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_TWCS_VALUE) {
+        if strategy_name.eq_ignore_ascii_case(COMPACTION_STRATEGY_TWCS_VALUE) {
             let mut twcs_opts = TwcsOptions::default();
             if let Some(max_active_window_files) = opts
                 .get(TWCS_MAX_ACTIVE_WINDOW_FILES_KEY)
