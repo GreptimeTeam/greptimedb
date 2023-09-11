@@ -227,7 +227,7 @@ pub enum AlterKind {
         /// Columns to add.
         columns: Vec<AddColumn>,
     },
-    /// Drop columns from the region, only value columns are allowed to drop.
+    /// Drop columns from the region, only fields are allowed to drop.
     DropColumns {
         /// Name of columns to drop.
         names: Vec<String>,

@@ -47,6 +47,7 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
+        // Get the version before alter.
         let version = region.version();
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
@@ -82,7 +83,12 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
 
-        info!("Schema of region {} is altered", region_id);
+        info!(
+            "Schema of region {} is altered from {} to {}",
+            region_id,
+            version.metadata.schema_version,
+            region.metadata().schema_version
+        );
 
         // Notifies waiters.
         send_result(sender, Ok(Output::AffectedRows(0)));
