@@ -78,7 +78,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Apply edit to region's version.
         region
             .version_control
-            .apply_edit(edit, region.file_purger.clone());
+            .apply_edit(edit, &[], region.file_purger.clone());
         request.on_success();
     }
 
