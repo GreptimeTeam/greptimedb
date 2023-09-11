@@ -14,21 +14,18 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::TableRouteValue;
-use common_meta::key::TABLE_ROUTE_PREFIX;
-use common_meta::rpc::store::{RangeRequest, RangeResponse};
-use common_meta::util;
-use prost::Message;
+use common_catalog::parse_full_table_name;
+use common_meta::key::table_name::TableNameKey;
+use common_meta::key::TableMetadataManagerRef;
 use snafu::{OptionExt, ResultExt};
 use tonic::codegen::http;
 
 use super::HttpHandler;
 use crate::error;
 use crate::error::Result;
-use crate::service::store::kv::KvStoreRef;
 
 pub struct RouteHandler {
-    pub kv_store: KvStoreRef,
+    pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 #[async_trait::async_trait]
@@ -38,51 +35,36 @@ impl HttpHandler for RouteHandler {
         _path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let full_table_name = params
-            .get("full_table_name")
-            .map(|full_table_name| full_table_name.replace('.', "-"))
-            .context(error::MissingRequiredParameterSnafu {
-                param: "full_table_name",
-            })?;
+        let table_name =
+            params
+                .get("full_table_name")
+                .context(error::MissingRequiredParameterSnafu {
+                    param: "full_table_name",
+                })?;
 
-        let route_key = format!("{}-{}", TABLE_ROUTE_PREFIX, full_table_name).into_bytes();
+        let (catalog, schema, table) =
+            parse_full_table_name(table_name).context(error::InvalidFullTableNameSnafu)?;
 
-        let range_end = util::get_prefix_end_key(&route_key);
+        let key = TableNameKey::new(catalog, schema, table);
 
-        let req = RangeRequest {
-            key: route_key,
-            range_end,
-            keys_only: false,
-            ..Default::default()
-        };
+        let table_id = self
+            .table_metadata_manager
+            .table_name_manager()
+            .get(key)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .map(|x| x.table_id());
 
-        let resp = self.kv_store.range(req).await?;
-
-        let show = pretty_fmt(resp)?;
-
+        let table_route_value = self
+            .table_metadata_manager
+            .table_route_manager()
+            .get(table_id.context(error::TableNotFoundSnafu { name: table_name })?)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(error::TableRouteNotFoundSnafu { table_name })?;
         http::Response::builder()
             .status(http::StatusCode::OK)
-            .body(show)
+            .body(serde_json::to_string(&table_route_value).unwrap())
             .context(error::InvalidHttpBodySnafu)
     }
-}
-
-fn pretty_fmt(response: RangeResponse) -> Result<String> {
-    let mut show = "".to_string();
-
-    for kv in response.kvs.into_iter() {
-        let route_key = String::from_utf8(kv.key).unwrap();
-        let route_val =
-            TableRouteValue::decode(&kv.value[..]).context(error::DecodeTableRouteSnafu)?;
-
-        show.push_str("route_key:\n");
-        show.push_str(&route_key);
-        show.push('\n');
-
-        show.push_str("route_value:\n");
-        show.push_str(&format!("{:#?}", route_val));
-        show.push('\n');
-    }
-
-    Ok(show)
 }
