@@ -87,7 +87,7 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router.route(
         "/route",
         route::RouteHandler {
-            kv_store: meta_srv.kv_store().clone(),
+            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
         },
     );
 

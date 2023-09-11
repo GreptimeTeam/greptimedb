@@ -38,7 +38,7 @@ use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::NextTableRouteKey;
+use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{TableMetaKey, TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_telemetry::debug;
@@ -85,7 +85,7 @@ impl CacheInvalidator for FrontendCatalogManager {
             String::from_utf8_lossy(&key.as_raw_key())
         );
 
-        let key = &NextTableRouteKey { table_id };
+        let key = &TableRouteKey { table_id };
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
             .await;

@@ -71,8 +71,6 @@ use self::catalog_name::{CatalogManager, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::error::{self, Result, SerdeJsonSnafu};
-#[allow(deprecated)]
-pub use crate::key::table_route::{TableRouteKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
@@ -88,6 +86,7 @@ const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
 const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
 const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
+const TABLE_ROUTE_PREFIX: &str = "__table_route";
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
