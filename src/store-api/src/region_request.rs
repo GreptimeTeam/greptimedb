@@ -175,7 +175,7 @@ pub struct RegionOpenRequest {
 pub struct RegionCloseRequest {}
 
 /// Alter metadata of a region.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RegionAlterRequest {
     /// The version of the schema before applying the alteration.
     pub schema_version: u64,
@@ -220,7 +220,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
 }
 
 /// Kind of the alteration.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AlterKind {
     /// Add columns to the region.
     AddColumns {
@@ -307,7 +307,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
 }
 
 /// Adds a column.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AddColumn {
     /// Metadata of the column to add.
     pub column_metadata: ColumnMetadata,
@@ -375,7 +375,7 @@ impl TryFrom<v1::region::AddColumn> for AddColumn {
 }
 
 /// Location to add a column.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AddColumnLocation {
     /// Add the column to the first position of columns.
     First,
@@ -411,3 +411,297 @@ pub struct RegionFlushRequest {}
 
 #[derive(Debug)]
 pub struct RegionCompactRequest {}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::region::RegionColumnDef;
+    use api::v1::{ColumnDataType, ColumnDef};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+
+    use super::*;
+    use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_from_proto_location() {
+        let proto_location = v1::AddColumnLocation {
+            location_type: LocationType::First as i32,
+            after_column_name: "".to_string(),
+        };
+        let location = AddColumnLocation::try_from(proto_location).unwrap();
+        assert_eq!(location, AddColumnLocation::First);
+
+        let proto_location = v1::AddColumnLocation {
+            location_type: 10,
+            after_column_name: "".to_string(),
+        };
+        AddColumnLocation::try_from(proto_location).unwrap_err();
+
+        let proto_location = v1::AddColumnLocation {
+            location_type: LocationType::After as i32,
+            after_column_name: "a".to_string(),
+        };
+        let location = AddColumnLocation::try_from(proto_location).unwrap();
+        assert_eq!(
+            location,
+            AddColumnLocation::After {
+                column_name: "a".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_from_none_proto_add_column() {
+        AddColumn::try_from(v1::region::AddColumn {
+            column_def: None,
+            location: None,
+        })
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_from_proto_alter_request() {
+        RegionAlterRequest::try_from(AlterRequest {
+            region_id: 0,
+            schema_version: 1,
+            kind: None,
+        })
+        .unwrap_err();
+
+        let request = RegionAlterRequest::try_from(AlterRequest {
+            region_id: 0,
+            schema_version: 1,
+            kind: Some(alter_request::Kind::AddColumns(v1::region::AddColumns {
+                add_columns: vec![v1::region::AddColumn {
+                    column_def: Some(RegionColumnDef {
+                        column_def: Some(ColumnDef {
+                            name: "a".to_string(),
+                            data_type: ColumnDataType::String as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                            semantic_type: SemanticType::Field as i32,
+                        }),
+                        column_id: 1,
+                    }),
+                    location: Some(v1::AddColumnLocation {
+                        location_type: LocationType::First as i32,
+                        after_column_name: "".to_string(),
+                    }),
+                }],
+            })),
+        })
+        .unwrap();
+
+        assert_eq!(
+            request,
+            RegionAlterRequest {
+                schema_version: 1,
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "a",
+                                ConcreteDataType::string_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Field,
+                            column_id: 1,
+                        },
+                        location: Some(AddColumnLocation::First),
+                    }]
+                },
+            }
+        );
+    }
+
+    fn new_metadata() -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_add_column_validate() {
+        let metadata = new_metadata();
+        AddColumn {
+            column_metadata: ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_1",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            },
+            location: None,
+        }
+        .validate(&metadata)
+        .unwrap();
+
+        AddColumn {
+            column_metadata: ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_1",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            },
+            location: None,
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
+        AddColumn {
+            column_metadata: ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            },
+            location: None,
+        }
+        .validate(&metadata)
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_add_duplicate_columns() {
+        let kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_schema: ColumnSchema::new(
+                            "tag_1",
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ),
+                        semantic_type: SemanticType::Tag,
+                        column_id: 4,
+                    },
+                    location: None,
+                },
+                AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_schema: ColumnSchema::new(
+                            "tag_1",
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ),
+                        semantic_type: SemanticType::Field,
+                        column_id: 5,
+                    },
+                    location: None,
+                },
+            ],
+        };
+        let metadata = new_metadata();
+        kind.validate(&metadata).unwrap_err();
+    }
+
+    #[test]
+    fn test_validate_drop_column() {
+        let metadata = new_metadata();
+        AlterKind::DropColumns {
+            names: vec!["xxxx".to_string()],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+        AlterKind::DropColumns {
+            names: vec!["tag_0".to_string()],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+        AlterKind::DropColumns {
+            names: vec!["field_0".to_string()],
+        }
+        .validate(&metadata)
+        .unwrap();
+    }
+
+    #[test]
+    fn test_validate_schema_version() {
+        let mut metadata = new_metadata();
+        metadata.schema_version = 2;
+
+        RegionAlterRequest {
+            schema_version: 1,
+            kind: AlterKind::DropColumns {
+                names: vec!["field_0".to_string()],
+            },
+        }
+        .validate(&metadata)
+        .unwrap_err();
+    }
+
+    #[test]
+    fn test_validate_add_columns() {
+        let kind = AlterKind::AddColumns {
+            columns: vec![
+                AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_schema: ColumnSchema::new(
+                            "tag_1",
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ),
+                        semantic_type: SemanticType::Tag,
+                        column_id: 4,
+                    },
+                    location: None,
+                },
+                AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_schema: ColumnSchema::new(
+                            "field_1",
+                            ConcreteDataType::string_datatype(),
+                            true,
+                        ),
+                        semantic_type: SemanticType::Field,
+                        column_id: 5,
+                    },
+                    location: None,
+                },
+            ],
+        };
+        let request = RegionAlterRequest {
+            schema_version: 1,
+            kind,
+        };
+        let mut metadata = new_metadata();
+        metadata.schema_version = 1;
+        request.validate(&metadata).unwrap();
+    }
+}
