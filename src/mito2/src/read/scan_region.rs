@@ -39,7 +39,7 @@ impl Scanner {
     /// Returns a [SendableRecordBatchStream] to retrieve scan results.
     pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream> {
         match self {
-            Scanner::Seq(seq_scan) => seq_scan.build().await,
+            Scanner::Seq(seq_scan) => seq_scan.build_stream().await,
         }
     }
 }
@@ -158,7 +158,7 @@ impl ScanRegion {
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 
-        let seq_scan = SeqScan::new(self.access_layer.clone(), mapper, self.request)
+        let seq_scan = SeqScan::new(self.access_layer.clone(), mapper)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)

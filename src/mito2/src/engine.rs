@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod close_test;
 #[cfg(test)]
+mod compaction_test;
+#[cfg(test)]
 mod create_test;
 #[cfg(test)]
 mod drop_test;

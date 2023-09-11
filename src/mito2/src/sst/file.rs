@@ -137,6 +137,18 @@ impl FileHandle {
     pub fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Relaxed);
     }
+
+    pub fn compacting(&self) -> bool {
+        self.inner.compacting.load(Ordering::Relaxed)
+    }
+
+    pub fn set_compacting(&self, compacting: bool) {
+        self.inner.compacting.store(compacting, Ordering::Relaxed);
+    }
+
+    pub fn meta(&self) -> FileMeta {
+        self.inner.meta.clone()
+    }
 }
 
 /// Inner data of [FileHandle].

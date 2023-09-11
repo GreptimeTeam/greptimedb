@@ -17,6 +17,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use common_time::Timestamp;
+
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
 
@@ -103,6 +105,22 @@ impl LevelMeta {
             level,
             files: HashMap::new(),
         }
+    }
+
+    /// Returns expired SSTs from current level.
+    pub fn get_expired_files(&self, expire_time: &Timestamp) -> Vec<FileHandle> {
+        self.files
+            .values()
+            .filter(|v| {
+                let (_, end) = v.time_range();
+                &end < expire_time
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = &FileHandle> {
+        self.files.values()
     }
 }
 

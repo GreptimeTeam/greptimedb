@@ -112,9 +112,6 @@ pub fn compaction_strategy_to_picker<S: LogStore>(
     strategy: &CompactionStrategy,
 ) -> CompactionPickerRef<S> {
     match strategy {
-        CompactionStrategy::LeveledTimeWindow => {
-            Arc::new(LeveledTimeWindowPicker::default()) as Arc<_>
-        }
         CompactionStrategy::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
             twcs_opts.max_active_window_files,
             twcs_opts.max_inactive_window_files,
