@@ -932,6 +932,7 @@ mod test {
 
     #[test]
     fn test_alter() {
+        // a (tag), b (field), c (ts)
         let metadata = build_test_region_metadata();
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
@@ -944,7 +945,7 @@ mod test {
             .unwrap();
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "c", "d"]);
-        assert_eq!([2, 4], &metadata.primary_key[..]);
+        assert_eq!([1, 4], &metadata.primary_key[..]);
 
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
         builder
@@ -994,5 +995,15 @@ mod test {
             .unwrap();
         let metadata = builder.build().unwrap();
         check_columns(&metadata, &["a", "b", "f", "c", "d"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropColumns {
+                names: vec!["a".to_string()],
+            })
+            .unwrap();
+        // Build returns error as the primary key has more columns.
+        let err = builder.build().unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 }
