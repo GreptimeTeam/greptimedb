@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
@@ -36,10 +35,9 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
-use crate::error::{RecoverProcedureSnafu, Result};
+use crate::error::{InitMetadataSnafu, RecoverProcedureSnafu, Result};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
-use crate::metadata_service::MetadataServiceRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
@@ -196,7 +194,6 @@ pub struct MetaSrv {
     election: Option<ElectionRef>,
     lock: DistLockRef,
     procedure_manager: ProcedureManagerRef,
-    metadata_service: MetadataServiceRef,
     mailbox: MailboxRef,
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -296,9 +293,10 @@ impl MetaSrv {
     }
 
     async fn create_default_schema_if_not_exist(&self) -> Result<()> {
-        self.metadata_service
-            .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
+        self.table_metadata_manager
+            .init()
             .await
+            .context(InitMetadataSnafu)
     }
 
     pub fn shutdown(&self) {

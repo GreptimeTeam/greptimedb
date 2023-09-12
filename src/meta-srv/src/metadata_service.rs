@@ -18,8 +18,7 @@ use async_trait::async_trait;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::TableMetadataManagerRef;
-use common_telemetry::{info, timer};
-use metrics::increment_counter;
+use common_telemetry::info;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
@@ -62,15 +61,12 @@ impl MetadataService for DefaultMetadataService {
         schema_name: &str,
         if_not_exist: bool,
     ) -> Result<()> {
-        let _timer = timer!(crate::metrics::METRIC_META_CREATE_SCHEMA);
-
         self.table_metadata_manager
             .catalog_manager()
             .create(CatalogNameKey::new(catalog_name))
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
-        increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
         info!("Successfully created a catalog: {}", catalog_name);
 
         let schema = SchemaNameKey::new(catalog_name, schema_name);

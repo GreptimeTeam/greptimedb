@@ -14,6 +14,8 @@
 
 pub const METRIC_META_TXN_REQUEST: &str = "meta.txn_request";
 
+pub(crate) const METRIC_META_CREATE_CATALOG: &str = "meta.create_catalog";
+pub(crate) const METRIC_META_CREATE_SCHEMA: &str = "meta.create_schema";
 pub(crate) const METRIC_META_PROCEDURE_CREATE_TABLE: &str = "meta.procedure.create_table";
 pub(crate) const METRIC_META_PROCEDURE_DROP_TABLE: &str = "meta.procedure.drop_table";
 pub(crate) const METRIC_META_PROCEDURE_ALTER_TABLE: &str = "meta.procedure.alter_table";
