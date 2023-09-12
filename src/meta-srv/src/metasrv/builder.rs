@@ -43,7 +43,6 @@ use crate::handler::response_header_handler::ResponseHeaderHandler;
 use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pushers};
 use crate::lock::memory::MemLock;
 use crate::lock::DistLockRef;
-use crate::metadata_service::{DefaultMetadataService, MetadataServiceRef};
 use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
@@ -66,7 +65,6 @@ pub struct MetaSrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
-    metadata_service: Option<MetadataServiceRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
     pubsub: Option<(PublishRef, SubscribeManagerRef)>,
 }
@@ -82,7 +80,6 @@ impl MetaSrvBuilder {
             election: None,
             options: None,
             lock: None,
-            metadata_service: None,
             datanode_clients: None,
             pubsub: None,
         }
@@ -128,11 +125,6 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn metadata_service(mut self, metadata_service: MetadataServiceRef) -> Self {
-        self.metadata_service = Some(metadata_service);
-        self
-    }
-
     pub fn datanode_clients(mut self, clients: Arc<DatanodeClients>) -> Self {
         self.datanode_clients = Some(clients);
         self
@@ -155,7 +147,6 @@ impl MetaSrvBuilder {
             selector,
             handler_group,
             lock,
-            metadata_service,
             datanode_clients,
             pubsub,
         } = self;
@@ -174,10 +165,7 @@ impl MetaSrvBuilder {
         let kv_backend = KvBackendAdapter::wrap(kv_store.clone());
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-        let metadata_service = metadata_service
-            .unwrap_or_else(|| Arc::new(DefaultMetadataService::new(table_metadata_manager)));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
-        let table_metadata_manager = build_table_metadata_manager(&kv_store);
         let ctx = SelectorContext {
             datanode_lease_secs: options.datanode_lease_secs,
             server_addr: options.server_addr.clone(),
@@ -275,7 +263,6 @@ impl MetaSrvBuilder {
             election,
             lock,
             procedure_manager,
-            metadata_service,
             mailbox,
             ddl_executor: ddl_manager,
             table_metadata_manager,
@@ -331,12 +318,6 @@ fn build_procedure_manager(options: &MetaSrvOptions, kv_store: &KvStoreRef) -> P
     };
     let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
     Arc::new(LocalManager::new(manager_config, state_store))
-}
-
-fn build_table_metadata_manager(kv_store: &KvStoreRef) -> TableMetadataManagerRef {
-    Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-        kv_store.clone(),
-    )))
 }
 
 fn build_ddl_manager(

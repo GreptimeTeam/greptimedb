@@ -19,20 +19,28 @@ use async_trait::async_trait;
 use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
+use common_meta::datanode_manager::DatanodeManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
+use partition::manager::PartitionRuleManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::catalog::FrontendCatalogManager;
 use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct DistRegionRequestHandler {
-    catalog_manager: Arc<FrontendCatalogManager>,
+    partition_manager: PartitionRuleManagerRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
 impl DistRegionRequestHandler {
-    pub fn arc(catalog_manager: Arc<FrontendCatalogManager>) -> Arc<Self> {
-        Arc::new(Self { catalog_manager })
+    pub fn arc(
+        partition_manager: PartitionRuleManagerRef,
+        datanode_manager: DatanodeManagerRef,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            partition_manager,
+            datanode_manager,
+        })
     }
 }
 
@@ -51,8 +59,7 @@ impl DistRegionRequestHandler {
         let region_id = RegionId::from_u64(request.region_id);
 
         let table_route = self
-            .catalog_manager
-            .partition_manager()
+            .partition_manager
             .find_table_route(region_id.table_id())
             .await
             .context(FindTableRouteSnafu {
@@ -64,7 +71,7 @@ impl DistRegionRequestHandler {
                 region: region_id.region_number(),
             })?;
 
-        let client = self.catalog_manager.datanode_manager().datanode(peer).await;
+        let client = self.datanode_manager.datanode(peer).await;
 
         client
             .handle_query(request)

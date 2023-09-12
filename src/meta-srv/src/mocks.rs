@@ -20,12 +20,10 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
 use tower::service_fn;
 
-use crate::metadata_service::{DefaultMetadataService, MetadataService};
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use crate::service::store::etcd::EtcdStore;
@@ -64,12 +62,8 @@ pub async fn mock(
     let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
         kv_store.clone(),
     )));
-    let metadata_service = DefaultMetadataService::new(table_metadata_manager);
 
-    metadata_service
-        .create_schema(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, true)
-        .await
-        .unwrap();
+    table_metadata_manager.init().await.unwrap();
 
     let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
 
