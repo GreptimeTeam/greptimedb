@@ -83,12 +83,6 @@ pub enum Error {
     #[snafu(display("Illegal config: {}", msg))]
     IllegalConfig { msg: String, location: Location },
 
-    #[snafu(display("Illegal auth config: {}", source))]
-    IllegalAuthConfig {
-        location: Location,
-        source: auth::error::Error,
-    },
-
     #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
     UnsupportedSelectorType {
         selector_type: String,
@@ -195,7 +189,6 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
-            | Error::IllegalAuthConfig { .. }
             | Error::ConnectEtcd { .. } => StatusCode::InvalidArguments,
 
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,

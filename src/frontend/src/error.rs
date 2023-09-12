@@ -667,6 +667,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Illegal auth config: {}", source))]
+    IllegalAuthConfig {
+        location: Location,
+        source: auth::error::Error,
+    },
+
     #[snafu(display("Missing insert body, source: {source}"))]
     MissingInsertBody {
         source: sql::error::Error,
@@ -715,6 +721,7 @@ impl ErrorExt for Error {
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
+            | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
 

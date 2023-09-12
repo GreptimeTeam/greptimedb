@@ -39,6 +39,7 @@ members = [
     "src/mito2",
     "src/object-store",
     "src/partition",
+    "src/plugins",
     "src/promql",
     "src/query",
     "src/script",
@@ -61,7 +62,6 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 arrow = { version = "43.0" }
-etcd-client = "0.11"
 arrow-array = "43.0"
 arrow-flight = "43.0"
 arrow-schema = { version = "43.0", features = ["serde"] }
@@ -76,12 +76,15 @@ datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion
 datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "c0b0fca548e99d020c76e1a1cd7132aab26000e1" }
 datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "c0b0fca548e99d020c76e1a1cd7132aab26000e1" }
 derive_builder = "0.12"
+etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "1969b5d610209ad1c2ad8e4cd3e9c3c24e40f1c2" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
+meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
+metrics = "0.20"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }
 parquet = "43.0"
@@ -108,8 +111,6 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.9", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
-metrics = "0.20"
-meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }
@@ -128,13 +129,12 @@ common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
+common-pprof = { path = "src/common/pprof" }
 common-procedure = { path = "src/common/procedure" }
 common-procedure-test = { path = "src/common/procedure-test" }
-common-pprof = { path = "src/common/pprof" }
 common-query = { path = "src/common/query" }
 common-recordbatch = { path = "src/common/recordbatch" }
 common-runtime = { path = "src/common/runtime" }
-substrait = { path = "src/common/substrait" }
 common-telemetry = { path = "src/common/telemetry" }
 common-test-util = { path = "src/common/test-util" }
 common-time = { path = "src/common/time" }
@@ -150,6 +150,7 @@ mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
+plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 query = { path = "src/query" }
 raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
@@ -159,6 +160,7 @@ session = { path = "src/session" }
 sql = { path = "src/sql" }
 storage = { path = "src/storage" }
 store-api = { path = "src/store-api" }
+substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
 table-procedure = { path = "src/table-procedure" }
 

@@ -41,7 +41,6 @@ use crate::error::{
     IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
     StartDatanodeSnafu, StartFrontendSnafu,
 };
-use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
 #[derive(Parser)]
@@ -287,8 +286,10 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-        let fe_opts = opts.fe_opts;
+        let (fe_opts, fe_plugins) = plugins::setup_frontend_plugins(opts.fe_opts)
+            .await
+            .context(StartFrontendSnafu)?;
+
         let dn_opts = opts.dn_opts;
 
         info!("Standalone start command: {:#?}", self);
@@ -306,7 +307,7 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = Datanode::new(dn_opts.clone(), plugins.clone())
+        let datanode = Datanode::new(dn_opts.clone(), Default::default())
             .await
             .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();
@@ -325,7 +326,7 @@ impl StartCommand {
 
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
-            plugins,
+            fe_plugins,
             kv_store,
             procedure_manager,
             catalog_manager,
@@ -378,13 +379,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let command = StartCommand {
+        let fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        let plugins = load_frontend_plugins(&command.user_provider);
-        let plugins = plugins.unwrap();
+        let (_, plugins) = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
+
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
             .authenticate(

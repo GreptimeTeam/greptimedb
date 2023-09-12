@@ -1,0 +1,13 @@
+[package]
+name = "plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+auth.workspace = true
+common-base.workspace = true
+frontend.workspace = true
+snafu.workspace = true

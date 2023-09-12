@@ -44,6 +44,7 @@ meta-srv = { workspace = true }
 metrics.workspace = true
 nu-ansi-term = "0.46"
 partition = { workspace = true }
+plugins.workspace = true
 prost.workspace = true
 query = { workspace = true }
 rand.workspace = true
