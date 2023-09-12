@@ -593,7 +593,10 @@ impl CompactionFinished {
 
     /// Compaction succeeded but failed to update manifest or region's already been dropped,
     /// clean compaction output files.
-    pub fn on_failure(self, _err: Error) {
+    pub fn on_failure(self, err: Error) {
+        if let Some(sender) = self.sender {
+            let _ = sender.send(Err(err));
+        }
         for file in &self.compacted_files {
             let file_id = file.file_id;
             warn!(
