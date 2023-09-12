@@ -327,13 +327,12 @@ impl StatementExecutor {
                     .zip(vectors)
                     .collect::<HashMap<_, _>>();
 
-                pending.push(self.handle_table_insert_request(
+                pending.push(self.inserter.handle_table_insert(
                     InsertRequest {
                         catalog_name: req.catalog_name.to_string(),
                         schema_name: req.schema_name.to_string(),
                         table_name: req.table_name.to_string(),
                         columns_values,
-                        // TODO: support multi-regions
                         region_number: 0,
                     },
                     query_ctx.clone(),

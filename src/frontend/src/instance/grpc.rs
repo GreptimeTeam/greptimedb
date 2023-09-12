@@ -15,6 +15,7 @@
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
+use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
@@ -131,5 +132,43 @@ impl GrpcQueryHandler for Instance {
 
         let output = interceptor.post_execute(output, ctx)?;
         Ok(output)
+    }
+}
+
+impl Instance {
+    pub async fn handle_inserts(
+        &self,
+        requests: InsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inserter
+            .handle_column_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
+    }
+
+    pub async fn handle_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inserter
+            .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
+    }
+
+    pub async fn handle_deletes(
+        &self,
+        requests: DeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.deleter.handle_column_deletes(requests, ctx).await
+    }
+
+    pub async fn handle_row_deletes(
+        &self,
+        requests: RowDeleteRequests,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.deleter.handle_row_deletes(requests, ctx).await
     }
 }

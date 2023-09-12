@@ -49,7 +49,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_creator: TableMetadataAllocatorRef,
+    table_meta_allocator: TableMetadataAllocatorRef,
 }
 
 impl DdlManager {
@@ -58,14 +58,14 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_creator: TableMetadataAllocatorRef,
+        table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Self {
         Self {
             procedure_manager,
             datanode_manager: datanode_clients,
             cache_invalidator,
             table_metadata_manager,
-            table_creator,
+            table_meta_allocator,
         }
     }
 
@@ -333,7 +333,7 @@ async fn handle_create_table_task(
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let (table_id, region_routes) = ddl_manager
-        .table_creator
+        .table_meta_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
             &mut create_table_task.table_info,

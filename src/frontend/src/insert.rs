@@ -12,48 +12,59 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use api::v1::alter_expr::Kind;
-use api::v1::region::region_request;
-use api::v1::{AlterExpr, ColumnSchema, InsertRequests, RowInsertRequest, RowInsertRequests};
-use catalog::CatalogManager;
-use client::region_handler::RegionRequestHandler;
+use api::v1::region::{InsertRequests as RegionInsertRequests, RegionRequestHeader};
+use api::v1::{
+    AlterExpr, ColumnSchema, CreateTableExpr, InsertRequests, RowInsertRequest, RowInsertRequests,
+};
+use catalog::CatalogManagerRef;
 use common_catalog::consts::default_engine;
 use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
+use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
+use common_meta::peer::Peer;
 use common_query::Output;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use datatypes::schema::Schema;
+use futures_util::future;
+use metrics::counter;
+use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use sql::statements::insert::Insert;
 use table::engine::TableReference;
+use table::requests::InsertRequest as TableInsertRequest;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, FindNewColumnsOnInsertionSnafu, InvalidInsertRequestSnafu, RequestDatanodeSnafu,
-    Result,
+    CatalogSnafu, FindNewColumnsOnInsertionSnafu, FindRegionLeaderSnafu, InvalidInsertRequestSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
 };
 use crate::expr_factory::CreateExprFactory;
-use crate::req_convert::insert::{ColumnToRow, RowToRegion};
+use crate::region_req_factory::RegionRequestFactory;
+use crate::req_convert::insert::{ColumnToRow, RowToRegion, StatementToRegion, TableToRegion};
 use crate::statement::StatementExecutor;
 
-pub(crate) struct Inserter<'a> {
-    catalog_manager: &'a dyn CatalogManager,
-    create_expr_factory: &'a CreateExprFactory,
-    statement_executor: &'a StatementExecutor,
-    region_request_handler: &'a dyn RegionRequestHandler,
+pub struct Inserter {
+    catalog_manager: CatalogManagerRef,
+    partition_manager: PartitionRuleManagerRef,
+    datanode_manager: DatanodeManagerRef,
 }
 
-impl<'a> Inserter<'a> {
+pub type InserterRef = Arc<Inserter>;
+
+impl Inserter {
     pub fn new(
-        catalog_manager: &'a dyn CatalogManager,
-        create_expr_factory: &'a CreateExprFactory,
-        statement_executor: &'a StatementExecutor,
-        region_request_handler: &'a dyn RegionRequestHandler,
+        catalog_manager: CatalogManagerRef,
+        partition_manager: PartitionRuleManagerRef,
+        datanode_manager: DatanodeManagerRef,
     ) -> Self {
         Self {
             catalog_manager,
-            create_expr_factory,
-            statement_executor,
-            region_request_handler,
+            partition_manager,
+            datanode_manager,
         }
     }
 
@@ -61,15 +72,18 @@ impl<'a> Inserter<'a> {
         &self,
         requests: InsertRequests,
         ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         let row_inserts = ColumnToRow::convert(requests)?;
-        self.handle_row_inserts(row_inserts, ctx).await
+        self.handle_row_inserts(row_inserts, ctx, statement_executor)
+            .await
     }
 
     pub async fn handle_row_inserts(
         &self,
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<Output> {
         // remove empty requests
         requests.inserts.retain(|req| {
@@ -78,25 +92,110 @@ impl<'a> Inserter<'a> {
                 .map(|r| !r.rows.is_empty())
                 .unwrap_or_default()
         });
-        validate_row_count_match(&requests)?;
+        validate_column_count_match(&requests)?;
 
-        self.create_or_alter_tables_on_demand(&requests, &ctx)
+        self.create_or_alter_tables_on_demand(&requests, &ctx, statement_executor)
             .await?;
-        let region_request = RowToRegion::new(self.catalog_manager, &ctx)
-            .convert(requests)
-            .await?;
-        let region_request = region_request::Body::Inserts(region_request);
+        let inserts = RowToRegion::new(
+            self.catalog_manager.as_ref(),
+            self.partition_manager.as_ref(),
+            &ctx,
+        )
+        .convert(requests)
+        .await?;
 
-        let affected_rows = self
-            .region_request_handler
-            .handle(region_request, ctx)
-            .await
-            .context(RequestDatanodeSnafu)?;
+        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        Ok(Output::AffectedRows(affected_rows as _))
+    }
+
+    pub async fn handle_table_insert(
+        &self,
+        request: TableInsertRequest,
+        ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let catalog = request.catalog_name.as_str();
+        let schema = request.schema_name.as_str();
+        let table_name = request.table_name.as_str();
+        let table = self.get_table(catalog, schema, table_name).await?;
+        let table = table.with_context(|| TableNotFoundSnafu {
+            table_name: common_catalog::format_full_table_name(catalog, schema, table_name),
+        })?;
+        let table_info = table.table_info();
+
+        let inserts = TableToRegion::new(&table_info, &self.partition_manager)
+            .convert(request)
+            .await?;
+
+        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        Ok(affected_rows as _)
+    }
+
+    pub async fn handle_statement_insert(
+        &self,
+        insert: &Insert,
+        ctx: &QueryContextRef,
+    ) -> Result<Output> {
+        let inserts =
+            StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
+                .convert(insert)
+                .await?;
+
+        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 }
 
-impl<'a> Inserter<'a> {
+impl Inserter {
+    async fn do_request(
+        &self,
+        requests: RegionInsertRequests,
+        trace_id: u64,
+        span_id: u64,
+    ) -> Result<AffectedRows> {
+        let header = RegionRequestHeader { trace_id, span_id };
+        let request_factory = RegionRequestFactory::new(header);
+
+        let tasks = self
+            .group_requests_by_peer(requests)
+            .await?
+            .into_iter()
+            .map(|(peer, inserts)| {
+                let request = request_factory.build_insert(inserts);
+                let datanode_manager = self.datanode_manager.clone();
+                common_runtime::spawn_write(async move {
+                    datanode_manager
+                        .datanode(&peer)
+                        .await
+                        .handle(request)
+                        .await
+                        .context(RequestInsertsSnafu)
+                })
+            });
+        let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
+
+        let affected_rows = results.into_iter().sum::<Result<u64>>()?;
+        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows);
+        Ok(affected_rows)
+    }
+
+    async fn group_requests_by_peer(
+        &self,
+        requests: RegionInsertRequests,
+    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
+        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
+
+        for req in requests.requests {
+            let peer = self
+                .partition_manager
+                .find_region_leader(req.region_id.into())
+                .await
+                .context(FindRegionLeaderSnafu)?;
+            inserts.entry(peer).or_default().requests.push(req);
+        }
+
+        Ok(inserts)
+    }
+
     // check if tables already exist:
     // - if table does not exist, create table by inferred CreateExpr
     // - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -104,15 +203,20 @@ impl<'a> Inserter<'a> {
         &self,
         requests: &RowInsertRequests,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
         // TODO(jeremy): create and alter in batch?
         for req in &requests.inserts {
-            match self.get_table(req, ctx).await? {
+            let catalog = ctx.current_catalog();
+            let schema = ctx.current_schema();
+            let table = self.get_table(catalog, schema, &req.table_name).await?;
+            match table {
                 Some(table) => {
                     validate_request_with_table(req, &table)?;
-                    self.alter_table_on_demand(req, table, ctx).await?
+                    self.alter_table_on_demand(req, table, ctx, statement_executor)
+                        .await?
                 }
-                None => self.create_table(req, ctx).await?,
+                None => self.create_table(req, ctx, statement_executor).await?,
             }
         }
 
@@ -121,11 +225,12 @@ impl<'a> Inserter<'a> {
 
     async fn get_table(
         &self,
-        req: &RowInsertRequest,
-        ctx: &QueryContextRef,
+        catalog: &str,
+        schema: &str,
+        table: &str,
     ) -> Result<Option<TableRef>> {
         self.catalog_manager
-            .table(ctx.current_catalog(), ctx.current_schema(), &req.table_name)
+            .table(catalog, schema, table)
             .await
             .context(CatalogSnafu)
     }
@@ -135,9 +240,11 @@ impl<'a> Inserter<'a> {
         req: &RowInsertRequest,
         table: TableRef,
         ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
     ) -> Result<()> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
+        let table_name = table.table_info().name.clone();
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let column_exprs = ColumnExpr::from_column_schemas(request_schema);
@@ -147,7 +254,6 @@ impl<'a> Inserter<'a> {
             return Ok(());
         };
 
-        let table_name = table.table_info().name.clone();
         info!(
             "Adding new columns: {:?} to table: {}.{}.{}",
             add_columns, catalog_name, schema_name, table_name
@@ -160,54 +266,75 @@ impl<'a> Inserter<'a> {
             kind: Some(Kind::AddColumns(add_columns)),
         };
 
-        self.statement_executor
-            .alter_table_inner(alter_table_expr)
-            .await?;
+        let res = statement_executor.alter_table_inner(alter_table_expr).await;
 
-        info!(
-            "Successfully added new columns to table: {}.{}.{}",
-            catalog_name, schema_name, table_name
-        );
-
-        Ok(())
+        match res {
+            Ok(_) => {
+                info!(
+                    "Successfully added new columns to table: {}.{}.{}",
+                    catalog_name, schema_name, table_name
+                );
+                Ok(())
+            }
+            Err(err) => {
+                error!(
+                    "Failed to add new columns to table: {}.{}.{}: {}",
+                    catalog_name, schema_name, table_name, err
+                );
+                Err(err)
+            }
+        }
     }
 
-    async fn create_table(&self, req: &RowInsertRequest, ctx: &QueryContextRef) -> Result<()> {
+    async fn create_table(
+        &self,
+        req: &RowInsertRequest,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
         let table_ref =
             TableReference::full(ctx.current_catalog(), ctx.current_schema(), &req.table_name);
+
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+        let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
         info!(
             "Table {}.{}.{} does not exist, try create table",
             table_ref.catalog, table_ref.schema, table_ref.table,
         );
 
-        let mut create_table_expr = self
-            .create_expr_factory
-            .create_table_expr_by_column_schemas(&table_ref, request_schema, default_engine())?;
-
         // TODO(weny): multiple regions table.
-        self.statement_executor
-            .create_table_inner(&mut create_table_expr, None)
-            .await?;
+        let res = statement_executor
+            .create_table_inner(create_table_expr, None)
+            .await;
 
-        info!(
-            "Successfully created table on insertion: {}.{}.{}",
-            table_ref.catalog, table_ref.schema, table_ref.table,
-        );
-
-        Ok(())
+        match res {
+            Ok(_) => {
+                info!(
+                    "Successfully created table {}.{}.{}",
+                    table_ref.catalog, table_ref.schema, table_ref.table,
+                );
+                Ok(())
+            }
+            Err(err) => {
+                error!(
+                    "Failed to create table {}.{}.{}: {}",
+                    table_ref.catalog, table_ref.schema, table_ref.table, err
+                );
+                Err(err)
+            }
+        }
     }
 }
 
-fn validate_row_count_match(requests: &RowInsertRequests) -> Result<()> {
+fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     for request in &requests.inserts {
         let rows = request.rows.as_ref().unwrap();
         let column_count = rows.schema.len();
         ensure!(
             rows.rows.iter().all(|r| r.values.len() == column_count),
             InvalidInsertRequestSnafu {
-                reason: "row count mismatch"
+                reason: "column count mismatch"
             }
         )
     }
@@ -241,6 +368,13 @@ fn validate_required_columns(request_schema: &[ColumnSchema], table_schema: &Sch
         }
     }
     Ok(())
+}
+
+fn build_create_table_expr(
+    table: &TableReference,
+    request_schema: &[ColumnSchema],
+) -> Result<CreateTableExpr> {
+    CreateExprFactory.create_table_expr_by_column_schemas(table, request_schema, default_engine())
 }
 
 #[cfg(test)]
