@@ -73,14 +73,6 @@ impl MitoEngine {
         }
     }
 
-    /// Stop the engine.
-    ///
-    /// Stopping the engine doesn't stop the underlying log store as other components might
-    /// still use it.
-    pub async fn stop(&self) -> Result<()> {
-        self.inner.stop().await
-    }
-
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
@@ -191,8 +183,13 @@ impl RegionEngine for MitoEngine {
         self.inner.get_metadata(region_id).map_err(BoxedError::new)
     }
 
+    /// Stop the engine.
+    ///
+    /// Stopping the engine doesn't stop the underlying log store as other components might
+    /// still use it. (When no other components are referencing the log store, it will
+    /// automatically shutdown.)
     async fn stop(&self) -> std::result::Result<(), BoxedError> {
-        self.stop().await.map_err(BoxedError::new)
+        self.inner.stop().await.map_err(BoxedError::new)
     }
 }
 
