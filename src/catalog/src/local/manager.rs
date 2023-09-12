@@ -98,9 +98,9 @@ impl SystemTableInitializer {
 
     async fn init_system_catalog(&self) -> Result<()> {
         let catalog_manager = &self.catalog_manager;
-        catalog_manager.register_local_catalog(SYSTEM_CATALOG_NAME)?;
+        catalog_manager.register_catalog(SYSTEM_CATALOG_NAME)?;
 
-        catalog_manager.register_local_schema(RegisterSchemaRequest {
+        catalog_manager.register_schema(RegisterSchemaRequest {
             catalog: SYSTEM_CATALOG_NAME.to_string(),
             schema: INFORMATION_SCHEMA_NAME.to_string(),
         })?;
@@ -112,7 +112,7 @@ impl SystemTableInitializer {
             table_id: SYSTEM_CATALOG_TABLE_ID,
             table: self.system.information_schema.system.as_table_ref(),
         };
-        catalog_manager.register_local_table(register_table_req)?;
+        catalog_manager.register_table(register_table_req)?;
 
         // Add numbers table for test
         let register_number_table_req = RegisterTableRequest {
@@ -123,7 +123,7 @@ impl SystemTableInitializer {
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
-        catalog_manager.register_local_table(register_number_table_req)?;
+        catalog_manager.register_table(register_number_table_req)?;
 
         Ok(())
     }
@@ -194,8 +194,7 @@ impl SystemTableInitializer {
         for entry in entries {
             match entry {
                 Entry::Catalog(c) => {
-                    self.catalog_manager
-                        .register_local_catalog(&c.catalog_name)?;
+                    self.catalog_manager.register_catalog(&c.catalog_name)?;
                     info!("Register catalog: {}", c.catalog_name);
                 }
                 Entry::Schema(s) => {
@@ -203,7 +202,7 @@ impl SystemTableInitializer {
                         catalog: s.catalog_name.clone(),
                         schema: s.schema_name.clone(),
                     };
-                    self.catalog_manager.register_local_schema(req)?;
+                    self.catalog_manager.register_schema(req)?;
                     info!("Registered schema: {:?}", s);
                 }
                 Entry::Table(t) => {
@@ -267,8 +266,7 @@ impl SystemTableInitializer {
             table_id: t.table_id,
             table: table_ref,
         };
-        self.catalog_manager
-            .register_local_table(register_request)?;
+        self.catalog_manager.register_table(register_request)?;
         Ok(())
     }
 

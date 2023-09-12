@@ -44,12 +44,12 @@ pub mod tables;
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 
-    /// Register a local catalog.
+    /// Register a catalog.
     ///
     /// # Returns
     ///
     /// Whether the catalog is registered.
-    fn register_local_catalog(&self, name: &str) -> Result<bool>;
+    fn register_catalog(&self, name: &str) -> Result<bool>;
 
     /// Register a local schema.
     ///
@@ -60,10 +60,10 @@ pub trait CatalogManager: Send + Sync {
     /// # Errors
     ///
     /// This method will/should fail if catalog not exist
-    fn register_local_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
+    fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
 
     /// Deregisters a database within given catalog/schema to catalog manager
-    fn deregister_local_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
+    fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
 
     /// Registers a local table.
     ///
@@ -74,10 +74,10 @@ pub trait CatalogManager: Send + Sync {
     /// # Errors
     ///
     /// This method will/should fail if catalog or schema not exist
-    fn register_local_table(&self, request: RegisterTableRequest) -> Result<bool>;
+    fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
 
     /// Deregisters a table within given catalog/schema to catalog manager
-    fn deregister_local_table(&self, request: DeregisterTableRequest) -> Result<()>;
+    fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()>;
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
@@ -189,7 +189,7 @@ pub(crate) async fn handle_system_table_request<'a, M: CatalogManager + ?Sized>(
                         table_name,
                     ),
                 })?;
-            manager.register_local_table(RegisterTableRequest {
+            manager.register_table(RegisterTableRequest {
                 catalog: catalog_name.clone(),
                 schema: schema_name.clone(),
                 table_name: table_name.clone(),

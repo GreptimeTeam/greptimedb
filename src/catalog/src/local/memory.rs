@@ -40,22 +40,22 @@ pub struct MemoryCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    fn register_local_catalog(&self, name: &str) -> Result<bool> {
+    fn register_catalog(&self, name: &str) -> Result<bool> {
         self.register_catalog(name)
     }
-    fn register_local_table(&self, request: RegisterTableRequest) -> Result<bool> {
+    fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         self.register_table(request)
     }
 
-    fn deregister_local_table(&self, request: DeregisterTableRequest) -> Result<()> {
+    fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
         self.deregister_table_sync(request)
     }
 
-    fn register_local_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
+    fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         self.register_schema_sync(request)
     }
 
-    fn deregister_local_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
+    fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schemas = catalogs
             .get_mut(&request.catalog)

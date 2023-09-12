@@ -166,29 +166,23 @@ impl FrontendCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
-    fn register_local_catalog(&self, name: &str) -> CatalogResult<bool> {
+    fn register_catalog(&self, name: &str) -> CatalogResult<bool> {
         self.local_catalog_manager.register_catalog(name)
     }
 
-    fn register_local_table(&self, request: RegisterTableRequest) -> CatalogResult<bool> {
+    fn register_table(&self, request: RegisterTableRequest) -> CatalogResult<bool> {
         self.local_catalog_manager.register_table(request)
     }
 
-    fn deregister_local_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
+    fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
         Ok(())
     }
 
-    fn register_local_schema(
-        &self,
-        _request: RegisterSchemaRequest,
-    ) -> catalog::error::Result<bool> {
+    fn register_schema(&self, _request: RegisterSchemaRequest) -> catalog::error::Result<bool> {
         unimplemented!("FrontendCatalogManager does not support registering schema")
     }
 
-    fn deregister_local_schema(
-        &self,
-        _request: DeregisterSchemaRequest,
-    ) -> catalog_err::Result<bool> {
+    fn deregister_schema(&self, _request: DeregisterSchemaRequest) -> catalog_err::Result<bool> {
         unimplemented!("FrontendCatalogManager does not support deregistering schema")
     }
 
