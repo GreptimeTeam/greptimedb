@@ -315,7 +315,7 @@ async fn test_engine_truncate_during_flush() {
     let flushed_entry_id = region.version_control.current().last_entry_id;
 
     let current_version = region.version_control.current().version;
-    assert_eq!(current_version.truncate_entry_id, None);
+    assert_eq!(current_version.truncated_entry_id, None);
 
     // Truncate the region.
     engine
@@ -364,5 +364,5 @@ async fn test_engine_truncate_during_flush() {
         .unwrap();
 
     let current_version = region.version_control.current().version;
-    assert_eq!(current_version.truncate_entry_id, None);
+    assert_eq!(current_version.truncated_entry_id, None);
 }
