@@ -795,7 +795,7 @@ mod tests {
                         value_data: Some(ValueData::I64Value(k1)),
                     },
                     api::v1::Value {
-                        value_data: Some(ValueData::TsMillisecondValue(i as i64)),
+                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64)),
                     },
                     api::v1::Value {
                         value_data: Some(ValueData::I64Value(i as i64)),

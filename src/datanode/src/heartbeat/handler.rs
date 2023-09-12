@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use common_catalog::consts::default_engine;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -46,7 +47,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(region_ident) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
-                    engine: region_ident.table_ident.engine,
+                    engine: default_engine().to_string(),
                     region_dir: "".to_string(),
                     options: HashMap::new(),
                 });
@@ -57,15 +58,14 @@ impl RegionHeartbeatResponseHandler {
                 let close_region_req = RegionRequest::Close(RegionCloseRequest {});
                 Ok((region_id, close_region_req))
             }
-            Instruction::InvalidateTableCache(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
+                InvalidHeartbeatResponseSnafu.fail()
+            }
         }
     }
 
     fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
-        RegionId::new(
-            region_ident.table_ident.table_id,
-            region_ident.region_number,
-        )
+        RegionId::new(region_ident.table_id, region_ident.region_number)
     }
 
     fn reply_template_from_instruction(instruction: &Instruction) -> InstructionReply {
@@ -78,7 +78,7 @@ impl RegionHeartbeatResponseHandler {
                 result: false,
                 error: None,
             }),
-            Instruction::InvalidateTableCache(_) => {
+            Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InstructionReply::InvalidateTableCache(SimpleReply {
                     result: false,
                     error: None,

@@ -36,14 +36,12 @@ use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
-use crate::ident::TableIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::metrics;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::table_name::TableName;
 
 pub struct DropTableProcedure {
     pub context: DdlContext,
@@ -118,25 +116,17 @@ impl DropTableProcedure {
 
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let table_name = self.data.table_name();
-        let engine = &self.data.table_info().meta.engine;
-
-        let table_ident = TableIdent {
-            catalog: table_name.catalog_name,
-            schema: table_name.schema_name,
-            table: table_name.table_name,
-            table_id: self.data.task.table_id,
-            engine: engine.to_string(),
+        let ctx = Context {
+            subject: Some("Invalidate table cache by dropping table".to_string()),
         };
 
-        self.context
-            .cache_invalidator
-            .invalidate_table(
-                &Context {
-                    subject: Some("Invalidate Table Cache by dropping table procedure".to_string()),
-                },
-                table_ident,
-            )
+        let cache_invalidator = &self.context.cache_invalidator;
+        cache_invalidator
+            .invalidate_table_id(&ctx, self.data.table_id())
+            .await?;
+
+        cache_invalidator
+            .invalidate_table_name(&ctx, self.data.table_ref().into())
             .await?;
 
         self.data.state = DropTableState::DatanodeDropRegions;
@@ -259,10 +249,6 @@ impl DropTableData {
 
     fn table_ref(&self) -> TableReference {
         self.task.table_ref()
-    }
-
-    fn table_name(&self) -> TableName {
-        self.task.table_name()
     }
 
     fn region_routes(&self) -> &Vec<RegionRoute> {

@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use api::v1::meta::MailboxMessage;
+use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
+use common_meta::table_name::TableName;
 use snafu::ResultExt;
+use table::metadata::TableId;
 
 use crate::metasrv::MetasrvInfo;
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
@@ -37,10 +39,8 @@ impl MetasrvCacheInvalidator {
     }
 }
 
-#[async_trait::async_trait]
-impl CacheInvalidator for MetasrvCacheInvalidator {
-    async fn invalidate_table(&self, ctx: &Context, table_ident: TableIdent) -> MetaResult<()> {
-        let instruction = Instruction::InvalidateTableCache(table_ident);
+impl MetasrvCacheInvalidator {
+    async fn broadcast(&self, ctx: &Context, instruction: Instruction) -> MetaResult<()> {
         let subject = &ctx
             .subject
             .clone()
@@ -60,5 +60,18 @@ impl CacheInvalidator for MetasrvCacheInvalidator {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
+    }
+}
+
+#[async_trait]
+impl CacheInvalidator for MetasrvCacheInvalidator {
+    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
+        let instruction = Instruction::InvalidateTableIdCache(table_id);
+        self.broadcast(ctx, instruction).await
+    }
+
+    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
+        let instruction = Instruction::InvalidateTableNameCache(table_name);
+        self.broadcast(ctx, instruction).await
     }
 }

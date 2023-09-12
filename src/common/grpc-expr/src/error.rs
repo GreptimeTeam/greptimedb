@@ -21,12 +21,6 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Column `{}` not found in table `{}`", column_name, table_name))]
-    ColumnNotFound {
-        column_name: String,
-        table_name: String,
-    },
-
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },
 
@@ -75,17 +69,8 @@ pub enum Error {
         source: api::error::Error,
     },
 
-    #[snafu(display("Unrecognized table option: {}", source))]
-    UnrecognizedTableOption {
-        location: Location,
-        source: table::error::Error,
-    },
-
     #[snafu(display("Unexpected values length, reason: {}", reason))]
     UnexpectedValuesLength { reason: String, location: Location },
-
-    #[snafu(display("The column name already exists, column: {}", column))]
-    ColumnAlreadyExists { column: String, location: Location },
 
     #[snafu(display("Unknown location type: {}", location_type))]
     UnknownLocationType {
@@ -99,8 +84,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
-
             Error::IllegalDeleteRequest { .. } => StatusCode::InvalidArguments,
 
             Error::ColumnDataType { .. } => StatusCode::Internal,
@@ -111,10 +94,9 @@ impl ErrorExt for Error {
             Error::CreateVector { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),
-            Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
-            Error::UnexpectedValuesLength { .. }
-            | Error::ColumnAlreadyExists { .. }
-            | Error::UnknownLocationType { .. } => StatusCode::InvalidArguments,
+            Error::UnexpectedValuesLength { .. } | Error::UnknownLocationType { .. } => {
+                StatusCode::InvalidArguments
+            }
         }
     }
 

@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_meta::ident::TableIdent;
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::info;
@@ -48,15 +47,7 @@ impl RegionFailoverStart {
         }
 
         let mut selector_ctx = ctx.selector_ctx.clone();
-        let TableIdent {
-            catalog,
-            schema,
-            table,
-            ..
-        } = &failed_region.table_ident;
-        selector_ctx.catalog = Some(catalog.to_string());
-        selector_ctx.schema = Some(schema.to_string());
-        selector_ctx.table = Some(table.to_string());
+        selector_ctx.table_id = Some(failed_region.table_id);
 
         let cluster_id = failed_region.cluster_id;
         let candidates = ctx
