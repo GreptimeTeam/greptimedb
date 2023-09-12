@@ -312,11 +312,11 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+        let catalog_manager = FrontendCatalogManager::new(
             kv_store.clone(),
             Arc::new(DummyKvCacheInvalidator),
             Arc::new(StandaloneDatanodeManager(region_server.clone())),
-        ));
+        );
 
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(

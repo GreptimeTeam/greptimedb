@@ -151,11 +151,11 @@ impl Instance {
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+        let catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             datanode_clients.clone(),
-        ));
+        );
 
         let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
 

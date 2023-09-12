@@ -14,19 +14,16 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use catalog::error::{
     self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
     TableMetadataManagerSnafu,
 };
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
-use catalog::local::MemoryCatalogManager;
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::CatalogManager;
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
-};
+use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::datanode_manager::DatanodeManagerRef;
@@ -47,10 +44,6 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::table::DistTable;
-
-/// Placeholder catalog name for system tables that are not in any
-/// catalog (or in every catalog).
-const EMPTY_CATALOG_NAME: &str = "";
 
 // There are two sources for finding a table: the `local_catalog_manager` and the
 // `table_metadata_manager`.
@@ -89,7 +82,8 @@ pub struct FrontendCatalogManager {
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     datanode_manager: DatanodeManagerRef,
-    local_catalog_manager: Arc<MemoryCatalogManager>,
+    /// A sub-CatalogManager that handles system tables
+    system_catalog: SystemCatalog,
 }
 
 #[async_trait::async_trait]
@@ -136,14 +130,16 @@ impl FrontendCatalogManager {
         backend: KvBackendRef,
         backend_cache_invalidator: KvCacheInvalidatorRef,
         datanode_manager: DatanodeManagerRef,
-    ) -> Self {
-        Self {
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|me| Self {
             backend_cache_invalidator,
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             datanode_manager,
-            local_catalog_manager: MemoryCatalogManager::new(),
-        }
+            system_catalog: SystemCatalog {
+                catalog_manager: me.clone(),
+            },
+        })
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
@@ -162,33 +158,6 @@ impl FrontendCatalogManager {
         let key = SchemaNameKey::new(catalog, schema).as_raw_key();
 
         self.backend_cache_invalidator.invalidate_key(&key).await;
-    }
-
-    fn prepare_system_tables() -> MemoryCatalogManager {
-        // let mut catalog_manager = MemoryCatalogManager::new();
-        // catalog_manager.register_table_sync(RegisterTableRequest {
-        //     catalog: DEFAULT_CATALOG_NAME.to_string(),
-        //     schema: DEFAULT_SCHEMA_NAME.to_string(),
-        //     table_name: NUMBERS_TABLE_NAME.to_string(),
-        //     table_id: NUMBERS_TABLE_ID,
-        //     table: Arc::new(NumbersTable::table(NUMBERS_TABLE_ID)),
-        // });
-        // catalog_manager.register_table_sync(RegisterTableRequest {
-        //     catalog: INFORMATION_SCHEMA_NAME.to_string(),
-        //     schema: INFORMATION_SCHEMA_NAME.to_string(),
-        //     table_name: TABLES.to_string(),
-        //     table_id: TABLES_ID,
-        //     table: Arc::new(InformationSchemaTable::tables()),
-        // });
-        // catalog_manager.register_table_sync(RegisterTableRequest {
-        //     catalog: INFORMATION_SCHEMA_NAME.to_string(),
-        //     schema: INFORMATION_SCHEMA_NAME.to_string(),
-        //     table_name: COLUMNS.to_string(),
-        //     table_id: COLUMNS_ID,
-        //     table: Arc::new(InformationSchemaTable::columns()),
-        // });
-        // catalog_manager
-        todo!()
     }
 }
 
@@ -220,11 +189,13 @@ impl CatalogManager for FrontendCatalogManager {
             .try_collect::<BTreeSet<_>>()
             .await
             .map_err(BoxedError::new)
-            .context(ListSchemasSnafu { catalog })?;
+            .context(ListSchemasSnafu { catalog })?
+            .into_iter()
+            .collect::<Vec<_>>();
 
-        keys.insert(INFORMATION_SCHEMA_NAME.to_string());
+        keys.extend_from_slice(&self.system_catalog.schema_names());
 
-        Ok(keys.into_iter().collect::<Vec<_>>())
+        Ok(keys)
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {
@@ -237,13 +208,7 @@ impl CatalogManager for FrontendCatalogManager {
             .into_iter()
             .map(|(k, _)| k)
             .collect::<Vec<String>>();
-        if catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME {
-            tables.push(NUMBERS_TABLE_NAME.to_string());
-        }
-        if schema == INFORMATION_SCHEMA_NAME {
-            tables.push(TABLES.to_string());
-            tables.push(COLUMNS.to_string());
-        }
+        tables.extend_from_slice(&self.system_catalog.table_names(schema));
 
         Ok(tables)
     }
@@ -257,9 +222,10 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
-        if schema == INFORMATION_SCHEMA_NAME {
+        if self.system_catalog.schema_exist(schema) {
             return Ok(true);
         }
+
         self.table_metadata_manager
             .schema_manager()
             .exist(SchemaNameKey::new(catalog, schema))
@@ -268,7 +234,7 @@ impl CatalogManager for FrontendCatalogManager {
     }
 
     async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
-        if schema == INFORMATION_SCHEMA_NAME && (table == TABLES || table == COLUMNS) {
+        if self.system_catalog.table_exist(schema, table) {
             return Ok(true);
         }
 
@@ -287,19 +253,8 @@ impl CatalogManager for FrontendCatalogManager {
         schema: &str,
         table_name: &str,
     ) -> CatalogResult<Option<TableRef>> {
-        if catalog == DEFAULT_CATALOG_NAME
-            && schema == DEFAULT_SCHEMA_NAME
-            && table_name == NUMBERS_TABLE_NAME
-        {
-            return Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)));
-        }
-
-        if schema == INFORMATION_SCHEMA_NAME {
-            let manager = Arc::new(self.clone()) as _;
-
-            let provider =
-                InformationSchemaProvider::new(catalog.to_string(), Arc::downgrade(&manager));
-            return Ok(provider.table(table_name));
+        if let Some(table) = self.system_catalog.table(catalog, schema, table_name) {
+            return Ok(Some(table));
         }
 
         let key = TableNameKey::new(catalog, schema, table_name);
@@ -334,5 +289,55 @@ impl CatalogManager for FrontendCatalogManager {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+// TODO: This struct can hold a static map of all system tables when
+// the upper layer (e.g., procedure) can inform the catalog manager
+// a new catalog is created.
+#[derive(Clone)]
+struct SystemCatalog {
+    catalog_manager: Weak<FrontendCatalogManager>,
+}
+
+impl SystemCatalog {
+    fn schema_names(&self) -> Vec<String> {
+        vec![INFORMATION_SCHEMA_NAME.to_string()]
+    }
+
+    fn table_names(&self, schema: &str) -> Vec<String> {
+        if schema == INFORMATION_SCHEMA_NAME {
+            vec![TABLES.to_string(), COLUMNS.to_string()]
+        } else if schema == DEFAULT_SCHEMA_NAME {
+            vec![NUMBERS_TABLE_NAME.to_string()]
+        } else {
+            vec![]
+        }
+    }
+
+    fn schema_exist(&self, schema: &str) -> bool {
+        schema == INFORMATION_SCHEMA_NAME
+    }
+
+    fn table_exist(&self, schema: &str, table: &str) -> bool {
+        if schema == INFORMATION_SCHEMA_NAME {
+            table == TABLES || table == COLUMNS
+        } else if schema == DEFAULT_SCHEMA_NAME {
+            table == NUMBERS_TABLE_NAME
+        } else {
+            false
+        }
+    }
+
+    fn table(&self, catalog: &str, schema: &str, table_name: &str) -> Option<TableRef> {
+        if schema == INFORMATION_SCHEMA_NAME {
+            let information_schema_provider =
+                InformationSchemaProvider::new(catalog.to_string(), self.catalog_manager.clone());
+            information_schema_provider.table(table_name)
+        } else if schema == DEFAULT_SCHEMA_NAME && table_name == NUMBERS_TABLE_NAME {
+            Some(NumbersTable::table(NUMBERS_TABLE_ID))
+        } else {
+            None
+        }
     }
 }

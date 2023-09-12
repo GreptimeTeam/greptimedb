@@ -128,7 +128,7 @@ impl MemoryCatalogManager {
         });
 
         // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
-        manager.register_catalog(DEFAULT_CATALOG_NAME).unwrap();
+        manager.register_catalog_sync(DEFAULT_CATALOG_NAME).unwrap();
         manager
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -156,7 +156,7 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a catalog if it does not exist and returns false if the schema exists.
-    pub fn register_catalog(&self, name: &str) -> Result<bool> {
+    pub fn register_catalog_sync(&self, name: &str) -> Result<bool> {
         let name = name.to_string();
 
         let mut catalogs = self.catalogs.write().unwrap();
@@ -263,7 +263,7 @@ impl MemoryCatalogManager {
         let schema = &table.table_info().schema_name;
 
         if !manager.catalog_exist_sync(catalog).unwrap() {
-            manager.register_catalog(catalog).unwrap();
+            manager.register_catalog_sync(catalog).unwrap();
         }
 
         if !manager.schema_exist_sync(catalog, schema).unwrap() {
@@ -331,8 +331,8 @@ mod tests {
     #[test]
     pub fn test_register_catalog_sync() {
         let list = MemoryCatalogManager::with_default_setup();
-        assert!(list.register_catalog("test_catalog").unwrap());
-        assert!(!list.register_catalog("test_catalog").unwrap());
+        assert!(list.register_catalog_sync("test_catalog").unwrap());
+        assert!(!list.register_catalog_sync("test_catalog").unwrap());
     }
 
     #[tokio::test]
