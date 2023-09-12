@@ -258,6 +258,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find leader for region, source: {}", source))]
+    FindRegionLeader {
+        source: partition::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to create table info, source: {}", source))]
     CreateTableInfo {
         #[snafu(backtrace)]
@@ -812,7 +818,8 @@ impl ErrorExt for Error {
             | Error::FindTablePartitionRule { source, .. }
             | Error::FindTableRoute { source, .. }
             | Error::SplitInsert { source, .. }
-            | Error::SplitDelete { source, .. } => source.status_code(),
+            | Error::SplitDelete { source, .. }
+            | Error::FindRegionLeader { source, .. } => source.status_code(),
 
             Error::UnrecognizedTableOption { .. } => StatusCode::InvalidArguments,
 

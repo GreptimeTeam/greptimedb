@@ -16,9 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::{iter, mem};
 
-use api::v1::region::{
-    region_request, DeleteRequests as RegionDeleteRequests, RegionRequest, RegionRequestHeader,
-};
+use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeader};
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManagerRef;
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
@@ -29,14 +27,14 @@ use metrics::counter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
 use table::requests::DeleteRequest as TableDeleteRequest;
 use table::TableRef;
 
 use crate::error::{
-    CatalogSnafu, FindDatanodeSnafu, FindTableRouteSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu,
+    CatalogSnafu, FindRegionLeaderSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu,
     MissingTimeIndexColumnSnafu, RequestDeletesSnafu, Result, TableNotFoundSnafu,
 };
+use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
 
 pub struct Deleter {
@@ -121,15 +119,13 @@ impl Deleter {
         trace_id: u64,
         span_id: u64,
     ) -> Result<AffectedRows> {
+        let request_factory = RegionRequestFactory::new(RegionRequestHeader { trace_id, span_id });
         let tasks = self
             .group_requests_by_peer(requests)
             .await?
             .into_iter()
             .map(|(peer, deletes)| {
-                let request = RegionRequest {
-                    header: Some(RegionRequestHeader { trace_id, span_id }),
-                    body: Some(region_request::Body::Deletes(deletes)),
-                };
+                let request = request_factory.build_delete(deletes);
                 let datanode_manager = self.datanode_manager.clone();
                 common_runtime::spawn_write(async move {
                     datanode_manager
@@ -154,22 +150,12 @@ impl Deleter {
         let mut deletes: HashMap<Peer, RegionDeleteRequests> = HashMap::new();
 
         for req in requests.requests {
-            let region_id = RegionId::from_u64(req.region_id);
-            let table_id = region_id.table_id();
-            let region_number = region_id.region_number();
-            let table_route = self
+            let peer = self
                 .partition_manager
-                .find_table_route(table_id)
+                .find_region_leader(req.region_id.into())
                 .await
-                .context(FindTableRouteSnafu { table_id })?;
-            let peer =
-                table_route
-                    .find_region_leader(region_number)
-                    .context(FindDatanodeSnafu {
-                        region: region_number,
-                    })?;
-
-            deletes.entry(peer.clone()).or_default().requests.push(req);
+                .context(FindRegionLeaderSnafu)?;
+            deletes.entry(peer).or_default().requests.push(req);
         }
 
         Ok(deletes)
@@ -240,7 +226,7 @@ impl Deleter {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog, schema, table),
+                table_name: common_catalog::format_full_table_name(catalog, schema, table),
             })
     }
 }

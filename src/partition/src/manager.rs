@@ -247,6 +247,17 @@ impl PartitionRuleManager {
         Ok(regions)
     }
 
+    pub async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
+        let table_route = self.find_table_route(region_id.table_id()).await?;
+        let peer = table_route
+            .find_region_leader(region_id.region_number())
+            .with_context(|| FindLeaderSnafu {
+                region_id,
+                table_id: region_id.table_id(),
+            })?;
+        Ok(peer.clone())
+    }
+
     pub async fn split_rows(
         &self,
         table_id: TableId,
