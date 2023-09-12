@@ -40,7 +40,6 @@ use crate::request::{
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
-use crate::worker::send_result;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
 
@@ -158,7 +157,7 @@ impl Picker for TwcsPicker {
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             // Nothing to compact.
-            send_result(waiter, Ok(Output::AffectedRows(0)));
+            waiter.send(Ok(Output::AffectedRows(0)));
             return None;
         }
         let task = TwcsCompactionTask {

@@ -24,7 +24,7 @@ use store_api::storage::RegionId;
 use crate::error::{RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
@@ -122,7 +122,7 @@ impl<S> RegionWorkerLoop<S> {
             if let Err(e) =
                 maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version().metadata)
             {
-                send_result(sender_req.sender, Err(e));
+                sender_req.sender.send(Err(e));
 
                 continue;
             }

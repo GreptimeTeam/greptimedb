@@ -30,7 +30,7 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::Version;
 use crate::region::MitoRegionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
@@ -57,7 +57,7 @@ impl<S> RegionWorkerLoop<S> {
             let task = self.new_flush_task(&region, FlushReason::Alter);
             if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
                 // Unable to flush the region, send error to waiter.
-                send_result(sender, Err(e));
+                sender.send(Err(e));
                 return;
             }
 
@@ -77,7 +77,7 @@ impl<S> RegionWorkerLoop<S> {
             alter_region_schema(&region, &version, request, &self.memtable_builder).await
         {
             error!(e; "Failed to alter region schema, region_id: {}", region_id);
-            send_result(sender, Err(e));
+            sender.send(Err(e));
             return;
         }
 
@@ -89,7 +89,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         // Notifies waiters.
-        send_result(sender, Ok(Output::AffectedRows(0)));
+        sender.send(Ok(Output::AffectedRows(0)));
     }
 }
 

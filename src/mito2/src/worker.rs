@@ -28,7 +28,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common_query::Output;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
@@ -47,8 +46,7 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
-    BackgroundNotify, DdlRequest, OptionOutputTx, SenderDdlRequest, SenderWriteRequest,
-    WorkerRequest,
+    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
@@ -176,11 +174,6 @@ impl WorkerGroup {
 
         &self.workers[index]
     }
-}
-
-/// Send result to the sender.
-pub(crate) fn send_result(sender: OptionOutputTx, res: Result<Output>) {
-    sender.send(res);
 }
 
 // Tests methods.

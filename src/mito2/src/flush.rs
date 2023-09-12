@@ -38,7 +38,6 @@ use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
-use crate::worker::send_result;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -563,20 +562,16 @@ impl FlushStatus {
             task.on_failure(err.clone());
         }
         for ddl in self.pending_ddls {
-            send_result(
-                ddl.sender,
-                Err(err.clone()).context(FlushRegionSnafu {
-                    region_id: self.region.region_id,
-                }),
-            );
+            ddl.sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                region_id: self.region.region_id,
+            }));
         }
         for write_req in self.pending_writes {
-            send_result(
-                write_req.sender,
-                Err(err.clone()).context(FlushRegionSnafu {
+            write_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
                     region_id: self.region.region_id,
-                }),
-            );
+                }));
         }
     }
 }
