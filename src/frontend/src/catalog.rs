@@ -45,34 +45,11 @@ use table::TableRef;
 
 use crate::table::DistTable;
 
-// There are two sources for finding a table: the `local_catalog_manager` and the
-// `table_metadata_manager`.
-//
-// The `local_catalog_manager` is for storing tables that are often transparent, not saving any
-// real data. For example, our system tables, the `numbers` table and the "information_schema"
-// table.
-//
-// The `table_metadata_manager`, on the other hand, is for storing tables that are created by users,
-// obviously.
-//
-// For now, separating the two makes the code simpler, at least in the retrieval site. Now we have
-// `numbers` and `information_schema` system tables. Both have their special implementations. If we
-// put them with other ordinary tables that are created by users, we need to check the table name
-// to decide which `TableRef` to return. Like this:
-//
-// ```rust
-// match table_name {
-//   "numbers" => ... // return NumbersTable impl
-//   "information_schema" => ... // return InformationSchemaTable impl
-//   _ => .. // return DistTable impl
-// }
-// ```
-//
-// On the other hand, because we use `MemoryCatalogManager` for system tables, we can easily store
-// and retrieve the concrete implementation of the system tables by their names, no more "if-else"s.
-//
-// However, if the system table is designed to have more features in the future, we may revisit
-// the implementation here.
+/// Access all existing catalog, schema and tables.
+///
+/// The result comes from two source, all the user tables are presented in
+/// a kv-backend which persists the metadata of a table. And system tables
+/// comes from [SystemCatalog], which is static and read-only.
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
     // TODO(LFC): Maybe use a real implementation for Standalone mode.
@@ -295,6 +272,10 @@ impl CatalogManager for FrontendCatalogManager {
 // TODO: This struct can hold a static map of all system tables when
 // the upper layer (e.g., procedure) can inform the catalog manager
 // a new catalog is created.
+/// Existing system tables:
+/// - public.numbers
+/// - information_schema.tables
+/// - information_schema.columns
 #[derive(Clone)]
 struct SystemCatalog {
     catalog_manager: Weak<FrontendCatalogManager>,
