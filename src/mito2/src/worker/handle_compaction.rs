@@ -65,6 +65,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             files_to_remove: std::mem::take(&mut request.compacted_files),
             compaction_time_window: None, // TODO(hl): update window maybe
             flushed_entry_id: None,
+            flushed_sequence: None,
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = region.manifest_manager.update(action_list).await {

@@ -48,11 +48,14 @@ pub(crate) struct VersionControl {
 impl VersionControl {
     /// Returns a new [VersionControl] with specific `version`.
     pub(crate) fn new(version: Version) -> VersionControl {
+        // Initialize sequence and entry id from flushed sequence and entry id.
+        let (flushed_sequence, flushed_entry_id) =
+            (version.flushed_sequence, version.flushed_entry_id);
         VersionControl {
             data: RwLock::new(VersionControlData {
                 version: Arc::new(version),
-                committed_sequence: 0,
-                last_entry_id: 0,
+                committed_sequence: flushed_sequence,
+                last_entry_id: flushed_entry_id,
                 is_dropped: false,
             }),
         }
@@ -172,6 +175,8 @@ pub(crate) struct Version {
     pub(crate) ssts: SstVersionRef,
     /// Inclusive max WAL entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
+    /// Inclusive max sequence of flushed data.
+    pub(crate) flushed_sequence: SequenceNumber,
     // TODO(yingwen): RegionOptions.
 }
 
@@ -183,6 +188,7 @@ pub(crate) struct VersionBuilder {
     memtables: MemtableVersionRef,
     ssts: SstVersionRef,
     flushed_entry_id: EntryId,
+    flushed_sequence: SequenceNumber,
 }
 
 impl VersionBuilder {
@@ -193,6 +199,7 @@ impl VersionBuilder {
             memtables: Arc::new(MemtableVersion::new(mutable)),
             ssts: Arc::new(SstVersion::new()),
             flushed_entry_id: 0,
+            flushed_sequence: 0,
         }
     }
 
@@ -203,6 +210,7 @@ impl VersionBuilder {
             memtables: version.memtables.clone(),
             ssts: version.ssts.clone(),
             flushed_entry_id: version.flushed_entry_id,
+            flushed_sequence: version.flushed_sequence,
         }
     }
 
@@ -224,10 +232,19 @@ impl VersionBuilder {
         self
     }
 
+    /// Sets flushed sequence.
+    pub(crate) fn flushed_sequence(mut self, sequence: SequenceNumber) -> Self {
+        self.flushed_sequence = sequence;
+        self
+    }
+
     /// Apply edit to the builder.
     pub(crate) fn apply_edit(mut self, edit: RegionEdit, file_purger: FilePurgerRef) -> Self {
-        if let Some(flushed_entry_id) = edit.flushed_entry_id {
-            self.flushed_entry_id = self.flushed_entry_id.max(flushed_entry_id);
+        if let Some(entry_id) = edit.flushed_entry_id {
+            self.flushed_entry_id = self.flushed_entry_id.max(entry_id);
+        }
+        if let Some(sequence) = edit.flushed_sequence {
+            self.flushed_sequence = self.flushed_sequence.max(sequence);
         }
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
@@ -269,6 +286,7 @@ impl VersionBuilder {
             memtables: self.memtables,
             ssts: self.ssts,
             flushed_entry_id: self.flushed_entry_id,
+            flushed_sequence: self.flushed_sequence,
         }
     }
 }
