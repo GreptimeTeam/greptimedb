@@ -1859,6 +1859,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "lazy_static",
+ "metrics",
  "prost",
  "regex",
  "serde",
