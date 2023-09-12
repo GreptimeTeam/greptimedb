@@ -20,7 +20,7 @@ use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::store::state_store::ObjectStateStore;
-use common_procedure::{ProcedureManagerRef, ProcedureWithId};
+use common_procedure::ProcedureManagerRef;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -32,10 +32,7 @@ use object_store::ObjectStore;
 use storage::compaction::noop::NoopCompactionScheduler;
 use storage::config::EngineConfig as StorageEngineConfig;
 use storage::EngineImpl;
-use table::metadata::TableId;
 use table::requests::CreateTableRequest;
-
-use crate::CreateTableProcedure;
 
 pub struct TestEnv {
     pub dir: TempDir,
