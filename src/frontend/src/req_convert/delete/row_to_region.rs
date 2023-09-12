@@ -12,27 +12,32 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::region::{
-    DeleteRequest as RegionDeleteRequest, DeleteRequests as RegionDeleteRequests,
-};
+use api::v1::region::DeleteRequests as RegionDeleteRequests;
 use api::v1::RowDeleteRequests;
 use catalog::CatalogManager;
+use partition::manager::PartitionRuleManager;
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionId;
 use table::TableRef;
 
 use crate::error::{CatalogSnafu, Result, TableNotFoundSnafu};
+use crate::req_convert::common::partitioner::Partitioner;
 
 pub struct RowToRegion<'a> {
     catalog_manager: &'a dyn CatalogManager,
+    partition_manager: &'a PartitionRuleManager,
     ctx: &'a QueryContext,
 }
 
 impl<'a> RowToRegion<'a> {
-    pub fn new(catalog_manager: &'a dyn CatalogManager, ctx: &'a QueryContext) -> Self {
+    pub fn new(
+        catalog_manager: &'a dyn CatalogManager,
+        partition_manager: &'a PartitionRuleManager,
+        ctx: &'a QueryContext,
+    ) -> Self {
         Self {
             catalog_manager,
+            partition_manager,
             ctx,
         }
     }
@@ -41,13 +46,13 @@ impl<'a> RowToRegion<'a> {
         let mut region_request = Vec::with_capacity(requests.deletes.len());
         for request in requests.deletes {
             let table = self.get_table(&request.table_name).await?;
+            let table_id = table.table_info().table_id();
 
-            let region_id = RegionId::new(table.table_info().table_id(), request.region_number);
-            let insert_request = RegionDeleteRequest {
-                region_id: region_id.into(),
-                rows: request.rows,
-            };
-            region_request.push(insert_request);
+            let requests = Partitioner::new(self.partition_manager)
+                .partition_delete_requests(table_id, request.rows.unwrap_or_default())
+                .await?;
+
+            region_request.extend(requests);
         }
 
         Ok(RegionDeleteRequests {
@@ -63,7 +68,11 @@ impl<'a> RowToRegion<'a> {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                table_name: common_catalog::format_full_table_name(
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                ),
             })
     }
 }

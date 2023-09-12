@@ -13,18 +13,16 @@
 // limitations under the License.
 
 use api::helper::value_to_grpc_value;
-use api::v1::region::{
-    InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
-};
+use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
 use datatypes::schema::{ColumnSchema, SchemaRef};
+use partition::manager::PartitionRuleManager;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements;
 use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
-use store_api::storage::RegionId;
 use table::TableRef;
 
 use super::{data_type, semantic_type};
@@ -32,18 +30,25 @@ use crate::error::{
     CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
     InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result, TableNotFoundSnafu,
 };
+use crate::req_convert::common::partitioner::Partitioner;
 
 const DEFAULT_PLACEHOLDER_VALUE: &str = "default";
 
 pub struct StatementToRegion<'a> {
     catalog_manager: &'a dyn CatalogManager,
+    partition_manager: &'a PartitionRuleManager,
     ctx: &'a QueryContext,
 }
 
 impl<'a> StatementToRegion<'a> {
-    pub fn new(catalog_manager: &'a dyn CatalogManager, ctx: &'a QueryContext) -> Self {
+    pub fn new(
+        catalog_manager: &'a dyn CatalogManager,
+        partition_manager: &'a PartitionRuleManager,
+        ctx: &'a QueryContext,
+    ) -> Self {
         Self {
             catalog_manager,
+            partition_manager,
             ctx,
         }
     }
@@ -63,7 +68,7 @@ impl<'a> StatementToRegion<'a> {
         ensure!(
             sql_rows.iter().all(|row| row.len() == column_count),
             InvalidSqlSnafu {
-                err_msg: "The column count of the row is not the same as columns."
+                err_msg: "column count mismatch"
             }
         );
 
@@ -98,12 +103,10 @@ impl<'a> StatementToRegion<'a> {
             }
         }
 
-        Ok(RegionInsertRequests {
-            requests: vec![RegionInsertRequest {
-                region_id: RegionId::new(table_info.table_id(), 0).into(),
-                rows: Some(Rows { schema, rows }),
-            }],
-        })
+        let requests = Partitioner::new(self.partition_manager)
+            .partition_insert_requests(table_info.table_id(), Rows { schema, rows })
+            .await?;
+        Ok(RegionInsertRequests { requests })
     }
 
     async fn get_table(&self, catalog: &str, schema: &str, table: &str) -> Result<TableRef> {
@@ -112,7 +115,7 @@ impl<'a> StatementToRegion<'a> {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog, schema, table),
+                table_name: common_catalog::format_full_table_name(catalog, schema, table),
             })
     }
 
