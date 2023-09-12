@@ -256,8 +256,7 @@ impl CreateTableProcedure {
         };
         let _ = self
             .catalog_manager
-            .register_table(register_req)
-            .await
+            .register_local_table(register_req)
             .map_err(Error::from_error_ext)?;
 
         Ok(Status::Done)

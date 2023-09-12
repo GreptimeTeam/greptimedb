@@ -22,8 +22,6 @@ use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 use tokio::task::JoinError;
 
-use crate::DeregisterTableRequest;
-
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
@@ -179,20 +177,6 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to deregister table, request: {:?}, source: {}",
-        request,
-        source
-    ))]
-    DeregisterTable {
-        request: DeregisterTableRequest,
-        location: Location,
-        source: table::error::Error,
-    },
-
-    #[snafu(display("Illegal catalog manager state: {}", msg))]
-    IllegalManagerState { location: Location, msg: String },
-
     #[snafu(display("Failed to scan system catalog table, source: {}", source))]
     SystemCatalogTableScan {
         location: Location,
@@ -269,7 +253,6 @@ impl ErrorExt for Error {
             Error::InvalidKey { .. }
             | Error::SchemaNotFound { .. }
             | Error::TableNotFound { .. }
-            | Error::IllegalManagerState { .. }
             | Error::CatalogNotFound { .. }
             | Error::InvalidEntryType { .. }
             | Error::ParallelOpenTable { .. } => StatusCode::Unexpected,
@@ -302,7 +285,6 @@ impl ErrorExt for Error {
             | Error::InsertCatalogRecord { source, .. }
             | Error::OpenTable { source, .. }
             | Error::CreateTable { source, .. }
-            | Error::DeregisterTable { source, .. }
             | Error::TableSchemaMismatch { source, .. } => source.status_code(),
 
             Error::MetaSrv { source, .. } => source.status_code(),

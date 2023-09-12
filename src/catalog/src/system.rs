@@ -20,7 +20,7 @@ use common_catalog::consts::{
     SYSTEM_CATALOG_NAME, SYSTEM_CATALOG_TABLE_ID, SYSTEM_CATALOG_TABLE_NAME,
 };
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, warn};
+use common_telemetry::debug;
 use common_time::util;
 use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -34,11 +34,9 @@ use table::requests::{CreateTableRequest, InsertRequest, OpenTableRequest, Table
 use table::TableRef;
 
 use crate::error::{
-    self, CreateSystemCatalogSnafu, DeregisterTableSnafu, EmptyValueSnafu, Error,
-    InsertCatalogRecordSnafu, InvalidEntryTypeSnafu, InvalidKeySnafu, OpenSystemCatalogSnafu,
-    Result, ValueDeserializeSnafu,
+    self, CreateSystemCatalogSnafu, EmptyValueSnafu, Error, InsertCatalogRecordSnafu,
+    InvalidEntryTypeSnafu, InvalidKeySnafu, OpenSystemCatalogSnafu, Result, ValueDeserializeSnafu,
 };
-use crate::DeregisterTableRequest;
 
 pub const ENTRY_TYPE_INDEX: usize = 0;
 pub const KEY_INDEX: usize = 1;
@@ -102,30 +100,6 @@ impl SystemCatalogTable {
             .insert(insert_request)
             .await
             .context(InsertCatalogRecordSnafu)
-    }
-
-    pub(crate) async fn deregister_table(
-        &self,
-        request: &DeregisterTableRequest,
-        table_id: TableId,
-    ) -> Result<()> {
-        let deletion_request = build_table_deletion_request(request, table_id);
-        self.0
-            .insert(deletion_request)
-            .await
-            .map(|x| {
-                if x != 1 {
-                    let table = common_catalog::format_full_table_name(
-                        &request.catalog,
-                        &request.schema,
-                        &request.table_name
-                    );
-                    warn!("Failed to delete table record from information_schema, unexpected returned result: {x}, table: {table}");
-                }
-            })
-            .with_context(|_| DeregisterTableSnafu {
-                request: request.clone(),
-            })
     }
 
     pub async fn register_schema(&self, catalog: String, schema: String) -> Result<usize> {
@@ -226,24 +200,6 @@ pub fn build_table_insert_request(
             table_name,
             engine,
             is_deleted: false,
-        })
-        .unwrap()
-        .as_bytes(),
-    )
-}
-
-pub(crate) fn build_table_deletion_request(
-    request: &DeregisterTableRequest,
-    table_id: TableId,
-) -> InsertRequest {
-    let entry_key = format_table_entry_key(&request.catalog, &request.schema, table_id);
-    build_insert_request(
-        EntryType::Table,
-        entry_key.as_bytes(),
-        serde_json::to_string(&TableEntryValue {
-            table_name: "".to_string(),
-            engine: "".to_string(),
-            is_deleted: true,
         })
         .unwrap()
         .as_bytes(),
@@ -614,21 +570,5 @@ mod tests {
             is_deleted: false,
         });
         assert_eq!(entry, expected);
-
-        catalog_table
-            .deregister_table(
-                &DeregisterTableRequest {
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: DEFAULT_SCHEMA_NAME.to_string(),
-                    table_name: "my_table".to_string(),
-                },
-                1,
-            )
-            .await
-            .unwrap();
-
-        let records = catalog_table.records().await.unwrap();
-        let batches = RecordBatches::try_collect(records).await.unwrap().take();
-        assert_eq!(batches.len(), 1);
     }
 }

@@ -19,7 +19,6 @@ use std::sync::Arc;
 use table::metadata::TableId;
 
 use crate::system::SystemCatalogTable;
-use crate::DeregisterTableRequest;
 
 pub struct InformationSchema {
     pub system: Arc<SystemCatalogTable>,
@@ -50,17 +49,6 @@ impl SystemCatalog {
         self.information_schema
             .system
             .register_table(catalog, schema, table_name, table_id, engine)
-            .await
-    }
-
-    pub(crate) async fn deregister_table(
-        &self,
-        request: &DeregisterTableRequest,
-        table_id: TableId,
-    ) -> crate::error::Result<()> {
-        self.information_schema
-            .system
-            .deregister_table(request, table_id)
             .await
     }
 
