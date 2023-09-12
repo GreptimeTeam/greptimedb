@@ -24,7 +24,6 @@ use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
 use snafu::ResultExt;
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
@@ -172,7 +171,6 @@ impl Picker for TwcsPicker {
             request_sender,
             sender: waiter,
             file_purger,
-            last_truncate_manifest_version: current_version.last_truncate_manifest_version,
         };
         Some(Box::new(task))
     }
@@ -231,7 +229,6 @@ pub(crate) struct TwcsCompactionTask {
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Sender that are used to notify waiters waiting for pending compaction tasks.
     pub sender: OptionOutputTx,
-    pub last_truncate_manifest_version: Option<ManifestVersion>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -357,7 +354,6 @@ impl CompactionTask for TwcsCompactionTask {
                     compacted_files: deleted,
                     sender: self.sender.take(),
                     file_purger: self.file_purger.clone(),
-                    last_truncate_manifest_version: self.last_truncate_manifest_version,
                 })
             }
             Err(e) => {

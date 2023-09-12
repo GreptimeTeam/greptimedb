@@ -32,7 +32,6 @@ use datatypes::prelude::DataType;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::manifest::ManifestVersion;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
@@ -666,8 +665,6 @@ pub(crate) struct CompactionFinished {
     pub(crate) sender: OptionOutputTx,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
-    /// Last truncate `ManifestVersion` before requesting compaction task.
-    pub(crate) last_truncate_manifest_version: Option<ManifestVersion>,
 }
 
 impl CompactionFinished {

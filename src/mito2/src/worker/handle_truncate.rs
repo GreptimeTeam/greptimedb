@@ -37,7 +37,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.flush_scheduler.on_region_truncating(region_id);
 
         // TODO(DevilExileSu): Notifies compaction scheduler.
-        let last_manifest_version = region.manifest_manager.manifest_version().await;
 
         // Write region truncated to manifest.
         let truncate = RegionTruncate {
@@ -51,7 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Reset region's version and mark all SSTs deleted.
         region
             .version_control
-            .truncate(entry_id, last_manifest_version, &self.memtable_builder);
+            .truncate(entry_id, &self.memtable_builder);
 
         // Make all data obsolete.
         self.wal.obsolete(region_id, entry_id).await?;
