@@ -68,7 +68,11 @@ impl<'a> RowToRegion<'a> {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog_name, schema_name, table_name),
+                table_name: common_catalog::format_full_table_name(
+                    catalog_name,
+                    schema_name,
+                    table_name,
+                ),
             })
     }
 }

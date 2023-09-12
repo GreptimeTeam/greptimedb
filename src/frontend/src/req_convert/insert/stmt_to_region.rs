@@ -115,7 +115,7 @@ impl<'a> StatementToRegion<'a> {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: format!("{}.{}.{}", catalog, schema, table),
+                table_name: common_catalog::format_full_table_name(catalog, schema, table),
             })
     }
 

@@ -119,7 +119,9 @@ impl Deleter {
         trace_id: u64,
         span_id: u64,
     ) -> Result<AffectedRows> {
-        let request_factory = RegionRequestFactory::new(RegionRequestHeader { trace_id, span_id });
+        let header = RegionRequestHeader { trace_id, span_id };
+        let request_factory = RegionRequestFactory::new(header);
+
         let tasks = self
             .group_requests_by_peer(requests)
             .await?
