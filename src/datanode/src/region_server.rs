@@ -57,7 +57,7 @@ use tonic::{Request, Response, Result as TonicResult};
 use crate::error::{
     BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
     GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, UnsupportedOutputSnafu,
+    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
 };
 
 #[derive(Clone)]
@@ -94,6 +94,11 @@ impl RegionServer {
 
     pub fn runtime(&self) -> Arc<Runtime> {
         self.inner.runtime.clone()
+    }
+
+    /// Stop the region server.
+    pub async fn stop(&self) -> Result<()> {
+        self.inner.stop().await
     }
 }
 
@@ -271,6 +276,24 @@ impl RegionServerInner {
             }
             Output::Stream(stream) => Ok(stream),
         }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        let region_ids = self.region_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
+        info!("Stopping region server with regions: {:?}", region_ids);
+        self.region_map.clear();
+
+        let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
+        // The underlying log store will automatically stop when all regions have been removed.
+        for (engine_name, engine) in engines {
+            engine
+                .stop()
+                .await
+                .context(StopRegionEngineSnafu { name: &engine_name })?;
+            info!("Region engine {engine_name} is stopped");
+        }
+
+        Ok(())
     }
 }
 

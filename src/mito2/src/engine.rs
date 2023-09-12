@@ -190,6 +190,10 @@ impl RegionEngine for MitoEngine {
     ) -> std::result::Result<RegionMetadataRef, BoxedError> {
         self.inner.get_metadata(region_id).map_err(BoxedError::new)
     }
+
+    async fn stop(&self) -> std::result::Result<(), BoxedError> {
+        self.stop().await.map_err(BoxedError::new)
+    }
 }
 
 // Tests methods.

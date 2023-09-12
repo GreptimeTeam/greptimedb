@@ -560,6 +560,18 @@ pub enum Error {
         location: Location,
         source: store_api::metadata::MetadataError,
     },
+
+    #[snafu(display(
+        "Failed to stop region engine {}, location:{}, source: {}",
+        name,
+        location,
+        source
+    ))]
+    StopRegionEngine {
+        name: String,
+        location: Location,
+        source: BoxedError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -670,6 +682,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             HandleRegionRequest { source, .. } => source.status_code(),
+            StopRegionEngine { source, .. } => source.status_code(),
         }
     }
 
