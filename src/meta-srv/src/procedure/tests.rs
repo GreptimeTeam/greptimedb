@@ -80,7 +80,6 @@ fn create_table_task() -> CreateTableTask {
         create_if_not_exists: false,
         table_options: HashMap::new(),
         table_id: None,
-        region_numbers: vec![1, 2, 3],
         engine: MITO2_ENGINE.to_string(),
     };
 

@@ -162,6 +162,7 @@ impl MergeScanExec {
 
             for region_id in regions {
                 let request = QueryRequest {
+                    header: None,
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),
                 };

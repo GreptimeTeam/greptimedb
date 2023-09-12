@@ -23,7 +23,7 @@ use snafu::{OptionExt, ResultExt};
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
-use crate::error::{self, Result, RetryLaterSnafu};
+use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
@@ -57,7 +57,7 @@ impl UpdateRegionMetadata {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<()> {
-        let table_id = failed_region.table_ident.table_id;
+        let table_id = failed_region.table_id;
 
         let table_route_value = ctx
             .table_metadata_manager
@@ -65,9 +65,7 @@ impl UpdateRegionMetadata {
             .get(table_id)
             .await
             .context(error::TableMetadataManagerSnafu)?
-            .with_context(|| error::TableRouteNotFoundSnafu {
-                table_name: failed_region.table_ident.table_ref().to_string(),
-            })?;
+            .context(TableRouteNotFoundSnafu { table_id })?;
 
         let mut new_region_routes = table_route_value.region_routes.clone();
 
@@ -184,7 +182,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let table_id = failed_region.table_ident.table_id;
+            let table_id = failed_region.table_id;
 
             env.context
                 .table_metadata_manager
@@ -315,7 +313,7 @@ mod tests {
             let failed_region_1 = env.failed_region(1).await;
             let failed_region_2 = env.failed_region(2).await;
 
-            let table_id = failed_region_1.table_ident.table_id;
+            let table_id = failed_region_1.table_id;
 
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {

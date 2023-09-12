@@ -54,10 +54,8 @@ impl GrpcQueryInterceptor for NoopInterceptor {
         match req {
             Request::Inserts(insert) => {
                 ensure!(
-                    insert.inserts.iter().all(|x| x.region_number == 0),
-                    NotSupportedSnafu {
-                        feat: "region not 0"
-                    }
+                    insert.inserts.iter().all(|x| x.row_count > 0),
+                    NotSupportedSnafu { feat: "" }
                 )
             }
             _ => {
@@ -75,7 +73,7 @@ fn test_grpc_interceptor() {
 
     let req = Request::Inserts(InsertRequests {
         inserts: vec![InsertRequest {
-            region_number: 1,
+            row_count: 0,
             ..Default::default()
         }],
     });

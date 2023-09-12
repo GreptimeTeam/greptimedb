@@ -248,7 +248,11 @@ impl RegionServerInner {
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
-        let QueryRequest { region_id, plan } = request;
+        let QueryRequest {
+            header: _,
+            region_id,
+            plan,
+        } = request;
         let region_id = RegionId::from_u64(region_id);
 
         // build dummy catalog list

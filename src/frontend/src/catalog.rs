@@ -28,7 +28,6 @@ use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::error::Result as MetaResult;
-use common_meta::ident::TableIdent;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_info::TableInfoKey;
@@ -36,10 +35,12 @@ use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{TableMetaKey, TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::table_name::TableName;
 use common_telemetry::debug;
 use futures_util::TryStreamExt;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
+use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
@@ -65,13 +66,8 @@ pub struct FrontendCatalogManager {
 
 #[async_trait::async_trait]
 impl CacheInvalidator for FrontendCatalogManager {
-    async fn invalidate_table(&self, _ctx: &Context, table_ident: TableIdent) -> MetaResult<()> {
-        let table_id = table_ident.table_id;
-        let key = TableNameKey::new(
-            &table_ident.catalog,
-            &table_ident.schema,
-            &table_ident.table,
-        );
+    async fn invalidate_table_name(&self, _ctx: &Context, table_name: TableName) -> MetaResult<()> {
+        let key: TableNameKey = (&table_name).into();
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
             .await;
@@ -80,6 +76,10 @@ impl CacheInvalidator for FrontendCatalogManager {
             String::from_utf8_lossy(&key.as_raw_key())
         );
 
+        Ok(())
+    }
+
+    async fn invalidate_table_id(&self, _ctx: &Context, table_id: TableId) -> MetaResult<()> {
         let key = TableInfoKey::new(table_id);
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())

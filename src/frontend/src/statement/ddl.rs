@@ -23,7 +23,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
-use common_meta::ident::TableIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
@@ -114,7 +113,6 @@ impl StatementExecutor {
         info!("Successfully created distributed table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
-        let engine = table_info.meta.engine.to_string();
 
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
@@ -123,16 +121,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: table_name.catalog_name.to_string(),
-                    schema: table_name.schema_name.to_string(),
-                    table: table_name.table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -153,21 +142,11 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        let engine = table.table_info().meta.engine.to_string();
         self.drop_table_procedure(&table_name, table_id).await?;
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: table_name.catalog_name.to_string(),
-                    schema: table_name.schema_name.to_string(),
-                    table: table_name.table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -256,7 +235,6 @@ impl StatementExecutor {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        let engine = table.table_info().meta.engine.to_string();
         self.verify_alter(table_id, table.table_info(), expr.clone())?;
 
         let req = SubmitDdlTaskRequest {
@@ -270,16 +248,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: catalog_name.to_string(),
-                    schema: schema_name.to_string(),
-                    table: table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 

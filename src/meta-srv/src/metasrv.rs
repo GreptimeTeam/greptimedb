@@ -31,6 +31,7 @@ use common_telemetry::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use snafu::ResultExt;
+use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
@@ -170,9 +171,7 @@ pub struct SelectorContext {
     pub datanode_lease_secs: u64,
     pub kv_store: KvStoreRef,
     pub meta_peer_client: MetaPeerClientRef,
-    pub catalog: Option<String>,
-    pub schema: Option<String>,
-    pub table: Option<String>,
+    pub table_id: Option<TableId>,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;

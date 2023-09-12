@@ -150,25 +150,25 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
         (
             ConcreteDataType::Timestamp(TimestampType::Second(_)),
             TimestampSecondVector,
-            ts_second_values,
+            timestamp_second_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Timestamp(TimestampType::Millisecond(_)),
             TimestampMillisecondVector,
-            ts_millisecond_values,
+            timestamp_millisecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Timestamp(TimestampType::Microsecond(_)),
             TimestampMicrosecondVector,
-            ts_microsecond_values,
+            timestamp_microsecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)),
             TimestampNanosecondVector,
-            ts_nanosecond_values,
+            timestamp_nanosecond_values,
             |x| { x.into_native() }
         ),
         (

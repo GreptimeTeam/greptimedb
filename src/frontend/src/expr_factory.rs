@@ -119,7 +119,6 @@ pub(crate) async fn create_external_expr(
         create_if_not_exists: create.if_not_exists,
         table_options: options,
         table_id: None,
-        region_numbers: vec![],
         engine: create.engine.to_string(),
     };
     Ok(expr)
@@ -151,7 +150,6 @@ pub fn create_to_expr(create: &CreateTable, query_ctx: QueryContextRef) -> Resul
         create_if_not_exists: create.if_not_exists,
         table_options,
         table_id: None,
-        region_numbers: vec![],
         engine: create.engine.to_string(),
     };
     Ok(expr)
