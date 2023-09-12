@@ -93,6 +93,16 @@ async fn test_alter_region() {
 |       | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+-------+---------+---------------------+";
     scan_check_after_alter(&engine, region_id, expected).await;
+    let check_region = |engine: &MitoEngine| {
+        let region = engine.get_region(region_id).unwrap();
+        let version_data = region.version_control.current();
+        assert_eq!(1, version_data.last_entry_id);
+        assert_eq!(3, version_data.committed_sequence);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(3, version_data.version.flushed_sequence);
+    };
+    check_region(&engine);
 
     // Reopen region.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
@@ -108,4 +118,5 @@ async fn test_alter_region() {
         .await
         .unwrap();
     scan_check_after_alter(&engine, region_id, expected).await;
+    check_region(&engine);
 }

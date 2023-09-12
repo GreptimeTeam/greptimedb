@@ -250,9 +250,22 @@ async fn test_flush_reopen_region() {
         assert_eq!(1, version_data.last_entry_id);
         assert_eq!(3, version_data.committed_sequence);
         assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(3, version_data.version.flushed_sequence);
     };
     check_region();
 
     reopen_region(&engine, region_id, region_dir).await;
     check_region();
+
+    // Puts again.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 10),
+    };
+    put_rows(&engine, region_id, rows).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    assert_eq!(2, version_data.last_entry_id);
+    assert_eq!(5, version_data.committed_sequence);
 }
