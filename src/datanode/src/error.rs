@@ -126,12 +126,6 @@ pub enum Error {
     #[snafu(display("Incorrect internal state: {}", state))]
     IncorrectInternalState { state: String, location: Location },
 
-    #[snafu(display("Failed to create catalog list, source: {}", source))]
-    NewCatalog {
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Catalog not found: {}", name))]
     CatalogNotFound { name: String, location: Location },
 
@@ -583,7 +577,7 @@ impl ErrorExt for Error {
             HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             DecodeLogicalPlan { source, .. } => source.status_code(),
-            NewCatalog { source, .. } | RegisterSchema { source, .. } => source.status_code(),
+            RegisterSchema { source, .. } => source.status_code(),
             CreateTable { source, .. } => source.status_code(),
             DropTable { source, .. } => source.status_code(),
             FlushTable { source, .. } => source.status_code(),

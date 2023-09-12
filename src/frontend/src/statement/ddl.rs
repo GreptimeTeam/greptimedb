@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{column_def, AlterExpr, CreateTableExpr, TruncateTableExpr};
-use catalog::{CatalogManagerRef, DeregisterTableRequest, RegisterTableRequest};
+use catalog::CatalogManagerRef;
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
@@ -34,7 +34,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
@@ -46,7 +46,7 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu, TableAlreadyExistSnafu,
+    DeserializePartitionSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::table::DistTable;
@@ -121,23 +121,6 @@ impl StatementExecutor {
 
         let table = DistTable::table(table_info);
 
-        let request = RegisterTableRequest {
-            catalog: table_name.catalog_name.clone(),
-            schema: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            table_id,
-            table: table.clone(),
-        };
-        ensure!(
-            self.catalog_manager
-                .register_table(request)
-                .await
-                .context(CatalogSnafu)?,
-            TableAlreadyExistSnafu {
-                table: table_name.to_string()
-            }
-        );
-
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate_table(
@@ -172,16 +155,6 @@ impl StatementExecutor {
         let table_id = table.table_info().table_id();
         let engine = table.table_info().meta.engine.to_string();
         self.drop_table_procedure(&table_name, table_id).await?;
-
-        let request = DeregisterTableRequest {
-            catalog: table_name.catalog_name.clone(),
-            schema: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-        };
-        self.catalog_manager
-            .deregister_table(request)
-            .await
-            .context(CatalogSnafu)?;
 
         // Invalidates local cache ASAP.
         self.cache_invalidator

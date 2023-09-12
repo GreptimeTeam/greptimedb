@@ -21,10 +21,11 @@ use catalog::error::{
     TableMetadataManagerSnafu,
 };
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
+use catalog::local::MemoryCatalogManager;
 use catalog::remote::KvCacheInvalidatorRef;
 use catalog::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest, RenameTableRequest,
+    RegisterTableRequest,
 };
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
@@ -50,13 +51,44 @@ use table::TableRef;
 
 use crate::table::DistTable;
 
+// There are two sources for finding a table: the `local_catalog_manager` and the
+// `table_metadata_manager`.
+//
+// The `local_catalog_manager` is for storing tables that are often transparent, not saving any
+// real data. For example, our system tables, the `numbers` table and the "information_schema"
+// table.
+//
+// The `table_metadata_manager`, on the other hand, is for storing tables that are created by users,
+// obviously.
+//
+// For now, separating the two makes the code simpler, at least in the retrieval site. Now we have
+// `numbers` and `information_schema` system tables. Both have their special implementations. If we
+// put them with other ordinary tables that are created by users, we need to check the table name
+// to decide which `TableRef` to return. Like this:
+//
+// ```rust
+// match table_name {
+//   "numbers" => ... // return NumbersTable impl
+//   "information_schema" => ... // return InformationSchemaTable impl
+//   _ => .. // return DistTable impl
+// }
+// ```
+//
+// On the other hand, because we use `MemoryCatalogManager` for system tables, we can easily store
+// and retrieve the concrete implementation of the system tables by their names, no more "if-else"s.
+//
+// However, if the system table is designed to have more features in the future, we may revisit
+// the implementation here.
 #[derive(Clone)]
 pub struct FrontendCatalogManager {
-    backend: KvBackendRef,
+    // TODO(LFC): Maybe use a real implementation for Standalone mode.
+    // Now we use `NoopKvCacheInvalidator` for Standalone mode. In Standalone mode, the KV backend
+    // is implemented by RaftEngine. Maybe we need a cache for it?
     backend_cache_invalidator: KvCacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     datanode_manager: DatanodeManagerRef,
+    local_catalog_manager: Arc<MemoryCatalogManager>,
 }
 
 #[async_trait::async_trait]
@@ -105,16 +137,12 @@ impl FrontendCatalogManager {
         datanode_manager: DatanodeManagerRef,
     ) -> Self {
         Self {
-            backend: backend.clone(),
             backend_cache_invalidator,
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
             datanode_manager,
+            local_catalog_manager: MemoryCatalogManager::new(),
         }
-    }
-
-    pub fn backend(&self) -> KvBackendRef {
-        self.backend.clone()
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
@@ -136,43 +164,32 @@ impl FrontendCatalogManager {
     }
 }
 
-// FIXME(hl): Frontend only needs a CatalogList, should replace with trait upcasting
-// as soon as it's stable: https://github.com/rust-lang/rust/issues/65991
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
-    async fn start(&self) -> catalog::error::Result<()> {
+    fn register_local_catalog(&self, name: &str) -> CatalogResult<bool> {
+        self.local_catalog_manager.register_catalog(name)
+    }
+
+    fn register_local_table(&self, request: RegisterTableRequest) -> CatalogResult<bool> {
+        self.local_catalog_manager.register_table(request)
+    }
+
+    fn deregister_local_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
         Ok(())
     }
 
-    async fn register_catalog(self: Arc<Self>, _name: String) -> CatalogResult<bool> {
-        unimplemented!("FrontendCatalogManager does not support registering catalog")
-    }
-
-    // TODO(LFC): Handle the table caching in (de)register_table.
-    async fn register_table(&self, _request: RegisterTableRequest) -> CatalogResult<bool> {
-        Ok(true)
-    }
-
-    async fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
-        Ok(())
-    }
-
-    async fn register_schema(
+    fn register_local_schema(
         &self,
         _request: RegisterSchemaRequest,
     ) -> catalog::error::Result<bool> {
         unimplemented!("FrontendCatalogManager does not support registering schema")
     }
 
-    async fn deregister_schema(
+    fn deregister_local_schema(
         &self,
         _request: DeregisterSchemaRequest,
     ) -> catalog_err::Result<bool> {
         unimplemented!("FrontendCatalogManager does not support deregistering schema")
-    }
-
-    async fn rename_table(&self, _request: RenameTableRequest) -> catalog_err::Result<bool> {
-        unimplemented!()
     }
 
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {

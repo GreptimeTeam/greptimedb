@@ -515,7 +515,7 @@ mod tests {
             table_id: NUMBERS_TABLE_ID,
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
-        let _ = catalog_manager.register_table(req).await.unwrap();
+        catalog_manager.register_local_table(req).unwrap();
 
         QueryEngineFactory::new(catalog_manager, None, false).query_engine()
     }

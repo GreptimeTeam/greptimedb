@@ -25,7 +25,7 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{self, IllegalAuthConfigSnafu, Result, StartCatalogManagerSnafu};
+use crate::error::{self, IllegalAuthConfigSnafu, Result};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -34,12 +34,6 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
-        self.frontend
-            .catalog_manager()
-            .start()
-            .await
-            .context(StartCatalogManagerSnafu)?;
-
         self.frontend
             .start()
             .await

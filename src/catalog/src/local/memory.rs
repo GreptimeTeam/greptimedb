@@ -15,96 +15,47 @@
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, MIN_USER_TABLE_ID,
-};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::OptionExt;
-use table::metadata::TableId;
-use table::table::TableIdProvider;
 use table::TableRef;
 
-use crate::error::{
-    CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu, TableNotFoundSnafu,
-};
+use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
 use crate::{
     CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest, RenameTableRequest,
+    RegisterTableRequest,
 };
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
 
 /// Simple in-memory list of catalogs
+#[derive(Clone)]
 pub struct MemoryCatalogManager {
     /// Collection of catalogs containing schemas and ultimately Tables
-    pub catalogs: RwLock<HashMap<String, SchemaEntries>>,
-    pub table_id: AtomicU32,
-}
-
-#[async_trait::async_trait]
-impl TableIdProvider for MemoryCatalogManager {
-    async fn next_table_id(&self) -> table::error::Result<TableId> {
-        Ok(self.table_id.fetch_add(1, Ordering::Relaxed))
-    }
+    catalogs: Arc<RwLock<HashMap<String, SchemaEntries>>>,
 }
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    async fn start(&self) -> Result<()> {
-        self.table_id.store(MIN_USER_TABLE_ID, Ordering::Relaxed);
-        Ok(())
+    fn register_local_catalog(&self, name: &str) -> Result<bool> {
+        self.register_catalog(name)
+    }
+    fn register_local_table(&self, request: RegisterTableRequest) -> Result<bool> {
+        self.register_table(request)
     }
 
-    async fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        self.register_table_sync(request)
-    }
-
-    async fn rename_table(&self, request: RenameTableRequest) -> Result<bool> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schema = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?
-            .get_mut(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?;
-
-        // check old and new table names
-        if !schema.contains_key(&request.table_name) {
-            return TableNotFoundSnafu {
-                table_info: request.table_name.to_string(),
-            }
-            .fail()?;
-        }
-        if schema.contains_key(&request.new_table_name) {
-            return TableExistsSnafu {
-                table: &request.new_table_name,
-            }
-            .fail();
-        }
-
-        let table = schema.remove(&request.table_name).unwrap();
-        let _ = schema.insert(request.new_table_name, table);
-
-        Ok(true)
-    }
-
-    async fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
+    fn deregister_local_table(&self, request: DeregisterTableRequest) -> Result<()> {
         self.deregister_table_sync(request)
     }
 
-    async fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
+    fn register_local_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
         self.register_schema_sync(request)
     }
 
-    async fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
+    fn deregister_local_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schemas = catalogs
             .get_mut(&request.catalog)
@@ -203,28 +154,27 @@ impl CatalogManager for MemoryCatalogManager {
             .collect())
     }
 
-    async fn register_catalog(self: Arc<Self>, name: String) -> Result<bool> {
-        self.register_catalog_sync(name)
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
 }
 
 impl MemoryCatalogManager {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            catalogs: Default::default(),
+        })
+    }
+
     /// Creates a manager with some default setups
     /// (e.g. default catalog/schema and information schema)
     pub fn with_default_setup() -> Arc<Self> {
         let manager = Arc::new(Self {
-            table_id: AtomicU32::new(MIN_USER_TABLE_ID),
             catalogs: Default::default(),
         });
 
         // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
-        manager
-            .register_catalog_sync(DEFAULT_CATALOG_NAME.to_string())
-            .unwrap();
+        manager.register_catalog(DEFAULT_CATALOG_NAME).unwrap();
         manager
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -252,12 +202,15 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a catalog if it does not exist and returns false if the schema exists.
-    pub fn register_catalog_sync(self: &Arc<Self>, name: String) -> Result<bool> {
+    pub fn register_catalog(&self, name: &str) -> Result<bool> {
+        let name = name.to_string();
+
         let mut catalogs = self.catalogs.write().unwrap();
 
         match catalogs.entry(name.clone()) {
             Entry::Vacant(e) => {
-                let catalog = self.create_catalog_entry(name);
+                let arc_self = Arc::new(self.clone());
+                let catalog = arc_self.create_catalog_entry(name);
                 e.insert(catalog);
                 increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
                 Ok(true)
@@ -311,7 +264,7 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a schema and returns an error if the catalog or schema does not exist.
-    pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
+    pub fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schema = catalogs
             .get_mut(&request.catalog)
@@ -356,7 +309,7 @@ impl MemoryCatalogManager {
         let schema = &table.table_info().schema_name;
 
         if !manager.catalog_exist_sync(catalog).unwrap() {
-            manager.register_catalog_sync(catalog.to_string()).unwrap();
+            manager.register_catalog(catalog).unwrap();
         }
 
         if !manager.schema_exist_sync(catalog, schema).unwrap() {
@@ -375,7 +328,7 @@ impl MemoryCatalogManager {
             table_id: table.table_info().ident.table_id,
             table,
         };
-        let _ = manager.register_table_sync(request).unwrap();
+        let _ = manager.register_table(request).unwrap();
         manager
     }
 }
@@ -388,8 +341,6 @@ pub fn new_memory_catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::*;
-    use common_error::ext::ErrorExt;
-    use common_error::status_code::StatusCode;
     use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 
     use super::*;
@@ -406,7 +357,7 @@ mod tests {
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
-        let _ = catalog_list.register_table(register_request).await.unwrap();
+        catalog_list.register_local_table(register_request).unwrap();
         let table = catalog_list
             .table(
                 DEFAULT_CATALOG_NAME,
@@ -423,130 +374,11 @@ mod tests {
             .is_none());
     }
 
-    #[tokio::test]
-    async fn test_mem_manager_rename_table() {
-        let catalog = MemoryCatalogManager::with_default_setup();
-        let table_name = "test_table";
-        assert!(!catalog
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
-        // register test table
-        let table_id = 2333;
-        let register_request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            table_id,
-            table: NumbersTable::table(table_id),
-        };
-        assert!(catalog.register_table(register_request).await.unwrap());
-        assert!(catalog
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
-
-        // rename test table
-        let new_table_name = "test_table_renamed";
-        let rename_request = RenameTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            new_table_name: new_table_name.to_string(),
-            table_id,
-        };
-        let _ = catalog.rename_table(rename_request).await.unwrap();
-
-        // test old table name not exist
-        assert!(!catalog
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
-
-        // test new table name exists
-        assert!(catalog
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
-            .await
-            .unwrap());
-        let registered_table = catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(registered_table.table_info().ident.table_id, table_id);
-
-        let dup_register_request = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: new_table_name.to_string(),
-            table_id: table_id + 1,
-            table: NumbersTable::table(table_id + 1),
-        };
-        let result = catalog.register_table(dup_register_request).await;
-        let err = result.err().unwrap();
-        assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
-    }
-
-    #[tokio::test]
-    async fn test_catalog_rename_table() {
-        let catalog = MemoryCatalogManager::with_default_setup();
-        let table_name = "num";
-        let table_id = 2333;
-        let table = NumbersTable::table(table_id);
-
-        // register table
-        let register_table_req = RegisterTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            table_id,
-            table,
-        };
-        assert!(catalog.register_table(register_table_req).await.unwrap());
-        assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap()
-            .is_some());
-
-        // rename table
-        let new_table_name = "numbers_new";
-        let rename_table_req = RenameTableRequest {
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            new_table_name: new_table_name.to_string(),
-            table_id,
-        };
-        assert!(catalog.rename_table(rename_table_req).await.unwrap());
-        assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap()
-            .is_none());
-        assert!(catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
-            .await
-            .unwrap()
-            .is_some());
-
-        let registered_table = catalog
-            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, new_table_name)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(registered_table.table_info().ident.table_id, table_id);
-    }
-
     #[test]
     pub fn test_register_catalog_sync() {
         let list = MemoryCatalogManager::with_default_setup();
-        assert!(list
-            .register_catalog_sync("test_catalog".to_string())
-            .unwrap());
-        assert!(!list
-            .register_catalog_sync("test_catalog".to_string())
-            .unwrap());
+        assert!(list.register_catalog("test_catalog").unwrap());
+        assert!(!list.register_catalog("test_catalog").unwrap());
     }
 
     #[tokio::test]
@@ -561,7 +393,7 @@ mod tests {
             table_id: 2333,
             table: NumbersTable::table(2333),
         };
-        let _ = catalog.register_table(register_table_req).await.unwrap();
+        catalog.register_local_table(register_table_req).unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
@@ -574,8 +406,7 @@ mod tests {
             table_name: table_name.to_string(),
         };
         catalog
-            .deregister_table(deregister_table_req)
-            .await
+            .deregister_local_table(deregister_table_req)
             .unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
@@ -603,20 +434,16 @@ mod tests {
             table_id: 0,
             table: NumbersTable::table(0),
         };
-        catalog
-            .clone()
-            .register_catalog(catalog_name.clone())
-            .await
-            .unwrap();
-        catalog.register_schema(schema).await.unwrap();
-        catalog.register_table(table).await.unwrap();
+        catalog.register_local_catalog(&catalog_name).unwrap();
+        catalog.register_local_schema(schema).unwrap();
+        catalog.register_local_table(table).unwrap();
 
         let request = DeregisterSchemaRequest {
             catalog: catalog_name.clone(),
             schema: schema_name.clone(),
         };
 
-        assert!(catalog.deregister_schema(request).await.unwrap());
+        assert!(catalog.deregister_local_schema(request).unwrap());
         assert!(!catalog
             .schema_exist(&catalog_name, &schema_name)
             .await
