@@ -206,9 +206,11 @@ impl RegionFlushTask {
     }
 
     /// Converts the flush task into a background job.
+    ///
+    /// We must call this in the region worker.
     fn into_flush_job(mut self, region: &MitoRegionRef) -> Job {
-        // Get a version of this region before creating a job so we
-        // always have a consistent memtable list.
+        // Get a version of this region before creating a job to get current
+        // wal entry id, sequence and immutable memtables.
         let version_data = region.version_control.current();
 
         Box::pin(async move {
@@ -232,6 +234,7 @@ impl RegionFlushTask {
                     file_metas,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
+                    flushed_sequence: version_data.committed_sequence,
                     memtables_to_remove,
                     senders: std::mem::take(&mut self.senders),
                     file_purger: self.file_purger.clone(),
