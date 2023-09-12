@@ -48,6 +48,9 @@ pub trait RegionEngine: Send + Sync {
 
     /// Retrieve region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
+
+    /// Stop the engine
+    async fn stop(&self) -> Result<(), BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;
