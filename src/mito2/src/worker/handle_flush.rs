@@ -165,6 +165,10 @@ impl<S> RegionWorkerLoop<S> {
         // Flush memtable with max mutable memtable.
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
         if let Some(region) = max_mem_region {
+            info!(
+                "Chosen the region {} with the maximum mutable memtable size to flush: {}.",
+                region.region_id, max_mutable_size
+            );
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(region, FlushReason::EngineFull);
                 self.flush_scheduler.schedule_flush(region, task)?;

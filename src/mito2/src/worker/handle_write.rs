@@ -35,12 +35,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         mut write_requests: Vec<SenderWriteRequest>,
         allow_stall: bool,
     ) {
+        // Flush this worker if the engine needs to flush.
+        self.maybe_flush_worker();
+
         if write_requests.is_empty() {
             return;
         }
-
-        // Flush this worker if the engine needs to flush.
-        self.maybe_flush_worker();
 
         if self.should_reject_write() {
             // The memory pressure is still too high, reject write requests.

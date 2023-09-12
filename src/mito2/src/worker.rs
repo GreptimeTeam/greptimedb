@@ -126,6 +126,11 @@ impl WorkerGroup {
             })
             .collect();
 
+        info!(
+            "Started region worker group with {} workers",
+            config.num_workers
+        );
+
         WorkerGroup { workers, scheduler }
     }
 
