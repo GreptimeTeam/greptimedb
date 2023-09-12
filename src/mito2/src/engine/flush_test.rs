@@ -25,8 +25,8 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::{FlushListener, StallListener};
 use crate::test_util::{
-    build_rows, build_rows_for_key, flush_region, put_rows, rows_schema, CreateRequestBuilder,
-    MockWriteBufferManager, TestEnv,
+    build_rows, build_rows_for_key, flush_region, put_rows, reopen_region, rows_schema,
+    CreateRequestBuilder, MockWriteBufferManager, TestEnv,
 };
 
 #[tokio::test]
@@ -220,4 +220,52 @@ async fn test_flush_empty() {
 ++
 ++";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_flush_reopen_region() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 3, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    flush_region(&engine, region_id).await;
+    let check_region = || {
+        let region = engine.get_region(region_id).unwrap();
+        let version_data = region.version_control.current();
+        assert_eq!(1, version_data.last_entry_id);
+        assert_eq!(3, version_data.committed_sequence);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(3, version_data.version.flushed_sequence);
+    };
+    check_region();
+
+    reopen_region(&engine, region_id, region_dir).await;
+    check_region();
+
+    // Puts again.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 2, 10),
+    };
+    put_rows(&engine, region_id, rows).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    assert_eq!(2, version_data.last_entry_id);
+    assert_eq!(5, version_data.committed_sequence);
 }

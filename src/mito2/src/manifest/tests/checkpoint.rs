@@ -58,6 +58,7 @@ fn nop_action() -> RegionMetaActionList {
         files_to_remove: vec![],
         compaction_time_window: None,
         flushed_entry_id: None,
+        flushed_sequence: None,
     })])
 }
 
@@ -149,7 +150,7 @@ async fn manager_with_checkpoint_distance_1() {
         .await
         .unwrap();
     let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
-    let expected_json = "{\"size\":769,\"version\":9,\"checksum\":null,\"extend_metadata\":{}}";
+    let expected_json = "{\"size\":790,\"version\":9,\"checksum\":null,\"extend_metadata\":{}}";
     assert_eq!(expected_json, raw_json);
 
     // reopen the manager
@@ -176,6 +177,7 @@ async fn checkpoint_with_different_compression_types() {
             files_to_remove: vec![],
             compaction_time_window: None,
             flushed_entry_id: None,
+            flushed_sequence: None,
         })]);
         actions.push(action);
     }

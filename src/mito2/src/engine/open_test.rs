@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionRequest};
+use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::test_util::{CreateRequestBuilder, TestEnv};
+use crate::test_util::{reopen_region, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
 async fn test_engine_open_empty() {
@@ -84,23 +84,6 @@ async fn test_engine_reopen_region() {
         .await
         .unwrap();
 
-    // Close the region.
-    engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
-        .await
-        .unwrap();
-
-    // Open the region again.
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                region_dir,
-                options: HashMap::default(),
-            }),
-        )
-        .await
-        .unwrap();
+    reopen_region(&engine, region_id, region_dir).await;
     assert!(engine.is_region_exists(region_id));
 }

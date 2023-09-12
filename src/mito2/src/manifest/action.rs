@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::{RegionMetadataNotFoundSnafu, Result, SerdeJsonSnafu, Utf8Snafu};
 use crate::sst::file::{FileId, FileMeta};
@@ -49,6 +49,7 @@ pub struct RegionEdit {
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
     pub flushed_entry_id: Option<EntryId>,
+    pub flushed_sequence: Option<SequenceNumber>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -65,6 +66,8 @@ pub struct RegionManifest {
     pub files: HashMap<FileId, FileMeta>,
     /// Last WAL entry id of flushed data.
     pub flushed_entry_id: EntryId,
+    /// Last sequence of flushed data.
+    pub flushed_sequence: SequenceNumber,
     /// Current manifest version.
     pub manifest_version: ManifestVersion,
 }
@@ -74,6 +77,7 @@ pub struct RegionManifestBuilder {
     metadata: Option<RegionMetadataRef>,
     files: HashMap<FileId, FileMeta>,
     flushed_entry_id: EntryId,
+    flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
 }
 
@@ -86,6 +90,7 @@ impl RegionManifestBuilder {
                 files: s.files,
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
+                flushed_sequence: s.flushed_sequence,
             }
         } else {
             Default::default()
@@ -108,6 +113,9 @@ impl RegionManifestBuilder {
         if let Some(flushed_entry_id) = edit.flushed_entry_id {
             self.flushed_entry_id = self.flushed_entry_id.max(flushed_entry_id);
         }
+        if let Some(flushed_sequence) = edit.flushed_sequence {
+            self.flushed_sequence = self.flushed_sequence.max(flushed_sequence);
+        }
     }
 
     /// Check if the builder keeps a [RegionMetadata](crate::metadata::RegionMetadata).
@@ -121,6 +129,7 @@ impl RegionManifestBuilder {
             metadata,
             files: self.files,
             flushed_entry_id: self.flushed_entry_id,
+            flushed_sequence: self.flushed_sequence,
             manifest_version: self.manifest_version,
         })
     }
@@ -216,6 +225,7 @@ mod tests {
 
         let region_edit = r#"{
             "flushed_entry_id":10,
+            "flushed_sequence":10,
             "compaction_time_window":null,
             "files_to_add":[
             {"region_id":4402341478400,"file_id":"4b220a70-2b03-4641-9687-b65d94641208","time_range":[{"value":1451609210000,"unit":"Millisecond"},{"value":1451609520000,"unit":"Millisecond"}],"level":1,"file_size":100}
