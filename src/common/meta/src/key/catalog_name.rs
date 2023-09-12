@@ -24,10 +24,12 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
+use crate::key::{
+    kv_backend_helper, TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX,
+};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
-use crate::rpc::store::{PutRequest, RangeRequest};
+use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,15 +105,16 @@ impl CatalogManager {
     }
 
     /// Creates `CatalogNameKey`.
-    pub async fn create(&self, catalog: CatalogNameKey<'_>) -> Result<()> {
-        let raw_key = catalog.as_raw_key();
+    pub async fn create(&self, catalog: CatalogNameKey<'_>, if_not_exists: bool) -> Result<()> {
         let _timer = timer!(crate::metrics::METRIC_META_CREATE_CATALOG);
 
-        let req = PutRequest::new()
-            .with_key(raw_key)
-            .with_value(CatalogNameValue.try_as_raw_value()?);
-        self.kv_backend.put(req).await?;
-        increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
+        let raw_key = catalog.as_raw_key();
+        let raw_value = CatalogNameValue.try_as_raw_value()?;
+        if kv_backend_helper::put_conditionally(&self.kv_backend, raw_key, raw_value, if_not_exists)
+            .await?
+        {
+            increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
+        }
 
         Ok(())
     }
@@ -119,7 +122,7 @@ impl CatalogManager {
     pub async fn exist(&self, catalog: CatalogNameKey<'_>) -> Result<bool> {
         let raw_key = catalog.as_raw_key();
 
-        Ok(self.kv_backend.get(&raw_key).await?.is_some())
+        self.kv_backend.exists(&raw_key).await
     }
 
     pub async fn catalog_names(&self) -> BoxStream<'static, Result<String>> {
@@ -159,7 +162,7 @@ mod tests {
 
         let catalog_key = CatalogNameKey::new("my-catalog");
 
-        manager.create(catalog_key).await.unwrap();
+        manager.create(catalog_key, false).await.unwrap();
 
         assert!(manager.exist(catalog_key).await.unwrap());
 
