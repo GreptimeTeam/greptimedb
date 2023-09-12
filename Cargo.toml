@@ -30,7 +30,7 @@ members = [
     "src/common/version",
     "src/datanode",
     "src/datatypes",
-    "src/file-table-engine",
+    "src/file-engine",
     "src/frontend",
     "src/log-store",
     "src/meta-client",
@@ -141,7 +141,7 @@ common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
-file-table-engine = { path = "src/file-table-engine" }
+file-engine = { path = "src/file-engine" }
 frontend = { path = "src/frontend" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }

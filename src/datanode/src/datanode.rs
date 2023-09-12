@@ -28,6 +28,8 @@ pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use file_engine::config::EngineConfig as FileEngineConfig;
+use file_engine::engine::FileRegionEngine;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
@@ -393,6 +395,8 @@ impl DatanodeOptions {
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),
+    #[serde(rename = "file")]
+    File(FileEngineConfig),
 }
 
 /// Datanode service.
@@ -547,6 +551,10 @@ impl Datanode {
                 RegionEngineConfig::Mito(config) => {
                     let engine: MitoEngine =
                         MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
+                    engines.push(Arc::new(engine) as _);
+                }
+                RegionEngineConfig::File(config) => {
+                    let engine = FileRegionEngine::new(config.clone(), object_store.clone());
                     engines.push(Arc::new(engine) as _);
                 }
             }

@@ -1,5 +1,5 @@
 [package]
-name = "file-table-engine"
+name = "file-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -31,5 +31,6 @@ table = { workspace = true }
 tokio.workspace = true
 
 [dev-dependencies]
+api = { workspace = true }
 common-procedure-test = { workspace = true }
 common-test-util = { workspace = true }

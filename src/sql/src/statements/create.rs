@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
-use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
+use common_catalog::consts::FILE_ENGINE;
 use itertools::Itertools;
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
@@ -182,7 +182,7 @@ impl Display for CreateTable {
         let partitions = self.format_partitions();
         let engine = &self.engine;
         let options = self.format_options();
-        let maybe_external = if self.engine == IMMUTABLE_FILE_ENGINE {
+        let maybe_external = if self.engine == FILE_ENGINE {
             "EXTERNAL "
         } else {
             ""

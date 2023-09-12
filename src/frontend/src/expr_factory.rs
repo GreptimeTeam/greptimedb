@@ -23,7 +23,7 @@ use api::v1::{
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use datatypes::schema::ColumnSchema;
-use file_table_engine::table::immutable::ImmutableFileTableOptions;
+use file_engine::FileOptions;
 use query::sql::prepare_immutable_file_table_files_and_schema;
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
@@ -100,7 +100,7 @@ pub(crate) async fn create_external_expr(
         .await
         .context(PrepareImmutableTableSnafu)?;
 
-    let meta = ImmutableFileTableOptions { files };
+    let meta = FileOptions { files };
     let _ = options.insert(
         IMMUTABLE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,

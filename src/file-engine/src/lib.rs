@@ -12,5 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod format;
-pub mod immutable;
+#![feature(assert_matches)]
+#![feature(result_option_inspect)]
+
+pub mod config;
+pub mod engine;
+pub mod error;
+pub(crate) mod manifest;
+pub(crate) mod region;
+pub(crate) mod stream;
+
+#[cfg(any(test, feature = "test"))]
+pub(crate) mod test_util;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileOptions {
+    pub files: Vec<String>,
+}
