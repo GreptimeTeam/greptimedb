@@ -13,24 +13,31 @@
 // limitations under the License.
 
 use datafusion::physical_plan::metrics::{
-    ExecutionPlanMetricsSet, Gauge, MetricBuilder, Timestamp,
+    Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, Timestamp,
 };
 
+/// This metrics struct is used to record and hold memory usage
+/// of result batch in [`crate::table::scan::StreamWithMetricWrapper`]
+/// during query execution, indicating size of the dataset.
 #[derive(Debug, Clone)]
 pub struct MemoryUsageMetrics {
     end_time: Timestamp,
+    // used memory in bytes
     mem_used: Gauge,
+    // number of rows in output
+    output_rows: Count,
 }
 
 impl MemoryUsageMetrics {
-    /// Create a new BaselineMetric structure, and set  `start_time` to now
+    /// Create a new MemoryUsageMetrics structure, and set `start_time` to now
     pub fn new(metrics: &ExecutionPlanMetricsSet, partition: usize) -> Self {
         let start_time = MetricBuilder::new(metrics).start_timestamp(partition);
         start_time.record();
 
         Self {
             end_time: MetricBuilder::new(metrics).end_timestamp(partition),
-            mem_used: MetricBuilder::new(metrics).gauge("mem_used", partition),
+            mem_used: MetricBuilder::new(metrics).mem_used(partition),
+            output_rows: MetricBuilder::new(metrics).output_rows(partition),
         }
     }
 
@@ -38,7 +45,11 @@ impl MemoryUsageMetrics {
         self.mem_used.add(mem_used);
     }
 
-    /// If not previously recorded `done()`, record
+    pub fn record_output(&self, num_rows: usize) {
+        self.output_rows.add(num_rows);
+    }
+
+    /// Record the end time of the query
     pub fn try_done(&self) {
         if self.end_time.value().is_none() {
             self.end_time.record()

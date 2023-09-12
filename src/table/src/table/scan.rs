@@ -121,16 +121,17 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        // it's calling storage level api
-        // so we don't record time now
         let poll = this.stream.poll_next_unpin(cx);
-        if let Poll::Ready(Option::Some(Result::Ok(record_batch))) = &poll {
+        if let Poll::Ready(Some(Ok(record_batch))) = &poll {
             let batch_mem_size = record_batch
                 .columns()
                 .iter()
                 .map(|vec_ref| vec_ref.memory_size())
                 .sum::<usize>();
+            // we don't record elapsed time here
+            // since it's calling storage api involving I/O ops
             this.metric.record_mem_usage(batch_mem_size);
+            this.metric.record_output(record_batch.num_rows());
         }
 
         poll
