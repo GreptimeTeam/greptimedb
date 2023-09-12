@@ -2676,7 +2676,6 @@ dependencies = [
  "store-api",
  "substrait 0.4.0-nightly",
  "table",
- "table-procedure",
  "tokio",
  "tokio-stream",
  "toml 0.7.6",
@@ -9513,30 +9512,6 @@ dependencies = [
  "store-api",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "table-procedure"
-version = "0.4.0-nightly"
-dependencies = [
- "async-trait",
- "catalog",
- "common-catalog",
- "common-error",
- "common-procedure",
- "common-procedure-test",
- "common-telemetry",
- "common-test-util",
- "datatypes",
- "log-store",
- "mito",
- "object-store",
- "serde",
- "serde_json",
- "snafu",
- "storage",
- "table",
- "tokio",
 ]
 
 [[package]]
