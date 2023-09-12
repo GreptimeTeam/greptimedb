@@ -16,8 +16,10 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
+use common_telemetry::timer;
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use metrics::increment_counter;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -103,11 +105,13 @@ impl CatalogManager {
     /// Creates `CatalogNameKey`.
     pub async fn create(&self, catalog: CatalogNameKey<'_>) -> Result<()> {
         let raw_key = catalog.as_raw_key();
+        let _timer = timer!(crate::metrics::METRIC_META_CREATE_CATALOG);
 
         let req = PutRequest::new()
             .with_key(raw_key)
             .with_value(CatalogNameValue.try_as_raw_value()?);
         self.kv_backend.put(req).await?;
+        increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
 
         Ok(())
     }

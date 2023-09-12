@@ -152,6 +152,7 @@ impl RegionOpener {
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
+            .flushed_sequence(manifest.flushed_sequence)
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
@@ -177,7 +178,9 @@ async fn replay_memtable<S: LogStore>(
     version_control: &VersionControlRef,
 ) -> Result<()> {
     let mut rows_replayed = 0;
-    let mut last_entry_id = EntryId::MIN;
+    // Last entry id should start from flushed entry id since there might be no
+    // data in the WAL.
+    let mut last_entry_id = flushed_entry_id;
     let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
     let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
     while let Some(res) = wal_stream.next().await {

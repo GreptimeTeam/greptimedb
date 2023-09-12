@@ -360,9 +360,7 @@ impl DdlTaskExecutor for DdlManager {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let cluster_id = ctx.cluster_id.context(error::UnexpectedSnafu {
-            err_msg: "cluster_id not found",
-        })?;
+        let cluster_id = ctx.cluster_id.unwrap_or_default();
         info!("Submitting Ddl task: {:?}", request.task);
         match request.task {
             CreateTable(create_table_task) => {

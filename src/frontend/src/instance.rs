@@ -156,8 +156,12 @@ impl Instance {
             meta_backend.clone(),
             datanode_clients.clone(),
         );
+        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
 
-        let region_request_handler = DistRegionRequestHandler::arc(catalog_manager.clone());
+        let region_request_handler = DistRegionRequestHandler::arc(
+            partition_manager.clone(),
+            catalog_manager.datanode_manager().clone(),
+        );
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
@@ -166,8 +170,6 @@ impl Instance {
             plugins.clone(),
         )
         .query_engine();
-
-        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
 
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
@@ -292,15 +294,28 @@ impl Instance {
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
         catalog_manager: CatalogManagerRef,
-        query_engine: QueryEngineRef,
+        plugins: Arc<Plugins>,
         region_server: RegionServer,
     ) -> Result<Self> {
+        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
+        let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
+
+        let region_request_handler =
+            DistRegionRequestHandler::arc(partition_manager.clone(), datanode_manager.clone());
+
+        let query_engine = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            Some(region_request_handler),
+            true,
+            plugins.clone(),
+        )
+        .query_engine();
+
         let script_executor =
             Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
-        let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
         let cache_invalidator = Arc::new(DummyCacheInvalidator);
         let ddl_executor = Arc::new(DdlManager::new(
             procedure_manager,
@@ -338,7 +353,7 @@ impl Instance {
             script_executor,
             statement_executor,
             query_engine,
-            plugins: Default::default(),
+            plugins,
             servers: Arc::new(HashMap::new()),
             heartbeat_task: None,
             inserter,
@@ -355,10 +370,6 @@ impl Instance {
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
-    }
-
-    pub fn set_plugins(&mut self, map: Arc<Plugins>) {
-        self.plugins = map;
     }
 
     pub fn plugins(&self) -> Arc<Plugins> {

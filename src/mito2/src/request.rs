@@ -37,7 +37,7 @@ use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
 };
-use store_api::storage::{CompactionStrategy, RegionId};
+use store_api::storage::{CompactionStrategy, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
@@ -525,6 +525,8 @@ pub(crate) struct FlushFinished {
     pub(crate) file_metas: Vec<FileMeta>,
     /// Entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
+    /// Sequence of flushed data.
+    pub(crate) flushed_sequence: SequenceNumber,
     /// Id of memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.

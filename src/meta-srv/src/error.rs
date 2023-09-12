@@ -26,6 +26,12 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Failed to create default catalog and schema, source: {}", source))]
+    InitMetadata {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to allocate next sequence number: {}", source))]
     NextSequence {
         location: Location,
@@ -611,6 +617,8 @@ impl ErrorExt for Error {
             | Error::UpdateTableRoute { source, .. }
             | Error::ConvertEtcdTxnObject { source, .. }
             | Error::GetFullTableInfo { source, .. } => source.status_code(),
+
+            Error::InitMetadata { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }
