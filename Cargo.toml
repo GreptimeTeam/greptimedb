@@ -48,7 +48,6 @@ members = [
     "src/storage",
     "src/store-api",
     "src/table",
-    "src/table-procedure",
     # TODO: add this back once the region server is available
     # "tests-integration",
     "tests/runner",
