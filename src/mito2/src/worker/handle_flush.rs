@@ -14,18 +14,16 @@
 
 //! Handling flush related requests.
 
-use common_query::Output;
 use common_telemetry::{error, info};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
 use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished};
+use crate::request::{FlushFailed, FlushFinished, OptionOutputTx};
 use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -105,7 +103,7 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_request(
         &mut self,
         region_id: RegionId,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        sender: OptionOutputTx,
     ) {
         let region = match self.regions.get_writable_region(region_id) {
             Ok(v) => v,
@@ -116,9 +114,7 @@ impl<S> RegionWorkerLoop<S> {
         };
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);
-        if let Some(sender) = sender {
-            task.senders.push(sender);
-        }
+        task.push_sender(sender);
         if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
         }

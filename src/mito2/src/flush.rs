@@ -22,7 +22,7 @@ use common_query::Output;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, Result};
@@ -31,8 +31,8 @@ use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionRef};
 use crate::region::MitoRegionRef;
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, SenderDdlRequest, SenderWriteRequest,
-    WorkerRequest,
+    BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
+    SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
@@ -178,7 +178,7 @@ pub(crate) struct RegionFlushTask {
     /// Reason to flush.
     pub(crate) reason: FlushReason,
     /// Flush result senders.
-    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    pub(crate) senders: Vec<OutputTx>,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
 
@@ -188,18 +188,24 @@ pub(crate) struct RegionFlushTask {
 }
 
 impl RegionFlushTask {
+    /// Push the sender if it is not none.
+    pub(crate) fn push_sender(&mut self, mut sender: OptionOutputTx) {
+        if let Some(sender) = sender.take_inner() {
+            self.senders.push(sender);
+        }
+    }
+
     /// Consumes the task and notify the sender the job is success.
     fn on_success(self) {
         for sender in self.senders {
-            let _ = sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(Output::AffectedRows(0)));
         }
     }
 
     /// Send flush error to waiter.
     fn on_failure(&mut self, err: Arc<Error>) {
         for sender in self.senders.drain(..) {
-            // Ignore send result.
-            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+            sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
         }

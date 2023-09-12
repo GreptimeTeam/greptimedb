@@ -12,17 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::Output;
 use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
 use crate::compaction::CompactionRequest;
-use crate::error::Result;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{CompactionFailed, CompactionFinished};
+use crate::request::{CompactionFailed, CompactionFinished, OptionOutputTx};
 use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -30,7 +27,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        sender: OptionOutputTx,
     ) {
         let region = match self.regions.get_writable_region(region_id) {
             Ok(v) => v,
@@ -96,7 +93,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn new_compaction_request(
         &self,
         region: &MitoRegionRef,
-        waiter: Option<oneshot::Sender<Result<Output>>>,
+        waiter: OptionOutputTx,
     ) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();

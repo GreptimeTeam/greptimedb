@@ -22,7 +22,6 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
 use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionNotFoundSnafu, Result};
 use crate::flush::FlushReason;
@@ -30,7 +29,7 @@ use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionLi
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::Version;
 use crate::region::MitoRegionRef;
-use crate::request::{DdlRequest, SenderDdlRequest};
+use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::{send_result, RegionWorkerLoop};
 
 impl<S> RegionWorkerLoop<S> {
@@ -38,7 +37,7 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
             send_result(sender, RegionNotFoundSnafu { region_id }.fail());

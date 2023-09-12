@@ -35,6 +35,7 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
 use crate::region_write_ctx::RegionWriteCtx;
+use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::wal::{EntryId, Wal};
@@ -196,7 +197,7 @@ async fn replay_memtable<S: LogStore>(
                 .as_ref()
                 .map(|rows| rows.rows.len())
                 .unwrap_or(0);
-            region_write_ctx.push_mutation(mutation.op_type, mutation.rows, None);
+            region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
         }
     }
 

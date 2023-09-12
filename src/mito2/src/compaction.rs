@@ -21,18 +21,16 @@ mod twcs;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_query::Output;
 use common_telemetry::debug;
 pub use picker::CompactionPickerRef;
 use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
-use crate::error;
 use crate::error::Result;
 use crate::region::version::VersionRef;
-use crate::request::WorkerRequest;
+use crate::request::{OptionOutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
 
@@ -43,7 +41,7 @@ pub struct CompactionRequest {
     pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    pub(crate) waiter: Option<oneshot::Sender<error::Result<Output>>>,
+    pub(crate) waiter: OptionOutputTx,
     pub(crate) file_purger: FilePurgerRef,
 }
 

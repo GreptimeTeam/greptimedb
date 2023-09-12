@@ -37,7 +37,7 @@ use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
@@ -47,7 +47,8 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
-    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+    BackgroundNotify, DdlRequest, OptionOutputTx, SenderDdlRequest, SenderWriteRequest,
+    WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
@@ -178,11 +179,8 @@ impl WorkerGroup {
 }
 
 /// Send result to the sender.
-pub(crate) fn send_result(sender: Option<oneshot::Sender<Result<Output>>>, res: Result<Output>) {
-    if let Some(sender) = sender {
-        // Ignore send result.
-        let _ = sender.send(res);
-    }
+pub(crate) fn send_result(sender: OptionOutputTx, res: Result<Output>) {
+    sender.send(res);
 }
 
 // Tests methods.
@@ -514,10 +512,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             };
 
-            if let Some(sender) = ddl.sender {
-                // Ignore send result.
-                let _ = sender.send(res);
-            }
+            ddl.sender.send(res);
         }
     }
 

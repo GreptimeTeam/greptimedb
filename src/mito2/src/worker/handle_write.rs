@@ -150,14 +150,12 @@ impl<S> RegionWorkerLoop<S> {
 /// Send rejected error to all `write_requests`.
 fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
     for req in write_requests {
-        if let Some(sender) = req.sender {
-            let _ = sender.send(
-                RejectWriteSnafu {
-                    region_id: req.request.region_id,
-                }
-                .fail(),
-            );
-        }
+        req.sender.send(
+            RejectWriteSnafu {
+                region_id: req.request.region_id,
+            }
+            .fail(),
+        );
     }
 }
 
