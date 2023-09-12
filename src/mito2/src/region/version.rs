@@ -145,8 +145,12 @@ pub(crate) struct VersionControlData {
     /// Latest version.
     pub(crate) version: VersionRef,
     /// Sequence number of last committed data.
+    ///
+    /// Starts from 1 (zero means no data).
     pub(crate) committed_sequence: SequenceNumber,
     /// Last WAL entry Id.
+    ///
+    /// Starts from 1 (zero means no data).
     pub(crate) last_entry_id: EntryId,
     /// Marker of whether this region is dropped/dropping
     pub(crate) is_dropped: bool,

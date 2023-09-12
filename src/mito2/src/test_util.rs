@@ -35,7 +35,8 @@ use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest, RegionPutRequest, RegionRequest,
+    RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 
@@ -565,4 +566,26 @@ pub async fn flush_region(engine: &MitoEngine, region_id: RegionId) {
         unreachable!()
     };
     assert_eq!(0, rows);
+}
+
+/// Reopen a region.
+pub async fn reopen_region(engine: &MitoEngine, region_id: RegionId, region_dir: String) {
+    // Close the region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    // Open the region again.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+            }),
+        )
+        .await
+        .unwrap();
 }
