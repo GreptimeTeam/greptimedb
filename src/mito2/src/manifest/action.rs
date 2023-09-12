@@ -62,7 +62,7 @@ pub struct RegionRemove {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
-    pub flushed_entry_id: EntryId,
+    pub truncated_entry_id: EntryId,
 }
 
 /// The region manifest data.
