@@ -486,7 +486,7 @@ mod tests {
     use std::borrow::Cow::Borrowed;
     use std::sync::Arc;
 
-    use catalog::{CatalogManager, RegisterTableRequest};
+    use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_query::Output;
     use common_recordbatch::{util, RecordBatch};
@@ -515,7 +515,7 @@ mod tests {
             table_id: NUMBERS_TABLE_ID,
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
-        catalog_manager.register_local_table(req).unwrap();
+        catalog_manager.register_table_sync(req).unwrap();
 
         QueryEngineFactory::new(catalog_manager, None, false).query_engine()
     }

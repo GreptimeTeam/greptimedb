@@ -26,7 +26,6 @@ use crate::requests::{
     TruncateTableRequest,
 };
 use crate::TableRef;
-pub mod manager;
 
 /// Represents a resolved path to a table of the form “catalog.schema.table”
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

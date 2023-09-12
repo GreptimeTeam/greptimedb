@@ -24,10 +24,7 @@ use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
-use crate::{
-    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest,
-};
+use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterTableRequest};
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
 
@@ -40,49 +37,6 @@ pub struct MemoryCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    fn register_local_catalog(&self, name: &str) -> Result<bool> {
-        self.register_catalog(name)
-    }
-    fn register_local_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        self.register_table(request)
-    }
-
-    fn deregister_local_table(&self, request: DeregisterTableRequest) -> Result<()> {
-        self.deregister_table_sync(request)
-    }
-
-    fn register_local_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        self.register_schema_sync(request)
-    }
-
-    fn deregister_local_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schemas = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?;
-        let table_count = schemas
-            .remove(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?
-            .len();
-        decrement_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-            table_count as f64,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
-        );
-
-        decrement_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
-        );
-        Ok(true)
-    }
-
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.schema_exist_sync(catalog, schema)
     }
@@ -174,7 +128,7 @@ impl MemoryCatalogManager {
         });
 
         // Safety: default catalog/schema is registered in order so no CatalogNotFound error will occur
-        manager.register_catalog(DEFAULT_CATALOG_NAME).unwrap();
+        manager.register_catalog_sync(DEFAULT_CATALOG_NAME).unwrap();
         manager
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -202,7 +156,7 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a catalog if it does not exist and returns false if the schema exists.
-    pub fn register_catalog(&self, name: &str) -> Result<bool> {
+    pub fn register_catalog_sync(&self, name: &str) -> Result<bool> {
         let name = name.to_string();
 
         let mut catalogs = self.catalogs.write().unwrap();
@@ -264,7 +218,7 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a schema and returns an error if the catalog or schema does not exist.
-    pub fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
+    pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schema = catalogs
             .get_mut(&request.catalog)
@@ -309,7 +263,7 @@ impl MemoryCatalogManager {
         let schema = &table.table_info().schema_name;
 
         if !manager.catalog_exist_sync(catalog).unwrap() {
-            manager.register_catalog(catalog).unwrap();
+            manager.register_catalog_sync(catalog).unwrap();
         }
 
         if !manager.schema_exist_sync(catalog, schema).unwrap() {
@@ -328,7 +282,7 @@ impl MemoryCatalogManager {
             table_id: table.table_info().ident.table_id,
             table,
         };
-        let _ = manager.register_table(request).unwrap();
+        let _ = manager.register_table_sync(request).unwrap();
         manager
     }
 }
@@ -357,7 +311,7 @@ mod tests {
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
-        catalog_list.register_local_table(register_request).unwrap();
+        catalog_list.register_table_sync(register_request).unwrap();
         let table = catalog_list
             .table(
                 DEFAULT_CATALOG_NAME,
@@ -377,8 +331,8 @@ mod tests {
     #[test]
     pub fn test_register_catalog_sync() {
         let list = MemoryCatalogManager::with_default_setup();
-        assert!(list.register_catalog("test_catalog").unwrap());
-        assert!(!list.register_catalog("test_catalog").unwrap());
+        assert!(list.register_catalog_sync("test_catalog").unwrap());
+        assert!(!list.register_catalog_sync("test_catalog").unwrap());
     }
 
     #[tokio::test]
@@ -393,7 +347,7 @@ mod tests {
             table_id: 2333,
             table: NumbersTable::table(2333),
         };
-        catalog.register_local_table(register_table_req).unwrap();
+        catalog.register_table_sync(register_table_req).unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
@@ -405,48 +359,11 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
         };
-        catalog
-            .deregister_local_table(deregister_table_req)
-            .unwrap();
+        catalog.deregister_table_sync(deregister_table_req).unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
             .unwrap()
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_catalog_deregister_schema() {
-        let catalog = MemoryCatalogManager::with_default_setup();
-
-        // Registers a catalog, a schema, and a table.
-        let catalog_name = "foo_catalog".to_string();
-        let schema_name = "foo_schema".to_string();
-        let table_name = "foo_table".to_string();
-        let schema = RegisterSchemaRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-        };
-        let table = RegisterTableRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-            table_name,
-            table_id: 0,
-            table: NumbersTable::table(0),
-        };
-        catalog.register_local_catalog(&catalog_name).unwrap();
-        catalog.register_local_schema(schema).unwrap();
-        catalog.register_local_table(table).unwrap();
-
-        let request = DeregisterSchemaRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-        };
-
-        assert!(catalog.deregister_local_schema(request).unwrap());
-        assert!(!catalog
-            .schema_exist(&catalog_name, &schema_name)
-            .await
-            .unwrap());
     }
 }

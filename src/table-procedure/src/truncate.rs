@@ -234,44 +234,9 @@ impl TruncateTableData {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use table::engine::TableEngine;
 
     use super::*;
     use crate::test_util::TestEnv;
-
-    #[tokio::test]
-    async fn test_truncate_table_procedure() {
-        let env = TestEnv::new("truncate");
-        let table_name = "test_truncate";
-        let table_id = env.create_table(table_name).await;
-
-        let request = TruncateTableRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            table_id,
-        };
-        let TestEnv {
-            dir: _dir,
-            table_engine,
-            procedure_manager,
-            catalog_manager,
-        } = env;
-        let procedure =
-            TruncateTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-
-        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
-        watcher.changed().await.unwrap();
-
-        assert!(catalog_manager
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
-
-        let ctx = EngineContext::default();
-        assert!(table_engine.table_exists(&ctx, table_id));
-    }
 
     #[tokio::test]
     async fn test_truncate_not_exists_table() {
