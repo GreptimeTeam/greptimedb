@@ -521,6 +521,15 @@ impl FlushScheduler {
     }
 }
 
+impl Drop for FlushScheduler {
+    fn drop(&mut self) {
+        for (region_id, flush_status) in self.region_status.drain() {
+            // We are shutting down so notify all pending tasks.
+            flush_status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        }
+    }
+}
+
 /// Flush status of a region scheduled by the [FlushScheduler].
 ///
 /// Tracks running and pending flush tasks and all pending requests of a region.
