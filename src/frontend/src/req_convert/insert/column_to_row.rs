@@ -35,6 +35,6 @@ fn request_column_to_row(request: InsertRequest) -> Result<RowInsertRequest> {
     Ok(RowInsertRequest {
         table_name: request.table_name,
         rows: Some(rows),
-        region_number: request.region_number,
+        region_number: 0, // FIXME(zhongzc): deprecated field
     })
 }

@@ -24,6 +24,7 @@ pub mod heartbeat;
 pub(crate) mod insert;
 pub mod instance;
 pub(crate) mod metrics;
+pub(crate) mod region_req_factory;
 pub(crate) mod req_convert;
 mod script;
 mod server;

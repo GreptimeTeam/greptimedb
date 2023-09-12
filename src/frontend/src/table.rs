@@ -116,20 +116,20 @@ pub(crate) mod test {
 
     use super::*;
 
-    fn new_test_table_info(
+    pub fn new_test_table_info(
         table_id: u32,
         table_name: &str,
         region_numbers: impl Iterator<Item = u32>,
     ) -> TableInfo {
         let column_schemas = vec![
-            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
             .with_time_index(true),
-            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::int32_datatype(), true),
         ];
         let schema = SchemaBuilder::try_from(column_schemas)
             .unwrap()
