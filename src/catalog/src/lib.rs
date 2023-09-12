@@ -21,15 +21,13 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use api::v1::meta::RegionStat;
-use common_telemetry::{info, warn};
+use common_telemetry::warn;
 use futures::future::BoxFuture;
-use snafu::ResultExt;
-use table::engine::{EngineContext, TableEngineRef};
 use table::metadata::{TableId, TableType};
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
-use crate::error::{CreateTableSnafu, Result};
+use crate::error::Result;
 
 pub mod error;
 pub mod information_schema;
@@ -38,46 +36,10 @@ mod metrics;
 pub mod remote;
 pub mod system;
 pub mod table_source;
-pub mod tables;
 
 #[async_trait::async_trait]
 pub trait CatalogManager: Send + Sync {
     fn as_any(&self) -> &dyn Any;
-
-    /// Register a catalog.
-    ///
-    /// # Returns
-    ///
-    /// Whether the catalog is registered.
-    fn register_catalog(&self, name: &str) -> Result<bool>;
-
-    /// Register a local schema.
-    ///
-    /// # Returns
-    ///
-    /// Whether the schema is registered.
-    ///
-    /// # Errors
-    ///
-    /// This method will/should fail if catalog not exist
-    fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool>;
-
-    /// Deregisters a database within given catalog/schema to catalog manager
-    fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool>;
-
-    /// Registers a local table.
-    ///
-    /// # Returns
-    ///
-    /// Whether the table is registered.
-    ///
-    /// # Errors
-    ///
-    /// This method will/should fail if catalog or schema not exist
-    fn register_table(&self, request: RegisterTableRequest) -> Result<bool>;
-
-    /// Deregisters a table within given catalog/schema to catalog manager
-    fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()>;
 
     async fn catalog_names(&self) -> Result<Vec<String>>;
 
@@ -162,48 +124,6 @@ pub struct DeregisterSchemaRequest {
 pub struct RegisterSchemaRequest {
     pub catalog: String,
     pub schema: String,
-}
-
-pub(crate) async fn handle_system_table_request<'a, M: CatalogManager + ?Sized>(
-    manager: &'a M,
-    engine: TableEngineRef,
-    sys_table_requests: &'a mut Vec<RegisterSystemTableRequest>,
-) -> Result<()> {
-    for req in sys_table_requests.drain(..) {
-        let catalog_name = &req.create_table_request.catalog_name;
-        let schema_name = &req.create_table_request.schema_name;
-        let table_name = &req.create_table_request.table_name;
-        let table_id = req.create_table_request.id;
-
-        let table = manager.table(catalog_name, schema_name, table_name).await?;
-        let table = if let Some(table) = table {
-            table
-        } else {
-            let table = engine
-                .create_table(&EngineContext::default(), req.create_table_request.clone())
-                .await
-                .with_context(|_| CreateTableSnafu {
-                    table_info: common_catalog::format_full_table_name(
-                        catalog_name,
-                        schema_name,
-                        table_name,
-                    ),
-                })?;
-            manager.register_table(RegisterTableRequest {
-                catalog: catalog_name.clone(),
-                schema: schema_name.clone(),
-                table_name: table_name.clone(),
-                table_id,
-                table: table.clone(),
-            })?;
-            info!("Created and registered system table: {table_name}");
-            table
-        };
-        if let Some(hook) = req.open_hook {
-            (hook)(table).await?;
-        }
-    }
-    Ok(())
 }
 
 /// The stat of regions in the datanode node.

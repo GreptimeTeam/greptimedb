@@ -24,10 +24,7 @@ use table::TableRef;
 
 use crate::error::{CatalogNotFoundSnafu, Result, SchemaNotFoundSnafu, TableExistsSnafu};
 use crate::information_schema::InformationSchemaProvider;
-use crate::{
-    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest,
-};
+use crate::{CatalogManager, DeregisterTableRequest, RegisterSchemaRequest, RegisterTableRequest};
 
 type SchemaEntries = HashMap<String, HashMap<String, TableRef>>;
 
@@ -40,49 +37,6 @@ pub struct MemoryCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    fn register_catalog(&self, name: &str) -> Result<bool> {
-        self.register_catalog(name)
-    }
-    fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
-        self.register_table(request)
-    }
-
-    fn deregister_table(&self, request: DeregisterTableRequest) -> Result<()> {
-        self.deregister_table_sync(request)
-    }
-
-    fn register_schema(&self, request: RegisterSchemaRequest) -> Result<bool> {
-        self.register_schema_sync(request)
-    }
-
-    fn deregister_schema(&self, request: DeregisterSchemaRequest) -> Result<bool> {
-        let mut catalogs = self.catalogs.write().unwrap();
-        let schemas = catalogs
-            .get_mut(&request.catalog)
-            .with_context(|| CatalogNotFoundSnafu {
-                catalog_name: &request.catalog,
-            })?;
-        let table_count = schemas
-            .remove(&request.schema)
-            .with_context(|| SchemaNotFoundSnafu {
-                catalog: &request.catalog,
-                schema: &request.schema,
-            })?
-            .len();
-        decrement_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-            table_count as f64,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
-        );
-
-        decrement_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
-        );
-        Ok(true)
-    }
-
     async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.schema_exist_sync(catalog, schema)
     }
@@ -264,7 +218,7 @@ impl MemoryCatalogManager {
     }
 
     /// Registers a schema and returns an error if the catalog or schema does not exist.
-    pub fn register_table(&self, request: RegisterTableRequest) -> Result<bool> {
+    pub fn register_table_sync(&self, request: RegisterTableRequest) -> Result<bool> {
         let mut catalogs = self.catalogs.write().unwrap();
         let schema = catalogs
             .get_mut(&request.catalog)
@@ -328,7 +282,7 @@ impl MemoryCatalogManager {
             table_id: table.table_info().ident.table_id,
             table,
         };
-        let _ = manager.register_table(request).unwrap();
+        let _ = manager.register_table_sync(request).unwrap();
         manager
     }
 }

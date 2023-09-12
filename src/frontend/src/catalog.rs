@@ -23,10 +23,7 @@ use catalog::error::{
 use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
 use catalog::local::MemoryCatalogManager;
 use catalog::remote::KvCacheInvalidatorRef;
-use catalog::{
-    CatalogManager, DeregisterSchemaRequest, DeregisterTableRequest, RegisterSchemaRequest,
-    RegisterTableRequest,
-};
+use catalog::CatalogManager;
 use common_catalog::consts::{
     DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID,
 };
@@ -50,6 +47,10 @@ use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
 use crate::table::DistTable;
+
+/// Placeholder catalog name for system tables that are not in any
+/// catalog (or in every catalog).
+const EMPTY_CATALOG_NAME: &str = "";
 
 // There are two sources for finding a table: the `local_catalog_manager` and the
 // `table_metadata_manager`.
@@ -162,30 +163,37 @@ impl FrontendCatalogManager {
 
         self.backend_cache_invalidator.invalidate_key(&key).await;
     }
+
+    fn prepare_system_tables() -> MemoryCatalogManager {
+        // let mut catalog_manager = MemoryCatalogManager::new();
+        // catalog_manager.register_table_sync(RegisterTableRequest {
+        //     catalog: DEFAULT_CATALOG_NAME.to_string(),
+        //     schema: DEFAULT_SCHEMA_NAME.to_string(),
+        //     table_name: NUMBERS_TABLE_NAME.to_string(),
+        //     table_id: NUMBERS_TABLE_ID,
+        //     table: Arc::new(NumbersTable::table(NUMBERS_TABLE_ID)),
+        // });
+        // catalog_manager.register_table_sync(RegisterTableRequest {
+        //     catalog: INFORMATION_SCHEMA_NAME.to_string(),
+        //     schema: INFORMATION_SCHEMA_NAME.to_string(),
+        //     table_name: TABLES.to_string(),
+        //     table_id: TABLES_ID,
+        //     table: Arc::new(InformationSchemaTable::tables()),
+        // });
+        // catalog_manager.register_table_sync(RegisterTableRequest {
+        //     catalog: INFORMATION_SCHEMA_NAME.to_string(),
+        //     schema: INFORMATION_SCHEMA_NAME.to_string(),
+        //     table_name: COLUMNS.to_string(),
+        //     table_id: COLUMNS_ID,
+        //     table: Arc::new(InformationSchemaTable::columns()),
+        // });
+        // catalog_manager
+        todo!()
+    }
 }
 
 #[async_trait::async_trait]
 impl CatalogManager for FrontendCatalogManager {
-    fn register_catalog(&self, name: &str) -> CatalogResult<bool> {
-        self.local_catalog_manager.register_catalog(name)
-    }
-
-    fn register_table(&self, request: RegisterTableRequest) -> CatalogResult<bool> {
-        self.local_catalog_manager.register_table(request)
-    }
-
-    fn deregister_table(&self, _request: DeregisterTableRequest) -> CatalogResult<()> {
-        Ok(())
-    }
-
-    fn register_schema(&self, _request: RegisterSchemaRequest) -> catalog::error::Result<bool> {
-        unimplemented!("FrontendCatalogManager does not support registering schema")
-    }
-
-    fn deregister_schema(&self, _request: DeregisterSchemaRequest) -> catalog_err::Result<bool> {
-        unimplemented!("FrontendCatalogManager does not support deregistering schema")
-    }
-
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
         let stream = self
             .table_metadata_manager
