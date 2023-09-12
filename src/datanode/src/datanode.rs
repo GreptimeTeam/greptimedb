@@ -403,6 +403,7 @@ pub struct Datanode {
     region_server: RegionServer,
     query_engine: QueryEngineRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    plugins: Arc<Plugins>,
 }
 
 impl Datanode {
@@ -412,7 +413,7 @@ impl Datanode {
             MemoryCatalogManager::with_default_setup(),
             None,
             false,
-            plugins,
+            plugins.clone(),
         );
         let query_engine = query_engine_factory.query_engine();
 
@@ -457,6 +458,7 @@ impl Datanode {
             region_server,
             query_engine,
             greptimedb_telemetry_task,
+            plugins,
         })
     }
 
@@ -507,6 +509,10 @@ impl Datanode {
 
     pub fn query_engine(&self) -> QueryEngineRef {
         self.query_engine.clone()
+    }
+
+    pub fn plugins(&self) -> Arc<Plugins> {
+        self.plugins.clone()
     }
 
     // internal utils

@@ -180,12 +180,12 @@ impl StartCommand {
     }
 
     async fn build(self, opts: FrontendOptions) -> Result<Instance> {
-        logging::info!("Frontend start command: {:#?}", self);
-        logging::info!("Frontend options: {:#?}", opts);
-
         let (opts, plugins) = plugins::setup_frontend_plugins(opts)
             .await
             .context(StartFrontendSnafu)?;
+
+        logging::info!("Frontend start command: {:#?}", self);
+        logging::info!("Frontend options: {:#?}", opts);
 
         let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
             .await
