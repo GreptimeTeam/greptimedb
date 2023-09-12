@@ -153,8 +153,7 @@ object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
 promql = { path = "src/promql" }
 query = { path = "src/query" }
-# TODO(weny): waits for https://github.com/tikv/raft-engine/pull/335
-raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "571462e36621407b9920465a1a15b8b01b929a7f" }
+raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
 script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
