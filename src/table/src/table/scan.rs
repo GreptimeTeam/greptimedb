@@ -24,11 +24,13 @@ use common_query::physical_plan::{Partitioning, PhysicalPlan, PhysicalPlanRef};
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::execution::context::TaskContext;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::SchemaRef;
 use futures::{Stream, StreamExt};
 use snafu::OptionExt;
+
+use crate::table::metrics::MemoryUsageMetrics;
 
 /// Adapt greptime's [SendableRecordBatchStream] to GreptimeDB's [PhysicalPlan].
 pub struct StreamScanAdapter {
@@ -97,10 +99,10 @@ impl PhysicalPlan for StreamScanAdapter {
     ) -> QueryResult<SendableRecordBatchStream> {
         let mut stream = self.stream.lock().unwrap();
         let stream = stream.take().context(query_error::ExecuteRepeatedlySnafu)?;
-        let baseline_metric = BaselineMetrics::new(&self.metric, partition);
+        let mem_usage_metrics = MemoryUsageMetrics::new(&self.metric, partition);
         Ok(Box::pin(StreamWithMetricWrapper {
             stream,
-            metric: baseline_metric,
+            metric: mem_usage_metrics,
         }))
     }
 
@@ -111,7 +113,7 @@ impl PhysicalPlan for StreamScanAdapter {
 
 pub struct StreamWithMetricWrapper {
     stream: SendableRecordBatchStream,
-    metric: BaselineMetrics,
+    metric: MemoryUsageMetrics,
 }
 
 impl Stream for StreamWithMetricWrapper {
@@ -119,9 +121,16 @@ impl Stream for StreamWithMetricWrapper {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        let _timer = this.metric.elapsed_compute().timer();
         let poll = this.stream.poll_next_unpin(cx);
-        if let Poll::Ready(Option::Some(Result::Ok(record_batch))) = &poll {
+        if let Poll::Ready(Some(Ok(record_batch))) = &poll {
+            let batch_mem_size = record_batch
+                .columns()
+                .iter()
+                .map(|vec_ref| vec_ref.memory_size())
+                .sum::<usize>();
+            // we don't record elapsed time here
+            // since it's calling storage api involving I/O ops
+            this.metric.record_mem_usage(batch_mem_size);
             this.metric.record_output(record_batch.num_rows());
         }
 
