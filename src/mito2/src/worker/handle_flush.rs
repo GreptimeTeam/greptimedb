@@ -47,6 +47,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             files_to_remove: Vec::new(),
             compaction_time_window: None,
             flushed_entry_id: Some(request.flushed_entry_id),
+            flushed_sequence: Some(request.flushed_sequence),
         };
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         if let Err(e) = region.manifest_manager.update(action_list).await {

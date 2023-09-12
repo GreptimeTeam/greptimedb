@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 
-use api::v1::{Rows, SemanticType};
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, Row, Rows, SemanticType};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -27,7 +28,9 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::test_util::{
+    build_rows, build_rows_for_key, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+};
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
     let request = ScanRequest::default();
@@ -37,6 +40,26 @@ async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expect
     let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+fn add_tag1() -> RegionAlterRequest {
+    RegionAlterRequest {
+        schema_version: 0,
+        kind: AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag_1",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 3,
+                },
+                location: Some(AddColumnLocation::First),
+            }],
+        },
+    }
 }
 
 #[tokio::test]
@@ -62,23 +85,7 @@ async fn test_alter_region() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    let request = RegionAlterRequest {
-        schema_version: 0,
-        kind: AlterKind::AddColumns {
-            columns: vec![AddColumn {
-                column_metadata: ColumnMetadata {
-                    column_schema: ColumnSchema::new(
-                        "tag_1",
-                        ConcreteDataType::string_datatype(),
-                        true,
-                    ),
-                    semantic_type: SemanticType::Tag,
-                    column_id: 3,
-                },
-                location: Some(AddColumnLocation::First),
-            }],
-        },
-    };
+    let request = add_tag1();
     engine
         .handle_request(region_id, RegionRequest::Alter(request))
         .await
@@ -91,6 +98,98 @@ async fn test_alter_region() {
 |       | 0     | 0.0     | 1970-01-01T00:00:00 |
 |       | 1     | 1.0     | 1970-01-01T00:00:01 |
 |       | 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+-------+---------+---------------------+";
+    scan_check_after_alter(&engine, region_id, expected).await;
+    let check_region = |engine: &MitoEngine| {
+        let region = engine.get_region(region_id).unwrap();
+        let version_data = region.version_control.current();
+        assert_eq!(1, version_data.last_entry_id);
+        assert_eq!(3, version_data.committed_sequence);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(1, version_data.version.flushed_entry_id);
+        assert_eq!(3, version_data.version.flushed_sequence);
+    };
+    check_region(&engine);
+
+    // Reopen region.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    scan_check_after_alter(&engine, region_id, expected).await;
+    check_region(&engine);
+}
+
+/// Build rows with schema (string, f64, ts_millis, string).
+fn build_rows_for_tags(
+    tag0: &str,
+    tag1: &str,
+    start: usize,
+    end: usize,
+    value_start: usize,
+) -> Vec<Row> {
+    (start..end)
+        .enumerate()
+        .map(|(idx, ts)| Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(tag0.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(tag1.to_string())),
+                },
+            ],
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_put_after_alter() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let mut column_schemas = rows_schema(&request);
+    let region_dir = request.region_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = add_tag1();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(request))
+        .await
+        .unwrap();
+
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_1 | tag_0 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | b     | 0.0     | 1970-01-01T00:00:00 |
+|       | b     | 1.0     | 1970-01-01T00:00:01 |
 +-------+-------+---------+---------------------+";
     scan_check_after_alter(&engine, region_id, expected).await;
 
@@ -107,5 +206,40 @@ async fn test_alter_region() {
         )
         .await
         .unwrap();
-    scan_check_after_alter(&engine, region_id, expected).await;
+
+    // Put with old schema.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 2, 3, 2),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Push tag_1 to schema.
+    column_schemas.push(api::v1::ColumnSchema {
+        column_name: "tag_1".to_string(),
+        datatype: ColumnDataType::String as i32,
+        semantic_type: SemanticType::Tag as i32,
+    });
+    // Put with new schema.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_tags("a", "a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Scan again.
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_1 | tag_0 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+| a     | a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | a     | 1.0     | 1970-01-01T00:00:01 |
+|       | b     | 0.0     | 1970-01-01T00:00:00 |
+|       | b     | 1.0     | 1970-01-01T00:00:01 |
+|       | b     | 2.0     | 1970-01-01T00:00:02 |
++-------+-------+---------+---------------------+";
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }
