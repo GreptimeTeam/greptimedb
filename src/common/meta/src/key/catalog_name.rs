@@ -119,7 +119,7 @@ impl CatalogManager {
         Ok(())
     }
 
-    pub async fn exist(&self, catalog: CatalogNameKey<'_>) -> Result<bool> {
+    pub async fn exists(&self, catalog: CatalogNameKey<'_>) -> Result<bool> {
         let raw_key = catalog.as_raw_key();
 
         self.kv_backend.exists(&raw_key).await
@@ -164,10 +164,10 @@ mod tests {
 
         manager.create(catalog_key, false).await.unwrap();
 
-        assert!(manager.exist(catalog_key).await.unwrap());
+        assert!(manager.exists(catalog_key).await.unwrap());
 
         let wrong_catalog_key = CatalogNameKey::new("my-wrong");
 
-        assert!(!manager.exist(wrong_catalog_key).await.unwrap());
+        assert!(!manager.exists(wrong_catalog_key).await.unwrap());
     }
 }

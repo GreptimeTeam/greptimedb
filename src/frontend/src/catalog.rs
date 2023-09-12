@@ -190,27 +190,27 @@ impl CatalogManager for FrontendCatalogManager {
         Ok(tables)
     }
 
-    async fn catalog_exist(&self, catalog: &str) -> CatalogResult<bool> {
+    async fn catalog_exists(&self, catalog: &str) -> CatalogResult<bool> {
         self.table_metadata_manager
             .catalog_manager()
-            .exist(CatalogNameKey::new(catalog))
+            .exists(CatalogNameKey::new(catalog))
             .await
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn schema_exist(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
+    async fn schema_exists(&self, catalog: &str, schema: &str) -> CatalogResult<bool> {
         if self.system_catalog.schema_exist(schema) {
             return Ok(true);
         }
 
         self.table_metadata_manager
             .schema_manager()
-            .exist(SchemaNameKey::new(catalog, schema))
+            .exists(SchemaNameKey::new(catalog, schema))
             .await
             .context(TableMetadataManagerSnafu)
     }
 
-    async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
+    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> CatalogResult<bool> {
         if self.system_catalog.table_exist(schema, table) {
             return Ok(true);
         }

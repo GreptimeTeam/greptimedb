@@ -538,7 +538,7 @@ impl SqlQueryHandler for Instance {
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.catalog_manager
-            .schema_exist(catalog, schema)
+            .schema_exists(catalog, schema)
             .await
             .context(error::CatalogSnafu)
     }

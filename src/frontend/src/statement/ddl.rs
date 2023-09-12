@@ -349,7 +349,7 @@ impl StatementExecutor {
         let exists = self
             .table_metadata_manager
             .schema_manager()
-            .exist(schema_key)
+            .exists(schema_key)
             .await
             .context(TableMetadataManagerSnafu)?;
 

@@ -161,7 +161,7 @@ impl SchemaManager {
         Ok(())
     }
 
-    pub async fn exist(&self, schema: SchemaNameKey<'_>) -> Result<bool> {
+    pub async fn exists(&self, schema: SchemaNameKey<'_>) -> Result<bool> {
         let raw_key = schema.as_raw_key();
 
         self.kv_backend.exists(&raw_key).await
@@ -227,10 +227,10 @@ mod tests {
         let schema_key = SchemaNameKey::new("my-catalog", "my-schema");
         manager.create(schema_key, None, false).await.unwrap();
 
-        assert!(manager.exist(schema_key).await.unwrap());
+        assert!(manager.exists(schema_key).await.unwrap());
 
         let wrong_schema_key = SchemaNameKey::new("my-catalog", "my-wrong");
 
-        assert!(!manager.exist(wrong_schema_key).await.unwrap());
+        assert!(!manager.exists(wrong_schema_key).await.unwrap());
     }
 }
