@@ -23,8 +23,8 @@ use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished, OptionOutputTx};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job finished.
@@ -33,13 +33,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
-        let region = match self.regions.get_writable_region(region_id) {
-            Ok(v) => v,
-            Err(e) => {
-                // We may dropped or closed the region. The region may be readonly.
-                request.on_failure(e);
-                return;
-            }
+        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
+            return;
         };
 
         // Write region edit to manifest.
@@ -103,14 +98,10 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_request(
         &mut self,
         region_id: RegionId,
-        sender: OptionOutputTx,
+        mut sender: OptionOutputTx,
     ) {
-        let region = match self.regions.get_writable_region(region_id) {
-            Ok(v) => v,
-            Err(e) => {
-                send_result(sender, Err(e));
-                return;
-            }
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+            return;
         };
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);

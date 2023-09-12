@@ -451,6 +451,12 @@ impl From<Sender<Result<Output>>> for OptionOutputTx {
     }
 }
 
+impl OnFailure for OptionOutputTx {
+    fn on_failure(&mut self, err: Error) {
+        self.send_mut(Err(err));
+    }
+}
+
 /// Callback on failure.
 pub(crate) trait OnFailure {
     /// Handles `err` on failure.
@@ -605,25 +611,27 @@ pub(crate) struct FlushFinished {
 }
 
 impl FlushFinished {
-    pub(crate) fn on_failure(self, err: Error) {
-        let err = Arc::new(err);
+    pub(crate) fn on_success(self) {
         for sender in self.senders {
+            sender.send(Ok(Output::AffectedRows(0)));
+        }
+    }
+}
+
+impl OnFailure for FlushFinished {
+    fn on_failure(&mut self, err: Error) {
+        let err = Arc::new(err);
+        for sender in self.senders.drain(..) {
             sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
         }
         // Clean flushed files.
-        for file in self.file_metas {
+        for file in &self.file_metas {
             self.file_purger.send_request(PurgeRequest {
                 region_id: file.region_id,
                 file_id: file.file_id,
             });
-        }
-    }
-
-    pub(crate) fn on_success(self) {
-        for sender in self.senders {
-            sender.send(Ok(Output::AffectedRows(0)));
         }
     }
 }
@@ -655,11 +663,13 @@ impl CompactionFinished {
         self.sender.send(Ok(AffectedRows(0)));
         info!("Successfully compacted region: {}", self.region_id);
     }
+}
 
+impl OnFailure for CompactionFinished {
     /// Compaction succeeded but failed to update manifest or region's already been dropped,
     /// clean compaction output files.
-    pub fn on_failure(self, err: Error) {
-        self.sender.send(Err(err));
+    fn on_failure(&mut self, err: Error) {
+        self.sender.send_mut(Err(err));
         for file in &self.compacted_files {
             let file_id = file.file_id;
             warn!(

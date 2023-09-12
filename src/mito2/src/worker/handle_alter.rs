@@ -23,7 +23,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataR
 use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::MemtableBuilderRef;
@@ -37,10 +37,9 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
-        sender: OptionOutputTx,
+        mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
+        let Some(region) = self.regions.get_region_or(region_id, &mut sender) else {
             return;
         };
 

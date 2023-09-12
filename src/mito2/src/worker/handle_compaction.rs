@@ -19,22 +19,18 @@ use store_api::storage::RegionId;
 use crate::compaction::CompactionRequest;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{CompactionFailed, CompactionFinished, OptionOutputTx};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
     pub(crate) fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
-        sender: OptionOutputTx,
+        mut sender: OptionOutputTx,
     ) {
-        let region = match self.regions.get_writable_region(region_id) {
-            Ok(v) => v,
-            Err(e) => {
-                send_result(sender, Err(e));
-                return;
-            }
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+            return;
         };
 
         let request = self.new_compaction_request(&region, sender);
@@ -54,12 +50,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
-        let region = match self.regions.get_writable_region(region_id) {
-            Ok(v) => v,
-            Err(e) => {
-                request.on_failure(e);
-                return;
-            }
+        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
+            return;
         };
 
         // Write region edit to manifest.

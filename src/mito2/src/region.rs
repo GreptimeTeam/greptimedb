@@ -136,7 +136,11 @@ impl RegionMap {
     }
 
     /// Gets region by region id or call the failure callback.
-    pub(crate) fn get_region_or_fail<F: OnFailure>(&self, region_id: RegionId, cb: &mut F) -> Option<MitoRegionRef> {
+    pub(crate) fn get_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
         let region_opt = self.get_region(region_id);
         if region_opt.is_none() {
             cb.on_failure(RegionNotFoundSnafu { region_id }.build());
@@ -147,7 +151,7 @@ impl RegionMap {
     /// Gets writable region by region id.
     ///
     /// Returns error if the region does not exist or is readonly.
-    pub(crate) fn get_writable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+    pub(crate) fn writable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
         let region = self
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
@@ -158,13 +162,17 @@ impl RegionMap {
     /// Gets writable region by region id.
     ///
     /// Calls the callback if the region does not exist or is readonly.
-    pub(crate) fn get_writable_region_or_fail<F: OnFailure>(&self, region_id: RegionId, cb: &mut F) -> Option<MitoRegionRef> {
-        match self.get_writable_region(region_id) {
+    pub(crate) fn writable_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
+        match self.writable_region(region_id) {
             Ok(region) => Some(region),
             Err(e) => {
                 cb.on_failure(e);
                 None
-            },
+            }
         }
     }
 

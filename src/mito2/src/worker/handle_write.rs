@@ -102,13 +102,12 @@ impl<S> RegionWorkerLoop<S> {
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
-                let region = match self.regions.get_writable_region(region_id) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // No such region or the region is read only.
-                        send_result(sender_req.sender, Err(e));
-                        continue;
-                    }
+                let Some(region) = self
+                    .regions
+                    .writable_region_or(region_id, &mut sender_req.sender)
+                else {
+                    // No such region or the region is read only.
+                    continue;
                 };
 
                 let region_ctx = RegionWriteCtx::new(region.region_id, &region.version_control);
