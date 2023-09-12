@@ -112,7 +112,7 @@ fn catalog_manager() -> Result<Arc<MemoryCatalogManager>> {
         table_id: NUMBERS_TABLE_ID,
         table: NumbersTable::table(NUMBERS_TABLE_ID),
     };
-    let _ = catalog_manager.register_table(req).unwrap();
+    let _ = catalog_manager.register_table_sync(req).unwrap();
 
     Ok(catalog_manager)
 }

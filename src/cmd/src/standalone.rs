@@ -311,11 +311,11 @@ impl StartCommand {
             .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+        let catalog_manager = FrontendCatalogManager::new(
             kv_store.clone(),
             Arc::new(DummyKvCacheInvalidator),
             Arc::new(StandaloneDatanodeManager(region_server.clone())),
-        ));
+        );
 
         catalog_manager
             .table_metadata_manager_ref()

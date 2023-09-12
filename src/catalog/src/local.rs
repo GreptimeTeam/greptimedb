@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod manager;
 pub mod memory;
 
 pub use memory::{new_memory_catalog_manager, MemoryCatalogManager};

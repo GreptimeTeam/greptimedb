@@ -15,7 +15,7 @@
 //! Procedure to create a table.
 
 use async_trait::async_trait;
-use catalog::{CatalogManagerRef, RegisterTableRequest};
+use catalog::CatalogManagerRef;
 use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
@@ -240,24 +240,12 @@ impl CreateTableProcedure {
             region_numbers: self.data.request.region_numbers.clone(),
         };
         // Safety: The table is already created.
-        let table = self
+        let _ = self
             .table_engine
             .open_table(&engine_ctx, open_req)
             .await
             .map_err(Error::from_error_ext)?
             .unwrap();
-
-        let register_req = RegisterTableRequest {
-            catalog: self.data.request.catalog_name.clone(),
-            schema: self.data.request.schema_name.clone(),
-            table_name: self.data.request.table_name.clone(),
-            table_id: self.data.request.id,
-            table,
-        };
-        let _ = self
-            .catalog_manager
-            .register_local_table(register_req)
-            .map_err(Error::from_error_ext)?;
 
         Ok(Status::Done)
     }

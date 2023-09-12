@@ -15,7 +15,7 @@
 //! Procedure to drop a table.
 
 use async_trait::async_trait;
-use catalog::{CatalogManagerRef, DeregisterTableRequest};
+use catalog::CatalogManagerRef;
 use common_procedure::error::SubprocedureFailedSnafu;
 use common_procedure::{
     Context, Error, LockKey, Procedure, ProcedureId, ProcedureManager, ProcedureState,
@@ -144,29 +144,6 @@ impl DropTableProcedure {
     }
 
     async fn on_remove_from_catalog(&mut self) -> Result<Status> {
-        let request = &self.data.request;
-        let has_table = self
-            .catalog_manager
-            .table(
-                &request.catalog_name,
-                &request.schema_name,
-                &request.table_name,
-            )
-            .await
-            .context(AccessCatalogSnafu)?
-            .is_some();
-        if has_table {
-            // The table is still in the catalog.
-            let deregister_table_req = DeregisterTableRequest {
-                catalog: self.data.request.catalog_name.clone(),
-                schema: self.data.request.schema_name.clone(),
-                table_name: self.data.request.table_name.clone(),
-            };
-            self.catalog_manager
-                .deregister_local_table(deregister_table_req)
-                .context(AccessCatalogSnafu)?;
-        }
-
         self.data.state = DropTableState::EngineDropTable;
         // Assign procedure id to the subprocedure.
         self.data.subprocedure_id = Some(ProcedureId::random());
@@ -264,44 +241,9 @@ impl DropTableData {
 #[cfg(test)]
 mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use table::engine::TableEngine;
 
     use super::*;
     use crate::test_util::TestEnv;
-
-    #[tokio::test]
-    async fn test_drop_table_procedure() {
-        let env = TestEnv::new("drop");
-        let table_name = "test_drop";
-        let table_id = env.create_table(table_name).await;
-
-        let request = DropTableRequest {
-            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-            table_name: table_name.to_string(),
-            table_id,
-        };
-        let TestEnv {
-            dir: _dir,
-            table_engine,
-            procedure_manager,
-            catalog_manager,
-        } = env;
-        let procedure =
-            DropTableProcedure::new(request, catalog_manager.clone(), table_engine.clone());
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-
-        let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
-        watcher.changed().await.unwrap();
-
-        assert!(!catalog_manager
-            .table_exist(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
-            .await
-            .unwrap());
-
-        let ctx = EngineContext::default();
-        assert!(!table_engine.table_exists(&ctx, table_id,));
-    }
 
     #[tokio::test]
     async fn test_drop_not_exists_table() {

@@ -27,7 +27,6 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::local::manager::SystemTableInitializer;
 use catalog::remote::CachedMetaKvBackend;
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
@@ -78,16 +77,14 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
-use table::engine::manager::MemoryTableEngineManager;
 
 use self::distributed::DistRegionRequestHandler;
 use self::standalone::StandaloneTableMetadataCreator;
 use crate::catalog::FrontendCatalogManager;
 use crate::delete::{Deleter, DeleterRef};
 use crate::error::{
-    self, CatalogSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
-    MissingMetasrvOptsSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
-    SqlExecInterceptedSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
+    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
@@ -154,11 +151,11 @@ impl Instance {
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        let catalog_manager = Arc::new(FrontendCatalogManager::new(
+        let catalog_manager = FrontendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             datanode_clients.clone(),
-        ));
+        );
         let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
 
         let region_request_handler = DistRegionRequestHandler::arc(
@@ -397,14 +394,6 @@ impl FrontendInstance for Instance {
         if let Some(heartbeat_task) = &self.heartbeat_task {
             heartbeat_task.start().await?;
         }
-
-        let initializer = SystemTableInitializer::try_new(
-            Arc::new(MemoryTableEngineManager::new_empty()),
-            self.catalog_manager.clone(),
-        )
-        .await
-        .context(CatalogSnafu)?;
-        initializer.init().await.context(CatalogSnafu)?;
 
         self.script_executor.start(self).await?;
 
