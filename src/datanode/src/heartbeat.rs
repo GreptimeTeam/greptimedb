@@ -196,11 +196,9 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
+                                    let peer = Some(Peer { id: node_id, addr: addr.clone() });
                                     let req = HeartbeatRequest {
-                                        peer: Some(Peer {
-                                            id: node_id,
-                                            addr: addr.clone(),
-                                        }),
+                                        peer,
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
@@ -216,19 +214,18 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        // TODO(jeremy): refactor load_status
-                        let (_,region_stats) = Self::load_stats(&region_server_clone).await;
+                        let peer = Some(Peer { id: node_id, addr: addr.clone() });
+                        let region_stats = Self::load_region_stats(&region_server_clone).await;
+                        let now = Instant::now();
+                        let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
-                            peer: Some(Peer {
-                                id: node_id,
-                                addr: addr.clone(),
-                            }),
+                            peer,
                             region_stats,
-                            duration_since_epoch: (Instant::now() - epoch).as_millis() as u64,
+                            duration_since_epoch,
                             node_epoch,
                             ..Default::default()
                         };
-                        sleep.as_mut().reset(Instant::now() + Duration::from_millis(interval));
+                        sleep.as_mut().reset(now + Duration::from_millis(interval));
                         Some(req)
                     }
                 };
@@ -260,9 +257,9 @@ impl HeartbeatTask {
         Ok(())
     }
 
-    async fn load_stats(region_server: &RegionServer) -> (u64, Vec<RegionStat>) {
+    async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
         let region_ids = region_server.opened_region_ids();
-        let region_stats = region_ids
+        region_ids
             .into_iter()
             .map(|region_id| RegionStat {
                 // TODO(ruihang): scratch more info
@@ -270,9 +267,7 @@ impl HeartbeatTask {
                 engine: "MitoEngine".to_string(),
                 ..Default::default()
             })
-            .collect::<Vec<_>>();
-
-        (region_stats.len() as _, region_stats)
+            .collect::<Vec<_>>()
     }
 
     pub async fn close(&self) -> Result<()> {
