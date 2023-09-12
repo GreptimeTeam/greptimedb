@@ -31,7 +31,6 @@ use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDat
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
-use query::QueryEngineRef;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -39,8 +38,8 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    IllegalConfigSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu,
-    StartFrontendSnafu,
+    IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFrontendSnafu,
 };
 use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
@@ -318,13 +317,18 @@ impl StartCommand {
             Arc::new(StandaloneDatanodeManager(region_server.clone())),
         ));
 
+        catalog_manager
+            .table_metadata_manager_ref()
+            .init()
+            .await
+            .context(InitMetadataSnafu)?;
+
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
             plugins,
             kv_store,
             procedure_manager,
             catalog_manager,
-            datanode.query_engine(),
             region_server,
         )
         .await?;
@@ -344,19 +348,17 @@ async fn build_frontend(
     kv_store: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
     catalog_manager: CatalogManagerRef,
-    query_engine: QueryEngineRef,
     region_server: RegionServer,
 ) -> Result<FeInstance> {
-    let mut frontend_instance = FeInstance::try_new_standalone(
+    let frontend_instance = FeInstance::try_new_standalone(
         kv_store,
         procedure_manager,
         catalog_manager,
-        query_engine,
+        plugins,
         region_server,
     )
     .await
     .context(StartFrontendSnafu)?;
-    frontend_instance.set_plugins(plugins.clone());
     Ok(frontend_instance)
 }
 
