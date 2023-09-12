@@ -49,10 +49,10 @@ pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
 // TODO(weny): removes it.
+mod kv_backend_helper;
 #[allow(deprecated)]
 pub mod table_region;
 // TODO(weny): removes it.
-mod kv_backend_helper;
 #[allow(deprecated)]
 pub mod table_route;
 
