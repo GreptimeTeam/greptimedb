@@ -451,6 +451,12 @@ impl From<Sender<Result<Output>>> for OptionOutputTx {
     }
 }
 
+/// Callback on failure.
+pub(crate) trait OnFailure {
+    /// Handles `err` on failure.
+    fn on_failure(&mut self, err: Error);
+}
+
 /// Sender and write request.
 #[derive(Debug)]
 pub(crate) struct SenderWriteRequest {

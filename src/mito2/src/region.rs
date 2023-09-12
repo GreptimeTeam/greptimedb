@@ -31,6 +31,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
 
 /// Metadata and runtime status of a region.
@@ -128,13 +129,22 @@ impl RegionMap {
         regions.insert(region.region_id, region);
     }
 
-    /// Get region by region id.
+    /// Gets region by region id.
     pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         let regions = self.regions.read().unwrap();
         regions.get(&region_id).cloned()
     }
 
-    /// Get writable region by region id.
+    /// Gets region by region id or call the failure callback.
+    pub(crate) fn get_region_or_fail<F: OnFailure>(&self, region_id: RegionId, cb: &mut F) -> Option<MitoRegionRef> {
+        let region_opt = self.get_region(region_id);
+        if region_opt.is_none() {
+            cb.on_failure(RegionNotFoundSnafu { region_id }.build());
+        }
+        region_opt
+    }
+
+    /// Gets writable region by region id.
     ///
     /// Returns error if the region does not exist or is readonly.
     pub(crate) fn get_writable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
@@ -143,6 +153,19 @@ impl RegionMap {
             .context(RegionNotFoundSnafu { region_id })?;
         ensure!(region.is_writable(), RegionReadonlySnafu { region_id });
         Ok(region)
+    }
+
+    /// Gets writable region by region id.
+    ///
+    /// Calls the callback if the region does not exist or is readonly.
+    pub(crate) fn get_writable_region_or_fail<F: OnFailure>(&self, region_id: RegionId, cb: &mut F) -> Option<MitoRegionRef> {
+        match self.get_writable_region(region_id) {
+            Ok(region) => Some(region),
+            Err(e) => {
+                cb.on_failure(e);
+                None
+            },
+        }
     }
 
     /// Remove region by id.
