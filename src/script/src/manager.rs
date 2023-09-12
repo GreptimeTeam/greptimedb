@@ -160,59 +160,22 @@ impl ScriptManager {
 
 #[cfg(test)]
 mod tests {
-    use catalog::CatalogManager;
-    use common_config::WalConfig;
-    use common_test_util::temp_dir::create_temp_dir;
-    use log_store::raft_engine::log_store::RaftEngineLogStore;
-    use mito::config::EngineConfig as TableEngineConfig;
-    use mito::engine::MitoEngine;
-    use mito::table::test_util::new_test_object_store;
+    use catalog::local::MemoryCatalogManager;
     use query::QueryEngineFactory;
-    use storage::compaction::noop::NoopCompactionScheduler;
-    use storage::config::EngineConfig as StorageEngineConfig;
-    use storage::EngineImpl;
-    use table::engine::manager::MemoryTableEngineManager;
 
     use super::*;
-
-    type DefaultEngine = MitoEngine<EngineImpl<RaftEngineLogStore>>;
 
     #[ignore = "script engine is temporary disabled"]
     #[tokio::test]
     async fn test_insert_find_compile_script() {
-        let wal_dir = create_temp_dir("test_insert_find_compile_script_wal");
-        let wal_dir_str = wal_dir.path().to_string_lossy().to_string();
-
         common_telemetry::init_default_ut_logging();
-        let (_dir, object_store) = new_test_object_store("test_insert_find_compile_script").await;
-        let log_store = RaftEngineLogStore::try_new(wal_dir_str, WalConfig::default())
-            .await
-            .unwrap();
-        let compaction_scheduler = Arc::new(NoopCompactionScheduler::default());
-        let mock_engine = Arc::new(DefaultEngine::new(
-            TableEngineConfig::default(),
-            EngineImpl::new(
-                StorageEngineConfig::default(),
-                Arc::new(log_store),
-                object_store.clone(),
-                compaction_scheduler,
-            )
-            .unwrap(),
-            object_store,
-        ));
-        let engine_manager = Arc::new(MemoryTableEngineManager::new(mock_engine.clone()));
-        let catalog_manager = Arc::new(
-            catalog::local::LocalCatalogManager::try_new(engine_manager)
-                .await
-                .unwrap(),
-        );
+        let catalog_manager = MemoryCatalogManager::new();
 
         let factory = QueryEngineFactory::new(catalog_manager.clone(), None, false);
         let query_engine = factory.query_engine();
         let mgr = ScriptManager::new(catalog_manager.clone(), query_engine)
             .await
             .unwrap();
-        catalog_manager.start().await.unwrap();
 
         let schema = "schema";
         let name = "test";

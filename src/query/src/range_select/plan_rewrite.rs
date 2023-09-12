@@ -380,14 +380,13 @@ mod test {
         let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
         assert!(catalog_list
-            .register_table(RegisterTableRequest {
+            .register_local_table(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,
                 table_id: 1024,
                 table,
             })
-            .await
             .is_ok());
         QueryEngineFactory::new(catalog_list, None, false).query_engine()
     }
