@@ -1356,7 +1356,7 @@ mod test {
     use std::time::{Duration, UNIX_EPOCH};
 
     use catalog::local::MemoryCatalogManager;
-    use catalog::{CatalogManager, RegisterTableRequest};
+    use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -1412,7 +1412,7 @@ mod test {
         let table = EmptyTable::from_table_info(&table_info);
         let catalog_list = MemoryCatalogManager::with_default_setup();
         assert!(catalog_list
-            .register_local_table(RegisterTableRequest {
+            .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
                 table_name,

@@ -92,27 +92,6 @@ impl TestEnv {
             catalog_manager,
         }
     }
-
-    pub async fn create_table(&self, table_name: &str) -> TableId {
-        let request = new_create_request(table_name);
-        let table_id = request.id;
-        let procedure = CreateTableProcedure::new(
-            request,
-            self.catalog_manager.clone(),
-            self.table_engine.clone(),
-            self.table_engine.clone(),
-        );
-
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
-        let mut watcher = self
-            .procedure_manager
-            .submit(procedure_with_id)
-            .await
-            .unwrap();
-        watcher.changed().await.unwrap();
-
-        table_id
-    }
 }
 
 pub fn schema_for_test() -> RawSchema {

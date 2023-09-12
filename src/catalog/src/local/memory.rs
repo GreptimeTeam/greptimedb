@@ -311,7 +311,7 @@ mod tests {
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
 
-        catalog_list.register_local_table(register_request).unwrap();
+        catalog_list.register_table_sync(register_request).unwrap();
         let table = catalog_list
             .table(
                 DEFAULT_CATALOG_NAME,
@@ -347,7 +347,7 @@ mod tests {
             table_id: 2333,
             table: NumbersTable::table(2333),
         };
-        catalog.register_local_table(register_table_req).unwrap();
+        catalog.register_table_sync(register_table_req).unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
@@ -359,48 +359,11 @@ mod tests {
             schema: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: table_name.to_string(),
         };
-        catalog
-            .deregister_local_table(deregister_table_req)
-            .unwrap();
+        catalog.deregister_table_sync(deregister_table_req).unwrap();
         assert!(catalog
             .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name)
             .await
             .unwrap()
             .is_none());
-    }
-
-    #[tokio::test]
-    async fn test_catalog_deregister_schema() {
-        let catalog = MemoryCatalogManager::with_default_setup();
-
-        // Registers a catalog, a schema, and a table.
-        let catalog_name = "foo_catalog".to_string();
-        let schema_name = "foo_schema".to_string();
-        let table_name = "foo_table".to_string();
-        let schema = RegisterSchemaRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-        };
-        let table = RegisterTableRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-            table_name,
-            table_id: 0,
-            table: NumbersTable::table(0),
-        };
-        catalog.register_local_catalog(&catalog_name).unwrap();
-        catalog.register_local_schema(schema).unwrap();
-        catalog.register_local_table(table).unwrap();
-
-        let request = DeregisterSchemaRequest {
-            catalog: catalog_name.clone(),
-            schema: schema_name.clone(),
-        };
-
-        assert!(catalog.deregister_local_schema(request).unwrap());
-        assert!(!catalog
-            .schema_exist(&catalog_name, &schema_name)
-            .await
-            .unwrap());
     }
 }
