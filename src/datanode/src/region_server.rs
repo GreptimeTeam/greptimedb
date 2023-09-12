@@ -28,7 +28,7 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogList, CatalogProvider};
@@ -48,7 +48,7 @@ use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::scan::StreamScanAdapter;
@@ -57,7 +57,7 @@ use tonic::{Request, Response, Result as TonicResult};
 use crate::error::{
     BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
     GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, UnsupportedOutputSnafu,
+    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
 };
 
 #[derive(Clone)]
@@ -94,6 +94,11 @@ impl RegionServer {
 
     pub fn runtime(&self) -> Arc<Runtime> {
         self.inner.runtime.clone()
+    }
+
+    /// Stop the region server.
+    pub async fn stop(&self) -> Result<()> {
+        self.inner.stop().await
     }
 }
 
@@ -271,6 +276,32 @@ impl RegionServerInner {
             }
             Output::Stream(stream) => Ok(stream),
         }
+    }
+
+    async fn stop(&self) -> Result<()> {
+        for region in self.region_map.iter() {
+            let region_id = *region.key();
+            let engine = region.value();
+            let closed = engine
+                .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .await;
+            match closed {
+                Ok(_) => info!("Region {region_id} is closed"),
+                Err(e) => warn!("Failed to close region {region_id}, err: {e}"),
+            }
+        }
+        self.region_map.clear();
+
+        let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
+        for (engine_name, engine) in engines {
+            engine
+                .stop()
+                .await
+                .context(StopRegionEngineSnafu { name: &engine_name })?;
+            info!("Region engine {engine_name} is stopped");
+        }
+
+        Ok(())
     }
 }
 
