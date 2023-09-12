@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 
-use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::manifest::ManifestVersion;
@@ -130,10 +129,6 @@ impl RegionManifestBuilder {
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
         self.manifest_version = manifest_version;
         self.flushed_entry_id = truncate.flushed_entry_id;
-        info!(
-            "Truncate region {} to entry {}",
-            truncate.region_id, truncate.flushed_entry_id
-        );
         self.files.clear();
     }
 

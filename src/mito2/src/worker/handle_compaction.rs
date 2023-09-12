@@ -17,6 +17,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::compaction::CompactionRequest;
+use crate::error::RegionTruncatingSnafu;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
@@ -53,6 +54,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             return;
         };
+
+        let version_data = region.version_control.current();
+        if version_data
+            .version
+            .last_truncate_manifest_version
+            .ne(&request.last_truncate_manifest_version)
+        {
+            request.on_failure(RegionTruncatingSnafu { region_id }.build());
+            return;
+        }
 
         // Write region edit to manifest.
         let edit = RegionEdit {

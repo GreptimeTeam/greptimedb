@@ -149,6 +149,11 @@ impl RegionManifestManager {
         inner.manifest.clone()
     }
 
+    pub async fn manifest_version(&self) -> ManifestVersion {
+        let inner = self.inner.read().await;
+        inner.last_version
+    }
+
     #[cfg(test)]
     pub async fn store(&self) -> ManifestObjectStore {
         let inner = self.inner.read().await;

@@ -28,7 +28,7 @@ use tokio::sync::oneshot;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::request::{BackgroundNotify, FlushFinished, WorkerRequest};
+use crate::request::{BackgroundNotify, CompactionFinished, FlushFinished, WorkerRequest};
 use crate::sst::file::{FileId, FileMeta, FileTimeRange};
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
@@ -270,7 +270,7 @@ async fn test_engine_truncate_reopen() {
 
 #[tokio::test]
 async fn test_engine_truncate_during_flush() {
-    let mut env = TestEnv::with_prefix("truncate-reopen");
+    let mut env = TestEnv::with_prefix("truncate-during-flush");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     // Create the region.
@@ -314,6 +314,10 @@ async fn test_engine_truncate_during_flush() {
 
     let flushed_entry_id = region.version_control.current().last_entry_id;
 
+    let current_version = region.version_control.current().version;
+    assert_eq!(current_version.truncate_entry_id, None);
+    assert_eq!(current_version.last_truncate_manifest_version, None);
+
     // Truncate the region.
     engine
         .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
@@ -340,9 +344,98 @@ async fn test_engine_truncate_during_flush() {
         .await
         .unwrap();
 
-    let _ = receiver.await.unwrap();
+    let _ = receiver.await;
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request.clone()).unwrap();
     assert_eq!(0, scanner.num_files());
+
+    // Put data to the region.
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows(5, 8),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Flush the region.
+    engine
+        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .await
+        .unwrap();
+
+    let current_version = region.version_control.current().version;
+    assert_eq!(current_version.truncate_entry_id, None);
+    assert_eq!(current_version.last_truncate_manifest_version, Some(0));
+}
+
+#[tokio::test]
+async fn test_engine_truncate_during_compaction() {
+    let mut env = TestEnv::with_prefix("truncate-during-compaction");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    // Create the region.
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+
+    // Create a parquet file.
+    // Simulate that the `handle_compaction()` function is currently being executed.
+    let file_id = FileId::random();
+    let file_name = format!("{}.parquet", file_id);
+    let file_meta = FileMeta {
+        region_id,
+        file_id,
+        time_range: FileTimeRange::default(),
+        level: 0,
+        file_size: 0,
+    };
+    env.get_object_store()
+        .unwrap()
+        .write(&join_path(&region_dir, &file_name), vec![])
+        .await
+        .unwrap();
+
+    let (sender, receiver) = oneshot::channel();
+
+    // Truncate the region.
+    engine
+        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .await
+        .unwrap();
+
+    // The compaction task is finished, and the `handle_compaction_finished()` is executed.
+    let finished = CompactionFinished {
+        region_id,
+        compaction_outputs: vec![file_meta],
+        compacted_files: vec![],
+        sender: Some(sender),
+        file_purger: region.file_purger.clone(),
+        last_truncate_manifest_version: None,
+    };
+
+    let worker_request = WorkerRequest::Background {
+        region_id,
+        notify: BackgroundNotify::CompactionFinished(finished),
+    };
+
+    engine
+        .handle_worker_request(region_id, worker_request)
+        .await
+        .unwrap();
+
+    let _ = receiver.await;
+
+    let request = ScanRequest::default();
+    let scanner = engine.scan(region_id, request.clone()).unwrap();
+    assert_eq!(0, scanner.num_files());
+
+    let current_version = region.version_control.current().version;
+    assert_eq!(current_version.last_truncate_manifest_version, Some(0));
 }

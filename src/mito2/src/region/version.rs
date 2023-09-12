@@ -25,6 +25,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use store_api::manifest::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
@@ -139,14 +140,21 @@ impl VersionControl {
         version_data.version = new_version;
     }
 
-    /// Reset current version.
-    pub(crate) fn reset(&self, flushed_entry_id: u64, memtable_builder: &MemtableBuilderRef) {
+    /// Truncate current version.
+    pub(crate) fn truncate(
+        &self,
+        flushed_entry_id: u64,
+        manifest_version: ManifestVersion,
+        memtable_builder: &MemtableBuilderRef,
+    ) {
         let version = self.current().version;
 
         let new_mutable = memtable_builder.build(&version.metadata);
         let new_version = Arc::new(
             VersionBuilder::new(version.metadata.clone(), new_mutable)
                 .flushed_entry_id(flushed_entry_id)
+                .truncate_entry_id(Some(flushed_entry_id))
+                .last_truncate_manifest_version(Some(manifest_version))
                 .build(),
         );
 
@@ -193,6 +201,14 @@ pub(crate) struct Version {
     pub(crate) flushed_entry_id: EntryId,
     /// Inclusive max sequence of flushed data.
     pub(crate) flushed_sequence: SequenceNumber,
+    /// Latest entry id during the truncating table.
+    ///
+    /// Used to check if it is a flush task during the truncation table.
+    pub(crate) truncate_entry_id: Option<EntryId>,
+    /// Last truncate table `ManifestVersion`
+    ///
+    /// Used to check if it is a compaction task during the truncation table.
+    pub(crate) last_truncate_manifest_version: Option<ManifestVersion>,
     // TODO(yingwen): RegionOptions.
 }
 
@@ -205,6 +221,8 @@ pub(crate) struct VersionBuilder {
     ssts: SstVersionRef,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
+    truncate_entry_id: Option<EntryId>,
+    last_truncate_manifest_version: Option<ManifestVersion>,
 }
 
 impl VersionBuilder {
@@ -216,6 +234,8 @@ impl VersionBuilder {
             ssts: Arc::new(SstVersion::new()),
             flushed_entry_id: 0,
             flushed_sequence: 0,
+            truncate_entry_id: None,
+            last_truncate_manifest_version: None,
         }
     }
 
@@ -227,6 +247,8 @@ impl VersionBuilder {
             ssts: version.ssts.clone(),
             flushed_entry_id: version.flushed_entry_id,
             flushed_sequence: version.flushed_sequence,
+            truncate_entry_id: None,
+            last_truncate_manifest_version: version.last_truncate_manifest_version,
         }
     }
 
@@ -251,6 +273,21 @@ impl VersionBuilder {
     /// Sets flushed sequence.
     pub(crate) fn flushed_sequence(mut self, sequence: SequenceNumber) -> Self {
         self.flushed_sequence = sequence;
+        self
+    }
+
+    /// Sets truncated entty id.
+    pub(crate) fn truncate_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
+        self.truncate_entry_id = entry_id;
+        self
+    }
+
+    /// Sets last truncate manifest version.
+    pub(crate) fn last_truncate_manifest_version(
+        mut self,
+        manifest_version: Option<ManifestVersion>,
+    ) -> Self {
+        self.last_truncate_manifest_version = manifest_version;
         self
     }
 
@@ -303,6 +340,8 @@ impl VersionBuilder {
             ssts: self.ssts,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
+            truncate_entry_id: self.truncate_entry_id,
+            last_truncate_manifest_version: self.last_truncate_manifest_version,
         }
     }
 }

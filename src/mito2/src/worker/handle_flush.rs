@@ -138,13 +138,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // The flush task before truncating the region.
         let version_data = region.version_control.current();
-        if version_data.version.flushed_entry_id >= request.flushed_entry_id {
-            info!(
-                "Truncate region {} to {}",
-                region_id, request.flushed_entry_id
-            );
-            request.on_failure(RegionTruncatingSnafu { region_id }.build());
-            return;
+        if let Some(truncate_entry_id) = version_data.version.truncate_entry_id {
+            if truncate_entry_id >= request.flushed_entry_id {
+                request.on_failure(RegionTruncatingSnafu { region_id }.build());
+                return;
+            }
         }
 
         // Write region edit to manifest.
