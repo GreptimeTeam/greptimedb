@@ -227,8 +227,7 @@ impl Server for GrpcServer {
         if let Some(database_handler) = &self.database_handler {
             builder = builder.add_service(
                 GreptimeDatabaseServer::new(DatabaseService::new(database_handler.clone()))
-                    .max_decoding_message_size(max_message_size)
-                    .max_encoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_message_size),
             )
         }
         if let Some(prometheus_handler) = &self.prometheus_handler {
@@ -238,8 +237,7 @@ impl Server for GrpcServer {
         if let Some(flight_handler) = &self.flight_handler {
             builder = builder.add_service(
                 FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone()))
-                    .max_decoding_message_size(max_message_size)
-                    .max_encoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_message_size),
             )
         } else {
             // TODO(ruihang): this is a temporary workaround before region server is ready.
@@ -250,8 +248,7 @@ impl Server for GrpcServer {
         if let Some(region_server_handler) = &self.region_server_handler {
             builder = builder.add_service(
                 RegionServer::new(region_server_handler.clone())
-                    .max_decoding_message_size(max_message_size)
-                    .max_encoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_message_size),
             );
         }
 
