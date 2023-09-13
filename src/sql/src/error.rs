@@ -50,7 +50,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Unsupported expr in default constraint: {} for column: {}",
+        "Unsupported expr in default constraint: {:?} for column: {}",
         expr,
         column_name
     ))]
