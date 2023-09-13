@@ -182,7 +182,6 @@ fn build_insert_request(
         schema_name: table_info.schema_name.clone(),
         table_name: table_info.name.clone(),
         columns_values,
-        region_number: 0,
     })
 }
 

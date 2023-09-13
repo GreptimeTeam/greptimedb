@@ -56,8 +56,9 @@ use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
+    GetRegionMetadataSnafu, HandleRegionRequestSnafu, MissingRequestHeaderSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result, StopRegionEngineSnafu,
+    UnsupportedOutputSnafu,
 };
 
 #[derive(Clone)]
@@ -66,6 +67,7 @@ pub struct RegionServer {
 }
 
 impl RegionServer {
+    /// Create and start a region server.
     pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
         Self {
             inner: Arc::new(RegionServerInner::new(query_engine, runtime)),
@@ -88,10 +90,12 @@ impl RegionServer {
         self.inner.handle_read(request).await
     }
 
+    /// Retrieve all opened region ids.
     pub fn opened_region_ids(&self) -> Vec<RegionId> {
         self.inner.region_map.iter().map(|e| *e.key()).collect()
     }
 
+    /// Get a copy of inner [Runtime]
     pub fn runtime(&self) -> Arc<Runtime> {
         self.inner.runtime.clone()
     }
@@ -248,8 +252,13 @@ impl RegionServerInner {
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
-        let QueryRequest { region_id, plan } = request;
+        let QueryRequest {
+            header,
+            region_id,
+            plan,
+        } = request;
         let region_id = RegionId::from_u64(region_id);
+        let ctx = QueryContext::with_trace_id(header.context(MissingRequestHeaderSnafu)?.trace_id);
 
         // build dummy catalog list
         let engine = self
@@ -266,7 +275,7 @@ impl RegionServerInner {
             .context(DecodeLogicalPlanSnafu)?;
         let result = self
             .query_engine
-            .execute(logical_plan.into(), QueryContext::arc())
+            .execute(logical_plan.into(), ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 

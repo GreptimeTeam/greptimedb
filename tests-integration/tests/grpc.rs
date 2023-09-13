@@ -218,7 +218,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
         values: Some(column::Values {
-            ts_millisecond_values: vec![100, 101, 102, 103],
+            timestamp_millisecond_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,

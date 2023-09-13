@@ -176,7 +176,6 @@ fn encode_gauge(
     let (columns, row_count) = lines.finish();
     Ok(InsertRequest {
         table_name: normalize_otlp_name(name),
-        region_number: 0,
         columns,
         row_count,
     })
@@ -208,7 +207,6 @@ fn encode_sum(
     let (columns, row_count) = lines.finish();
     Ok(InsertRequest {
         table_name: normalize_otlp_name(name),
-        region_number: 0,
         columns,
         row_count,
     })
@@ -251,7 +249,6 @@ fn encode_histogram(name: &str, hist: &Histogram) -> Result<InsertRequest> {
     let (columns, row_count) = lines.finish();
     Ok(InsertRequest {
         table_name: normalize_otlp_name(name),
-        region_number: 0,
         columns,
         row_count,
     })
@@ -310,7 +307,6 @@ fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Resu
     let (columns, row_count) = lines.finish();
     Ok(InsertRequest {
         table_name: normalize_otlp_name(name),
-        region_number: 0,
         columns,
         row_count,
     })
@@ -351,7 +347,6 @@ fn encode_summary(
     let (columns, row_count) = lines.finish();
     Ok(InsertRequest {
         table_name: normalize_otlp_name(name),
-        region_number: 0,
         columns,
         row_count,
     })

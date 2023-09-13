@@ -509,7 +509,6 @@ pub(crate) mod test {
             schema_name: "public".to_string(),
             table_name: "numbers".to_string(),
             columns_values: Default::default(),
-            region_number: 0,
         };
         meter_insert_request!(req);
 

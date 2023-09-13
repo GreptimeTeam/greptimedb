@@ -301,7 +301,7 @@ CREATE TABLE {table_name} (
     }
 
     async fn test_insert_delete_and_query_on_existing_table(instance: &Instance, table_name: &str) {
-        let ts_millisecond_values = vec![
+        let timestamp_millisecond_values = vec![
             1672557972000,
             1672557973000,
             1672557974000,
@@ -335,7 +335,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "b".to_string(),
                     values: Some(Values {
-                        string_values: ts_millisecond_values
+                        string_values: timestamp_millisecond_values
                             .iter()
                             .map(|x| format!("ts: {x}"))
                             .collect(),
@@ -348,7 +348,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values,
+                        timestamp_millisecond_values,
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -429,7 +429,7 @@ CREATE TABLE {table_name} (
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
-                        ts_millisecond_values: ts,
+                        timestamp_millisecond_values: ts,
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::TimestampMillisecond as i32,
@@ -559,7 +559,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672557975000, 1672557976000, 1672557977000],
+                        timestamp_millisecond_values: vec![1672557975000, 1672557976000, 1672557977000],
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -594,7 +594,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672557978000, 1672557979000, 1672557980000],
+                        timestamp_millisecond_values: vec![1672557978000, 1672557979000, 1672557980000],
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -642,7 +642,7 @@ CREATE TABLE {table_name} (
             key_columns: vec![Column {
                 column_name: "ts".to_string(),
                 values: Some(Values {
-                    ts_millisecond_values: vec![1672557975000, 1672557979000],
+                    timestamp_millisecond_values: vec![1672557975000, 1672557979000],
                     ..Default::default()
                 }),
                 semantic_type: SemanticType::Timestamp as i32,
@@ -724,7 +724,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![
+                        timestamp_millisecond_values: vec![
                             1672557972000,
                             1672557973000,
                             1672557974000,

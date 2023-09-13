@@ -164,6 +164,9 @@ pub enum Error {
         source: table::error::Error,
     },
 
+    #[snafu(display("Missing request header"))]
+    MissingRequestHeader { location: Location },
+
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound {
         table_name: String,
@@ -628,7 +631,8 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. }
             | InvalidInsertRowLen { .. }
-            | ColumnDataType { .. } => StatusCode::InvalidArguments,
+            | ColumnDataType { .. }
+            | MissingRequestHeader { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected

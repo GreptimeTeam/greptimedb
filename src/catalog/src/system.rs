@@ -262,7 +262,6 @@ pub fn build_insert_request(entry_type: EntryType, key: &[u8], value: &[u8]) -> 
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: SYSTEM_CATALOG_TABLE_NAME.to_string(),
         columns_values,
-        region_number: 0, // system catalog table has only one region
     }
 }
 

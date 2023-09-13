@@ -145,7 +145,6 @@ mod tests {
             schema_name: DEFAULT_SCHEMA_NAME.to_string(),
             table_name: "table_1".to_string(),
             columns_values: HashMap::from([("a".to_string(), vector)]),
-            region_number: 0,
         }
     }
 

@@ -62,6 +62,12 @@ impl QueryContext {
             .build()
     }
 
+    pub fn with_trace_id(trace_id: u64) -> QueryContextRef {
+        QueryContextBuilder::default()
+            .try_trace_id(Some(trace_id))
+            .build()
+    }
+
     pub fn with_db_name(db_name: Option<&String>) -> QueryContextRef {
         let (catalog, schema) = db_name
             .map(|db| {

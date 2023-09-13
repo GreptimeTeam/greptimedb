@@ -191,7 +191,6 @@ impl DatafusionQueryEngine {
             schema_name: table_name.schema.to_string(),
             table_name: table_name.table.to_string(),
             columns_values: column_vectors,
-            region_number: 0,
         };
 
         table

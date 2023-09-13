@@ -96,7 +96,6 @@ pub fn to_table_insert_request(
         schema_name: schema_name.to_string(),
         table_name: table_name.to_string(),
         columns_values,
-        region_number: request.region_number,
     })
 }
 
@@ -363,7 +362,6 @@ mod tests {
             table_name: "demo".to_string(),
             columns,
             row_count,
-            region_number: 0,
         };
         let insert_req = to_table_insert_request("greptime", "public", request).unwrap();
 
@@ -476,7 +474,7 @@ mod tests {
         };
 
         let ts_vals = Values {
-            ts_millisecond_values: vec![100, 101],
+            timestamp_millisecond_values: vec![100, 101],
             ..Default::default()
         };
         let ts_column = Column {

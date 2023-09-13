@@ -36,7 +36,7 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::QueryRequest;
+use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
@@ -161,7 +161,12 @@ impl MergeScanExec {
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
 
             for region_id in regions {
+                let header = RegionRequestHeader {
+                    trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                    span_id: 0,
+                };
                 let request = QueryRequest {
+                    header: Some(header),
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),
                 };

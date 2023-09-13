@@ -114,18 +114,26 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
         (String, StringValue, string_values),
         (Date, DateValue, date_values),
         (Datetime, DatetimeValue, datetime_values),
-        (TimestampSecond, TsSecondValue, ts_second_values),
+        (
+            TimestampSecond,
+            TimestampSecondValue,
+            timestamp_second_values
+        ),
         (
             TimestampMillisecond,
-            TsMillisecondValue,
-            ts_millisecond_values
+            TimestampMillisecondValue,
+            timestamp_millisecond_values
         ),
         (
             TimestampMicrosecond,
-            TsMicrosecondValue,
-            ts_microsecond_values
+            TimestampMicrosecondValue,
+            timestamp_microsecond_values
         ),
-        (TimestampNanosecond, TsNanosecondValue, ts_nanosecond_values),
+        (
+            TimestampNanosecond,
+            TimestampNanosecondValue,
+            timestamp_nanosecond_values
+        ),
         (TimeSecond, TimeSecondValue, time_second_values),
         (
             TimeMillisecond,

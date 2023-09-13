@@ -131,7 +131,7 @@ fn to_insert_request(records: Vec<WeatherRecord>) -> InsertRequest {
         Column {
             column_name: "ts".to_owned(),
             values: Some(column::Values {
-                ts_millisecond_values: timestamp_millis,
+                timestamp_millisecond_values: timestamp_millis,
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,
@@ -177,6 +177,5 @@ fn to_insert_request(records: Vec<WeatherRecord>) -> InsertRequest {
         table_name: "weather_demo".to_owned(),
         columns,
         row_count: rows as u32,
-        ..Default::default()
     }
 }

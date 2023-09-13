@@ -54,7 +54,7 @@ impl GrpcQueryInterceptor for NoopInterceptor {
         match req {
             Request::Inserts(insert) => {
                 ensure!(
-                    insert.inserts.iter().all(|x| x.region_number == 0),
+                    insert.inserts.iter().all(|x| !x.table_name.is_empty()),
                     NotSupportedSnafu {
                         feat: "region not 0"
                     }
@@ -75,7 +75,6 @@ fn test_grpc_interceptor() {
 
     let req = Request::Inserts(InsertRequests {
         inserts: vec![InsertRequest {
-            region_number: 1,
             ..Default::default()
         }],
     });

@@ -92,14 +92,14 @@ impl<R: Region> Table for MitoTable<R> {
         }
         let regions = self.regions.load();
         let region = regions
-            .get(&request.region_number)
+            .get(&0)
             .with_context(|| RegionNotFoundSnafu {
                 table: common_catalog::format_full_table_name(
                     &request.catalog_name,
                     &request.schema_name,
                     &request.table_name,
                 ),
-                region: request.region_number,
+                region: 0u32,
             })
             .map_err(BoxedError::new)
             .context(table_error::TableOperationSnafu)?;

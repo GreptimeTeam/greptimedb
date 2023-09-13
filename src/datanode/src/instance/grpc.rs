@@ -864,7 +864,7 @@ mod test {
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672384140000, 1672384141000, 1672384142000],
+                        timestamp_millisecond_values: vec![1672384140000, 1672384141000, 1672384142000],
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -937,7 +937,7 @@ mod test {
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672201026000],
+                        timestamp_millisecond_values: vec![1672201026000],
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::TimestampMillisecond as i32,
@@ -962,7 +962,7 @@ mod test {
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672201026000],
+                        timestamp_millisecond_values: vec![1672201026000],
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::TimestampMillisecond as i32,

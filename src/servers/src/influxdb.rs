@@ -125,7 +125,6 @@ impl TryFrom<InfluxdbRequest> for InsertRequests {
                 let (columns, row_count) = writer.finish();
                 GrpcInsertRequest {
                     table_name,
-                    region_number: 0,
                     columns,
                     row_count,
                 }
@@ -284,7 +283,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             SemanticType::Timestamp,
             Vec::new(),
             Values {
-                ts_millisecond_values: vec![1663840496100, 1663840496400],
+                timestamp_millisecond_values: vec![1663840496100, 1663840496400],
                 ..Default::default()
             },
         );
@@ -323,7 +322,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
             SemanticType::Timestamp,
             Vec::new(),
             Values {
-                ts_millisecond_values: vec![1663840496100, 1663840496400],
+                timestamp_millisecond_values: vec![1663840496100, 1663840496400],
                 ..Default::default()
             },
         );
@@ -553,7 +552,7 @@ monitor2,host=host4 cpu=66.3,memory=1029 1663840496400340003";
 
     fn extract_ts_millis_value(value: &ValueData) -> i64 {
         match value {
-            ValueData::TsMillisecondValue(v) => *v,
+            ValueData::TimestampMillisecondValue(v) => *v,
             _ => panic!(),
         }
     }

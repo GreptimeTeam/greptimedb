@@ -412,7 +412,6 @@ pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests,
             sample_counts += row_count as usize;
             GrpcInsertRequest {
                 table_name,
-                region_number: 0,
                 columns,
                 row_count,
             }
@@ -655,7 +654,9 @@ mod tests {
                     value_data: Some(api::v1::value::ValueData::F64Value(value)),
                 },
                 api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        timestamp,
+                    )),
                 },
             ],
         }
@@ -674,7 +675,9 @@ mod tests {
                     value_data: Some(api::v1::value::ValueData::F64Value(value)),
                 },
                 api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        timestamp,
+                    )),
                 },
             ],
         }
@@ -782,7 +785,11 @@ mod tests {
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
+            columns[0]
+                .values
+                .as_ref()
+                .unwrap()
+                .timestamp_millisecond_values,
             vec![1000, 2000]
         );
 
@@ -810,7 +817,11 @@ mod tests {
 
         assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
+            columns[0]
+                .values
+                .as_ref()
+                .unwrap()
+                .timestamp_millisecond_values,
             vec![1000, 2000]
         );
 
@@ -848,7 +859,11 @@ mod tests {
         );
         assert_eq!(columns[1].column_name, TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[1].values.as_ref().unwrap().ts_millisecond_values,
+            columns[1]
+                .values
+                .as_ref()
+                .unwrap()
+                .timestamp_millisecond_values,
             vec![1000, 2000, 3000]
         );
 

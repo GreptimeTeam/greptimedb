@@ -55,6 +55,7 @@ pub enum Error {
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
     InvalidColumnProto { err_msg: String, location: Location },
+
     #[snafu(display("Failed to create vector, source: {}", source))]
     CreateVector {
         location: Location,

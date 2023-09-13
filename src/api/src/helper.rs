@@ -214,19 +214,19 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::TimestampSecond => Values {
-            ts_second_values: Vec::with_capacity(capacity),
+            timestamp_second_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::TimestampMillisecond => Values {
-            ts_millisecond_values: Vec::with_capacity(capacity),
+            timestamp_millisecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::TimestampMicrosecond => Values {
-            ts_microsecond_values: Vec::with_capacity(capacity),
+            timestamp_microsecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::TimestampNanosecond => Values {
-            ts_nanosecond_values: Vec::with_capacity(capacity),
+            timestamp_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::TimeSecond => Values {
@@ -286,10 +286,10 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
         Value::Date(val) => values.date_values.push(val.val()),
         Value::DateTime(val) => values.datetime_values.push(val.val()),
         Value::Timestamp(val) => match val.unit() {
-            TimeUnit::Second => values.ts_second_values.push(val.value()),
-            TimeUnit::Millisecond => values.ts_millisecond_values.push(val.value()),
-            TimeUnit::Microsecond => values.ts_microsecond_values.push(val.value()),
-            TimeUnit::Nanosecond => values.ts_nanosecond_values.push(val.value()),
+            TimeUnit::Second => values.timestamp_second_values.push(val.value()),
+            TimeUnit::Millisecond => values.timestamp_millisecond_values.push(val.value()),
+            TimeUnit::Microsecond => values.timestamp_microsecond_values.push(val.value()),
+            TimeUnit::Nanosecond => values.timestamp_nanosecond_values.push(val.value()),
         },
         Value::Time(val) => match val.unit() {
             TimeUnit::Second => values.time_second_values.push(val.value()),
@@ -375,10 +375,16 @@ pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
         ValueData::StringValue(string) => ValueRef::String(string.as_str()),
         ValueData::DateValue(d) => ValueRef::Date(Date::from(*d)),
         ValueData::DatetimeValue(d) => ValueRef::DateTime(DateTime::new(*d)),
-        ValueData::TsSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
-        ValueData::TsMillisecondValue(t) => ValueRef::Timestamp(Timestamp::new_millisecond(*t)),
-        ValueData::TsMicrosecondValue(t) => ValueRef::Timestamp(Timestamp::new_microsecond(*t)),
-        ValueData::TsNanosecondValue(t) => ValueRef::Timestamp(Timestamp::new_nanosecond(*t)),
+        ValueData::TimestampSecondValue(t) => ValueRef::Timestamp(Timestamp::new_second(*t)),
+        ValueData::TimestampMillisecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_millisecond(*t))
+        }
+        ValueData::TimestampMicrosecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_microsecond(*t))
+        }
+        ValueData::TimestampNanosecondValue(t) => {
+            ValueRef::Timestamp(Timestamp::new_nanosecond(*t))
+        }
         ValueData::TimeSecondValue(t) => ValueRef::Time(Time::new_second(*t)),
         ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
         ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
@@ -418,17 +424,17 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         ConcreteDataType::Date(_) => Arc::new(DateVector::from_vec(values.date_values)),
         ConcreteDataType::DateTime(_) => Arc::new(DateTimeVector::from_vec(values.datetime_values)),
         ConcreteDataType::Timestamp(unit) => match unit {
-            TimestampType::Second(_) => {
-                Arc::new(TimestampSecondVector::from_vec(values.ts_second_values))
-            }
+            TimestampType::Second(_) => Arc::new(TimestampSecondVector::from_vec(
+                values.timestamp_second_values,
+            )),
             TimestampType::Millisecond(_) => Arc::new(TimestampMillisecondVector::from_vec(
-                values.ts_millisecond_values,
+                values.timestamp_millisecond_values,
             )),
             TimestampType::Microsecond(_) => Arc::new(TimestampMicrosecondVector::from_vec(
-                values.ts_microsecond_values,
+                values.timestamp_microsecond_values,
             )),
             TimestampType::Nanosecond(_) => Arc::new(TimestampNanosecondVector::from_vec(
-                values.ts_nanosecond_values,
+                values.timestamp_nanosecond_values,
             )),
         },
         ConcreteDataType::Time(unit) => match unit {
@@ -550,22 +556,22 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             .map(|v| Value::Date(v.into()))
             .collect(),
         ConcreteDataType::Timestamp(TimestampType::Second(_)) => values
-            .ts_second_values
+            .timestamp_second_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_second(v)))
             .collect(),
         ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => values
-            .ts_millisecond_values
+            .timestamp_millisecond_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_millisecond(v)))
             .collect(),
         ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => values
-            .ts_microsecond_values
+            .timestamp_microsecond_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_microsecond(v)))
             .collect(),
         ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => values
-            .ts_nanosecond_values
+            .timestamp_nanosecond_values
             .into_iter()
             .map(|v| Value::Timestamp(Timestamp::new_nanosecond(v)))
             .collect(),
@@ -682,16 +688,16 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         },
         Value::Timestamp(v) => match v.unit() {
             TimeUnit::Second => v1::Value {
-                value_data: Some(ValueData::TsSecondValue(v.value())),
+                value_data: Some(ValueData::TimestampSecondValue(v.value())),
             },
             TimeUnit::Millisecond => v1::Value {
-                value_data: Some(ValueData::TsMillisecondValue(v.value())),
+                value_data: Some(ValueData::TimestampMillisecondValue(v.value())),
             },
             TimeUnit::Microsecond => v1::Value {
-                value_data: Some(ValueData::TsMicrosecondValue(v.value())),
+                value_data: Some(ValueData::TimestampMicrosecondValue(v.value())),
             },
             TimeUnit::Nanosecond => v1::Value {
-                value_data: Some(ValueData::TsNanosecondValue(v.value())),
+                value_data: Some(ValueData::TimestampNanosecondValue(v.value())),
             },
         },
         Value::Time(v) => match v.unit() {
@@ -747,10 +753,10 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::StringValue(_) => ColumnDataType::String,
         ValueData::DateValue(_) => ColumnDataType::Date,
         ValueData::DatetimeValue(_) => ColumnDataType::Datetime,
-        ValueData::TsSecondValue(_) => ColumnDataType::TimestampSecond,
-        ValueData::TsMillisecondValue(_) => ColumnDataType::TimestampMillisecond,
-        ValueData::TsMicrosecondValue(_) => ColumnDataType::TimestampMicrosecond,
-        ValueData::TsNanosecondValue(_) => ColumnDataType::TimestampNanosecond,
+        ValueData::TimestampSecondValue(_) => ColumnDataType::TimestampSecond,
+        ValueData::TimestampMillisecondValue(_) => ColumnDataType::TimestampMillisecond,
+        ValueData::TimestampMicrosecondValue(_) => ColumnDataType::TimestampMicrosecond,
+        ValueData::TimestampNanosecondValue(_) => ColumnDataType::TimestampNanosecond,
         ValueData::TimeSecondValue(_) => ColumnDataType::TimeSecond,
         ValueData::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
         ValueData::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
@@ -837,10 +843,10 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
             Value::Date(v) => Some(ValueData::DateValue(v.val())),
             Value::DateTime(v) => Some(ValueData::DatetimeValue(v.val())),
             Value::Timestamp(v) => Some(match v.unit() {
-                TimeUnit::Second => ValueData::TsSecondValue(v.value()),
-                TimeUnit::Millisecond => ValueData::TsMillisecondValue(v.value()),
-                TimeUnit::Microsecond => ValueData::TsMicrosecondValue(v.value()),
-                TimeUnit::Nanosecond => ValueData::TsNanosecondValue(v.value()),
+                TimeUnit::Second => ValueData::TimestampSecondValue(v.value()),
+                TimeUnit::Millisecond => ValueData::TimestampMillisecondValue(v.value()),
+                TimeUnit::Microsecond => ValueData::TimestampMicrosecondValue(v.value()),
+                TimeUnit::Nanosecond => ValueData::TimestampNanosecondValue(v.value()),
             }),
             Value::Time(v) => Some(match v.unit() {
                 TimeUnit::Second => ValueData::TimeSecondValue(v.value()),
@@ -943,7 +949,7 @@ mod tests {
         assert_eq!(2, values.capacity());
 
         let values = values_with_capacity(ColumnDataType::TimestampMillisecond, 2);
-        let values = values.ts_millisecond_values;
+        let values = values.timestamp_millisecond_values;
         assert_eq!(2, values.capacity());
 
         let values = values_with_capacity(ColumnDataType::TimeMillisecond, 2);
@@ -1162,28 +1168,28 @@ mod tests {
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![1, 2, 3],
-            column.values.as_ref().unwrap().ts_nanosecond_values
+            column.values.as_ref().unwrap().timestamp_nanosecond_values
         );
 
         let vector = Arc::new(TimestampMillisecondVector::from_vec(vec![4, 5, 6]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![4, 5, 6],
-            column.values.as_ref().unwrap().ts_millisecond_values
+            column.values.as_ref().unwrap().timestamp_millisecond_values
         );
 
         let vector = Arc::new(TimestampMicrosecondVector::from_vec(vec![7, 8, 9]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![7, 8, 9],
-            column.values.as_ref().unwrap().ts_microsecond_values
+            column.values.as_ref().unwrap().timestamp_microsecond_values
         );
 
         let vector = Arc::new(TimestampSecondVector::from_vec(vec![10, 11, 12]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![10, 11, 12],
-            column.values.as_ref().unwrap().ts_second_values
+            column.values.as_ref().unwrap().timestamp_second_values
         );
     }
 
@@ -1312,7 +1318,7 @@ mod tests {
         let actual = pb_values_to_values(
             &ConcreteDataType::Timestamp(TimestampType::Second(TimestampSecondType)),
             Values {
-                ts_second_values: vec![1_i64, 2_i64, 3_i64],
+                timestamp_second_values: vec![1_i64, 2_i64, 3_i64],
                 ..Default::default()
             },
         );
@@ -1327,7 +1333,7 @@ mod tests {
         let actual = pb_values_to_values(
             &ConcreteDataType::Timestamp(TimestampType::Millisecond(TimestampMillisecondType)),
             Values {
-                ts_millisecond_values: vec![1_i64, 2_i64, 3_i64],
+                timestamp_millisecond_values: vec![1_i64, 2_i64, 3_i64],
                 ..Default::default()
             },
         );
