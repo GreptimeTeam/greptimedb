@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use common_telemetry::logging;
+use datanode::datanode::builder::DatanodeBuilder;
 use datanode::datanode::{Datanode, DatanodeOptions};
 use meta_client::MetaClientOptions;
 use servers::Mode;
@@ -162,7 +163,8 @@ impl StartCommand {
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = Datanode::new(opts, Default::default())
+        let datanode = DatanodeBuilder::new(opts, Default::default())
+            .build()
             .await
             .context(StartDatanodeSnafu)?;
 

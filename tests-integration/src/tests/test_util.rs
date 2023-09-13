@@ -20,10 +20,8 @@ use common_test_util::find_workspace_path;
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
-use crate::tests::{
-    create_distributed_instance, create_standalone_instance, MockDistributedInstance,
-    MockStandaloneInstance,
-};
+use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+use crate::tests::{create_distributed_instance, MockDistributedInstance};
 
 pub(crate) trait MockInstance {
     fn frontend(&self) -> Arc<Instance>;
@@ -31,7 +29,7 @@ pub(crate) trait MockInstance {
     fn is_distributed_mode(&self) -> bool;
 }
 
-impl MockInstance for MockStandaloneInstance {
+impl MockInstance for GreptimeDbStandalone {
     fn frontend(&self) -> Arc<Instance> {
         self.instance.clone()
     }
@@ -53,7 +51,7 @@ impl MockInstance for MockDistributedInstance {
 
 pub(crate) async fn standalone() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
-    let instance = create_standalone_instance(&test_name).await;
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name).build().await;
     Arc::new(instance)
 }
 

@@ -20,6 +20,7 @@ mod test {
     use api::v1::ddl_request::Expr as DdlExpr;
     use api::v1::greptime_request::Request;
     use api::v1::query_request::Query;
+    use api::v1::region::QueryRequest as RegionQueryRequest;
     use api::v1::{
         alter_expr, AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDef,
         CreateDatabaseExpr, CreateTableExpr, DdlRequest, DeleteRequest, DeleteRequests,
@@ -31,9 +32,13 @@ mod test {
     use common_recordbatch::RecordBatches;
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
+    use query::plan::LogicalPlan;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
+    use store_api::storage::RegionId;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
 
@@ -49,8 +54,9 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_handle_ddl_request() {
-        let standalone =
-            tests::create_standalone_instance("test_standalone_handle_ddl_request").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_handle_ddl_request")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         test_handle_ddl_request(instance.as_ref()).await;
@@ -81,15 +87,17 @@ mod test {
                 column_defs: vec![
                     ColumnDef {
                         name: "a".to_string(),
-                        datatype: ColumnDataType::String as _,
+                        data_type: ColumnDataType::String as _,
                         is_nullable: true,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Field as i32,
                     },
                     ColumnDef {
                         name: "ts".to_string(),
-                        datatype: ColumnDataType::TimestampMillisecond as _,
+                        data_type: ColumnDataType::TimestampMillisecond as _,
                         is_nullable: false,
                         default_constraint: vec![],
+                        semantic_type: SemanticType::Timestamp as i32,
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -109,15 +117,14 @@ mod test {
                     add_columns: vec![AddColumn {
                         column_def: Some(ColumnDef {
                             name: "b".to_string(),
-                            datatype: ColumnDataType::Int32 as _,
+                            data_type: ColumnDataType::Int32 as _,
                             is_nullable: true,
                             default_constraint: vec![],
+                            semantic_type: SemanticType::Field as i32,
                         }),
-                        is_key: false,
                         location: None,
                     }],
                 })),
-                ..Default::default()
             })),
         });
         let output = query(instance, request).await;
@@ -161,18 +168,17 @@ mod test {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        for (_, dn) in instance.datanodes().iter() {
-            assert!(dn
-                .catalog_manager()
-                .table(
-                    "greptime",
-                    "database_created_through_grpc",
-                    "table_created_through_grpc"
-                )
-                .await
-                .unwrap()
-                .is_none());
-        }
+        assert!(instance
+            .frontend()
+            .catalog_manager()
+            .table(
+                "greptime",
+                "database_created_through_grpc",
+                "table_created_through_grpc"
+            )
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -277,10 +283,9 @@ CREATE TABLE {table_name} (
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_insert_and_query() {
-        common_telemetry::init_default_ut_logging();
-
-        let standalone =
-            tests::create_standalone_instance("test_standalone_insert_and_query").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_insert_and_query")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         let table_name = "my_table";
@@ -518,22 +523,31 @@ CREATE TABLE {table_name} (
             .collect::<HashMap<u32, u64>>();
         assert_eq!(region_to_dn_map.len(), expected_distribution.len());
 
-        for (region, dn) in region_to_dn_map.iter() {
-            let stmt = QueryLanguageParser::parse_sql(&format!(
-                "SELECT ts, a, b FROM {table_name} ORDER BY ts"
-            ))
+        let stmt = QueryLanguageParser::parse_sql(&format!(
+            "SELECT ts, a, b FROM {table_name} ORDER BY ts"
+        ))
+        .unwrap();
+        let LogicalPlan::DfPlan(plan) = instance
+            .frontend()
+            .statement_executor()
+            .plan(stmt, QueryContext::arc())
+            .await
             .unwrap();
-            let dn = instance.datanodes().get(dn).unwrap();
-            let engine = dn.query_engine();
-            let plan = engine
-                .planner()
-                .plan(stmt, QueryContext::arc())
+        let plan = DFLogicalSubstraitConvertor.encode(&plan).unwrap();
+
+        for (region, dn) in region_to_dn_map.iter() {
+            let region_server = instance.datanodes().get(dn).unwrap().region_server();
+
+            let region_id = RegionId::new(table_id, *region);
+
+            let stream = region_server
+                .handle_read(RegionQueryRequest {
+                    region_id: region_id.as_u64(),
+                    plan: plan.to_vec(),
+                })
                 .await
                 .unwrap();
-            let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
-            let Output::Stream(stream) = output else {
-                unreachable!()
-            };
+
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
 
@@ -680,9 +694,9 @@ CREATE TABLE {table_name} (
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_promql_query() {
-        common_telemetry::init_default_ut_logging();
-
-        let standalone = tests::create_standalone_instance("test_standalone_promql_query").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_promql_query")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         let table_name = "my_table";

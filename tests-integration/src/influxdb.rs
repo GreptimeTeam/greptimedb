@@ -24,12 +24,14 @@ mod test {
     use servers::query_handler::InfluxdbLineProtocolHandler;
     use session::context::QueryContext;
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_put_influxdb_lines() {
-        let standalone =
-            tests::create_standalone_instance("test_standalone_put_influxdb_lines").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_put_influxdb_lines")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         test_put_influxdb_lines(instance).await;
@@ -44,8 +46,11 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_put_influxdb_lines_without_time_column() {
-        let standalone =
-            tests::create_standalone_instance("test_standalone_put_influxdb_lines").await;
+        let standalone = GreptimeDbStandaloneBuilder::new(
+            "test_standalone_put_influxdb_lines_without_time_column",
+        )
+        .build()
+        .await;
         test_put_influxdb_lines_without_time_column(&standalone.instance).await;
     }
 

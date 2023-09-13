@@ -21,11 +21,11 @@ pub mod region_server;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-#[cfg(feature = "testing")]
-use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
+#[cfg(feature = "testing")]
+use api::v1::region::region_server::Region;
 use api::v1::region::region_server::RegionServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 #[cfg(feature = "testing")]
@@ -123,12 +123,12 @@ impl GrpcServer {
 
     #[cfg(feature = "testing")]
     pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
-        FlightServiceServer::new(FlightCraftWrapper(self.database_handler.clone().unwrap()))
+        FlightServiceServer::new(FlightCraftWrapper(self.flight_handler.clone().unwrap()))
     }
 
     #[cfg(feature = "testing")]
-    pub fn create_database_service(&self) -> GreptimeDatabaseServer<impl GreptimeDatabase> {
-        GreptimeDatabaseServer::new(DatabaseService::new(self.database_handler.clone().unwrap()))
+    pub fn create_region_service(&self) -> RegionServer<impl Region> {
+        RegionServer::new(self.region_server_handler.clone().unwrap())
     }
 
     pub fn create_healthcheck_service(&self) -> HealthCheckServer<impl HealthCheck> {
