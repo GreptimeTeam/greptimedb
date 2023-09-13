@@ -87,7 +87,7 @@ async fn test_engine_reopen_region() {
         .await
         .unwrap();
 
-    reopen_region(&engine, region_id, region_dir).await;
+    reopen_region(&engine, region_id, region_dir, false).await;
     assert!(engine.is_region_exists(region_id));
 }
 
@@ -105,7 +105,7 @@ async fn test_engine_open_readonly() {
         .await
         .unwrap();
 
-    reopen_region(&engine, region_id, region_dir).await;
+    reopen_region(&engine, region_id, region_dir, false).await;
 
     // Region is readonly.
     let rows = Rows {

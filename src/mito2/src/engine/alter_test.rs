@@ -206,6 +206,8 @@ async fn test_put_after_alter() {
         )
         .await
         .unwrap();
+    // Set writable.
+    engine.set_writable(region_id, true).unwrap();
 
     // Put with old schema.
     let rows = Rows {

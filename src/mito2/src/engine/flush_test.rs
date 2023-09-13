@@ -255,7 +255,7 @@ async fn test_flush_reopen_region() {
     };
     check_region();
 
-    reopen_region(&engine, region_id, region_dir).await;
+    reopen_region(&engine, region_id, region_dir, true).await;
     check_region();
 
     // Puts again.
