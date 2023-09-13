@@ -349,9 +349,9 @@ impl StatementExecutor {
         let exists = self
             .table_metadata_manager
             .schema_manager()
-            .exist(schema_key)
+            .exists(schema_key)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
 
         if exists {
             return if create_if_not_exists {
@@ -363,9 +363,9 @@ impl StatementExecutor {
 
         self.table_metadata_manager
             .schema_manager()
-            .create(schema_key, None)
+            .create(schema_key, None, false)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
 
         Ok(Output::AffectedRows(1))
     }

@@ -181,8 +181,6 @@ impl Env {
                     "--use-memory-store".to_string(),
                     "true".to_string(),
                     "--http-addr=127.0.0.1:5001".to_string(),
-                    "--disable-region-failover".to_string(),
-                    "true".to_string(),
                 ];
                 (args, METASRV_ADDR.to_string())
             }
@@ -225,7 +223,6 @@ impl Env {
         let data_home = self
             .data_home
             .join(format!("greptimedb_datanode_{}_{id}", db_ctx.time));
-        let wal_dir = data_home.join("wal").display().to_string();
 
         let subcommand = "datanode";
         let mut args = vec![
@@ -236,7 +233,6 @@ impl Env {
         args.push(format!("--rpc-addr=127.0.0.1:410{id}"));
         args.push(format!("--http-addr=127.0.0.1:430{id}"));
         args.push(format!("--data-home={}", data_home.display()));
-        args.push(format!("--wal-dir={wal_dir}"));
         args.push(format!("--node-id={id}"));
         args.push("--metasrv-addr=127.0.0.1:3002".to_string());
         (args, format!("127.0.0.1:410{id}"))

@@ -438,9 +438,7 @@ impl Datanode {
             Mode::Standalone => None,
         };
         let heartbeat_task = match opts.mode {
-            Mode::Distributed => {
-                Some(HeartbeatTask::try_new(&opts, Some(region_server.clone())).await?)
-            }
+            Mode::Distributed => Some(HeartbeatTask::try_new(&opts, region_server.clone()).await?),
             Mode::Standalone => None,
         };
         let greptimedb_telemetry_task = get_greptimedb_telemetry_task(

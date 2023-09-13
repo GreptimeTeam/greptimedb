@@ -331,12 +331,19 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     for request in &requests.inserts {
         let rows = request.rows.as_ref().unwrap();
         let column_count = rows.schema.len();
-        ensure!(
-            rows.rows.iter().all(|r| r.values.len() == column_count),
-            InvalidInsertRequestSnafu {
-                reason: "column count mismatch"
-            }
-        )
+        rows.rows.iter().try_for_each(|r| {
+            ensure!(
+                r.values.len() == column_count,
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "column count mismatch, columns: {}, values: {}",
+                        column_count,
+                        r.values.len()
+                    )
+                }
+            );
+            Ok(())
+        })?;
     }
     Ok(())
 }

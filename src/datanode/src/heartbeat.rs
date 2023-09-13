@@ -62,11 +62,7 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub async fn try_new(
-        opts: &DatanodeOptions,
-        // TODO: remove optional
-        region_server: Option<RegionServer>,
-    ) -> Result<Self> {
+    pub async fn try_new(opts: &DatanodeOptions, region_server: RegionServer) -> Result<Self> {
         let meta_client = new_metasrv_client(
             opts.node_id.context(MissingNodeIdSnafu)?,
             opts.meta_client_options
@@ -74,8 +70,6 @@ impl HeartbeatTask {
                 .context(MissingMetasrvOptsSnafu)?,
         )
         .await?;
-
-        let region_server = region_server.unwrap();
 
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
@@ -258,13 +252,13 @@ impl HeartbeatTask {
     }
 
     async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let region_ids = region_server.opened_region_ids();
-        region_ids
+        let regions = region_server.opened_regions();
+        regions
             .into_iter()
-            .map(|region_id| RegionStat {
-                // TODO(ruihang): scratch more info
+            .map(|(region_id, engine)| RegionStat {
                 region_id: region_id.as_u64(),
-                engine: "MitoEngine".to_string(),
+                engine,
+                // TODO(ruihang): scratch more info
                 ..Default::default()
             })
             .collect::<Vec<_>>()

@@ -5,7 +5,7 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
 DROP TABLE test;
@@ -20,7 +20,7 @@ CREATE TABLE host_load1 (
 );
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN host_load1{__field__="val"};
 
 DROP TABLE host_load1;

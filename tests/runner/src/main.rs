@@ -34,7 +34,7 @@ async fn main() {
 
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir())
-        .fail_fast(true)
+        .fail_fast(false)
         .test_filter(test_filter)
         .follow_links(true)
         .build()

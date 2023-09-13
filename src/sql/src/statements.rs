@@ -37,7 +37,7 @@ use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::TimestampType;
-use datatypes::value::Value;
+use datatypes::value::{OrderedF32, OrderedF64, Value};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::ast::{
@@ -128,12 +128,12 @@ fn parse_hex_string(s: &str) -> Result<Value> {
 }
 
 macro_rules! parse_number_to_value {
-    ($data_type: expr, $n: ident,  $(($Type: ident, $PrimitiveType: ident)), +) => {
+    ($data_type: expr, $n: ident,  $(($Type: ident, $PrimitiveType: ident, $Target: ident)), +) => {
         match $data_type {
             $(
                 ConcreteDataType::$Type(_) => {
                     let n  = parse_sql_number::<$PrimitiveType>($n)?;
-                    Ok(Value::from(n))
+                    Ok(Value::$Type($Target::from(n)))
                 },
             )+
                 _ => ParseSqlValueSnafu {
@@ -149,17 +149,17 @@ pub fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Valu
     parse_number_to_value!(
         data_type,
         n,
-        (UInt8, u8),
-        (UInt16, u16),
-        (UInt32, u32),
-        (UInt64, u64),
-        (Int8, i8),
-        (Int16, i16),
-        (Int32, i32),
-        (Int64, i64),
-        (Float64, f64),
-        (Float32, f32),
-        (Timestamp, i64)
+        (UInt8, u8, u8),
+        (UInt16, u16, u16),
+        (UInt32, u32, u32),
+        (UInt64, u64, u64),
+        (Int8, i8, i8),
+        (Int16, i16, i16),
+        (Int32, i32, i32),
+        (Int64, i64, i64),
+        (Float64, f64, OrderedF64),
+        (Float32, f32, OrderedF32),
+        (Timestamp, i64, Timestamp)
     )
     // TODO(hl): also Date/DateTime
 }
