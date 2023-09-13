@@ -94,30 +94,34 @@ pub(crate) async fn create_external_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let mut options = create.options;
+    let mut table_options = create.options;
 
-    let (files, schema) = prepare_immutable_file_table_files_and_schema(&options, &create.columns)
-        .await
-        .context(PrepareImmutableTableSnafu)?;
+    let time_index = find_time_index(&create.constraints)?;
+    let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+
+    let (files, schema) =
+        prepare_immutable_file_table_files_and_schema(&table_options, &time_index, &create.columns)
+            .await
+            .context(PrepareImmutableTableSnafu)?;
 
     let meta = FileOptions { files };
-    let _ = options.insert(
+    let _ = table_options.insert(
         IMMUTABLE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
 
-    let primary_keys = vec![];
+    let column_defs = column_schemas_to_defs(schema.column_schemas, &primary_keys)?;
 
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
         table_name,
         desc: "".to_string(),
-        column_defs: column_schemas_to_defs(schema.column_schemas, &primary_keys)?,
-        time_index: "".to_string(),
-        primary_keys: vec![],
+        column_defs,
+        time_index,
+        primary_keys,
         create_if_not_exists: create.if_not_exists,
-        table_options: options,
+        table_options,
         table_id: None,
         region_numbers: vec![],
         engine: create.engine.to_string(),

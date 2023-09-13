@@ -304,13 +304,17 @@ fn describe_column_semantic_types(
 
 pub async fn prepare_immutable_file_table_files_and_schema(
     options: &HashMap<String, String>,
+    time_index: &str,
     columns: &Vec<ColumnDef>,
 ) -> Result<(Vec<String>, RawSchema)> {
     let (object_store, files) = prepare_immutable_file_table(options).await?;
     let schema = if !columns.is_empty() {
         let columns_schemas: Vec<_> = columns
             .iter()
-            .map(|column| column_def_to_schema(column, false).context(error::ParseSqlSnafu))
+            .map(|column| {
+                column_def_to_schema(column, column.name.to_string() == time_index)
+                    .context(error::ParseSqlSnafu)
+            })
             .collect::<Result<Vec<_>>>()?;
         RawSchema::new(columns_schemas)
     } else {

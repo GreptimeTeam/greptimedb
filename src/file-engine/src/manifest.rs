@@ -31,7 +31,7 @@ use crate::FileOptions;
 
 #[inline]
 fn region_manifest_path(region_dir: &str) -> String {
-    format!("{region_dir}manifest/_immutable_manifest")
+    format!("{region_dir}manifest/_file_manifest")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
