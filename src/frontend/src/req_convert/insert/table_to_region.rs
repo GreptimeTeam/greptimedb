@@ -74,11 +74,11 @@ mod tests {
         let schema_manager = SchemaManager::new(backend.clone());
 
         catalog_manager
-            .create(CatalogNameKey::default())
+            .create(CatalogNameKey::default(), false)
             .await
             .unwrap();
         schema_manager
-            .create(SchemaNameKey::default(), None)
+            .create(SchemaNameKey::default(), None, false)
             .await
             .unwrap();
 

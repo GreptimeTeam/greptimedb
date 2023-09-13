@@ -158,7 +158,7 @@ impl InformationSchemaColumnsBuilder {
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             if !catalog_manager
-                .schema_exist(&catalog_name, &schema_name)
+                .schema_exists(&catalog_name, &schema_name)
                 .await?
             {
                 continue;
