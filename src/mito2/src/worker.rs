@@ -573,6 +573,15 @@ impl WorkerListener {
             listener.on_write_stall();
         }
     }
+
+    pub(crate) async fn on_handle_finishd_begin(&self, region_id: RegionId) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_handle_finished_begin(region_id).await;
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
+    }
 }
 
 #[cfg(test)]

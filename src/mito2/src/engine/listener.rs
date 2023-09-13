@@ -16,17 +16,21 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common_telemetry::info;
 use store_api::storage::RegionId;
 use tokio::sync::Notify;
 
 /// Mito engine background event listener.
+#[async_trait]
 pub trait EventListener: Send + Sync {
     /// Notifies the listener that a region is flushed successfully.
     fn on_flush_success(&self, region_id: RegionId);
 
     /// Notifies the listener that the engine is stalled.
     fn on_write_stall(&self);
+
+    async fn on_handle_finished_begin(&self, region_id: RegionId);
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -50,6 +54,7 @@ impl FlushListener {
     }
 }
 
+#[async_trait]
 impl EventListener for FlushListener {
     fn on_flush_success(&self, region_id: RegionId) {
         info!("Region {} flush successfully", region_id);
@@ -58,6 +63,8 @@ impl EventListener for FlushListener {
     }
 
     fn on_write_stall(&self) {}
+
+    async fn on_handle_finished_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch stall events.
@@ -79,6 +86,7 @@ impl StallListener {
     }
 }
 
+#[async_trait]
 impl EventListener for StallListener {
     fn on_flush_success(&self, _region_id: RegionId) {}
 
@@ -86,5 +94,39 @@ impl EventListener for StallListener {
         info!("Engine is stalled");
 
         self.notify.notify_one();
+    }
+
+    async fn on_handle_finished_begin(&self, _region_id: RegionId) {}
+}
+
+pub struct HandleFinishedListener {
+    notify: Notify,
+}
+
+impl HandleFinishedListener {
+    pub fn new() -> HandleFinishedListener {
+        HandleFinishedListener {
+            notify: Notify::new(),
+        }
+    }
+
+    pub fn notify(&self) {
+        self.notify.notify_one();
+    }
+
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[async_trait]
+impl EventListener for HandleFinishedListener {
+    fn on_flush_success(&self, _region_id: RegionId) {}
+
+    fn on_write_stall(&self) {}
+
+    async fn on_handle_finished_begin(&self, region_id: RegionId) {
+        info!("Region {} begin handle finished flush", region_id);
+        self.wait().await;
     }
 }

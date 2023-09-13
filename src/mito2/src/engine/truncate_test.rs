@@ -13,24 +13,25 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
-use object_store::util::join_path;
-use smallvec::SmallVec;
+use common_telemetry::init_default_ut_logging;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::request::{BackgroundNotify, FlushFinished, WorkerRequest};
-use crate::sst::file::{FileId, FileMeta, FileTimeRange};
-use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
+use crate::engine::listener::HandleFinishedListener;
+use crate::test_util::{
+    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, MockWriteBufferManager,
+    TestEnv,
+};
 
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
@@ -270,13 +271,21 @@ async fn test_engine_truncate_reopen() {
 
 #[tokio::test]
 async fn test_engine_truncate_during_flush() {
+    init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush");
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
+    let listener = Arc::new(HandleFinishedListener::new());
+    let engine = env
+        .create_engine_with(
+            MitoConfig::default(),
+            write_buffer_manager.clone(),
+            Some(listener.clone()),
+        )
+        .await;
 
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
-    let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -293,62 +302,33 @@ async fn test_engine_truncate_during_flush() {
 
     let region = engine.get_region(region_id).unwrap();
 
-    // Create a parquet file.
-    // Simulate that the `do_flush()` function is currently being executed.
-    let file_id = FileId::random();
-    let file_name = format!("{}.parquet", file_id);
-    let file_meta = FileMeta {
-        region_id,
-        file_id,
-        time_range: FileTimeRange::default(),
-        level: 0,
-        file_size: 0,
-    };
-    env.get_object_store()
-        .unwrap()
-        .write(&join_path(&region_dir, &file_name), vec![])
-        .await
-        .unwrap();
+    let version_data = region.version_control.current();
+    let entry_id = version_data.last_entry_id;
+    let sequence = version_data.committed_sequence;
 
-    let (sender, receiver) = oneshot::channel();
+    // Flush reigon.
+    let engine_cloned = engine.clone();
+    tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id).await;
+    });
 
-    let flushed_entry_id = region.version_control.current().last_entry_id;
-
-    let current_version = region.version_control.current().version;
-    assert_eq!(current_version.truncated_entry_id, None);
-
-    // Truncate the region.
+    // Truncate the region
     engine
         .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
-    // The flush task is finished, and the `handle_flush_finished()` is executed.
-    let finished = FlushFinished {
-        region_id,
-        file_metas: vec![file_meta.clone()],
-        flushed_entry_id,
-        flushed_sequence: flushed_entry_id,
-        memtables_to_remove: SmallVec::new(),
-        file_purger: region.file_purger.clone(),
-        senders: vec![sender],
-    };
+    listener.notify();
 
-    let worker_request = WorkerRequest::Background {
-        region_id,
-        notify: BackgroundNotify::FlushFinished(finished),
-    };
-
-    engine
-        .handle_worker_request(region_id, worker_request)
-        .await
-        .unwrap();
-
-    let _ = receiver.await;
+    let version_data = region.version_control.current();
+    let truncated_entry_id = version_data.version.truncated_entry_id.unwrap();
+    let truncated_sequence = version_data.version.flushed_sequence;
 
     let request = ScanRequest::default();
     let scanner = engine.scan(region_id, request.clone()).unwrap();
     assert_eq!(0, scanner.num_files());
+    assert_eq!(entry_id, truncated_entry_id);
+    assert_eq!(sequence, truncated_sequence);
 
     // Put data to the region.
     let rows = Rows {

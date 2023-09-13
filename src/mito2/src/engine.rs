@@ -91,15 +91,6 @@ impl MitoEngine {
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
-
-    #[cfg(test)]
-    pub(crate) async fn handle_worker_request(
-        &self,
-        region_id: RegionId,
-        request: WorkerRequest,
-    ) -> Result<()> {
-        self.inner.handle_worker_request(region_id, request).await
-    }
 }
 
 /// Inner struct of [MitoEngine].
@@ -167,15 +158,6 @@ impl EngineInner {
 
         region.set_writable(writable);
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn handle_worker_request(
-        &self,
-        region_id: RegionId,
-        request: WorkerRequest,
-    ) -> Result<()> {
-        self.workers.submit_to_worker(region_id, request).await
     }
 }
 
