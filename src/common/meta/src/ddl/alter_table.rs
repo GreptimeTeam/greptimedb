@@ -30,7 +30,7 @@ use common_telemetry::{debug, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId, TableInfo};
@@ -54,6 +54,8 @@ use crate::table_name::TableName;
 pub struct AlterTableProcedure {
     context: DdlContext,
     data: AlterTableData,
+    /// proto alter Kind.
+    kind: alter_request::Kind,
 }
 
 impl AlterTableProcedure {
@@ -64,17 +66,45 @@ impl AlterTableProcedure {
         task: AlterTableTask,
         table_info_value: TableInfoValue,
         context: DdlContext,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let alter_kind = task
+            .alter_table
+            .kind
+            .as_ref()
+            .context(InvalidProtoMsgSnafu {
+                err_msg: "'kind' is absent",
+            })?;
+        let (kind, next_column_id) =
+            create_proto_alter_kind(&table_info_value.table_info, alter_kind)?;
+
+        Ok(Self {
             context,
-            data: AlterTableData::new(task, table_info_value, cluster_id),
-        }
+            data: AlterTableData::new(task, table_info_value, cluster_id, next_column_id),
+            kind,
+        })
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
-        let data = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let data: AlterTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let alter_kind = data
+            .task
+            .alter_table
+            .kind
+            .as_ref()
+            .context(InvalidProtoMsgSnafu {
+                err_msg: "'kind' is absent",
+            })
+            .map_err(ProcedureError::external)?;
+        let (kind, next_column_id) =
+            create_proto_alter_kind(&data.table_info_value.table_info, alter_kind)
+                .map_err(ProcedureError::external)?;
+        assert_eq!(data.next_column_id, next_column_id);
 
-        Ok(AlterTableProcedure { context, data })
+        Ok(AlterTableProcedure {
+            context,
+            data,
+            kind,
+        })
     }
 
     // Checks whether the table exists.
@@ -133,56 +163,10 @@ impl AlterTableProcedure {
     pub fn create_alter_region_request(&self, region_id: RegionId) -> Result<AlterRequest> {
         let table_info = self.data.table_info();
 
-        let kind =
-            match self.alter_kind()? {
-                Kind::AddColumns(x) => {
-                    let mut next_column_id = table_info.meta.next_column_id;
-
-                    let add_columns =
-                        x.add_columns
-                            .iter()
-                            .map(|add_column| {
-                                let column_def = add_column.column_def.as_ref().context(
-                                    InvalidProtoMsgSnafu {
-                                        err_msg: "'column_def' is absent",
-                                    },
-                                )?;
-
-                                let column_id = next_column_id;
-                                next_column_id += 1;
-
-                                let column_def = RegionColumnDef {
-                                    column_def: Some(column_def.clone()),
-                                    column_id,
-                                };
-
-                                Ok(AddColumn {
-                                    column_def: Some(column_def),
-                                    location: add_column.location.clone(),
-                                })
-                            })
-                            .collect::<Result<Vec<_>>>()?;
-
-                    alter_request::Kind::AddColumns(AddColumns { add_columns })
-                }
-                Kind::DropColumns(x) => {
-                    let drop_columns = x
-                        .drop_columns
-                        .iter()
-                        .map(|x| DropColumn {
-                            name: x.name.clone(),
-                        })
-                        .collect::<Vec<_>>();
-
-                    alter_request::Kind::DropColumns(DropColumns { drop_columns })
-                }
-                Kind::RenameTable(_) => unreachable!(),
-            };
-
         Ok(AlterRequest {
             region_id: region_id.as_u64(),
             schema_version: table_info.ident.version,
-            kind: Some(kind),
+            kind: Some(self.kind.clone()),
         })
     }
 
@@ -280,6 +264,9 @@ impl AlterTableProcedure {
 
         let mut new_info = table_info.clone();
         new_info.ident.version = table_info.ident.version + 1;
+        if let Some(column_id) = self.data.next_column_id {
+            new_info.meta.next_column_id = new_info.meta.next_column_id.max(column_id);
+        }
         new_info.meta = new_meta;
 
         if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
@@ -426,15 +413,23 @@ pub struct AlterTableData {
     task: AlterTableTask,
     table_info_value: TableInfoValue,
     cluster_id: u64,
+    /// Next column id of the table if the task adds columns to the table.
+    next_column_id: Option<ColumnId>,
 }
 
 impl AlterTableData {
-    pub fn new(task: AlterTableTask, table_info_value: TableInfoValue, cluster_id: u64) -> Self {
+    pub fn new(
+        task: AlterTableTask,
+        table_info_value: TableInfoValue,
+        cluster_id: u64,
+        next_column_id: Option<ColumnId>,
+    ) -> Self {
         Self {
             state: AlterTableState::Prepare,
             task,
             table_info_value,
             cluster_id,
+            next_column_id,
         }
     }
 
@@ -448,5 +443,69 @@ impl AlterTableData {
 
     fn table_info(&self) -> &RawTableInfo {
         &self.table_info_value.table_info
+    }
+}
+
+/// Creates region proto alter kind from `table_info` and `alter_kind`.
+///
+/// Returns the kind and next column id if it adds new columns.
+///
+/// # Panics
+/// Panics if kind is rename.
+pub fn create_proto_alter_kind(
+    table_info: &RawTableInfo,
+    alter_kind: &Kind,
+) -> Result<(alter_request::Kind, Option<ColumnId>)> {
+    match alter_kind {
+        Kind::AddColumns(x) => {
+            let mut next_column_id = table_info.meta.next_column_id;
+
+            let add_columns = x
+                .add_columns
+                .iter()
+                .map(|add_column| {
+                    let column_def =
+                        add_column
+                            .column_def
+                            .as_ref()
+                            .context(InvalidProtoMsgSnafu {
+                                err_msg: "'column_def' is absent",
+                            })?;
+
+                    let column_id = next_column_id;
+                    next_column_id += 1;
+
+                    let column_def = RegionColumnDef {
+                        column_def: Some(column_def.clone()),
+                        column_id,
+                    };
+
+                    Ok(AddColumn {
+                        column_def: Some(column_def),
+                        location: add_column.location.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            Ok((
+                alter_request::Kind::AddColumns(AddColumns { add_columns }),
+                Some(next_column_id),
+            ))
+        }
+        Kind::DropColumns(x) => {
+            let drop_columns = x
+                .drop_columns
+                .iter()
+                .map(|x| DropColumn {
+                    name: x.name.clone(),
+                })
+                .collect::<Vec<_>>();
+
+            Ok((
+                alter_request::Kind::DropColumns(DropColumns { drop_columns }),
+                None,
+            ))
+        }
+        Kind::RenameTable(_) => unreachable!(),
     }
 }
