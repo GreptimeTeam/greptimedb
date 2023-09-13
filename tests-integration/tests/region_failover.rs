@@ -19,10 +19,9 @@ use api::v1::meta::Peer;
 use catalog::remote::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::ident::TableIdent;
-use common_meta::key::table_name::{TableNameKey, TableNameValue};
+use common_meta::key::table_name::TableNameKey;
+use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
-use common_meta::rpc::router::TableRoute;
-use common_meta::rpc::KeyValue;
 use common_meta::RegionIdent;
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
@@ -109,12 +108,12 @@ pub async fn test_region_failover(store_type: StorageType) {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
 
-    let cache_key = TableNameKey::new("greptime", "public", "my_table").as_raw_key();
-
-    let cache = get_table_cache(&frontend, &cache_key).unwrap();
-    let table_name_value = TableNameValue::try_from_raw_value(&cache.unwrap().value).unwrap();
-    let table_id = table_name_value.table_id();
-    assert!(get_route_cache(&frontend, table_id).is_some());
+    let table_id = get_table_id(
+        &frontend,
+        TableNameKey::new("greptime", "public", "my_table"),
+    )
+    .await;
+    assert!(has_route_cache(&frontend, table_id).await);
 
     let distribution = find_region_distribution(&cluster, table_id).await;
     info!("Find region distribution: {distribution:?}");
@@ -145,8 +144,7 @@ pub async fn test_region_failover(store_type: StorageType) {
     // Waits for invalidating table cache
     time::sleep(Duration::from_millis(100)).await;
 
-    let route_cache = get_route_cache(&frontend, table_id);
-    assert!(route_cache.is_none());
+    assert!(!has_route_cache(&frontend, table_id).await);
 
     // Inserts data to each datanode after failover
     let frontend = cluster.frontend.clone();
@@ -167,33 +165,41 @@ pub async fn test_region_failover(store_type: StorageType) {
     assert!(success)
 }
 
-fn get_table_cache(instance: &Arc<Instance>, key: &[u8]) -> Option<Option<KeyValue>> {
+async fn get_table_id(instance: &Arc<Instance>, key: TableNameKey<'_>) -> TableId {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()
         .downcast_ref::<FrontendCatalogManager>()
         .unwrap();
 
-    let kvbackend = catalog_manager.backend();
-
-    let kvbackend = kvbackend
-        .as_any()
-        .downcast_ref::<CachedMetaKvBackend>()
-        .unwrap();
-    let cache = kvbackend.cache();
-
-    Some(cache.get(key))
+    catalog_manager
+        .table_metadata_manager_ref()
+        .table_name_manager()
+        .get(key)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_id()
 }
 
-fn get_route_cache(instance: &Arc<Instance>, table_id: TableId) -> Option<Arc<TableRoute>> {
+async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()
         .downcast_ref::<FrontendCatalogManager>()
         .unwrap();
-    let pm = catalog_manager.partition_manager();
-    let cache = pm.table_routes().cache();
-    cache.get(&table_id)
+
+    let kv_backend = catalog_manager.table_metadata_manager_ref().kv_backend();
+
+    let cache = kv_backend
+        .as_any()
+        .downcast_ref::<CachedMetaKvBackend>()
+        .unwrap()
+        .cache();
+
+    cache
+        .get(TableRouteKey::new(table_id).as_raw_key().as_slice())
+        .is_some()
 }
 
 async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
@@ -354,6 +360,7 @@ async fn run_region_failover_procedure(
     let procedure = RegionFailoverProcedure::new(
         failed_region.clone(),
         RegionFailoverContext {
+            region_lease_secs: 10,
             in_memory: meta_srv.in_memory().clone(),
             mailbox: meta_srv.mailbox().clone(),
             selector,

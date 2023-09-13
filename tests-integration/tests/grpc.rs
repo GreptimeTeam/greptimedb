@@ -250,14 +250,14 @@ pub async fn test_insert_and_select(store_type: StorageType) {
     //alter
     let add_column = ColumnDef {
         name: "test_column".to_string(),
-        datatype: ColumnDataType::Int64.into(),
+        data_type: ColumnDataType::Int64.into(),
         is_nullable: true,
         default_constraint: vec![],
+        semantic_type: SemanticType::Field as i32,
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
             column_def: Some(add_column),
-            is_key: false,
             location: None,
         }],
     });
@@ -266,7 +266,6 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         schema_name: DEFAULT_SCHEMA_NAME.to_string(),
         table_name: "demo".to_string(),
         kind: Some(kind),
-        ..Default::default()
     };
     let result = db.alter(expr).await.unwrap();
     assert!(matches!(result, Output::AffectedRows(0)));
@@ -342,27 +341,31 @@ fn testing_create_expr() -> CreateTableExpr {
     let column_defs = vec![
         ColumnDef {
             name: "host".to_string(),
-            datatype: ColumnDataType::String as i32,
+            data_type: ColumnDataType::String as i32,
             is_nullable: false,
             default_constraint: vec![],
+            semantic_type: SemanticType::Tag as i32,
         },
         ColumnDef {
             name: "cpu".to_string(),
-            datatype: ColumnDataType::Float64 as i32,
+            data_type: ColumnDataType::Float64 as i32,
             is_nullable: true,
             default_constraint: vec![],
+            semantic_type: SemanticType::Field as i32,
         },
         ColumnDef {
             name: "memory".to_string(),
-            datatype: ColumnDataType::Float64 as i32,
+            data_type: ColumnDataType::Float64 as i32,
             is_nullable: true,
             default_constraint: vec![],
+            semantic_type: SemanticType::Field as i32,
         },
         ColumnDef {
             name: "ts".to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32, // timestamp
+            data_type: ColumnDataType::TimestampMillisecond as i32, // timestamp
             is_nullable: true,
             default_constraint: vec![],
+            semantic_type: SemanticType::Timestamp as i32,
         },
     ];
     CreateTableExpr {

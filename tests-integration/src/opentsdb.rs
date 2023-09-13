@@ -25,11 +25,14 @@ mod tests {
     use servers::query_handler::OpentsdbProtocolHandler;
     use session::context::QueryContext;
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_exec() {
-        let standalone = tests::create_standalone_instance("test_standalone_exec").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_exec")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         test_exec(instance).await;
