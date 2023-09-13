@@ -28,19 +28,19 @@ Affected Rows: 1
 
 INSERT INTO a VALUES (1);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
+Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2,3);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
+Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, columns: 2, values: 3
 
 INSERT INTO a VALUES (1,2),(3);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 1
+Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, columns: 2, values: 1
 
 INSERT INTO a VALUES (1,2),(3,4,5);
 
-Error: 1004(InvalidArguments), Columns and values number mismatch, columns: 2, values: 3
+Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, columns: 2, values: 3
 
 DROP TABLE strings;
 
