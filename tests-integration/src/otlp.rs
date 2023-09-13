@@ -30,11 +30,14 @@ mod test {
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use session::context::QueryContext;
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_on_standalone() {
-        let standalone = tests::create_standalone_instance("test_standalone_otlp").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_otlp")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         test_otlp(instance).await;

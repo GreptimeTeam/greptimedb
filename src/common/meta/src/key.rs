@@ -202,6 +202,11 @@ impl TableMetadataManager {
         &self.table_route_manager
     }
 
+    #[cfg(feature = "testing")]
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
+    }
+
     pub async fn get_full_table_info(
         &self,
         table_id: TableId,

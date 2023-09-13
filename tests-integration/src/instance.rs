@@ -19,6 +19,7 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Arc;
 
+    use api::v1::region::QueryRequest;
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::key::table_name::TableNameKey;
@@ -29,17 +30,23 @@ mod tests {
     use frontend::error::{self, Error, Result};
     use frontend::instance::Instance;
     use query::parser::QueryLanguageParser;
+    use query::plan::LogicalPlan;
     use servers::interceptor::{SqlQueryInterceptor, SqlQueryInterceptorRef};
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::{QueryContext, QueryContextRef};
     use sql::statements::statement::Statement;
+    use store_api::storage::RegionId;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
     use crate::tests::MockDistributedInstance;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_exec_sql() {
-        let standalone = tests::create_standalone_instance("test_standalone_exec_sql").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_exec_sql")
+            .build()
+            .await;
         let instance = standalone.instance.as_ref();
 
         let sql = r#"
@@ -216,18 +223,27 @@ mod tests {
         assert_eq!(region_to_dn_map.len(), expected_distribution.len());
 
         let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
+        let LogicalPlan::DfPlan(plan) = instance
+            .frontend()
+            .statement_executor()
+            .plan(stmt, QueryContext::arc())
+            .await
+            .unwrap();
+        let plan = DFLogicalSubstraitConvertor.encode(&plan).unwrap();
+
         for (region, dn) in region_to_dn_map.iter() {
-            let dn = instance.datanodes().get(dn).unwrap();
-            let engine = dn.query_engine();
-            let plan = engine
-                .planner()
-                .plan(stmt.clone(), QueryContext::arc())
+            let region_server = instance.datanodes().get(dn).unwrap().region_server();
+
+            let region_id = RegionId::new(table_id, *region);
+
+            let stream = region_server
+                .handle_read(QueryRequest {
+                    region_id: region_id.as_u64(),
+                    plan: plan.to_vec(),
+                })
                 .await
                 .unwrap();
-            let output = engine.execute(plan, QueryContext::arc()).await.unwrap();
-            let Output::Stream(stream) = output else {
-                unreachable!()
-            };
+
             let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
             let actual = recordbatches.pretty_print().unwrap();
 
@@ -246,14 +262,13 @@ mod tests {
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {
-        for (_, dn) in instance.datanodes().iter() {
-            assert!(dn
-                .catalog_manager()
-                .table("greptime", "public", "demo")
-                .await
-                .unwrap()
-                .is_none())
-        }
+        assert!(instance
+            .frontend()
+            .catalog_manager()
+            .table("greptime", "public", "demo")
+            .await
+            .unwrap()
+            .is_none())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -314,13 +329,15 @@ mod tests {
             }
         }
 
-        let standalone = tests::create_standalone_instance("test_hook").await;
-        let mut instance = standalone.instance;
-
         let plugins = Plugins::new();
         let counter_hook = Arc::new(AssertionHook::default());
         plugins.insert::<SqlQueryInterceptorRef<Error>>(counter_hook.clone());
-        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_sql_interceptor_plugin")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.instance;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,
@@ -374,13 +391,15 @@ mod tests {
 
         let query_ctx = QueryContext::arc();
 
-        let standalone = tests::create_standalone_instance("test_db_hook").await;
-        let mut instance = standalone.instance;
-
         let plugins = Plugins::new();
         let hook = Arc::new(DisableDBOpHook);
         plugins.insert::<SqlQueryInterceptorRef<Error>>(hook.clone());
-        Arc::make_mut(&mut instance).set_plugins(Arc::new(plugins));
+
+        let standalone = GreptimeDbStandaloneBuilder::new("test_disable_db_operation_plugin")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.instance;
 
         let sql = r#"CREATE TABLE demo(
                             host STRING,

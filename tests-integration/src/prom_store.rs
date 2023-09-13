@@ -28,12 +28,14 @@ mod tests {
     use servers::query_handler::PromStoreProtocolHandler;
     use session::context::QueryContext;
 
+    use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_prom_store_remote_rw() {
-        let standalone =
-            tests::create_standalone_instance("test_standalone_prom_store_remote_rw").await;
+        let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_prom_store_remote_rw")
+            .build()
+            .await;
         let instance = &standalone.instance;
 
         test_prom_store_remote_rw(instance).await;

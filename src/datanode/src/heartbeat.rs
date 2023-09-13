@@ -27,16 +27,14 @@ use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
 use crate::datanode::DatanodeOptions;
-use crate::error::{
-    self, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, Result,
-};
+use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -62,15 +60,11 @@ impl Drop for HeartbeatTask {
 
 impl HeartbeatTask {
     /// Create a new heartbeat task instance.
-    pub async fn try_new(opts: &DatanodeOptions, region_server: RegionServer) -> Result<Self> {
-        let meta_client = new_metasrv_client(
-            opts.node_id.context(MissingNodeIdSnafu)?,
-            opts.meta_client_options
-                .as_ref()
-                .context(MissingMetasrvOptsSnafu)?,
-        )
-        .await?;
-
+    pub async fn try_new(
+        opts: &DatanodeOptions,
+        region_server: RegionServer,
+        meta_client: MetaClient,
+    ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
             opts.heartbeat.interval_millis,

@@ -11,7 +11,10 @@ futures = { version = "0.3" }
 lru = "0.9"
 md5 = "0.7"
 metrics.workspace = true
-opendal = { version = "0.36", features = ["layers-tracing", "layers-metrics"] }
+opendal = { git = "https://github.com/apache/incubator-opendal.git", rev = "7d5524f35f29f7eda8131e8b0873590b7cbe34ab", features = [
+    "layers-tracing",
+    "layers-metrics",
+] }
 pin-project = "1.0"
 tokio.workspace = true
 uuid.workspace = true

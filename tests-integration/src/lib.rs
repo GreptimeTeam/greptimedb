@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod catalog;
 pub mod cluster;
 mod grpc;
 mod influxdb;
@@ -22,7 +21,7 @@ mod otlp;
 mod prom_store;
 pub mod test_util;
 
-// TODO(LFC): Refactor: move instance structs out of mod "tests", like the `GreptimeDbCluster`.
+mod standalone;
 #[cfg(test)]
 mod tests;
 
