@@ -76,16 +76,16 @@ impl Lister {
                         path: &file_full_path,
                     },
                 )?;
-                // Safety: file must exists
-                let file = self
+
+                Ok(self
                     .object_store
                     .list_with(&self.path)
                     .await
                     .context(error::ListObjectsSnafu { path: &self.path })?
                     .into_iter()
                     .find(|f| f.name() == filename)
-                    .unwrap();
-                Ok(vec![file])
+                    .map(|f| vec![f])
+                    .unwrap_or_default())
             }
         }
     }
