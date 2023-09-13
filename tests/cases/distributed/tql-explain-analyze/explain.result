@@ -9,7 +9,7 @@ Affected Rows: 3
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
 +---------------+-----------------------------------------------------------------------------------------------+
@@ -24,7 +24,7 @@ TQL EXPLAIN (0, 10, '5s') test;
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                    |
 |               |     PromSeriesDivideExec: tags=["k"]                                                          |
 |               |       SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST]                                |
-|               |         MergeScanExec: peers=[REDACTED
+|               |         MergeScanExec: REDACTED
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
 
@@ -44,7 +44,7 @@ CREATE TABLE host_load1 (
 Affected Rows: 0
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN host_load1{__field__="val"};
 
 +---------------+------------------------------------------------------------------------------------------------------------------+
@@ -59,7 +59,7 @@ TQL EXPLAIN host_load1{__field__="val"};
 |               |   PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [false]                                      |
 |               |     PromSeriesDivideExec: tags=["collector", "host"]                                                             |
 |               |       SortExec: expr=[collector@1 DESC NULLS LAST,host@2 DESC NULLS LAST,ts@3 DESC NULLS LAST]                   |
-|               |         MergeScanExec: peers=[REDACTED
+|               |         MergeScanExec: REDACTED
 |               |                                                                                                                  |
 +---------------+------------------------------------------------------------------------------------------------------------------+
 
