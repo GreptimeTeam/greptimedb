@@ -186,11 +186,3 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .build()
         .await
 }
-
-pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
-    let meta_srv = build_meta_srv(opts).await?;
-
-    meta_srv.try_start().await?;
-
-    Ok(meta_srv)
-}

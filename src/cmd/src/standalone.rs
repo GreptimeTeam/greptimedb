@@ -31,6 +31,7 @@ use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDat
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use plugins::OptPlugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -286,7 +287,10 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let (fe_opts, fe_plugins) = plugins::setup_frontend_plugins(opts.fe_opts)
+        let OptPlugins {
+            opts: fe_opts,
+            plugins: fe_plugins,
+        } = plugins::setup_frontend_plugins(opts.fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -372,6 +376,7 @@ mod tests {
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
+    use plugins::OptPlugins;
     use servers::Mode;
 
     use super::*;
@@ -384,7 +389,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, plugins) = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
+        let OptPlugins { plugins, .. } = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider

@@ -18,6 +18,7 @@ use clap::Parser;
 use common_telemetry::logging;
 use datanode::datanode::{Datanode, DatanodeOptions};
 use meta_client::MetaClientOptions;
+use plugins::OptPlugins;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -163,7 +164,7 @@ impl StartCommand {
     }
 
     async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
-        let (opts, plugins) = plugins::setup_datanode_plugins(opts)
+        let OptPlugins { opts, plugins } = plugins::setup_datanode_plugins(opts)
             .await
             .context(StartDatanodeSnafu)?;
 

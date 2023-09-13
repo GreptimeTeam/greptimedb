@@ -6,9 +6,9 @@ use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
 
-pub async fn setup_frontend_plugins(
-    opts: FrontendOptions,
-) -> Result<(FrontendOptions, Arc<Plugins>)> {
+use crate::OptPlugins;
+
+pub async fn setup_frontend_plugins(opts: FrontendOptions) -> Result<OptPlugins<FrontendOptions>> {
     let plugins = Plugins::new();
 
     if let Some(user_provider) = opts.user_provider.as_ref() {
@@ -17,7 +17,10 @@ pub async fn setup_frontend_plugins(
         plugins.insert::<UserProviderRef>(provider);
     }
 
-    Ok((opts, Arc::new(plugins)))
+    Ok(OptPlugins {
+        opts,
+        plugins: Arc::new(plugins),
+    })
 }
 
 pub async fn start_frontend_plugins(_plugins: Arc<Plugins>) -> Result<()> {

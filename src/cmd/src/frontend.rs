@@ -17,6 +17,7 @@ use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::MetaClientOptions;
+use plugins::OptPlugins;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
@@ -180,7 +181,7 @@ impl StartCommand {
     }
 
     async fn build(self, opts: FrontendOptions) -> Result<Instance> {
-        let (opts, plugins) = plugins::setup_frontend_plugins(opts)
+        let OptPlugins { opts, plugins } = plugins::setup_frontend_plugins(opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -209,6 +210,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
+    use plugins::OptPlugins;
     use servers::http::HttpOptions;
 
     use super::*;
@@ -307,7 +309,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (_, plugins) = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
+        let OptPlugins { plugins, .. } = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
