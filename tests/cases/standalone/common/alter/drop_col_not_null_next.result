@@ -19,9 +19,10 @@ ALTER TABLE test DROP COLUMN j;
 
 Affected Rows: 0
 
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
 INSERT INTO test VALUES (3, NULL);
 
-Error: 1004(InvalidArguments), Column k is not null but input has null
+Error: 1004(InvalidArguments), Invalid request to region, reason: column k is not null but input has null
 
 INSERT INTO test VALUES (3, 13);
 
