@@ -213,7 +213,10 @@ impl WriteRequest {
                     !has_null || column.column_schema.is_nullable(),
                     InvalidRequestSnafu {
                         region_id,
-                        reason: format!("column {} is not null", column.column_schema.name),
+                        reason: format!(
+                            "column {} is not null but input has null",
+                            column.column_schema.name
+                        ),
                     }
                 );
             } else {
