@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
+use common_base::PluginsRef;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
@@ -198,7 +199,8 @@ pub struct MetaSrv {
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
-    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
+
+    plugins: PluginsRef,
 }
 
 impl MetaSrv {
@@ -218,7 +220,7 @@ impl MetaSrv {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
-            let subscribe_manager = self.subscribe_manager().cloned();
+            let subscribe_manager = self.subscribe_manager();
             let mut rx = election.subscribe_leader_change();
             let task_handler = self.greptimedb_telemetry_task.clone();
             let _handle = common_runtime::spawn_bg(async move {
@@ -360,12 +362,12 @@ impl MetaSrv {
         &self.table_metadata_manager
     }
 
-    pub fn publish(&self) -> Option<&PublishRef> {
-        self.pubsub.as_ref().map(|suite| &suite.0)
+    pub fn publish(&self) -> Option<PublishRef> {
+        self.plugins.get::<PublishRef>()
     }
 
-    pub fn subscribe_manager(&self) -> Option<&SubscribeManagerRef> {
-        self.pubsub.as_ref().map(|suite| &suite.1)
+    pub fn subscribe_manager(&self) -> Option<SubscribeManagerRef> {
+        self.plugins.get::<SubscribeManagerRef>()
     }
 
     #[inline]

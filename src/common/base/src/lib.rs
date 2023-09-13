@@ -75,3 +75,5 @@ impl Plugins {
         binding.is_empty()
     }
 }
+
+pub type PluginsRef = Arc<Plugins>;

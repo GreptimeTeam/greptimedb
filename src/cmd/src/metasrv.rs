@@ -12,9 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use common_base::Plugins;
 use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
@@ -160,10 +162,11 @@ impl StartCommand {
 
     async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
         logging::info!("MetaSrv start command: {:#?}", self);
-
         logging::info!("MetaSrv options: {:#?}", opts);
 
-        let instance = MetaSrvInstance::new(opts)
+        let plugins = Arc::new(Plugins::new());
+
+        let instance = MetaSrvInstance::new(opts, plugins)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

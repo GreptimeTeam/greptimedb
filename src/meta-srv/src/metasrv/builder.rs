@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
+use common_base::{Plugins, PluginsRef};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -47,7 +48,7 @@ use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
-use crate::pubsub::{PublishRef, SubscribeManagerRef};
+use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
@@ -66,7 +67,7 @@ pub struct MetaSrvBuilder {
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
-    pubsub: Option<(PublishRef, SubscribeManagerRef)>,
+    plugins: Option<PluginsRef>,
 }
 
 impl MetaSrvBuilder {
@@ -81,7 +82,7 @@ impl MetaSrvBuilder {
             options: None,
             lock: None,
             datanode_clients: None,
-            pubsub: None,
+            plugins: None,
         }
     }
 
@@ -130,8 +131,8 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn pubsub(mut self, publish: PublishRef, subscribe_manager: SubscribeManagerRef) -> Self {
-        self.pubsub = Some((publish, subscribe_manager));
+    pub fn plugins(mut self, plugins: PluginsRef) -> Self {
+        self.plugins = Some(plugins);
         self
     }
 
@@ -148,7 +149,7 @@ impl MetaSrvBuilder {
             handler_group,
             lock,
             datanode_clients,
-            pubsub,
+            plugins,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -216,11 +217,10 @@ impl MetaSrvBuilder {
                     None
                 };
 
-                let publish_heartbeat_handler = if let Some((publish, _)) = pubsub.as_ref() {
-                    Some(PublishHeartbeatHandler::new(publish.clone()))
-                } else {
-                    None
-                };
+                let publish_heartbeat_handler = plugins
+                    .clone()
+                    .and_then(|plugins| plugins.get::<PublishRef>())
+                    .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
                 let region_lease_handler = RegionLeaseHandler::new(options.region_lease_secs);
 
@@ -272,7 +272,7 @@ impl MetaSrvBuilder {
                 enable_telemetry,
             )
             .await,
-            pubsub,
+            plugins: plugins.unwrap_or_else(|| Arc::new(Plugins::default())),
         })
     }
 }
