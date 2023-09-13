@@ -48,7 +48,6 @@ pub mod datanode_table;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
-mod kv_backend_helper;
 // TODO(weny): removes it.
 #[allow(deprecated)]
 pub mod table_region;

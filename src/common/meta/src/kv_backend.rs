@@ -81,6 +81,32 @@ where
         })
     }
 
+    /// Puts a value at a key. If `if_not_exists` is `true`, the operation
+    /// ensures the key does not exist before applying the PUT operation.
+    /// Otherwise, it simply applies the PUT operation without checking for
+    /// the key's existence.
+    async fn put_conditionally(
+        &self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        if_not_exists: bool,
+    ) -> Result<bool, Self::Error> {
+        let success = if if_not_exists {
+            let req = CompareAndPutRequest::new()
+                .with_key(key)
+                .with_expect(vec![])
+                .with_value(value);
+            let res = self.compare_and_put(req).await?;
+            res.success
+        } else {
+            let req = PutRequest::new().with_key(key).with_value(value);
+            self.put(req).await?;
+            true
+        };
+
+        Ok(success)
+    }
+
     /// Check if the key exists, not returning the value.
     /// If the value is large, this method is more efficient than `get`.
     async fn exists(&self, key: &[u8]) -> Result<bool, Self::Error> {

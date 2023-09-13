@@ -24,9 +24,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Error, InvalidTableMetadataSnafu, Result};
-use crate::key::{
-    kv_backend_helper, TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX,
-};
+use crate::key::{TableMetaKey, CATALOG_NAME_KEY_PATTERN, CATALOG_NAME_KEY_PREFIX};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
@@ -110,7 +108,9 @@ impl CatalogManager {
 
         let raw_key = catalog.as_raw_key();
         let raw_value = CatalogNameValue.try_as_raw_value()?;
-        if kv_backend_helper::put_conditionally(&self.kv_backend, raw_key, raw_value, if_not_exists)
+        if self
+            .kv_backend
+            .put_conditionally(raw_key, raw_value, if_not_exists)
             .await?
         {
             increment_counter!(crate::metrics::METRIC_META_CREATE_CATALOG);
