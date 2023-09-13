@@ -81,8 +81,9 @@ impl MetaSrvInstance {
 
         self.signal_sender = Some(tx);
 
-        let meta_srv =
-            bootstrap_meta_srv_with_router(&self.opts.bind_addr, router(self.meta_srv.clone()), rx);
+        let router = router(self.meta_srv.clone());
+
+        let meta_srv = bootstrap_meta_srv_with_router(&self.opts.bind_addr, router, rx);
         let addr = self
             .opts
             .http_opts

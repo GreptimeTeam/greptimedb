@@ -12,17 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use common_base::Plugins;
 use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
+use plugins::OptPlugins;
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, StartMetaServerSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -161,10 +160,12 @@ impl StartCommand {
     }
 
     async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
+        let OptPlugins { opts, plugins } = plugins::setup_meta_srv_plugins(opts)
+            .await
+            .context(StartMetaServerSnafu)?;
+
         logging::info!("MetaSrv start command: {:#?}", self);
         logging::info!("MetaSrv options: {:#?}", opts);
-
-        let plugins = Arc::new(Plugins::new());
 
         let instance = MetaSrvInstance::new(opts, plugins)
             .await

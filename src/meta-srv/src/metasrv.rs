@@ -370,6 +370,10 @@ impl MetaSrv {
         self.plugins.get::<SubscribeManagerRef>()
     }
 
+    pub fn plugins(&self) -> &PluginsRef {
+        &self.plugins
+    }
+
     #[inline]
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();

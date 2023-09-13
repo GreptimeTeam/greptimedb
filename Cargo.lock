@@ -6657,6 +6657,7 @@ dependencies = [
  "common-base",
  "datanode",
  "frontend",
+ "meta-srv",
  "snafu",
 ]
 
