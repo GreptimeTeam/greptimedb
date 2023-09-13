@@ -77,6 +77,11 @@ impl AlterTableProcedure {
         let (kind, next_column_id) =
             create_proto_alter_kind(&table_info_value.table_info, alter_kind)?;
 
+        debug!(
+            "New AlterTableProcedure, kind: {:?}, next_column_id: {:?}",
+            kind, next_column_id
+        );
+
         Ok(Self {
             context,
             data: AlterTableData::new(task, table_info_value, cluster_id, next_column_id),
@@ -263,11 +268,11 @@ impl AlterTableProcedure {
             })?;
 
         let mut new_info = table_info.clone();
+        new_info.meta = new_meta;
         new_info.ident.version = table_info.ident.version + 1;
         if let Some(column_id) = self.data.next_column_id {
             new_info.meta.next_column_id = new_info.meta.next_column_id.max(column_id);
         }
-        new_info.meta = new_meta;
 
         if let AlterKind::RenameTable { new_table_name } = &request.alter_kind {
             new_info.name = new_table_name.to_string();
@@ -295,7 +300,7 @@ impl AlterTableProcedure {
             self.on_update_metadata_for_alter(new_info.into()).await?;
         }
 
-        info!("Updated table metadata for table {table_id}");
+        info!("Updated table metadata for table {table_ref}, table_id: {table_id}");
 
         self.data.state = AlterTableState::InvalidateTableCache;
         Ok(Status::executing(true))
@@ -411,6 +416,7 @@ enum AlterTableState {
 pub struct AlterTableData {
     state: AlterTableState,
     task: AlterTableTask,
+    /// Table info value before alteration.
     table_info_value: TableInfoValue,
     cluster_id: u64,
     /// Next column id of the table if the task adds columns to the table.
