@@ -175,14 +175,15 @@ impl TreeNodeVisitor for TableNameExtractor {
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
                         if provider.table().table_type() == TableType::Base {
+                            common_telemetry::info!("[DEBUG] is base table");
                             let info = provider.table().table_info();
                             self.table_name = Some(TableName::new(
                                 info.catalog_name.clone(),
                                 info.schema_name.clone(),
                                 info.name.clone(),
                             ));
-                            return Ok(VisitRecursion::Stop);
                         }
+                        return Ok(VisitRecursion::Stop);
                     }
                 }
                 match &scan.table_name {
