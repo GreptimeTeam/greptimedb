@@ -135,19 +135,6 @@ impl RegionMap {
         regions.get(&region_id).cloned()
     }
 
-    /// Gets region by region id or call the failure callback.
-    pub(crate) fn get_region_or<F: OnFailure>(
-        &self,
-        region_id: RegionId,
-        cb: &mut F,
-    ) -> Option<MitoRegionRef> {
-        let region_opt = self.get_region(region_id);
-        if region_opt.is_none() {
-            cb.on_failure(RegionNotFoundSnafu { region_id }.build());
-        }
-        region_opt
-    }
-
     /// Gets writable region by region id.
     ///
     /// Returns error if the region does not exist or is readonly.

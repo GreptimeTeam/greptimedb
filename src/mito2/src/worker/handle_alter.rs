@@ -39,7 +39,7 @@ impl<S> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.get_region_or(region_id, &mut sender) else {
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
