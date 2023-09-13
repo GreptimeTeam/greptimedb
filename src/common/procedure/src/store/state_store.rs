@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
 use futures::{Stream, StreamExt};
-use object_store::{EntryMode, Metakey, ObjectStore};
+use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 
 use crate::error::{DeleteStateSnafu, ListStateSnafu, PutStateSnafu, Result};
@@ -86,7 +86,8 @@ impl StateStore for ObjectStateStore {
     async fn walk_top_down(&self, path: &str) -> Result<KeyValueStream> {
         let mut lister = self
             .store
-            .scan(path)
+            .lister_with(path)
+            .delimiter("")
             .await
             .map_err(|e| {
                 BoxedError::new(PlainError::new(
@@ -110,17 +111,8 @@ impl StateStore for ObjectStateStore {
                     })
                     .context(ListStateSnafu { path: &path_string })?;
                 let key = entry.path();
-                let metadata = store
-                    .metadata(&entry, Metakey::Mode)
-                    .await
-                    .map_err(|e| {
-                        BoxedError::new(PlainError::new(
-                            e.to_string(),
-                            StatusCode::StorageUnavailable,
-                        ))
-                    })
-                    .context(ListStateSnafu { path: key })?;
-                if let EntryMode::FILE = metadata.mode() {
+
+                if let EntryMode::FILE = entry.metadata().mode() {
                     let value = store
                         .read(key)
                         .await
