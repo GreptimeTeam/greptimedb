@@ -185,7 +185,7 @@ impl EngineInner {
         })?;
         self.regions.write().await.insert(region_id, region);
 
-        info!("A new region created, region_id: {}", region_id);
+        info!("A new region is created, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
     }
 
