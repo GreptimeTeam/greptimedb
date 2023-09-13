@@ -51,7 +51,7 @@ impl Lister {
             Source::Dir => {
                 let streamer = self
                     .object_store
-                    .list(&self.path)
+                    .lister_with(&self.path)
                     .await
                     .context(error::ListObjectsSnafu { path: &self.path })?;
 
@@ -76,7 +76,16 @@ impl Lister {
                         path: &file_full_path,
                     },
                 )?;
-                Ok(vec![Entry::new(&file_full_path)])
+                // Safety: file must exists
+                let file = self
+                    .object_store
+                    .list_with(&self.path)
+                    .await
+                    .context(error::ListObjectsSnafu { path: &self.path })?
+                    .into_iter()
+                    .find(|f| f.name() == filename)
+                    .unwrap();
+                Ok(vec![file])
             }
         }
     }

@@ -21,7 +21,7 @@ use common_test_util::temp_dir::create_temp_dir;
 use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
 use object_store::test_util::TempFolder;
-use object_store::{util, ObjectStore, ObjectStoreBuilder};
+use object_store::{ObjectStore, ObjectStoreBuilder};
 use opendal::raw::Accessor;
 use opendal::services::{Azblob, Gcs, Oss};
 use opendal::{EntryMode, Operator, OperatorBuilder};
@@ -37,7 +37,7 @@ async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     assert_eq!("Hello, World!", String::from_utf8(bs)?);
 
     // Read range from object;
-    let bs = store.range_read(file_name, 1..=11).await?;
+    let bs = store.read_with(file_name).range(1..=11).await?;
     assert_eq!("ello, World", String::from_utf8(bs)?);
 
     // Get object's Metadata
@@ -62,8 +62,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     store.write(p3, "Hello, object3!").await?;
 
     // List objects
-    let lister = store.list("/").await?;
-    let entries = util::collect(lister).await?;
+    let entries = store.list("/").await?;
     assert_eq!(3, entries.len());
 
     store.delete(p1).await?;
@@ -71,7 +70,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
 
     // List objects again
     // Only o2 is exists
-    let entries = util::collect(store.list("/").await?).await?;
+    let entries = store.list("/").await?;
     assert_eq!(1, entries.len());
     assert_eq!(p2, entries.get(0).unwrap().path());
 
@@ -79,7 +78,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     assert_eq!("Hello, object2!", String::from_utf8(content)?);
 
     store.delete(p2).await?;
-    let entries = util::collect(store.list("/").await?).await?;
+    let entries = store.list("/").await?;
     assert!(entries.is_empty());
     Ok(())
 }
@@ -225,8 +224,7 @@ async fn assert_cache_files(
     file_names: &[&str],
     file_contents: &[&str],
 ) -> Result<()> {
-    let obs = store.list("/").await?;
-    let objects = util::collect(obs).await?;
+    let objects = store.list("/").await?;
 
     // compare the cache file with the expected cache file; ignore orders
     for o in objects {
@@ -284,10 +282,10 @@ async fn test_object_store_cache_policy() -> Result<()> {
     store.write(p2, "Hello, object2!").await.unwrap();
 
     // create cache by read object
-    let _ = store.range_read(p1, 0..).await?;
+    let _ = store.read_with(p1).range(0..).await?;
     let _ = store.read(p1).await?;
-    let _ = store.range_read(p2, 0..).await?;
-    let _ = store.range_read(p2, 7..).await?;
+    let _ = store.read_with(p2).range(0..).await?;
+    let _ = store.read_with(p2).range(7..).await?;
     let _ = store.read(p2).await?;
 
     assert_cache_files(
@@ -327,7 +325,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     store.write(p3, "Hello, object3!").await.unwrap();
 
     let _ = store.read(p3).await.unwrap();
-    let _ = store.range_read(p3, 0..5).await.unwrap();
+    let _ = store.read_with(p3).range(0..5).await.unwrap();
 
     assert_cache_files(
         &cache_store,

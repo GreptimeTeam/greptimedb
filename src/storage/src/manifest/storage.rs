@@ -177,7 +177,7 @@ impl ManifestObjectStore {
     {
         let streamer = self
             .object_store
-            .list(&self.path)
+            .lister_with(&self.path)
             .await
             .context(ListObjectsSnafu { path: &self.path })?;
         streamer
