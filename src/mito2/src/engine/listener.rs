@@ -30,7 +30,7 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the engine is stalled.
     fn on_write_stall(&self);
 
-    async fn on_handle_finished_begin(&self, region_id: RegionId);
+    async fn on_flush_begin(&self, region_id: RegionId);
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -64,7 +64,7 @@ impl EventListener for FlushListener {
 
     fn on_write_stall(&self) {}
 
-    async fn on_handle_finished_begin(&self, _region_id: RegionId) {}
+    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
 /// Listener to watch stall events.
@@ -96,37 +96,43 @@ impl EventListener for StallListener {
         self.notify.notify_one();
     }
 
-    async fn on_handle_finished_begin(&self, _region_id: RegionId) {}
+    async fn on_flush_begin(&self, _region_id: RegionId) {}
 }
 
-pub struct HandleFinishedListener {
-    notify: Notify,
+pub struct FlushTruncateListener {
+    notify_flush: Notify,
+    notify_truncate: Notify,
 }
 
-impl HandleFinishedListener {
-    pub fn new() -> HandleFinishedListener {
-        HandleFinishedListener {
-            notify: Notify::new(),
+impl FlushTruncateListener {
+    pub fn new() -> FlushTruncateListener {
+        FlushTruncateListener {
+            notify_flush: Notify::new(),
+            notify_truncate: Notify::new(),
         }
     }
 
-    pub fn notify(&self) {
-        self.notify.notify_one();
+    pub fn notify_flush(&self) {
+        self.notify_flush.notify_one();
     }
 
-    pub async fn wait(&self) {
-        self.notify.notified().await;
+    pub async fn wait_truncate(&self) {
+        self.notify_truncate.notified().await;
     }
 }
 
 #[async_trait]
-impl EventListener for HandleFinishedListener {
+impl EventListener for FlushTruncateListener {
     fn on_flush_success(&self, _region_id: RegionId) {}
 
     fn on_write_stall(&self) {}
 
-    async fn on_handle_finished_begin(&self, region_id: RegionId) {
-        info!("Region {} begin handle finished flush", region_id);
-        self.wait().await;
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        info!(
+            "Region {} begin do flush, notify region to truncate",
+            region_id
+        );
+        self.notify_truncate.notify_one();
+        self.notify_flush.notified().await;
     }
 }

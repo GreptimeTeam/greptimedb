@@ -40,6 +40,7 @@ use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
+use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -187,6 +188,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
+    pub(crate) listener: WorkerListener,
 }
 
 impl RegionFlushTask {
@@ -228,6 +230,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
+        self.listener.on_flush_begin(self.region_id).await;
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
                 let memtables_to_remove = version_data

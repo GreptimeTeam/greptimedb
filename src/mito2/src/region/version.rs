@@ -105,6 +105,7 @@ impl VersionControl {
             VersionBuilder::from_version(version)
                 .apply_edit(edit, purger)
                 .remove_memtables(memtables_to_remove)
+                .truncated_entry_id(None)
                 .build(),
         );
 
@@ -240,7 +241,7 @@ impl VersionBuilder {
             ssts: version.ssts.clone(),
             flushed_entry_id: version.flushed_entry_id,
             flushed_sequence: version.flushed_sequence,
-            truncated_entry_id: None,
+            truncated_entry_id: version.truncated_entry_id,
         }
     }
 

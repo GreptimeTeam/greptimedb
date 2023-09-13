@@ -542,7 +542,7 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Wrapper that only calls event listener in tests.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct WorkerListener {
     #[cfg(test)]
     listener: Option<crate::engine::listener::EventListenerRef>,
@@ -574,10 +574,10 @@ impl WorkerListener {
         }
     }
 
-    pub(crate) async fn on_handle_finishd_begin(&self, region_id: RegionId) {
+    pub(crate) async fn on_flush_begin(&self, region_id: RegionId) {
         #[cfg(test)]
         if let Some(listener) = &self.listener {
-            listener.on_handle_finished_begin(region_id).await;
+            listener.on_flush_begin(region_id).await;
         }
         // Avoid compiler warning.
         let _ = region_id;

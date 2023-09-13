@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
-use common_telemetry::init_default_ut_logging;
+use common_telemetry::{info, init_default_ut_logging};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
@@ -27,10 +27,9 @@ use store_api::storage::RegionId;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::engine::listener::HandleFinishedListener;
+use crate::engine::listener::FlushTruncateListener;
 use crate::test_util::{
-    build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, MockWriteBufferManager,
-    TestEnv,
+    build_rows, put_rows, rows_schema, CreateRequestBuilder, MockWriteBufferManager, TestEnv,
 };
 
 #[tokio::test]
@@ -174,7 +173,7 @@ async fn test_engine_truncate_after_flush() {
         .unwrap();
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request.clone()).unwrap();
+    let scanner = engine.scanner(region_id, request.clone()).unwrap();
     assert_eq!(1, scanner.num_files());
 
     // Truncate the region.
@@ -208,7 +207,7 @@ async fn test_engine_truncate_after_flush() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(0, scanner.num_files());
 }
 
@@ -274,7 +273,7 @@ async fn test_engine_truncate_during_flush() {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush");
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(HandleFinishedListener::new());
+    let listener = Arc::new(FlushTruncateListener::new());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
@@ -286,6 +285,7 @@ async fn test_engine_truncate_during_flush() {
     // Create the region.
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
 
     let column_schemas = rows_schema(&request);
     engine
@@ -308,41 +308,54 @@ async fn test_engine_truncate_during_flush() {
 
     // Flush reigon.
     let engine_cloned = engine.clone();
-    tokio::spawn(async move {
-        flush_region(&engine_cloned, region_id).await;
+    let flush_task = tokio::spawn(async move {
+        info!("do flush task!!!!");
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+            .await
     });
 
-    // Truncate the region
+    // Wait truncate before flush memtable.
+    listener.wait_truncate().await;
+
+    // Truncate the region.
     engine
         .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
-    listener.notify();
+    // Notify region to continue flushing.
+    listener.notify_flush();
 
+    // Wait handle flushed finish.
+    let _err = flush_task.await.unwrap().unwrap_err();
+
+    // Check sequences and entry id.
     let version_data = region.version_control.current();
-    let truncated_entry_id = version_data.version.truncated_entry_id.unwrap();
+    let truncated_entry_id = version_data.version.truncated_entry_id;
     let truncated_sequence = version_data.version.flushed_sequence;
 
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request.clone()).unwrap();
+    let scanner = engine.scanner(region_id, request.clone()).unwrap();
     assert_eq!(0, scanner.num_files());
-    assert_eq!(entry_id, truncated_entry_id);
+    assert_eq!(Some(entry_id), truncated_entry_id);
     assert_eq!(sequence, truncated_sequence);
 
-    // Put data to the region.
-    let rows = Rows {
-        schema: column_schemas,
-        rows: build_rows(5, 8),
-    };
-    put_rows(&engine, region_id, rows).await;
-
-    // Flush the region.
+    // Reopen the engine.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::default(),
+            }),
+        )
         .await
         .unwrap();
 
+    let region = engine.get_region(region_id).unwrap();
     let current_version = region.version_control.current().version;
     assert_eq!(current_version.truncated_entry_id, None);
 }
