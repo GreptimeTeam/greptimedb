@@ -175,7 +175,6 @@ impl TreeNodeVisitor for TableNameExtractor {
                         .downcast_ref::<DfTableProviderAdapter>()
                     {
                         if provider.table().table_type() == TableType::Base {
-                            common_telemetry::info!("[DEBUG] is base table");
                             let info = provider.table().table_info();
                             self.table_name = Some(TableName::new(
                                 info.catalog_name.clone(),
