@@ -138,24 +138,34 @@ impl Client {
         Ok((addr, channel))
     }
 
+    fn max_grpc_message_size(&self) -> usize {
+        self.inner.channel_manager.config().max_message_size
+    }
+
     pub(crate) fn make_flight_client(&self) -> Result<FlightClient> {
         let (addr, channel) = self.find_channel()?;
         Ok(FlightClient {
             addr,
-            client: FlightServiceClient::new(channel),
+            client: FlightServiceClient::new(channel)
+                .max_decoding_message_size(self.max_grpc_message_size())
+                .max_encoding_message_size(self.max_grpc_message_size()),
         })
     }
 
     pub(crate) fn make_database_client(&self) -> Result<DatabaseClient> {
         let (_, channel) = self.find_channel()?;
         Ok(DatabaseClient {
-            inner: GreptimeDatabaseClient::new(channel),
+            inner: GreptimeDatabaseClient::new(channel)
+                .max_decoding_message_size(self.max_grpc_message_size())
+                .max_encoding_message_size(self.max_grpc_message_size()),
         })
     }
 
     pub(crate) fn raw_region_client(&self) -> Result<PbRegionClient<Channel>> {
         let (_, channel) = self.find_channel()?;
-        Ok(PbRegionClient::new(channel))
+        Ok(PbRegionClient::new(channel)
+            .max_decoding_message_size(self.max_grpc_message_size())
+            .max_encoding_message_size(self.max_grpc_message_size()))
     }
 
     pub fn make_prometheus_gateway_client(&self) -> Result<PrometheusGatewayClient<Channel>> {
