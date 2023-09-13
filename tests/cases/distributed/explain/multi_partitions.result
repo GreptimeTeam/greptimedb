@@ -19,7 +19,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
 
 +-+-+
@@ -28,7 +28,7 @@ explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY hos
 | logical_plan_| Sort: demo.host ASC NULLS LAST_|
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | SortExec: expr=[host@0 ASC NULLS LAST]_|
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

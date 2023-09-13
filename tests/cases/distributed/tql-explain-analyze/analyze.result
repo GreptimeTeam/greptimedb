@@ -12,7 +12,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
 +-+-+
@@ -23,7 +23,7 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
 |_|_PromSeriesDivideExec: tags=["k"], REDACTED
 |_|_SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST], REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
