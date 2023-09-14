@@ -14,23 +14,27 @@
 
 use std::collections::HashMap;
 
+use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::region_request::{RegionOpenRequest, RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::test_util::{reopen_region, CreateRequestBuilder, TestEnv};
+use crate::test_util::{
+    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+};
 
 #[tokio::test]
 async fn test_engine_open_empty() {
     let mut env = TestEnv::with_prefix("open-empty");
     let engine = env.create_engine(MitoConfig::default()).await;
 
+    let region_id = RegionId::new(1, 1);
     let err = engine
         .handle_request(
-            RegionId::new(1, 1),
+            region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
                 region_dir: "empty".to_string(),
@@ -39,10 +43,9 @@ async fn test_engine_open_empty() {
         )
         .await
         .unwrap_err();
-    assert!(
-        matches!(err.status_code(), StatusCode::RegionNotFound),
-        "unexpected err: {err}"
-    );
+    assert_eq!(StatusCode::RegionNotFound, err.status_code());
+    let err = engine.set_writable(region_id, true).unwrap_err();
+    assert_eq!(StatusCode::RegionNotFound, err.status_code());
 }
 
 #[tokio::test]
@@ -84,6 +87,41 @@ async fn test_engine_reopen_region() {
         .await
         .unwrap();
 
-    reopen_region(&engine, region_id, region_dir).await;
+    reopen_region(&engine, region_id, region_dir, false).await;
     assert!(engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
+async fn test_engine_open_readonly() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    reopen_region(&engine, region_id, region_dir, false).await;
+
+    // Region is readonly.
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 2),
+    };
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::RegionReadonly, err.status_code());
+
+    // Set writable and write.
+    engine.set_writable(region_id, true).unwrap();
+    put_rows(&engine, region_id, rows).await;
 }

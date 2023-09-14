@@ -12,28 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_query::Output;
 use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
 use crate::compaction::CompactionRequest;
-use crate::error::{RegionNotFoundSnafu, Result};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{CompactionFailed, CompactionFinished};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles compaction request submitted to region worker.
     pub(crate) fn handle_compaction_request(
         &mut self,
         region_id: RegionId,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
@@ -54,8 +50,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: CompactionFinished,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            request.on_failure(RegionNotFoundSnafu { region_id }.build());
+        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             return;
         };
 
@@ -90,7 +85,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn new_compaction_request(
         &self,
         region: &MitoRegionRef,
-        waiter: Option<oneshot::Sender<Result<Output>>>,
+        waiter: OptionOutputTx,
     ) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();

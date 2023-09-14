@@ -14,19 +14,17 @@
 
 //! Handling flush related requests.
 
-use common_query::Output;
 use common_telemetry::{error, info};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
-use crate::error::{RegionNotFoundSnafu, Result};
+use crate::error::Result;
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
-use crate::request::{FlushFailed, FlushFinished};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// On region flush job finished.
@@ -35,9 +33,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region_id: RegionId,
         mut request: FlushFinished,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            // We may dropped or closed the region.
-            request.on_failure(RegionNotFoundSnafu { region_id }.build());
+        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
             return;
         };
 
@@ -102,17 +98,14 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_request(
         &mut self,
         region_id: RegionId,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);
-        if let Some(sender) = sender {
-            task.senders.push(sender);
-        }
+        task.push_sender(sender);
         if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
         }

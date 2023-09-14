@@ -22,26 +22,24 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
 use store_api::storage::RegionId;
-use tokio::sync::oneshot;
 
-use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, InvalidRegionRequestSnafu, Result};
 use crate::flush::FlushReason;
 use crate::manifest::action::{RegionChange, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::Version;
 use crate::region::MitoRegionRef;
-use crate::request::{DdlRequest, SenderDdlRequest};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
+use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_alter_request(
         &mut self,
         region_id: RegionId,
         request: RegionAlterRequest,
-        sender: Option<oneshot::Sender<Result<Output>>>,
+        mut sender: OptionOutputTx,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
-            send_result(sender, RegionNotFoundSnafu { region_id }.fail());
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
@@ -59,7 +57,7 @@ impl<S> RegionWorkerLoop<S> {
             let task = self.new_flush_task(&region, FlushReason::Alter);
             if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
                 // Unable to flush the region, send error to waiter.
-                send_result(sender, Err(e));
+                sender.send(Err(e));
                 return;
             }
 
@@ -79,7 +77,7 @@ impl<S> RegionWorkerLoop<S> {
             alter_region_schema(&region, &version, request, &self.memtable_builder).await
         {
             error!(e; "Failed to alter region schema, region_id: {}", region_id);
-            send_result(sender, Err(e));
+            sender.send(Err(e));
             return;
         }
 
@@ -91,7 +89,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         // Notifies waiters.
-        send_result(sender, Ok(Output::AffectedRows(0)));
+        sender.send(Ok(Output::AffectedRows(0)));
     }
 }
 

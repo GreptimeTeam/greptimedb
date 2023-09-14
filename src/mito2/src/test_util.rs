@@ -569,7 +569,12 @@ pub async fn flush_region(engine: &MitoEngine, region_id: RegionId) {
 }
 
 /// Reopen a region.
-pub async fn reopen_region(engine: &MitoEngine, region_id: RegionId, region_dir: String) {
+pub async fn reopen_region(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    region_dir: String,
+    writable: bool,
+) {
     // Close the region.
     engine
         .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
@@ -588,4 +593,8 @@ pub async fn reopen_region(engine: &MitoEngine, region_id: RegionId, region_dir:
         )
         .await
         .unwrap();
+
+    if writable {
+        engine.set_writable(region_id, true).unwrap();
+    }
 }
