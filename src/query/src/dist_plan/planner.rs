@@ -181,8 +181,8 @@ impl TreeNodeVisitor for TableNameExtractor {
                                 info.schema_name.clone(),
                                 info.name.clone(),
                             ));
-                            return Ok(VisitRecursion::Stop);
                         }
+                        return Ok(VisitRecursion::Stop);
                     }
                 }
                 match &scan.table_name {

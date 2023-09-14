@@ -21,11 +21,11 @@ pub mod region_server;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-#[cfg(feature = "testing")]
-use api::v1::greptime_database_server::GreptimeDatabase;
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
 use api::v1::prometheus_gateway_server::{PrometheusGateway, PrometheusGatewayServer};
+#[cfg(feature = "testing")]
+use api::v1::region::region_server::Region;
 use api::v1::region::region_server::RegionServer;
 use api::v1::{HealthCheckRequest, HealthCheckResponse};
 #[cfg(feature = "testing")]
@@ -33,6 +33,7 @@ use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use async_trait::async_trait;
 use auth::UserProviderRef;
+use common_grpc::channel_manager::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use common_telemetry::{error, warn};
@@ -58,6 +59,7 @@ use crate::server::Server;
 type TonicResult<T> = std::result::Result<T, Status>;
 
 pub struct GrpcServer {
+    config: GrpcServerConfig,
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
@@ -77,6 +79,22 @@ pub struct GrpcServer {
     region_server_handler: Option<RegionServerRequestHandler>,
 }
 
+/// Grpc Server configuration
+#[derive(Debug, Clone)]
+pub struct GrpcServerConfig {
+    // Max gRPC message size
+    // TODO(dennis): make it configurable
+    pub max_message_size: usize,
+}
+
+impl Default for GrpcServerConfig {
+    fn default() -> Self {
+        Self {
+            max_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+        }
+    }
+}
+
 impl GrpcServer {
     pub fn new(
         query_handler: Option<ServerGrpcQueryHandlerRef>,
@@ -92,6 +110,7 @@ impl GrpcServer {
         let region_server_handler = region_server_handler
             .map(|handler| RegionServerRequestHandler::new(handler, runtime.clone()));
         Self {
+            config: GrpcServerConfig::default(),
             shutdown_tx: Mutex::new(None),
             user_provider,
             serve_state: Mutex::new(None),
@@ -104,12 +123,12 @@ impl GrpcServer {
 
     #[cfg(feature = "testing")]
     pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
-        FlightServiceServer::new(FlightCraftWrapper(self.database_handler.clone().unwrap()))
+        FlightServiceServer::new(FlightCraftWrapper(self.flight_handler.clone().unwrap()))
     }
 
     #[cfg(feature = "testing")]
-    pub fn create_database_service(&self) -> GreptimeDatabaseServer<impl GreptimeDatabase> {
-        GreptimeDatabaseServer::new(DatabaseService::new(self.database_handler.clone().unwrap()))
+    pub fn create_region_service(&self) -> RegionServer<impl Region> {
+        RegionServer::new(self.region_server_handler.clone().unwrap())
     }
 
     pub fn create_healthcheck_service(&self) -> HealthCheckServer<impl HealthCheck> {
@@ -182,6 +201,7 @@ impl Server for GrpcServer {
     }
 
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
+        let max_message_size = self.config.max_message_size;
         let (tx, rx) = oneshot::channel();
         let (listener, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
@@ -205,18 +225,20 @@ impl Server for GrpcServer {
             .add_service(self.create_healthcheck_service())
             .add_service(self.create_reflection_service());
         if let Some(database_handler) = &self.database_handler {
-            builder = builder.add_service(GreptimeDatabaseServer::new(DatabaseService::new(
-                database_handler.clone(),
-            )))
+            builder = builder.add_service(
+                GreptimeDatabaseServer::new(DatabaseService::new(database_handler.clone()))
+                    .max_decoding_message_size(max_message_size),
+            )
         }
         if let Some(prometheus_handler) = &self.prometheus_handler {
             builder = builder
                 .add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
         }
         if let Some(flight_handler) = &self.flight_handler {
-            builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
-                flight_handler.clone(),
-            )))
+            builder = builder.add_service(
+                FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone()))
+                    .max_decoding_message_size(max_message_size),
+            )
         } else {
             // TODO(ruihang): this is a temporary workaround before region server is ready.
             builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
@@ -224,7 +246,10 @@ impl Server for GrpcServer {
             )))
         }
         if let Some(region_server_handler) = &self.region_server_handler {
-            builder = builder.add_service(RegionServer::new(region_server_handler.clone()))
+            builder = builder.add_service(
+                RegionServer::new(region_server_handler.clone())
+                    .max_decoding_message_size(max_message_size),
+            );
         }
 
         let (serve_state_tx, serve_state_rx) = oneshot::channel();

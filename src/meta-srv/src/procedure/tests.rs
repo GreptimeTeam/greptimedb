@@ -295,7 +295,8 @@ fn test_create_alter_region_request() {
         alter_table_task,
         TableInfoValue::new(test_data::new_table_info()),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
-    );
+    )
+    .unwrap();
 
     let region_id = RegionId::new(42, 1);
     let alter_region_request = procedure.create_alter_region_request(region_id).unwrap();
@@ -358,7 +359,8 @@ async fn test_submit_alter_region_requests() {
         alter_table_task,
         TableInfoValue::new(table_info),
         context,
-    );
+    )
+    .unwrap();
 
     let expected_altered_regions = Arc::new(Mutex::new(HashSet::from([
         RegionId::new(42, 1),

@@ -213,7 +213,10 @@ impl WriteRequest {
                     !has_null || column.column_schema.is_nullable(),
                     InvalidRequestSnafu {
                         region_id,
-                        reason: format!("column {} is not null", column.column_schema.name),
+                        reason: format!(
+                            "column {} is not null but input has null",
+                            column.column_schema.name
+                        ),
                     }
                 );
             } else {
@@ -805,7 +808,7 @@ mod tests {
 
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
-        check_invalid_request(&err, "column ts is not null");
+        check_invalid_request(&err, "column ts is not null but input has null");
     }
 
     #[test]

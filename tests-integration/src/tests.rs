@@ -19,13 +19,11 @@ mod test_util;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::RegisterSchemaRequest;
 use common_meta::key::TableMetadataManagerRef;
-use datanode::instance::Instance as DatanodeInstance;
+use datanode::datanode::Datanode;
 use frontend::instance::Instance;
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct MockDistributedInstance(GreptimeDbCluster);
 
@@ -34,54 +32,12 @@ impl MockDistributedInstance {
         self.0.frontend.clone()
     }
 
-    pub fn datanodes(&self) -> &HashMap<u64, Arc<DatanodeInstance>> {
+    pub fn datanodes(&self) -> &HashMap<u64, Datanode> {
         &self.0.datanode_instances
     }
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         self.0.meta_srv.table_metadata_manager()
-    }
-}
-
-pub struct MockStandaloneInstance {
-    pub instance: Arc<Instance>,
-    _guard: TestGuard,
-}
-
-pub(crate) async fn create_standalone_instance(test_name: &str) -> MockStandaloneInstance {
-    let (opts, guard) = create_tmp_dir_and_datanode_opts(StorageType::File, test_name);
-    let (dn_instance, heartbeat) = DatanodeInstance::with_opts(&opts, Default::default())
-        .await
-        .unwrap();
-
-    let frontend_instance = Instance::try_new_standalone(dn_instance.clone())
-        .await
-        .unwrap();
-
-    dn_instance.start().await.unwrap();
-
-    assert!(dn_instance
-        .catalog_manager()
-        .clone()
-        .register_catalog("another_catalog".to_string())
-        .await
-        .is_ok());
-    let req = RegisterSchemaRequest {
-        catalog: "another_catalog".to_string(),
-        schema: "another_schema".to_string(),
-    };
-    assert!(dn_instance
-        .catalog_manager()
-        .register_schema(req)
-        .await
-        .is_ok());
-
-    if let Some(heartbeat) = heartbeat {
-        heartbeat.start().await.unwrap();
-    };
-    MockStandaloneInstance {
-        instance: Arc::new(frontend_instance),
-        _guard: guard,
     }
 }
 

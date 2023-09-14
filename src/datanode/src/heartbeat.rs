@@ -27,16 +27,14 @@ use common_meta::heartbeat::utils::outgoing_message_to_mailbox_message;
 use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
 use crate::datanode::DatanodeOptions;
-use crate::error::{
-    self, MetaClientInitSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, Result,
-};
+use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -64,19 +62,9 @@ impl HeartbeatTask {
     /// Create a new heartbeat task instance.
     pub async fn try_new(
         opts: &DatanodeOptions,
-        // TODO: remove optional
-        region_server: Option<RegionServer>,
+        region_server: RegionServer,
+        meta_client: MetaClient,
     ) -> Result<Self> {
-        let meta_client = new_metasrv_client(
-            opts.node_id.context(MissingNodeIdSnafu)?,
-            opts.meta_client_options
-                .as_ref()
-                .context(MissingMetasrvOptsSnafu)?,
-        )
-        .await?;
-
-        let region_server = region_server.unwrap();
-
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
             opts.heartbeat.interval_millis,
@@ -258,13 +246,13 @@ impl HeartbeatTask {
     }
 
     async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
-        let region_ids = region_server.opened_region_ids();
-        region_ids
+        let regions = region_server.opened_regions();
+        regions
             .into_iter()
-            .map(|region_id| RegionStat {
-                // TODO(ruihang): scratch more info
+            .map(|(region_id, engine)| RegionStat {
                 region_id: region_id.as_u64(),
-                engine: "MitoEngine".to_string(),
+                engine,
+                // TODO(ruihang): scratch more info
                 ..Default::default()
             })
             .collect::<Vec<_>>()

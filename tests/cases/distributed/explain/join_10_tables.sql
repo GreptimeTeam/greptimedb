@@ -13,7 +13,7 @@ create table t_10 (ts timestamp time index, vin string, val int);
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 explain 
 select * 
 from 

@@ -176,11 +176,8 @@ pub enum Error {
     #[snafu(display("Invalid system table definition: {err_msg}, at {location}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
 
-    #[snafu(display("Table not found: '{}', at {location}", table_name))]
-    TableNotFound {
-        table_name: String,
-        location: Location,
-    },
+    #[snafu(display("Table not found: {}", table_name))]
+    TableNotFound { table_name: String },
 
     #[snafu(display("Failed to join task, source: {}", source))]
     JoinTask {

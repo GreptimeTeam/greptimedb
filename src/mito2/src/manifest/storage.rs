@@ -168,7 +168,7 @@ impl ManifestObjectStore {
     where
         F: Fn(Entry) -> Option<R>,
     {
-        let streamer = match self.object_store.list(&self.path).await {
+        let streamer = match self.object_store.lister_with(&self.path).await {
             Ok(streamer) => streamer,
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 debug!("Manifest directory does not exists: {}", self.path);

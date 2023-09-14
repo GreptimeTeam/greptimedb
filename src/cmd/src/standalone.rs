@@ -23,6 +23,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use datanode::datanode::builder::DatanodeBuilder;
 use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
 use datanode::region_server::RegionServer;
 use frontend::catalog::FrontendCatalogManager;
@@ -311,7 +312,8 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = Datanode::new(dn_opts.clone(), Default::default())
+        let datanode = DatanodeBuilder::new(dn_opts.clone(), Default::default())
+            .build()
             .await
             .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();

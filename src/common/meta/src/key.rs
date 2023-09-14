@@ -168,13 +168,12 @@ impl TableMetadataManager {
 
     pub async fn init(&self) -> Result<()> {
         let catalog_name = CatalogNameKey::new(DEFAULT_CATALOG_NAME);
-        if !self.catalog_manager().exist(catalog_name).await? {
-            self.catalog_manager().create(catalog_name).await?;
-        }
         let schema_name = SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        if !self.schema_manager().exist(schema_name).await? {
-            self.schema_manager().create(schema_name, None).await?;
-        }
+
+        self.catalog_manager().create(catalog_name, true).await?;
+        self.schema_manager()
+            .create(schema_name, None, true)
+            .await?;
 
         Ok(())
     }
@@ -201,6 +200,11 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
     }
 
     pub async fn get_full_table_info(

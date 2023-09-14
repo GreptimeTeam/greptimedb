@@ -37,7 +37,7 @@ pub struct MemoryCatalogManager {
 
 #[async_trait::async_trait]
 impl CatalogManager for MemoryCatalogManager {
-    async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool> {
+    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool> {
         self.schema_exist_sync(catalog, schema)
     }
 
@@ -59,11 +59,11 @@ impl CatalogManager for MemoryCatalogManager {
         Ok(result)
     }
 
-    async fn catalog_exist(&self, catalog: &str) -> Result<bool> {
+    async fn catalog_exists(&self, catalog: &str) -> Result<bool> {
         self.catalog_exist_sync(catalog)
     }
 
-    async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
+    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool> {
         let catalogs = self.catalogs.read().unwrap();
         Ok(catalogs
             .get(catalog)

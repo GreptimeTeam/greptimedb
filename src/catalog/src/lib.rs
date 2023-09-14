@@ -47,11 +47,11 @@ pub trait CatalogManager: Send + Sync {
 
     async fn table_names(&self, catalog: &str, schema: &str) -> Result<Vec<String>>;
 
-    async fn catalog_exist(&self, catalog: &str) -> Result<bool>;
+    async fn catalog_exists(&self, catalog: &str) -> Result<bool>;
 
-    async fn schema_exist(&self, catalog: &str, schema: &str) -> Result<bool>;
+    async fn schema_exists(&self, catalog: &str, schema: &str) -> Result<bool>;
 
-    async fn table_exist(&self, catalog: &str, schema: &str, table: &str) -> Result<bool>;
+    async fn table_exists(&self, catalog: &str, schema: &str, table: &str) -> Result<bool>;
 
     /// Returns the table by catalog, schema and table name.
     async fn table(
