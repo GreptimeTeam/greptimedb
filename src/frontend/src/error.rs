@@ -689,6 +689,17 @@ pub enum Error {
 
     #[snafu(display("Invalid region request, reason: {}", reason))]
     InvalidRegionRequest { reason: String },
+
+    #[snafu(display(
+        "Invalid partition columns when creating table '{}', reason: {}",
+        table,
+        reason
+    ))]
+    InvalidPartitionColumns {
+        table: String,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -714,7 +725,8 @@ impl ErrorExt for Error {
             | Error::UnsupportedFormat { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,
+            | Error::IncompleteGrpcRequest { .. }
+            | Error::InvalidPartitionColumns { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

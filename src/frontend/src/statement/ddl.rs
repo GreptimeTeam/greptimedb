@@ -33,7 +33,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
@@ -46,8 +46,9 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvalidPartitionColumnsSnafu, ParseSqlSnafu, Result,
+    SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu,
 };
 use crate::{expr_factory, MAX_VALUE};
 
@@ -100,6 +101,8 @@ impl StatementExecutor {
         );
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
+
+        validate_partition_columns(create_table, &partition_cols)?;
 
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
@@ -346,6 +349,22 @@ impl StatementExecutor {
     }
 }
 
+fn validate_partition_columns(
+    create_table: &CreateTableExpr,
+    partition_cols: &[String],
+) -> Result<()> {
+    ensure!(
+        partition_cols
+            .iter()
+            .all(|col| &create_table.time_index == col || create_table.primary_keys.contains(col)),
+        InvalidPartitionColumnsSnafu {
+            table: &create_table.table_name,
+            reason: "partition column must belongs to primary keys or equals to time index"
+        }
+    );
+    Ok(())
+}
+
 fn parse_partitions(
     create_table: &CreateTableExpr,
     partitions: Option<Partitions>,
@@ -530,6 +549,31 @@ mod test {
 
     use super::*;
     use crate::expr_factory;
+
+    #[test]
+    fn test_validate_partition_columns() {
+        let create_table = CreateTableExpr {
+            table_name: "my_table".to_string(),
+            time_index: "ts".to_string(),
+            primary_keys: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        };
+
+        assert!(validate_partition_columns(&create_table, &[]).is_ok());
+        assert!(validate_partition_columns(&create_table, &["ts".to_string()]).is_ok());
+        assert!(validate_partition_columns(&create_table, &["a".to_string()]).is_ok());
+        assert!(
+            validate_partition_columns(&create_table, &["b".to_string(), "a".to_string()]).is_ok()
+        );
+
+        assert_eq!(
+            validate_partition_columns(&create_table, &["a".to_string(), "c".to_string()])
+                .unwrap_err()
+                .to_string(),
+            "Invalid partition columns when creating table 'my_table', \
+            reason: partition column must belongs to primary keys or equals to time index",
+        );
+    }
 
     #[tokio::test]
     async fn test_parse_partitions() {
