@@ -334,7 +334,7 @@ CREATE TABLE {table_name} (
                         ..Default::default()
                     }),
                     null_mask: vec![32, 0],
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Int32 as i32,
                 },
                 Column {
@@ -412,7 +412,7 @@ CREATE TABLE {table_name} (
             key_columns: vec![
                 Column {
                     column_name: "a".to_string(),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
                         i32_values: a,
                         ..Default::default()
