@@ -30,10 +30,10 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
-        self.instance
-            .start()
+        plugins::start_meta_srv_plugins(self.instance.plugins())
             .await
-            .context(error::StartMetaServerSnafu)
+            .context(StartMetaServerSnafu)?;
+        self.instance.start().await.context(StartMetaServerSnafu)
     }
 
     pub async fn stop(&self) -> Result<()> {

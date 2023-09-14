@@ -56,22 +56,27 @@ pub struct MetaSrvInstance {
     opts: MetaSrvOptions,
 
     signal_sender: Option<Sender<()>>,
+
+    plugins: PluginsRef,
 }
 
 impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions, plugins: PluginsRef) -> Result<MetaSrvInstance> {
-        let meta_srv = build_meta_srv(&opts, plugins).await?;
+        let meta_srv = build_meta_srv(&opts, plugins.clone()).await?;
         let http_srv = Arc::new(
             HttpServerBuilder::new(opts.http_opts.clone())
                 .with_metrics_handler(MetricsHandler)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build(),
         );
+        // put meta_srv into plugins for later use
+        plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
             opts,
             signal_sender: None,
+            plugins,
         })
     }
 
@@ -121,6 +126,10 @@ impl MetaSrvInstance {
                 server: self.http_srv.name(),
             })?;
         Ok(())
+    }
+
+    pub fn plugins(&self) -> PluginsRef {
+        self.plugins.clone()
     }
 }
 
