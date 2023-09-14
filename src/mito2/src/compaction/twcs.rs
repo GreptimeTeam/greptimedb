@@ -156,6 +156,8 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
+            // FIXME(yingwen): Need to remove the region from the scheduler.
+
             // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
             for waiter in waiters {
                 waiter.send(Ok(Output::AffectedRows(0)));

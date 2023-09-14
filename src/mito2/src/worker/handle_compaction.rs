@@ -16,9 +16,7 @@ use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::compaction::CompactionRequest;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
@@ -33,10 +31,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        let mut request = self.new_compaction_request(&region);
-        // Push waiter to the request.
-        request.push_waiter(sender);
-        if let Err(e) = self.compaction_scheduler.schedule_compaction(request) {
+        if let Err(e) = self
+            .compaction_scheduler
+            .schedule_compaction(&region, sender)
+        {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
@@ -81,22 +79,5 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
         error!(req.err; "Failed to compact region: {}", req.region_id);
-    }
-
-    /// Creates a new compaction request.
-    fn new_compaction_request(&self, region: &MitoRegionRef) -> CompactionRequest {
-        let current_version = region.version_control.current().version;
-        let access_layer = region.access_layer.clone();
-        let file_purger = region.file_purger.clone();
-
-        CompactionRequest {
-            current_version,
-            access_layer,
-            ttl: None,                    // TODO(hl): get TTL info from region metadata
-            compaction_time_window: None, // TODO(hl): get persisted region compaction time window
-            request_sender: self.sender.clone(),
-            waiters: Vec::new(),
-            file_purger,
-        }
     }
 }

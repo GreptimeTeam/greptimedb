@@ -18,18 +18,20 @@ mod picker;
 mod test_util;
 mod twcs;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::debug;
 pub use picker::CompactionPickerRef;
 use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
 use crate::error::Result;
 use crate::region::version::VersionRef;
+use crate::region::MitoRegionRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
@@ -74,16 +76,42 @@ pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> Compactio
 /// Compaction scheduler tracks and manages compaction tasks.
 pub(crate) struct CompactionScheduler {
     scheduler: SchedulerRef,
-    // TODO(hl): maybe tracks region compaction status in CompactionScheduler
+    /// Regions need compaction.
+    region_status: HashMap<RegionId, CompactionStatus>,
+    /// Request sender of the worker that this scheduler belongs to.
+    request_sender: Sender<WorkerRequest>,
 }
 
 impl CompactionScheduler {
-    pub(crate) fn new(scheduler: SchedulerRef) -> Self {
-        Self { scheduler }
+    pub(crate) fn new(scheduler: SchedulerRef, request_sender: Sender<WorkerRequest>) -> Self {
+        Self {
+            scheduler,
+            region_status: HashMap::new(),
+            request_sender,
+        }
     }
 
-    /// Schedules a region compaction task.
-    pub(crate) fn schedule_compaction(&self, req: CompactionRequest) -> Result<()> {
+    /// Schedules a compaction for the region.
+    pub(crate) fn schedule_compaction(
+        &mut self,
+        region: &MitoRegionRef,
+        waiter: OptionOutputTx,
+    ) -> Result<()> {
+        if let Some(status) = self.region_status.get_mut(&region.region_id) {
+            // Region is compacting or wait for compaction. Add the waiter to pending list.
+            status.merge_waiter(waiter);
+            return Ok(());
+        }
+
+        // The region can compact directly.
+        let req = self.new_compaction_request(region, waiter);
+        self.submit_request(req)
+    }
+
+    /// Submit a compaction request.
+    ///
+    /// Callers must ensure that the region doesn't have compaction task running.
+    fn submit_request(&self, req: CompactionRequest) -> Result<()> {
         self.scheduler.schedule(Box::pin(async {
             // TODO(hl): build picker according to region options.
             let picker =
@@ -93,22 +121,69 @@ impl CompactionScheduler {
                 picker,
                 req.region_id()
             );
+            // FIXME(yingwen): We should remove the region from region status.
             let Some(mut task) = picker.pick(req) else {
                 return;
             };
             task.run().await;
         }))
     }
+
+    /// Creates a new compaction request for compaction picker.
+    fn new_compaction_request(
+        &self,
+        region: &MitoRegionRef,
+        waiter: OptionOutputTx,
+    ) -> CompactionRequest {
+        let current_version = region.version_control.current().version;
+        let access_layer = region.access_layer.clone();
+        let file_purger = region.file_purger.clone();
+
+        let mut req = CompactionRequest {
+            current_version,
+            access_layer,
+            ttl: None,                    // TODO(hl): get TTL info from region metadata
+            compaction_time_window: None, // TODO(hl): get persisted region compaction time window
+            request_sender: self.request_sender.clone(),
+            waiters: Vec::new(),
+            file_purger,
+        };
+        req.push_waiter(waiter);
+
+        req
+    }
+}
+
+/// Pending compaction tasks.
+struct PendingCompaction {
+    waiters: Vec<OutputTx>,
+}
+
+impl PendingCompaction {
+    /// Push waiter to the request.
+    fn push_waiter(&mut self, mut waiter: OptionOutputTx) {
+        if let Some(waiter) = waiter.take_inner() {
+            self.waiters.push(waiter);
+        }
+    }
 }
 
 /// Status of running and pending region compaction tasks.
 struct CompactionStatus {
-    // Request waiting for compaction.
-    pending_request: Option<CompactionRequest>,
+    /// Compaction pending to schedule.
+    ///
+    /// For simplicity, we merge all pending compaction requests into one.
+    pending_compaction: Option<PendingCompaction>,
 }
 
 impl CompactionStatus {
-    fn merge_request(&mut self, request: CompactionRequest) {
-        unimplemented!()
+    /// Merge the watier to the pending compaction.
+    fn merge_waiter(&mut self, waiter: OptionOutputTx) {
+        let pending = self
+            .pending_compaction
+            .get_or_insert_with(|| PendingCompaction {
+                waiters: Vec::new(),
+            });
+        pending.push_waiter(waiter);
     }
 }

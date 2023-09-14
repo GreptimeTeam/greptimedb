@@ -551,7 +551,7 @@ impl Drop for FlushScheduler {
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
-    // TODO(yingwen): We can remove this flag.
+    // TODO(yingwen): Maybe we can remove this flag.
     /// There is a flush task running.
     flushing: bool,
     /// Task waiting for next flush.
