@@ -14,6 +14,7 @@
 
 //! Utilities for projection.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -55,40 +56,23 @@ impl ProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: impl Iterator<Item = usize>,
     ) -> Result<ProjectionMapper> {
-        let projection_len = projection.size_hint().0;
-        let mut batch_indices = Vec::with_capacity(projection_len);
-        let mut column_schemas = Vec::with_capacity(projection_len);
-        let mut column_ids = Vec::with_capacity(projection_len);
-        for idx in projection {
+        let projection: Vec<_> = projection.collect();
+        let mut column_schemas = Vec::with_capacity(projection.len());
+        let mut column_ids = Vec::with_capacity(projection.len());
+        for idx in &projection {
             // For each projection index, we get the column id for projection.
             let column = metadata
                 .column_metadatas
-                .get(idx)
+                .get(*idx)
                 .context(InvalidRequestSnafu {
                     region_id: metadata.region_id,
                     reason: format!("projection index {} is out of bound", idx),
                 })?;
 
-            // Get column index in a batch by its semantic type and column id.
-            let batch_index = match column.semantic_type {
-                SemanticType::Tag => {
-                    // Safety: It is a primary key column.
-                    let index = metadata.primary_key_index(column.column_id).unwrap();
-                    BatchIndex::Tag(index)
-                }
-                SemanticType::Timestamp => BatchIndex::Timestamp,
-                SemanticType::Field => {
-                    // Safety: It is a field column.
-                    let index = metadata.field_index(column.column_id).unwrap();
-                    BatchIndex::Field(index)
-                }
-            };
-            batch_indices.push(batch_index);
             column_ids.push(column.column_id);
             // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[idx].clone());
+            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
         }
-
         let codec = McmpRowCodec::new(
             metadata
                 .primary_key_columns()
@@ -97,7 +81,38 @@ impl ProjectionMapper {
         );
         // Safety: Columns come from existing schema.
         let output_schema = Arc::new(Schema::new(column_schemas));
+        // Get fields in each batch.
         let batch_fields = Batch::projected_fields(metadata, &column_ids);
+
+        // Field column id to its index in batch.
+        let field_id_to_index: HashMap<_, _> = batch_fields
+            .iter()
+            .enumerate()
+            .map(|(index, column_id)| (*column_id, index))
+            .collect();
+        // For each projected column, compute its index in batches.
+        let mut batch_indices = Vec::with_capacity(projection.len());
+        for idx in &projection {
+            // Safety: idx is valid.
+            let column = &metadata.column_metadatas[*idx];
+            // Get column index in a batch by its semantic type and column id.
+            let batch_index = match column.semantic_type {
+                SemanticType::Tag => {
+                    // Safety: It is a primary key column.
+                    let index = metadata.primary_key_index(column.column_id).unwrap();
+                    // We always read all primary key so the column always exists and the tag
+                    // index is always valid.
+                    BatchIndex::Tag(index)
+                }
+                SemanticType::Timestamp => BatchIndex::Timestamp,
+                SemanticType::Field => {
+                    // Safety: It is a field column so it should be in `field_id_to_index`.
+                    let index = field_id_to_index[&column.column_id];
+                    BatchIndex::Field(index)
+                }
+            };
+            batch_indices.push(batch_index);
+        }
 
         Ok(ProjectionMapper {
             metadata: metadata.clone(),

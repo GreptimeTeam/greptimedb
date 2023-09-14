@@ -31,6 +31,8 @@ pub(crate) mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
+mod projection_test;
+#[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
