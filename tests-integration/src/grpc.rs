@@ -195,9 +195,10 @@ mod test {
             r"
 CREATE TABLE {table_name} (
     a INT,
-    b STRING PRIMARY KEY,
+    b STRING,
     ts TIMESTAMP,
-    TIME INDEX (ts)
+    TIME INDEX (ts),
+    PRIMARY KEY (a, b)
 ) PARTITION BY RANGE COLUMNS(a) (
     PARTITION r0 VALUES LESS THAN (10),
     PARTITION r1 VALUES LESS THAN (20),
@@ -334,7 +335,7 @@ CREATE TABLE {table_name} (
                         ..Default::default()
                     }),
                     null_mask: vec![32, 0],
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Int32 as i32,
                 },
                 Column {
@@ -412,7 +413,7 @@ CREATE TABLE {table_name} (
             key_columns: vec![
                 Column {
                     column_name: "a".to_string(),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
                         i32_values: a,
                         ..Default::default()
