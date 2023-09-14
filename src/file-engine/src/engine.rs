@@ -93,6 +93,12 @@ impl RegionEngine for FileRegionEngine {
     async fn stop(&self) -> Result<(), BoxedError> {
         self.inner.stop().await.map_err(BoxedError::new)
     }
+
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+        self.inner
+            .set_writable(region_id, writable)
+            .map_err(BoxedError::new)
+    }
 }
 
 struct EngineInner {
@@ -140,6 +146,13 @@ impl EngineInner {
         let _lock = self.region_mutex.lock().await;
         self.regions.write().await.clear();
         Ok(())
+    }
+
+    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> EngineResult<()> {
+        UnsupportedSnafu {
+            operation: "set writable",
+        }
+        .fail()
     }
 }
 

@@ -241,6 +241,15 @@ pub enum Error {
         duration: Duration,
         location: Location,
     },
+
+    #[snafu(display(
+        "Expected timestamp column to be of type Timestamp, but was: {:?}",
+        data_type
+    ))]
+    GreptimeTimestampColumnDataType {
+        data_type: ConcreteDataType,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -261,7 +270,8 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | BuildRegex { .. }
             | ConvertSchema { .. }
-            | AddSystemTimeOverflow { .. } => StatusCode::InvalidArguments,
+            | AddSystemTimeOverflow { .. }
+            | GreptimeTimestampColumnDataType { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
             EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),

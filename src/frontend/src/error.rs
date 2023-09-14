@@ -624,8 +624,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to prepare immutable table: {}", source))]
-    PrepareImmutableTable {
+    #[snafu(display("Failed to prepare file table: {}", source))]
+    PrepareFileTable {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to infer file table schema: {}", source))]
+    InferFileTableSchema {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to infer file table time index: {}", source))]
+    InferFileTableTimeIndex {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
@@ -708,7 +720,9 @@ impl ErrorExt for Error {
             | Error::MissingMetasrvOpts { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
-            | Error::PrepareImmutableTable { .. }
+            | Error::PrepareFileTable { .. }
+            | Error::InferFileTableSchema { .. }
+            | Error::InferFileTableTimeIndex { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }

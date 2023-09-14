@@ -24,7 +24,9 @@ use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use datatypes::schema::ColumnSchema;
 use file_engine::FileOptions;
-use query::sql::prepare_immutable_file_table_files_and_schema;
+use query::sql::{
+    infer_file_table_schema, infer_time_index_or_add_default, prepare_file_table_files,
+};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
@@ -33,12 +35,13 @@ use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
 use table::engine::TableReference;
-use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
+use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    ParseSqlSnafu, PrepareImmutableTableSnafu, Result, UnrecognizedTableOptionSnafu,
+    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
+    InferFileTableTimeIndexSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
+    PrepareFileTableSnafu, Result, UnrecognizedTableOptionSnafu,
 };
 use crate::table::table_idents_to_full_name;
 
@@ -85,6 +88,34 @@ impl CreateExprFactory {
     }
 }
 
+// When the `CREATE EXTERNAL TABLE` statement is in expanded form, like
+// ```sql
+// CREATE EXTERNAL TABLE city (
+//   host string,
+//   ts timestamp,
+//   cpu float64,
+//   memory float64,
+//   TIME INDEX (ts),
+//   PRIMARY KEY(host)
+// ) WITH (location='/var/data/city.csv', format='csv');
+// ```
+// The user needs to specify the TIME INDEX column. If there is no suitable
+// column in the file to use as TIME INDEX, an additional placeholder column
+// needs to be created as the TIME INDEX, and a `DEFAULT <value>` constraint
+// should be added.
+//
+//
+// When the `CREATE EXTERNAL TABLE` statement is in inferred form, like
+// ```sql
+// CREATE EXTERNAL TABLE IF NOT EXISTS city WITH (location='/var/data/city.csv',format='csv');
+// ```
+// 1. If the TIME INDEX column can be inferred from metadata, use that column
+//    as the TIME INDEX. Otherwise,
+// 2. If a column named `greptime_timestamp` exists (with the requirement that
+//    the column is with type TIMESTAMP, otherwise an error is thrown), use
+//    that column as the TIME INDEX. Otherwise,
+// 3. Automatically create the `greptime_timestamp` column and add a `DEFAULT 0`
+//    constraint.
 pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
     query_ctx: QueryContextRef,
@@ -96,21 +127,33 @@ pub(crate) async fn create_external_expr(
 
     let mut table_options = create.options;
 
-    let time_index = find_time_index(&create.constraints)?;
-    let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+    let (object_store, files) = prepare_file_table_files(&table_options)
+        .await
+        .context(PrepareFileTableSnafu)?;
 
-    let (files, schema) =
-        prepare_immutable_file_table_files_and_schema(&table_options, &time_index, &create.columns)
+    let (time_index, primary_keys, column_defs) = if !create.columns.is_empty() {
+        let time_index = find_time_index(&create.constraints)?;
+        let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+        let column_defs = columns_to_expr(&create.columns, &time_index, &primary_keys)?;
+        (time_index, primary_keys, column_defs)
+    } else {
+        let mut column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
             .await
-            .context(PrepareImmutableTableSnafu)?;
+            .context(InferFileTableSchemaSnafu)?
+            .column_schemas;
+        let time_index = infer_time_index_or_add_default(&mut column_schemas)
+            .context(InferFileTableTimeIndexSnafu)?;
+        let primary_keys = vec![];
+
+        let column_defs = column_schemas_to_defs(column_schemas, &primary_keys)?;
+        (time_index, primary_keys, column_defs)
+    };
 
     let meta = FileOptions { files };
     let _ = table_options.insert(
-        IMMUTABLE_TABLE_META_KEY.to_string(),
+        FILE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
-
-    let column_defs = column_schemas_to_defs(schema.column_schemas, &primary_keys)?;
 
     let expr = CreateTableExpr {
         catalog_name,

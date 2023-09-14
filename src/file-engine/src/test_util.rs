@@ -60,7 +60,7 @@ pub fn new_test_options() -> HashMap<String, String> {
         ("format".to_string(), "csv".to_string()),
         ("location".to_string(), "test".to_string()),
         (
-            "__private.immutable_table_meta".to_string(),
+            "__private.file_table_meta".to_string(),
             "{\"files\":[\"1.csv\"]}".to_string(),
         ),
     ])

@@ -27,6 +27,7 @@ use common_datasource::object_store::build_backend;
 use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
+use common_time::Timestamp;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
@@ -35,11 +36,9 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
-use sql::ast::ColumnDef;
-use sql::statements::column_def_to_schema;
 use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
-use table::requests::{IMMUTABLE_TABLE_LOCATION_KEY, IMMUTABLE_TABLE_PATTERN_KEY};
+use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
 use table::TableRef;
 
 use crate::datafusion::execute_show_with_filter;
@@ -57,6 +56,8 @@ const COLUMN_SEMANTIC_TYPE_COLUMN: &str = "Semantic Type";
 const NULLABLE_YES: &str = "YES";
 const NULLABLE_NO: &str = "NO";
 const PRI_KEY: &str = "PRI";
+
+const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 
 static DESCRIBE_TABLE_OUTPUT_SCHEMA: Lazy<Arc<Schema>> = Lazy::new(|| {
     Arc::new(Schema::new(vec![
@@ -302,39 +303,15 @@ fn describe_column_semantic_types(
     ))
 }
 
-pub async fn prepare_immutable_file_table_files_and_schema(
-    options: &HashMap<String, String>,
-    time_index: &str,
-    columns: &Vec<ColumnDef>,
-) -> Result<(Vec<String>, RawSchema)> {
-    let (object_store, files) = prepare_immutable_file_table(options).await?;
-    let schema = if !columns.is_empty() {
-        let columns_schemas: Vec<_> = columns
-            .iter()
-            .map(|column| {
-                column_def_to_schema(column, column.name.to_string() == time_index)
-                    .context(error::ParseSqlSnafu)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        RawSchema::new(columns_schemas)
-    } else {
-        let format = parse_immutable_file_table_format(options)?;
-        infer_immutable_file_table_schema(&object_store, &*format, &files).await?
-    };
-
-    Ok((files, schema))
-}
-
 // lists files in the frontend to reduce unnecessary scan requests repeated in each datanode.
-async fn prepare_immutable_file_table(
+pub async fn prepare_file_table_files(
     options: &HashMap<String, String>,
 ) -> Result<(ObjectStore, Vec<String>)> {
-    let url =
-        options
-            .get(IMMUTABLE_TABLE_LOCATION_KEY)
-            .context(error::MissingRequiredFieldSnafu {
-                name: IMMUTABLE_TABLE_LOCATION_KEY,
-            })?;
+    let url = options
+        .get(FILE_TABLE_LOCATION_KEY)
+        .context(error::MissingRequiredFieldSnafu {
+            name: FILE_TABLE_LOCATION_KEY,
+        })?;
 
     let (dir, filename) = find_dir_and_filename(url);
     let source = if let Some(filename) = filename {
@@ -343,7 +320,7 @@ async fn prepare_immutable_file_table(
         Source::Dir
     };
     let regex = options
-        .get(IMMUTABLE_TABLE_PATTERN_KEY)
+        .get(FILE_TABLE_PATTERN_KEY)
         .map(|x| Regex::new(x))
         .transpose()
         .context(error::BuildRegexSnafu)?;
@@ -369,9 +346,56 @@ async fn prepare_immutable_file_table(
     Ok((object_store, files))
 }
 
-fn parse_immutable_file_table_format(
+pub async fn infer_file_table_schema(
+    object_store: &ObjectStore,
+    files: &[String],
     options: &HashMap<String, String>,
-) -> Result<Box<dyn FileFormat>> {
+) -> Result<RawSchema> {
+    let format = parse_file_table_format(options)?;
+    let merged = infer_schemas(object_store, files, format.as_ref())
+        .await
+        .context(error::InferSchemaSnafu)?;
+    Ok(RawSchema::from(
+        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
+    ))
+}
+
+pub fn infer_time_index_or_add_default(columns: &mut Vec<ColumnSchema>) -> Result<String> {
+    if let Some(time_index_column) = columns.iter().find(|c| c.is_time_index()) {
+        return Ok(time_index_column.name.clone());
+    }
+
+    if let Some(column) = columns
+        .iter_mut()
+        .find(|column| column.name == GREPTIME_TIMESTAMP)
+    {
+        return if let ConcreteDataType::Timestamp(_) = column.data_type {
+            *column = column.clone().with_time_index(true);
+            Ok(GREPTIME_TIMESTAMP.to_string())
+        } else {
+            error::GreptimeTimestampColumnDataTypeSnafu {
+                data_type: column.data_type.clone(),
+            }
+            .fail()
+        };
+    }
+
+    let added_time_index_column = ColumnSchema::new(
+        GREPTIME_TIMESTAMP,
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+    )
+    .with_time_index(true)
+    .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Value(
+        Value::Timestamp(Timestamp::new_millisecond(0)),
+    )))
+    .unwrap();
+    columns.push(added_time_index_column);
+
+    Ok(GREPTIME_TIMESTAMP.to_string())
+}
+
+fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn FileFormat>> {
     Ok(
         match Format::try_from(options).context(error::ParseFileFormatSnafu)? {
             Format::Csv(format) => Box::new(format),
@@ -380,19 +404,6 @@ fn parse_immutable_file_table_format(
             Format::Orc(format) => Box::new(format),
         },
     )
-}
-
-async fn infer_immutable_file_table_schema(
-    object_store: &ObjectStore,
-    file_format: &dyn FileFormat,
-    files: &[String],
-) -> Result<RawSchema> {
-    let merged = infer_schemas(object_store, files, file_format)
-        .await
-        .context(error::InferSchemaSnafu)?;
-    Ok(RawSchema::from(
-        &Schema::try_from(merged).context(error::ConvertSchemaSnafu)?,
-    ))
 }
 
 #[cfg(test)]
