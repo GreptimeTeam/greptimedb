@@ -113,6 +113,7 @@ mod tests {
 
     #[test]
     fn test_date_cast() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         // timestamp -> date
         let ts = Value::Timestamp(Timestamp::from_str("2000-01-01 08:00:01").unwrap());
         let date = ConcreteDataType::date_datatype().cast(ts).unwrap();

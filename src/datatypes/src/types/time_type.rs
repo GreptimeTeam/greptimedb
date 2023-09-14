@@ -410,8 +410,8 @@ mod tests {
             .unwrap();
         assert_eq!(time, Value::Time(Time::new_nanosecond(4000)));
 
-        // Other situations will return None, such as Int64 -> TimeSecondType
-        // or Int32 -> TimeMicrosecondType etc.
+        // Other situations will return None, such as Int64 -> TimeSecondType or
+        // Int32 -> TimeMicrosecondType etc.
         let val = Value::Int64(123);
         let time = ConcreteDataType::time_second_datatype().cast(val);
         assert_eq!(time, None);

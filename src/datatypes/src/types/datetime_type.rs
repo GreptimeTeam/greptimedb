@@ -103,3 +103,25 @@ impl LogicalPrimitiveType for DateTimeType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_datetime_cast() {
+        // cast from Int64
+        let val = Value::Int64(1000);
+        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        assert_eq!(dt, Value::DateTime(DateTime::from(1000)));
+
+        // cast from String
+        std::env::set_var("TZ", "Asia/Shanghai");
+        let val = Value::String("1970-01-01 00:00:00+0800".into());
+        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        assert_eq!(
+            dt,
+            Value::DateTime(DateTime::from_str("1970-01-01 00:00:00+0800").unwrap())
+        )
+    }
+}
