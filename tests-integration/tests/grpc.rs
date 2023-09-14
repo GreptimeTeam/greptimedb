@@ -191,7 +191,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
                 .collect(),
             ..Default::default()
         }),
-        semantic_type: SemanticType::Field as i32,
+        semantic_type: SemanticType::Tag as i32,
         datatype: ColumnDataType::String as i32,
         ..Default::default()
     };
@@ -363,14 +363,14 @@ fn testing_create_expr() -> CreateTableExpr {
         ColumnDef {
             name: "ts".to_string(),
             data_type: ColumnDataType::TimestampMillisecond as i32, // timestamp
-            is_nullable: true,
+            is_nullable: false,
             default_constraint: vec![],
             semantic_type: SemanticType::Timestamp as i32,
         },
     ];
     CreateTableExpr {
-        catalog_name: "".to_string(),
-        schema_name: "".to_string(),
+        catalog_name: "greptime".to_string(),
+        schema_name: "public".to_string(),
         table_name: "demo".to_string(),
         desc: "blabla little magic fairy".to_string(),
         column_defs,

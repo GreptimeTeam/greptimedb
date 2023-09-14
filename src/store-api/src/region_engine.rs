@@ -30,7 +30,7 @@ pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
-    /// Handle request to the region.
+    /// Handles request to the region.
     ///
     /// Only query is not included, which is handled in `handle_query`
     async fn handle_request(
@@ -39,18 +39,25 @@ pub trait RegionEngine: Send + Sync {
         request: RegionRequest,
     ) -> Result<Output, BoxedError>;
 
-    /// Handle substrait query and return a stream of record batches
+    /// Handles substrait query and return a stream of record batches
     async fn handle_query(
         &self,
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
-    /// Retrieve region's metadata.
+    /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
-    /// Stop the engine
+    /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
+
+    /// Sets writable mode for a region.
+    ///
+    /// The engine checks whether the region is writable before writing to the region. Setting
+    /// the region as readonly doesn't guarantee that write operations in progress will not
+    /// take effect.
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

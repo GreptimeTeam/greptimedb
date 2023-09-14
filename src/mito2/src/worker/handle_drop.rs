@@ -26,7 +26,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
-use crate::error::{self, OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{OpenDalSnafu, Result};
 use crate::region::RegionMapRef;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
@@ -35,9 +35,7 @@ const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
-        let Some(region) = self.regions.get_region(region_id) else {
-            return RegionNotFoundSnafu { region_id }.fail();
-        };
+        let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}", region_id);
 
@@ -119,7 +117,7 @@ pub(crate) async fn remove_region_dir_once(
         .lister_with(region_path)
         .await
         .context(OpenDalSnafu)?;
-    while let Some(file) = files.try_next().await.context(error::OpenDalSnafu)? {
+    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
         if file.path().ends_with(".parquet") {
             has_parquet_file = true;
             break;

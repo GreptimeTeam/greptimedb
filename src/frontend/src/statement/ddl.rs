@@ -111,7 +111,7 @@ impl StatementExecutor {
         let table_id = resp.table_id.context(error::UnexpectedSnafu {
             violated: "expected table_id",
         })?;
-        info!("Successfully created distributed table '{table_name}' with table id {table_id}");
+        info!("Successfully created table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
         let engine = table_info.meta.engine.to_string();

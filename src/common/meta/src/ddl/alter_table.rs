@@ -54,8 +54,8 @@ use crate::table_name::TableName;
 pub struct AlterTableProcedure {
     context: DdlContext,
     data: AlterTableData,
-    /// proto alter Kind.
-    kind: alter_request::Kind,
+    /// proto alter Kind for adding/dropping columns.
+    kind: Option<alter_request::Kind>,
 }
 
 impl AlterTableProcedure {
@@ -171,7 +171,7 @@ impl AlterTableProcedure {
         Ok(AlterRequest {
             region_id: region_id.as_u64(),
             schema_version: table_info.ident.version,
-            kind: Some(self.kind.clone()),
+            kind: self.kind.clone(),
         })
     }
 
@@ -461,7 +461,7 @@ impl AlterTableData {
 pub fn create_proto_alter_kind(
     table_info: &RawTableInfo,
     alter_kind: &Kind,
-) -> Result<(alter_request::Kind, Option<ColumnId>)> {
+) -> Result<(Option<alter_request::Kind>, Option<ColumnId>)> {
     match alter_kind {
         Kind::AddColumns(x) => {
             let mut next_column_id = table_info.meta.next_column_id;
@@ -494,7 +494,7 @@ pub fn create_proto_alter_kind(
                 .collect::<Result<Vec<_>>>()?;
 
             Ok((
-                alter_request::Kind::AddColumns(AddColumns { add_columns }),
+                Some(alter_request::Kind::AddColumns(AddColumns { add_columns })),
                 Some(next_column_id),
             ))
         }
@@ -508,10 +508,12 @@ pub fn create_proto_alter_kind(
                 .collect::<Vec<_>>();
 
             Ok((
-                alter_request::Kind::DropColumns(DropColumns { drop_columns }),
+                Some(alter_request::Kind::DropColumns(DropColumns {
+                    drop_columns,
+                })),
                 None,
             ))
         }
-        Kind::RenameTable(_) => unreachable!(),
+        Kind::RenameTable(_) => Ok((None, None)),
     }
 }

@@ -14,7 +14,7 @@
 
 //! Region opener.
 
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
 use common_telemetry::info;
@@ -35,6 +35,7 @@ use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
 use crate::region_write_ctx::RegionWriteCtx;
+use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::LocalFilePurger;
 use crate::wal::{EntryId, Wal};
@@ -110,10 +111,12 @@ impl RegionOpener {
             manifest_manager,
             file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
             last_flush_millis: AtomicI64::new(current_time_millis()),
+            // Region is writable after it is created.
+            writable: AtomicBool::new(true),
         })
     }
 
-    /// Opens an existing region.
+    /// Opens an existing region in read only mode.
     ///
     /// Returns error if the region doesn't exist.
     pub(crate) async fn open<S: LogStore>(
@@ -165,6 +168,8 @@ impl RegionOpener {
             manifest_manager,
             file_purger,
             last_flush_millis: AtomicI64::new(current_time_millis()),
+            // Region is always opened in read only mode.
+            writable: AtomicBool::new(false),
         };
         Ok(region)
     }
@@ -192,7 +197,7 @@ async fn replay_memtable<S: LogStore>(
                 .as_ref()
                 .map(|rows| rows.rows.len())
                 .unwrap_or(0);
-            region_write_ctx.push_mutation(mutation.op_type, mutation.rows, None);
+            region_write_ctx.push_mutation(mutation.op_type, mutation.rows, OptionOutputTx::none());
         }
     }
 

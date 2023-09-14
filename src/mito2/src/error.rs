@@ -469,6 +469,12 @@ pub enum Error {
         source: store_api::metadata::MetadataError,
         location: Location,
     },
+
+    #[snafu(display("Region {} is read only, location: {}", region_id, location))]
+    RegionReadonly {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -539,6 +545,7 @@ impl ErrorExt for Error {
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
+            RegionReadonly { .. } => StatusCode::RegionReadonly,
         }
     }
 

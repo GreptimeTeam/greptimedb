@@ -58,6 +58,7 @@ impl UpdateRegionMetadata {
         failed_region: &RegionIdent,
     ) -> Result<()> {
         let table_id = failed_region.table_ident.table_id;
+        let engine = failed_region.table_ident.engine.as_str();
 
         let table_route_value = ctx
             .table_metadata_manager
@@ -85,7 +86,7 @@ impl UpdateRegionMetadata {
         );
 
         ctx.table_metadata_manager
-            .update_table_route(table_id, table_route_value, new_region_routes)
+            .update_table_route(table_id, engine, table_route_value, new_region_routes)
             .await
             .context(error::UpdateTableRouteSnafu)?;
 

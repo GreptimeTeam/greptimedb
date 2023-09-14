@@ -18,18 +18,20 @@ pub(crate) mod opener;
 pub(crate) mod version;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_telemetry::info;
 use common_time::util::current_time_millis;
+use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::Result;
+use crate::error::{RegionNotFoundSnafu, RegionReadonlySnafu, Result};
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
+use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
 
 /// Metadata and runtime status of a region.
@@ -55,6 +57,8 @@ pub(crate) struct MitoRegion {
     pub(crate) file_purger: FilePurgerRef,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
+    /// Whether the region is writable.
+    writable: AtomicBool,
 }
 
 pub(crate) type MitoRegionRef = Arc<MitoRegion>;
@@ -94,6 +98,16 @@ impl MitoRegion {
         let now = current_time_millis();
         self.last_flush_millis.store(now, Ordering::Relaxed);
     }
+
+    /// Returns whether the region is writable.
+    pub(crate) fn is_writable(&self) -> bool {
+        self.writable.load(Ordering::Relaxed)
+    }
+
+    /// Sets the writable flag.
+    pub(crate) fn set_writable(&self, writable: bool) {
+        self.writable.store(writable, Ordering::Relaxed);
+    }
 }
 
 /// Regions indexed by ids.
@@ -115,10 +129,38 @@ impl RegionMap {
         regions.insert(region.region_id, region);
     }
 
-    /// Get region by region id.
+    /// Gets region by region id.
     pub(crate) fn get_region(&self, region_id: RegionId) -> Option<MitoRegionRef> {
         let regions = self.regions.read().unwrap();
         regions.get(&region_id).cloned()
+    }
+
+    /// Gets writable region by region id.
+    ///
+    /// Returns error if the region does not exist or is readonly.
+    pub(crate) fn writable_region(&self, region_id: RegionId) -> Result<MitoRegionRef> {
+        let region = self
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+        ensure!(region.is_writable(), RegionReadonlySnafu { region_id });
+        Ok(region)
+    }
+
+    /// Gets writable region by region id.
+    ///
+    /// Calls the callback if the region does not exist or is readonly.
+    pub(crate) fn writable_region_or<F: OnFailure>(
+        &self,
+        region_id: RegionId,
+        cb: &mut F,
+    ) -> Option<MitoRegionRef> {
+        match self.writable_region(region_id) {
+            Ok(region) => Some(region),
+            Err(e) => {
+                cb.on_failure(e);
+                None
+            }
+        }
     }
 
     /// Remove region by id.

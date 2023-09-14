@@ -20,11 +20,11 @@ use common_query::Output;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
-use tokio::sync::oneshot::Sender;
 
 use crate::error::{Error, Result, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
+use crate::request::OptionOutputTx;
 use crate::wal::{EntryId, WalWriter};
 
 /// Context to keep region metadata and buffer write requests.
@@ -34,14 +34,14 @@ struct WriteNotify {
     /// Error to send to the waiter.
     err: Option<Arc<Error>>,
     /// Sender to send write result to the waiter for this mutation.
-    sender: Option<Sender<Result<Output>>>,
+    sender: OptionOutputTx,
     /// Number of rows to be written.
     num_rows: usize,
 }
 
 impl WriteNotify {
     /// Creates a new notify from the `sender`.
-    fn new(sender: Option<Sender<Result<Output>>>, num_rows: usize) -> WriteNotify {
+    fn new(sender: OptionOutputTx, num_rows: usize) -> WriteNotify {
         WriteNotify {
             err: None,
             sender,
@@ -51,15 +51,14 @@ impl WriteNotify {
 
     /// Send result to the waiter.
     fn notify_result(&mut self) {
-        let Some(sender) = self.sender.take() else {
-            return;
-        };
         if let Some(err) = &self.err {
             // Try to send the error to waiters.
-            let _ = sender.send(Err(err.clone()).context(WriteGroupSnafu));
+            self.sender
+                .send_mut(Err(err.clone()).context(WriteGroupSnafu));
         } else {
             // Send success result.
-            let _ = sender.send(Ok(Output::AffectedRows(self.num_rows)));
+            self.sender
+                .send_mut(Ok(Output::AffectedRows(self.num_rows)));
         }
     }
 }
@@ -117,12 +116,7 @@ impl RegionWriteCtx {
     }
 
     /// Push [SenderWriteRequest] to the context.
-    pub(crate) fn push_mutation(
-        &mut self,
-        op_type: i32,
-        rows: Option<Rows>,
-        tx: Option<Sender<Result<Output>>>,
-    ) {
+    pub(crate) fn push_mutation(&mut self, op_type: i32, rows: Option<Rows>, tx: OptionOutputTx) {
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
         self.wal_entry.mutations.push(Mutation {
             op_type,

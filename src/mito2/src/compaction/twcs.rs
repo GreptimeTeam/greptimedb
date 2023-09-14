@@ -27,7 +27,6 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot::Sender;
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::output::CompactionOutput;
@@ -35,11 +34,12 @@ use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
 use crate::error;
 use crate::error::CompactRegionSnafu;
-use crate::request::{BackgroundNotify, CompactionFailed, CompactionFinished, WorkerRequest};
+use crate::request::{
+    BackgroundNotify, CompactionFailed, CompactionFinished, OptionOutputTx, WorkerRequest,
+};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::LevelMeta;
-use crate::worker::send_result;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
 
@@ -157,7 +157,7 @@ impl Picker for TwcsPicker {
 
         if outputs.is_empty() && expired_ssts.is_empty() {
             // Nothing to compact.
-            send_result(waiter, Ok(Output::AffectedRows(0)));
+            waiter.send(Ok(Output::AffectedRows(0)));
             return None;
         }
         let task = TwcsCompactionTask {
@@ -228,7 +228,7 @@ pub(crate) struct TwcsCompactionTask {
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Sender that are used to notify waiters waiting for pending compaction tasks.
-    pub sender: Option<Sender<error::Result<Output>>>,
+    pub sender: OptionOutputTx,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -321,11 +321,10 @@ impl TwcsCompactionTask {
 
     /// Handles compaction failure, notifies all waiters.
     fn on_failure(&mut self, err: Arc<error::Error>) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(Err(err.clone()).context(CompactRegionSnafu {
+        self.sender
+            .send_mut(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
-        }
     }
 
     /// Notifies region worker to handle post-compaction tasks.
