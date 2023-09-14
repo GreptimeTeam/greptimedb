@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_time_cast() {
-        // Int32 -> TiemSecondType
+        // Int32 -> TimeSecondType
         let val = Value::Int32(1000);
         let time = ConcreteDataType::time_second_datatype().cast(val).unwrap();
         assert_eq!(time, Value::Time(Time::new_second(1000)));

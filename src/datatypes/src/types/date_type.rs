@@ -63,7 +63,7 @@ impl DataType for DateType {
                 Ok(d) => Some(Value::Date(d)),
                 Err(_) => None,
             },
-            Value::Timestamp(v) => v.to_chrono_date().map(|nd| Value::Date(nd.into())),
+            Value::Timestamp(v) => v.to_chrono_date().map(|date| Value::Date(date.into())),
             _ => None,
         }
     }

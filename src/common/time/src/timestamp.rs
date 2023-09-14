@@ -268,8 +268,8 @@ impl Timestamp {
         Timestamp::from_splits(sec, nsec)
     }
 
-    pub fn from_chrono_date(nd: NaiveDate) -> Option<Self> {
-        Timestamp::from_chrono_datetime(nd.and_time(NaiveTime::default()))
+    pub fn from_chrono_date(date: NaiveDate) -> Option<Self> {
+        Timestamp::from_chrono_datetime(date.and_time(NaiveTime::default()))
     }
 }
 

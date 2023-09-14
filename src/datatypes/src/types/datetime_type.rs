@@ -57,6 +57,7 @@ impl DataType for DateTimeType {
     fn cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
+            Value::Timestamp(v) => v.to_chrono_datetime().map(|d| Value::DateTime(d.into())),
             Value::String(v) => match DateTime::from_str(v.as_utf8()) {
                 Ok(d) => Some(Value::DateTime(d)),
                 Err(_) => None,
@@ -106,6 +107,9 @@ impl LogicalPrimitiveType for DateTimeType {
 
 #[cfg(test)]
 mod tests {
+
+    use common_time::Timestamp;
+
     use super::*;
 
     #[test]
@@ -122,6 +126,14 @@ mod tests {
         assert_eq!(
             dt,
             Value::DateTime(DateTime::from_str("1970-01-01 00:00:00+0800").unwrap())
-        )
+        );
+
+        // cast from Timestamp
+        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29.042+0800").unwrap());
+        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        assert_eq!(
+            dt,
+            Value::DateTime(DateTime::from_str("2020-09-08 21:42:29+0800").unwrap())
+        );
     }
 }

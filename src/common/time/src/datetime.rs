@@ -52,7 +52,7 @@ impl From<DateTime> for serde_json::Value {
 
 impl From<NaiveDateTime> for DateTime {
     fn from(value: NaiveDateTime) -> Self {
-        DateTime::from(value.timestamp_millis())
+        DateTime::from(value.timestamp())
     }
 }
 
@@ -94,7 +94,7 @@ impl DateTime {
     }
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_millis(self.0)
+        NaiveDateTime::from_timestamp_opt(self.0, 0)
     }
 }
 

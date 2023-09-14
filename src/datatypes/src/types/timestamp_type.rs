@@ -242,6 +242,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_cast() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         // string -> timestamp
         let s = Value::String("2021-01-01 01:02:03".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype()
@@ -258,10 +259,10 @@ mod tests {
 
         // datetime -> timestamp
         let dt = Value::DateTime(DateTime::from(1234567));
-        let ts = ConcreteDataType::timestamp_millisecond_datatype()
+        let ts = ConcreteDataType::timestamp_second_datatype()
             .cast(dt)
             .unwrap();
-        assert_eq!(ts, Value::Timestamp(Timestamp::new_millisecond(1234567)));
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
         // date -> timestamp
         let d = Value::Date(Date::from_str("1970-01-01").unwrap());
