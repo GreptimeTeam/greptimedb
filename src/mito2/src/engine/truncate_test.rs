@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::v1::Rows;
 use common_recordbatch::RecordBatches;
@@ -351,5 +350,5 @@ async fn test_engine_truncate_during_flush() {
 
     let region = engine.get_region(region_id).unwrap();
     let current_version = region.version_control.current().version;
-    assert_eq!(current_version.truncated_entry_id, None);
+    assert_eq!(current_version.truncated_entry_id, Some(entry_id));
 }

@@ -79,6 +79,8 @@ pub struct RegionManifest {
     pub flushed_sequence: SequenceNumber,
     /// Current manifest version.
     pub manifest_version: ManifestVersion,
+    /// Last WAL entry id of truncated data.
+    pub truncated_entry_id: Option<EntryId>,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +90,7 @@ pub struct RegionManifestBuilder {
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
+    truncated_entry_id: Option<EntryId>,
 }
 
 impl RegionManifestBuilder {
@@ -100,6 +103,7 @@ impl RegionManifestBuilder {
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
                 flushed_sequence: s.flushed_sequence,
+                truncated_entry_id: s.truncated_entry_id,
             }
         } else {
             Default::default()
@@ -131,6 +135,7 @@ impl RegionManifestBuilder {
         self.manifest_version = manifest_version;
         self.flushed_entry_id = truncate.truncated_entry_id;
         self.flushed_sequence = truncate.truncated_sequence;
+        self.truncated_entry_id = Some(truncate.truncated_entry_id);
         self.files.clear();
     }
 
@@ -147,6 +152,7 @@ impl RegionManifestBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             manifest_version: self.manifest_version,
+            truncated_entry_id: self.truncated_entry_id,
         })
     }
 }
