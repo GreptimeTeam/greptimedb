@@ -27,12 +27,12 @@ use store_api::storage::RegionId;
 
 use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
 
-pub(crate) struct DistRegionRequestHandler {
+pub(crate) struct FrontendRegionRequestHandler {
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
 }
 
-impl DistRegionRequestHandler {
+impl FrontendRegionRequestHandler {
     pub fn arc(
         partition_manager: PartitionRuleManagerRef,
         datanode_manager: DatanodeManagerRef,
@@ -45,7 +45,7 @@ impl DistRegionRequestHandler {
 }
 
 #[async_trait]
-impl RegionRequestHandler for DistRegionRequestHandler {
+impl RegionRequestHandler for FrontendRegionRequestHandler {
     async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
         self.do_get_inner(request)
             .await
@@ -54,7 +54,7 @@ impl RegionRequestHandler for DistRegionRequestHandler {
     }
 }
 
-impl DistRegionRequestHandler {
+impl FrontendRegionRequestHandler {
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 
