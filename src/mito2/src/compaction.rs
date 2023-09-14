@@ -100,3 +100,15 @@ impl CompactionScheduler {
         }))
     }
 }
+
+/// Status of running and pending region compaction tasks.
+struct CompactionStatus {
+    // Request waiting for compaction.
+    pending_request: Option<CompactionRequest>,
+}
+
+impl CompactionStatus {
+    fn merge_request(&mut self, request: CompactionRequest) {
+        unimplemented!()
+    }
+}
