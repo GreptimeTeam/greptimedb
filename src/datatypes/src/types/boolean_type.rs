@@ -69,12 +69,14 @@ impl DataType for BooleanType {
             Value::Int16(v) => numeric_to_bool(v),
             Value::Int32(v) => numeric_to_bool(v),
             Value::Int64(v) => numeric_to_bool(v),
+            Value::Float32(v) => numeric_to_bool(v),
+            Value::Float64(v) => numeric_to_bool(v),
             _ => None,
         }
     }
 }
 
-fn numeric_to_bool<T>(num: T) -> Option<Value>
+pub fn numeric_to_bool<T>(num: T) -> Option<Value>
 where
     T: Num + Default,
 {
@@ -85,13 +87,26 @@ where
     }
 }
 
+pub fn bool_to_numeric<T>(value: bool) -> Option<T>
+where
+    T: Num,
+{
+    if value {
+        Some(T::one())
+    } else {
+        Some(T::zero())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    use ordered_float::OrderedFloat;
 
     use super::*;
     use crate::data_type::ConcreteDataType;
 
-    macro_rules! test_bool_conversion {
+    macro_rules! test_bool {
         ($value: expr, $expected: expr) => {
             let val = $value;
             let b = ConcreteDataType::boolean_datatype().cast(val).unwrap();
@@ -100,25 +115,31 @@ mod tests {
     }
 
     #[test]
-    fn test_bool_cast() {
+    fn test_other_type_cast_to_bool() {
         // false cases
-        test_bool_conversion!(Value::UInt8(0), false);
-        test_bool_conversion!(Value::UInt16(0), false);
-        test_bool_conversion!(Value::UInt32(0), false);
-        test_bool_conversion!(Value::UInt64(0), false);
-        test_bool_conversion!(Value::Int8(0), false);
-        test_bool_conversion!(Value::Int16(0), false);
-        test_bool_conversion!(Value::Int32(0), false);
-        test_bool_conversion!(Value::Int64(0), false);
-
+        test_bool!(Value::UInt8(0), false);
+        test_bool!(Value::UInt16(0), false);
+        test_bool!(Value::UInt32(0), false);
+        test_bool!(Value::UInt64(0), false);
+        test_bool!(Value::Int8(0), false);
+        test_bool!(Value::Int16(0), false);
+        test_bool!(Value::Int32(0), false);
+        test_bool!(Value::Int64(0), false);
+        test_bool!(Value::Float32(OrderedFloat(0.0)), false);
+        test_bool!(Value::Float64(OrderedFloat(0.0)), false);
         // true cases
-        test_bool_conversion!(Value::UInt8(1), true);
-        test_bool_conversion!(Value::UInt16(1), true);
-        test_bool_conversion!(Value::UInt32(1), true);
-        test_bool_conversion!(Value::UInt64(1), true);
-        test_bool_conversion!(Value::Int8(1), true);
-        test_bool_conversion!(Value::Int16(1), true);
-        test_bool_conversion!(Value::Int32(1), true);
-        test_bool_conversion!(Value::Int64(1), true);
+        test_bool!(Value::UInt8(1), true);
+        test_bool!(Value::UInt16(1), true);
+        test_bool!(Value::UInt32(1), true);
+        test_bool!(Value::UInt64(1), true);
+        test_bool!(Value::Int8(1), true);
+        test_bool!(Value::Int16(1), true);
+        test_bool!(Value::Int32(1), true);
+        test_bool!(Value::Int64(1), true);
+        test_bool!(Value::Float32(OrderedFloat(1.0)), true);
+        test_bool!(Value::Float64(OrderedFloat(1.0)), true);
     }
+
+    #[test]
+    fn test_bool_cast_to_other_type() {}
 }

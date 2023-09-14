@@ -16,11 +16,13 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use arrow::datatypes::{ArrowNativeType, ArrowPrimitiveType, DataType as ArrowDataType};
+use common_time::interval::IntervalUnit;
 use common_time::{Date, DateTime};
 use num::NumCast;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
+use super::boolean_type::bool_to_numeric;
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarRef, ScalarVectorBuilder};
@@ -245,7 +247,7 @@ macro_rules! define_logical_primitive_type {
 }
 
 macro_rules! define_non_timestamp_primitive {
-    ($Native: ident, $TypeId: ident, $DataType: ident, $Largest: ident) => {
+    ( $Native: ident, $TypeId: ident, $DataType: ident, $Largest: ident $(, $TargetType: ident)* ) => {
         define_logical_primitive_type!($Native, $TypeId, $DataType, $Largest);
 
         impl DataType for $DataType {
@@ -273,25 +275,73 @@ macro_rules! define_non_timestamp_primitive {
                 false
             }
 
-            fn cast(&self, _: Value) -> Option<Value> {
-                unimplemented!()
+            fn cast(&self, from: Value) -> Option<Value> {
+                match from {
+                    Value::Boolean(v) => bool_to_numeric(v).map(|val|Value::$TypeId(val)),
+                    Value::String(v) => match v.as_utf8().parse::<$Native>(){
+                        Ok(val) => Some(Value::from(val)),
+                        Err(_)=> None,
+                    }
+                    $(
+                        Value::$TargetType(v) => num::cast::cast(v).map(Value::$TypeId),
+                    )*
+
+                    _ => None,
+                }
             }
         }
     };
 }
 
-define_non_timestamp_primitive!(u8, UInt8, UInt8Type, UInt64Type);
-define_non_timestamp_primitive!(u16, UInt16, UInt16Type, UInt64Type);
-define_non_timestamp_primitive!(u32, UInt32, UInt32Type, UInt64Type);
-define_non_timestamp_primitive!(u64, UInt64, UInt64Type, UInt64Type);
-define_non_timestamp_primitive!(i8, Int8, Int8Type, Int64Type);
-define_non_timestamp_primitive!(i16, Int16, Int16Type, Int64Type);
-define_non_timestamp_primitive!(i32, Int32, Int32Type, Int64Type);
-define_non_timestamp_primitive!(f32, Float32, Float32Type, Float64Type);
-define_non_timestamp_primitive!(f64, Float64, Float64Type, Float64Type);
+define_non_timestamp_primitive!(u8, UInt8, UInt8Type, UInt64Type, UInt8, Float32, Float64);
+define_non_timestamp_primitive!(
+    u16, UInt16, UInt16Type, UInt64Type, UInt8, UInt16, Float32, Float64
+);
+define_non_timestamp_primitive!(
+    u32, UInt32, UInt32Type, UInt64Type, UInt8, UInt16, UInt32, Float32, Float64
+);
+define_non_timestamp_primitive!(
+    u64, UInt64, UInt64Type, UInt64Type, UInt8, UInt16, UInt32, UInt64, Float32, Float64
+);
+define_non_timestamp_primitive!(i8, Int8, Int8Type, Int64Type, Int8, Float32, Float64);
+define_non_timestamp_primitive!(i16, Int16, Int16Type, Int64Type, Int8, Int16, Float32, Float64);
+
+define_non_timestamp_primitive!(
+    f32,
+    Float32,
+    Float32Type,
+    Float64Type,
+    Float32,
+    Float64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Int8,
+    Int16,
+    Int32,
+    Int64
+);
+define_non_timestamp_primitive!(
+    f64,
+    Float64,
+    Float64Type,
+    Float64Type,
+    Float64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Int8,
+    Int16,
+    Int32,
+    Int64
+);
 
 // Timestamp primitive:
 define_logical_primitive_type!(i64, Int64, Int64Type, Int64Type);
+
+define_logical_primitive_type!(i32, Int32, Int32Type, Int64Type);
 
 impl DataType for Int64Type {
     fn name(&self) -> &str {
@@ -318,14 +368,92 @@ impl DataType for Int64Type {
         true
     }
 
-    fn cast(&self, _: Value) -> Option<Value> {
-        unimplemented!()
+    fn cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Boolean(v) => bool_to_numeric(v).map(Value::Int64),
+            Value::Int8(v) => num::cast::cast(v).map(Value::Int64),
+            Value::Int16(v) => num::cast::cast(v).map(Value::Int64),
+            Value::Int32(v) => num::cast::cast(v).map(Value::Int64),
+            Value::Int64(v) => Some(Value::Int64(v)),
+            Value::Float32(v) => num::cast::cast(v).map(Value::Int64),
+            Value::Float64(v) => num::cast::cast(v).map(Value::Int64),
+            Value::String(v) => match v.as_utf8().parse::<i64>() {
+                Ok(val) => Some(Value::Int64(val)),
+                Err(_) => None,
+            },
+            Value::DateTime(v) => Some(Value::Int64(v.val())),
+            Value::Timestamp(v) => Some(Value::Int64(v.value())),
+            Value::Time(v) => Some(Value::Int64(v.value())),
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::DayTime => Some(Value::Int64(v.to_i64())),
+                IntervalUnit::YearMonth => None,
+                IntervalUnit::MonthDayNano => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl DataType for Int32Type {
+    #[doc = " Name of this data type."]
+    fn name(&self) -> &str {
+        "Int32"
+    }
+
+    #[doc = " Returns id of the Logical data type."]
+    fn logical_type_id(&self) -> LogicalTypeId {
+        LogicalTypeId::Int32
+    }
+
+    #[doc = " Returns the default value of this type."]
+    fn default_value(&self) -> Value {
+        Value::Int32(0)
+    }
+
+    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
+    fn as_arrow_type(&self) -> ArrowDataType {
+        ArrowDataType::Int32
+    }
+
+    #[doc = " Creates a mutable vector with given `capacity` of this type."]
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        Box::new(PrimitiveVectorBuilder::<Int32Type>::with_capacity(capacity))
+    }
+
+    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
+    #[doc = " use it as a timestamp."]
+    fn is_timestamp_compatible(&self) -> bool {
+        false
+    }
+
+    fn cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Boolean(v) => bool_to_numeric(v).map(Value::Int32),
+            Value::Int8(v) => num::cast::cast(v).map(Value::Int32),
+            Value::Int16(v) => num::cast::cast(v).map(Value::Int32),
+            Value::Int32(v) => Some(Value::Int32(v)),
+            Value::Float32(v) => num::cast::cast(v).map(Value::Int32),
+            Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
+            Value::String(v) => match v.as_utf8().parse::<i32>() {
+                Ok(val) => Some(Value::Int32(val)),
+                Err(_) => None,
+            },
+            Value::Date(v) => Some(Value::Int32(v.val())),
+            Value::Interval(v) => match v.unit() {
+                IntervalUnit::YearMonth => Some(Value::Int32(v.to_i32())),
+                IntervalUnit::DayTime => None,
+                IntervalUnit::MonthDayNano => None,
+            },
+            _ => None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::BinaryHeap;
+
+    use ordered_float::OrderedFloat;
 
     use super::*;
 
@@ -368,5 +496,222 @@ mod tests {
         test!(i64);
         test!(f32);
         test!(f64);
+    }
+
+    macro_rules! assert_primitive_cast {
+        ($value: expr, $datatype:expr, $expected: expr) => {
+            let val = $value;
+            let b = $datatype.cast(val).unwrap();
+            assert_eq!(b, $expected);
+        };
+    }
+
+    #[test]
+    fn test_primitive_cast() {
+        // Integer cast
+        assert_primitive_cast!(
+            Value::UInt8(123),
+            ConcreteDataType::uint16_datatype(),
+            Value::UInt16(123)
+        );
+
+        assert_primitive_cast!(
+            Value::UInt8(123),
+            ConcreteDataType::uint32_datatype(),
+            Value::UInt32(123)
+        );
+        assert_primitive_cast!(
+            Value::UInt8(123),
+            ConcreteDataType::uint64_datatype(),
+            Value::UInt64(123)
+        );
+        assert_primitive_cast!(
+            Value::UInt16(1234),
+            ConcreteDataType::uint32_datatype(),
+            Value::UInt32(1234)
+        );
+        assert_primitive_cast!(
+            Value::UInt16(1234),
+            ConcreteDataType::uint64_datatype(),
+            Value::UInt64(1234)
+        );
+        assert_primitive_cast!(
+            Value::UInt32(12345),
+            ConcreteDataType::uint64_datatype(),
+            Value::UInt64(12345)
+        );
+
+        assert_primitive_cast!(
+            Value::UInt8(123),
+            ConcreteDataType::uint16_datatype(),
+            Value::UInt16(123)
+        );
+
+        assert_primitive_cast!(
+            Value::Int8(123),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(123)
+        );
+        assert_primitive_cast!(
+            Value::Int8(123),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(123)
+        );
+        assert_primitive_cast!(
+            Value::Int16(1234),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(1234)
+        );
+        assert_primitive_cast!(
+            Value::Int16(1234),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(1234)
+        );
+        assert_primitive_cast!(
+            Value::Int32(12345),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(12345)
+        );
+    }
+
+    #[test]
+    fn test_float_cast() {
+        // cast to Float32
+        assert_primitive_cast!(
+            Value::UInt8(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt16(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt32(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt64(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int8(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int16(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int32(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int64(12),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(12.0))
+        );
+
+        // cast to Float64
+        assert_primitive_cast!(
+            Value::UInt8(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt16(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt32(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::UInt64(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int8(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int16(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int32(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+        assert_primitive_cast!(
+            Value::Int64(12),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(12.0))
+        );
+    }
+
+    #[test]
+    fn test_string_cast_to_primitive() {
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::uint8_datatype(),
+            Value::UInt8(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::uint16_datatype(),
+            Value::UInt16(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::uint32_datatype(),
+            Value::UInt32(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::uint64_datatype(),
+            Value::UInt64(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::int8_datatype(),
+            Value::Int8(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::int16_datatype(),
+            Value::Int16(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::int32_datatype(),
+            Value::Int32(123)
+        );
+        assert_primitive_cast!(
+            Value::String("123".into()),
+            ConcreteDataType::int64_datatype(),
+            Value::Int64(123)
+        );
+        assert_primitive_cast!(
+            Value::String("1.23".into()),
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(1.23))
+        );
+        assert_primitive_cast!(
+            Value::String("1.23".into()),
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(1.23))
+        );
     }
 }
