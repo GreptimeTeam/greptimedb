@@ -247,7 +247,6 @@ mod tests {
             engine: Default::default(),
             version: 1,
         };
-        print!("{value:?}");
         let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
