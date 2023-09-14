@@ -38,7 +38,7 @@ use datatypes::arrow::compute::can_cast_types;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::vectors::Helper;
 use futures_util::StreamExt;
-use object_store::{Entry, EntryMode, Metakey, ObjectStore};
+use object_store::{Entry, EntryMode, ObjectStore};
 use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -256,11 +256,7 @@ impl StatementExecutor {
         let table_schema = table.schema().arrow_schema().clone();
 
         for entry in entries.iter() {
-            let metadata = object_store
-                .metadata(entry, Metakey::Mode)
-                .await
-                .context(error::ReadObjectSnafu { path: entry.path() })?;
-            if metadata.mode() != EntryMode::FILE {
+            if entry.metadata().mode() != EntryMode::FILE {
                 continue;
             }
             let path = entry.path();

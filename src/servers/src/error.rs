@@ -479,7 +479,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound
         | StatusCode::InvalidAuthHeader => Code::Unauthenticated,
-        StatusCode::AccessDenied | StatusCode::PermissionDenied => Code::PermissionDenied,
+        StatusCode::AccessDenied | StatusCode::PermissionDenied | StatusCode::RegionReadonly => {
+            Code::PermissionDenied
+        }
     }
 }
 

@@ -16,7 +16,7 @@ SELECT * FROM test;
 
 DESC TABLE test;
 
-ALTER TABLE test ADD COLUMN idc STRING default "idc" PRIMARY KEY;
+ALTER TABLE test ADD COLUMN idc STRING default 'idc' PRIMARY KEY;
 
 SELECT * FROM test;
 

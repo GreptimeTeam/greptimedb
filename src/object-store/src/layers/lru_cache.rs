@@ -19,10 +19,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lru::LruCache;
 use metrics::increment_counter;
-use opendal::raw::oio::{Page, Read, ReadExt, Reader, Write};
+use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
 use opendal::raw::{
-    Accessor, Layer, LayeredAccessor, OpAppend, OpDelete, OpList, OpRead, OpWrite, RpAppend,
-    RpDelete, RpList, RpRead, RpWrite,
+    Accessor, Layer, LayeredAccessor, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
+    RpWrite,
 };
 use opendal::{ErrorKind, Result};
 use tokio::sync::Mutex;
@@ -114,7 +114,6 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     type BlockingWriter = I::BlockingWriter;
     type Pager = I::Pager;
     type BlockingPager = I::BlockingPager;
-    type Appender = I::Appender;
 
     fn inner(&self) -> &Self::Inner {
         &self.inner
@@ -146,7 +145,7 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
                 let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
 
                 while let Some(bytes) = reader.next().await {
-                    writer.write(bytes?).await?;
+                    writer.write(&bytes?).await?;
                 }
 
                 writer.close().await?;
@@ -176,10 +175,6 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
         self.inner.write(path, args).await
-    }
-
-    async fn append(&self, path: &str, args: OpAppend) -> Result<(RpAppend, Self::Appender)> {
-        self.inner.append(path, args).await
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {

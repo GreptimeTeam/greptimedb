@@ -19,14 +19,14 @@ use std::time::Duration;
 use common_query::Output;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
-use futures::StreamExt;
+use futures::TryStreamExt;
 use object_store::util::join_path;
-use object_store::{EntryMode, Metakey, ObjectStore};
+use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
-use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{OpenDalSnafu, Result};
 use crate::region::RegionMapRef;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
 
@@ -35,9 +35,7 @@ const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
-        let Some(region) = self.regions.get_region(region_id) else {
-            return RegionNotFoundSnafu { region_id }.fail();
-        };
+        let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}", region_id);
 
@@ -115,17 +113,16 @@ pub(crate) async fn remove_region_dir_once(
     let mut has_parquet_file = false;
     // record all paths that neither ends with .parquet nor the marker file
     let mut files_to_remove_first = vec![];
-    let mut files = object_store.scan(region_path).await.context(OpenDalSnafu)?;
-    while let Some(file) = files.next().await {
-        let file = file.context(OpenDalSnafu)?;
+    let mut files = object_store
+        .lister_with(region_path)
+        .await
+        .context(OpenDalSnafu)?;
+    while let Some(file) = files.try_next().await.context(OpenDalSnafu)? {
         if file.path().ends_with(".parquet") {
             has_parquet_file = true;
             break;
         } else if !file.path().ends_with(DROPPING_MARKER_FILE) {
-            let meta = object_store
-                .metadata(&file, Metakey::Mode)
-                .await
-                .context(OpenDalSnafu)?;
+            let meta = file.metadata();
             if meta.mode() == EntryMode::FILE {
                 files_to_remove_first.push(file.path().to_string());
             }

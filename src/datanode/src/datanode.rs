@@ -14,6 +14,8 @@
 
 //! Datanode configurations
 
+pub mod builder;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,7 +37,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::util::normalize_dir;
-use query::{QueryEngineFactory, QueryEngineRef};
+use query::QueryEngineFactory;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
@@ -55,7 +57,6 @@ use tokio::fs;
 use crate::error::{
     CreateDirSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
 };
-use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
 use crate::region_server::RegionServer;
 use crate::server::Services;
@@ -405,12 +406,14 @@ pub struct Datanode {
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
     region_server: RegionServer,
-    query_engine: QueryEngineRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
 
 impl Datanode {
-    pub async fn new(opts: DatanodeOptions, plugins: Arc<Plugins>) -> Result<Datanode> {
+    async fn new_region_server(
+        opts: &DatanodeOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<RegionServer> {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
             MemoryCatalogManager::with_default_setup(),
@@ -429,48 +432,30 @@ impl Datanode {
         );
 
         let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
-        let log_store = Self::build_log_store(&opts).await?;
-        let object_store = store::new_object_store(&opts).await?;
-        let engines = Self::build_store_engines(&opts, log_store, object_store).await?;
+        let log_store = Self::build_log_store(opts).await?;
+        let object_store = store::new_object_store(opts).await?;
+        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
 
-        // build optional things with different modes
-        let services = match opts.mode {
-            Mode::Distributed => Some(Services::try_new(region_server.clone(), &opts).await?),
-            Mode::Standalone => None,
-        };
-        let heartbeat_task = match opts.mode {
-            Mode::Distributed => {
-                Some(HeartbeatTask::try_new(&opts, Some(region_server.clone())).await?)
-            }
-            Mode::Standalone => None,
-        };
-        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
-            Some(opts.storage.data_home.clone()),
-            &opts.mode,
-            opts.enable_telemetry,
-        )
-        .await;
-
-        Ok(Self {
-            opts,
-            services,
-            heartbeat_task,
-            region_server,
-            query_engine,
-            greptimedb_telemetry_task,
-        })
+        Ok(region_server)
     }
 
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
+
+        self.start_heartbeat().await?;
+
+        let _ = self.greptimedb_telemetry_task.start();
+        self.start_services().await
+    }
+
+    pub async fn start_heartbeat(&self) -> Result<()> {
         if let Some(task) = &self.heartbeat_task {
             task.start().await?;
         }
-        let _ = self.greptimedb_telemetry_task.start();
-        self.start_services().await
+        Ok(())
     }
 
     /// Start services of datanode. This method call will block until services are shutdown.
@@ -507,10 +492,6 @@ impl Datanode {
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
-    }
-
-    pub fn query_engine(&self) -> QueryEngineRef {
-        self.query_engine.clone()
     }
 
     // internal utils

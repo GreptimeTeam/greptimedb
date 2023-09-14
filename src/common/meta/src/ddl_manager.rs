@@ -134,7 +134,7 @@ impl DdlManager {
         let context = self.create_context();
 
         let procedure =
-            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context);
+            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context)?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 

@@ -259,6 +259,12 @@ impl StatementExecutor {
         let engine = table.table_info().meta.engine.to_string();
         self.verify_alter(table_id, table.table_info(), expr.clone())?;
 
+        info!(
+            "Table info before alter is {:?}, expr: {:?}",
+            table.table_info(),
+            expr
+        );
+
         let req = SubmitDdlTaskRequest {
             task: DdlTask::new_alter_table(expr.clone()),
         };
@@ -349,9 +355,9 @@ impl StatementExecutor {
         let exists = self
             .table_metadata_manager
             .schema_manager()
-            .exist(schema_key)
+            .exists(schema_key)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
 
         if exists {
             return if create_if_not_exists {
@@ -363,9 +369,9 @@ impl StatementExecutor {
 
         self.table_metadata_manager
             .schema_manager()
-            .create(schema_key, None)
+            .create(schema_key, None, false)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+            .context(TableMetadataManagerSnafu)?;
 
         Ok(Output::AffectedRows(1))
     }

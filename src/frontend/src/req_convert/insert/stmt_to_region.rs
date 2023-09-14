@@ -65,12 +65,19 @@ impl<'a> StatementToRegion<'a> {
         let sql_rows = stmt.values_body().context(MissingInsertBodySnafu)?;
         let row_count = sql_rows.len();
 
-        ensure!(
-            sql_rows.iter().all(|row| row.len() == column_count),
-            InvalidSqlSnafu {
-                err_msg: "column count mismatch"
-            }
-        );
+        sql_rows.iter().try_for_each(|r| {
+            ensure!(
+                r.len() == column_count,
+                InvalidSqlSnafu {
+                    err_msg: format!(
+                        "column count mismatch, columns: {}, values: {}",
+                        column_count,
+                        r.len()
+                    )
+                }
+            );
+            Ok(())
+        })?;
 
         let mut schema = Vec::with_capacity(column_count);
         let mut rows = vec![

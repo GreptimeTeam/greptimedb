@@ -17,7 +17,7 @@ PARTITION BY RANGE COLUMNS (host) (
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 explain SELECT * FROM demo WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
 
 drop table demo;

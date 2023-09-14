@@ -255,8 +255,8 @@ impl RegionMetadata {
                 !id_names.contains_key(&col.column_id),
                 InvalidMetaSnafu {
                     reason: format!(
-                        "column {} and {} have the same column id",
-                        id_names[&col.column_id], col.column_schema.name
+                        "column {} and {} have the same column id {}",
+                        id_names[&col.column_id], col.column_schema.name, col.column_id,
                     ),
                 }
             );

@@ -42,7 +42,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE (peer-.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
 explain 
 select * 
 from 
@@ -122,45 +122,45 @@ limit 1;
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_FilterExec: vin@1 IS NOT NULL_|
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_MergeScanExec: peers=[REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

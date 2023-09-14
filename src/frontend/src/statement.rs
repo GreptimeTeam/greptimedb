@@ -194,7 +194,11 @@ impl StatementExecutor {
         }
     }
 
-    async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    pub async fn plan(
+        &self,
+        stmt: QueryStatement,
+        query_ctx: QueryContextRef,
+    ) -> Result<LogicalPlan> {
         self.query_engine
             .planner()
             .plan(stmt, query_ctx)

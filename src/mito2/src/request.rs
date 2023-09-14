@@ -213,7 +213,10 @@ impl WriteRequest {
                     !has_null || column.column_schema.is_nullable(),
                     InvalidRequestSnafu {
                         region_id,
-                        reason: format!("column {} is not null", column.column_schema.name),
+                        reason: format!(
+                            "column {} is not null but input has null",
+                            column.column_schema.name
+                        ),
                     }
                 );
             } else {
@@ -388,11 +391,86 @@ pub(crate) fn validate_proto_value(
     Ok(())
 }
 
+/// Oneshot output result sender.
+#[derive(Debug)]
+pub(crate) struct OutputTx(Sender<Result<Output>>);
+
+impl OutputTx {
+    /// Creates a new output sender.
+    pub(crate) fn new(sender: Sender<Result<Output>>) -> OutputTx {
+        OutputTx(sender)
+    }
+
+    /// Sends the `result`.
+    pub(crate) fn send(self, result: Result<Output>) {
+        // Ignores send result.
+        let _ = self.0.send(result);
+    }
+}
+
+/// Optional output result sender.
+#[derive(Debug)]
+pub(crate) struct OptionOutputTx(Option<OutputTx>);
+
+impl OptionOutputTx {
+    /// Creates a sender.
+    pub(crate) fn new(sender: Option<OutputTx>) -> OptionOutputTx {
+        OptionOutputTx(sender)
+    }
+
+    /// Creates an empty sender.
+    pub(crate) fn none() -> OptionOutputTx {
+        OptionOutputTx(None)
+    }
+
+    /// Sends the `result` and consumes the inner sender.
+    pub(crate) fn send_mut(&mut self, result: Result<Output>) {
+        if let Some(sender) = self.0.take() {
+            sender.send(result);
+        }
+    }
+
+    /// Sends the `result` and consumes the sender.
+    pub(crate) fn send(mut self, result: Result<Output>) {
+        if let Some(sender) = self.0.take() {
+            sender.send(result);
+        }
+    }
+
+    /// Takes the sender.
+    pub(crate) fn take(&mut self) -> OptionOutputTx {
+        OptionOutputTx(self.0.take())
+    }
+
+    /// Takes the inner sender.
+    pub(crate) fn take_inner(&mut self) -> Option<OutputTx> {
+        self.0.take()
+    }
+}
+
+impl From<Sender<Result<Output>>> for OptionOutputTx {
+    fn from(sender: Sender<Result<Output>>) -> Self {
+        Self::new(Some(OutputTx::new(sender)))
+    }
+}
+
+impl OnFailure for OptionOutputTx {
+    fn on_failure(&mut self, err: Error) {
+        self.send_mut(Err(err));
+    }
+}
+
+/// Callback on failure.
+pub(crate) trait OnFailure {
+    /// Handles `err` on failure.
+    fn on_failure(&mut self, err: Error);
+}
+
 /// Sender and write request.
 #[derive(Debug)]
 pub(crate) struct SenderWriteRequest {
     /// Result sender.
-    pub(crate) sender: Option<Sender<Result<Output>>>,
+    pub(crate) sender: OptionOutputTx,
     pub(crate) request: WriteRequest,
 }
 
@@ -428,50 +506,50 @@ impl WorkerRequest {
             RegionRequest::Put(v) => {
                 let write_request = WriteRequest::new(region_id, OpType::Put, v.rows)?;
                 WorkerRequest::Write(SenderWriteRequest {
-                    sender: Some(sender),
+                    sender: sender.into(),
                     request: write_request,
                 })
             }
             RegionRequest::Delete(v) => {
                 let write_request = WriteRequest::new(region_id, OpType::Delete, v.rows)?;
                 WorkerRequest::Write(SenderWriteRequest {
-                    sender: Some(sender),
+                    sender: sender.into(),
                     request: write_request,
                 })
             }
             RegionRequest::Create(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Create(v),
             }),
             RegionRequest::Drop(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Drop(v),
             }),
             RegionRequest::Open(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Open(v),
             }),
             RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Close(v),
             }),
             RegionRequest::Alter(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Alter(v),
             }),
             RegionRequest::Flush(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Flush(v),
             }),
             RegionRequest::Compact(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
-                sender: Some(sender),
+                sender: sender.into(),
                 request: DdlRequest::Compact(v),
             }),
         };
@@ -498,7 +576,7 @@ pub(crate) struct SenderDdlRequest {
     /// Region id of the request.
     pub(crate) region_id: RegionId,
     /// Result sender.
-    pub(crate) sender: Option<Sender<Result<Output>>>,
+    pub(crate) sender: OptionOutputTx,
     /// Ddl request.
     pub(crate) request: DdlRequest,
 }
@@ -530,33 +608,33 @@ pub(crate) struct FlushFinished {
     /// Id of memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Flush result senders.
-    pub(crate) senders: Vec<oneshot::Sender<Result<Output>>>,
+    pub(crate) senders: Vec<OutputTx>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
 }
 
 impl FlushFinished {
-    pub(crate) fn on_failure(self, err: Error) {
-        let err = Arc::new(err);
+    pub(crate) fn on_success(self) {
         for sender in self.senders {
-            // Ignore send result.
-            let _ = sender.send(Err(err.clone()).context(FlushRegionSnafu {
+            sender.send(Ok(Output::AffectedRows(0)));
+        }
+    }
+}
+
+impl OnFailure for FlushFinished {
+    fn on_failure(&mut self, err: Error) {
+        let err = Arc::new(err);
+        for sender in self.senders.drain(..) {
+            sender.send(Err(err.clone()).context(FlushRegionSnafu {
                 region_id: self.region_id,
             }));
         }
         // Clean flushed files.
-        for file in self.file_metas {
+        for file in &self.file_metas {
             self.file_purger.send_request(PurgeRequest {
                 region_id: file.region_id,
                 file_id: file.file_id,
             });
-        }
-    }
-
-    pub(crate) fn on_success(self) {
-        for sender in self.senders {
-            // Ignore send result.
-            let _ = sender.send(Ok(Output::AffectedRows(0)));
         }
     }
 }
@@ -578,22 +656,23 @@ pub(crate) struct CompactionFinished {
     /// Compacted files that are to be removed from region version.
     pub(crate) compacted_files: Vec<FileMeta>,
     /// Compaction result sender.
-    pub(crate) sender: Option<oneshot::Sender<Result<Output>>>,
+    pub(crate) sender: OptionOutputTx,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
 }
 
 impl CompactionFinished {
     pub fn on_success(self) {
-        if let Some(sender) = self.sender {
-            let _ = sender.send(Ok(AffectedRows(0)));
-        }
+        self.sender.send(Ok(AffectedRows(0)));
         info!("Successfully compacted region: {}", self.region_id);
     }
+}
 
+impl OnFailure for CompactionFinished {
     /// Compaction succeeded but failed to update manifest or region's already been dropped,
     /// clean compaction output files.
-    pub fn on_failure(self, _err: Error) {
+    fn on_failure(&mut self, err: Error) {
+        self.sender.send_mut(Err(err));
         for file in &self.compacted_files {
             let file_id = file.file_id;
             warn!(
@@ -805,7 +884,7 @@ mod tests {
 
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
-        check_invalid_request(&err, "column ts is not null");
+        check_invalid_request(&err, "column ts is not null but input has null");
     }
 
     #[test]

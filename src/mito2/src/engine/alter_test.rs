@@ -34,7 +34,7 @@ use crate::test_util::{
 
 async fn scan_check_after_alter(engine: &MitoEngine, region_id: RegionId, expected: &str) {
     let request = ScanRequest::default();
-    let scanner = engine.scan(region_id, request).unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
     assert_eq!(0, scanner.num_memtables());
     assert_eq!(1, scanner.num_files());
     let stream = scanner.scan().await.unwrap();
@@ -206,6 +206,8 @@ async fn test_put_after_alter() {
         )
         .await
         .unwrap();
+    // Set writable.
+    engine.set_writable(region_id, true).unwrap();
 
     // Put with old schema.
     let rows = Rows {

@@ -21,10 +21,10 @@ use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionNotFoundSnafu, RejectWriteSnafu, Result};
+use crate::error::{RejectWriteSnafu, Result};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
-use crate::worker::{send_result, RegionWorkerLoop};
+use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
     /// Takes and handles all write requests.
@@ -102,10 +102,11 @@ impl<S> RegionWorkerLoop<S> {
 
             // Checks whether the region exists and is it stalling.
             if let hash_map::Entry::Vacant(e) = region_ctxs.entry(region_id) {
-                let Some(region) = self.regions.get_region(region_id) else {
-                    // No such region.
-                    send_result(sender_req.sender, RegionNotFoundSnafu { region_id }.fail());
-
+                let Some(region) = self
+                    .regions
+                    .writable_region_or(region_id, &mut sender_req.sender)
+                else {
+                    // No such region or the region is read only.
                     continue;
                 };
 
@@ -121,7 +122,7 @@ impl<S> RegionWorkerLoop<S> {
             if let Err(e) =
                 maybe_fill_missing_columns(&mut sender_req.request, &region_ctx.version().metadata)
             {
-                send_result(sender_req.sender, Err(e));
+                sender_req.sender.send(Err(e));
 
                 continue;
             }
@@ -148,14 +149,12 @@ impl<S> RegionWorkerLoop<S> {
 /// Send rejected error to all `write_requests`.
 fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
     for req in write_requests {
-        if let Some(sender) = req.sender {
-            let _ = sender.send(
-                RejectWriteSnafu {
-                    region_id: req.request.region_id,
-                }
-                .fail(),
-            );
-        }
+        req.sender.send(
+            RejectWriteSnafu {
+                region_id: req.request.region_id,
+            }
+            .fail(),
+        );
     }
 }
 

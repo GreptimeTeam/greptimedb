@@ -6,6 +6,7 @@ SELECT * FROM test;
 
 ALTER TABLE test DROP COLUMN j;
 
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
 INSERT INTO test VALUES (3, NULL);
 
 INSERT INTO test VALUES (3, 13);
