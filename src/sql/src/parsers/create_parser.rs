@@ -108,7 +108,7 @@ impl<'a> ParserContext<'a> {
             name: table_name,
             columns,
             constraints,
-            options,
+            options: options.into(),
             if_not_exists,
             engine,
         }))
@@ -380,7 +380,7 @@ impl<'a> ParserContext<'a> {
             // The timestamp type may be an alias type, we have to retrieve the actual type.
             let data_type = get_real_timestamp_type(&column.data_type);
             ensure!(
-                matches!(column.data_type, DataType::Timestamp(_, _)),
+                matches!(data_type, DataType::Timestamp(_, _)),
                 InvalidColumnOptionSnafu {
                     name: column.name.to_string(),
                     msg: "time index column data type should be timestamp",
@@ -658,8 +658,9 @@ fn validate_time_index(create_table: &CreateTable) -> Result<()> {
             ),
         })?;
 
+    let time_index_data_type = get_real_timestamp_type(&time_index_column.data_type);
     ensure!(
-        matches!(time_index_column.data_type, DataType::Timestamp(_, _)),
+        matches!(time_index_data_type, DataType::Timestamp(_, _)),
         InvalidColumnOptionSnafu {
             name: time_index_column.name.to_string(),
             msg: "time index column data type should be timestamp",
