@@ -307,10 +307,11 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = DatanodeBuilder::new(dn_opts.clone(), plugins.clone())
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
+        let datanode =
+            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), plugins.clone())
+                .build()
+                .await
+                .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();
 
         let catalog_manager = FrontendCatalogManager::new(

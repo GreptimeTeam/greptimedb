@@ -93,6 +93,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to get info from meta server, source: {}", source))]
+    GetMetadata {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         location: Location,
@@ -264,6 +270,12 @@ pub enum Error {
         location: Location,
         source: common_runtime::error::Error,
     },
+
+    #[snafu(display("Expect KvBackend but not found, location: {}", location))]
+    MissingKvBackend { location: Location },
+
+    #[snafu(display("Expect MetaClient but not found, location: {}", location))]
+    MissingMetaClient { location: Location },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
@@ -586,7 +598,9 @@ impl ErrorExt for Error {
             | ExecuteLogicalPlan { source, .. } => source.status_code(),
 
             BuildRegionRequests { source, .. } => source.status_code(),
-            HandleHeartbeatResponse { source, .. } => source.status_code(),
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+                source.status_code()
+            }
 
             DecodeLogicalPlan { source, .. } => source.status_code(),
             RegisterSchema { source, .. } => source.status_code(),
@@ -628,7 +642,9 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. }
             | InvalidInsertRowLen { .. }
-            | ColumnDataType { .. } => StatusCode::InvalidArguments,
+            | ColumnDataType { .. }
+            | MissingKvBackend { .. }
+            | MissingMetaClient { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected

@@ -14,15 +14,18 @@
 
 //! Datanode implementation.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use catalog::local::MemoryCatalogManager;
+use catalog::remote::MetaKvBackend;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::key::table_info::TableInfoManager;
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
@@ -36,15 +39,17 @@ use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::path_utils::WAL_DIR;
+use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
+use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 use tokio::fs;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
-    RuntimeResourceSnafu, ShutdownInstanceSnafu,
+    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingMetaClientSnafu,
+    MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu,
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
@@ -115,12 +120,167 @@ impl Datanode {
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
     }
+}
 
-    // internal utils
+pub struct DatanodeBuilder {
+    opts: DatanodeOptions,
+    plugins: Arc<Plugins>,
+    meta_client: Option<MetaClient>,
+    kv_backend: Option<KvBackendRef>,
+}
+
+impl DatanodeBuilder {
+    /// `kv_backend` is optional. If absent, the builder will try to build one
+    /// by using the given `opts`
+    pub fn new(
+        opts: DatanodeOptions,
+        kv_backend: Option<KvBackendRef>,
+        plugins: Arc<Plugins>,
+    ) -> Self {
+        Self {
+            opts,
+            plugins,
+            meta_client: None,
+            kv_backend,
+        }
+    }
+
+    pub fn with_meta_client(self, meta_client: MetaClient) -> Self {
+        Self {
+            meta_client: Some(meta_client),
+            ..self
+        }
+    }
+
+    pub async fn build(mut self) -> Result<Datanode> {
+        let mode = &self.opts.mode;
+
+        // build meta client
+        let meta_client = match mode {
+            Mode::Distributed => {
+                let meta_client = if let Some(meta_client) = self.meta_client.take() {
+                    meta_client
+                } else {
+                    let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+
+                    let meta_config = self
+                        .opts
+                        .meta_client_options
+                        .as_ref()
+                        .context(MissingMetasrvOptsSnafu)?;
+
+                    new_metasrv_client(node_id, meta_config).await?
+                };
+                Some(meta_client)
+            }
+            Mode::Standalone => None,
+        };
+
+        // build kv-backend
+        let kv_backend = match mode {
+            Mode::Distributed => Arc::new(MetaKvBackend {
+                client: Arc::new(meta_client.clone().context(MissingMetaClientSnafu)?),
+            }),
+            Mode::Standalone => self.kv_backend.clone().context(MissingKvBackendSnafu)?,
+        };
+
+        // build and initialize region server
+        let log_store = Self::build_log_store(&self.opts).await?;
+        let region_server =
+            Self::new_region_server(&self.opts, self.plugins.clone(), log_store).await?;
+        self.initialize_region_server(&region_server, kv_backend, matches!(mode, Mode::Standalone))
+            .await?;
+
+        let heartbeat_task = match mode {
+            Mode::Distributed => {
+                let meta_client = meta_client.context(MissingMetaClientSnafu)?;
+
+                let heartbeat_task =
+                    HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?;
+                Some(heartbeat_task)
+            }
+            Mode::Standalone => None,
+        };
+
+        let services = match mode {
+            Mode::Distributed => Some(Services::try_new(region_server.clone(), &self.opts).await?),
+            Mode::Standalone => None,
+        };
+
+        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
+            Some(self.opts.storage.data_home.clone()),
+            mode,
+            self.opts.enable_telemetry,
+        )
+        .await;
+
+        Ok(Datanode {
+            opts: self.opts,
+            services,
+            heartbeat_task,
+            region_server,
+            greptimedb_telemetry_task,
+        })
+    }
+
+    /// Open all regions belong to this datanode.
+    async fn initialize_region_server(
+        &self,
+        region_server: &RegionServer,
+        kv_backend: KvBackendRef,
+        open_with_writable: bool,
+    ) -> Result<()> {
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        let mut regions = vec![];
+        let mut table_values = datanode_table_manager.tables(node_id);
+        while let Some(table_value) = table_values.next().await {
+            let table_value = table_value.context(GetMetadataSnafu)?;
+            for region_number in table_value.regions {
+                regions.push((
+                    RegionId::new(table_value.table_id, region_number),
+                    table_value.engine.clone(),
+                ));
+            }
+        }
+
+        info!("going to open {} regions", regions.len());
+
+        let table_info_manager = TableInfoManager::new(kv_backend);
+        for (region_id, engine) in regions {
+            let Some(table_info) = table_info_manager
+                .get(region_id.table_id())
+                .await
+                .context(GetMetadataSnafu)?
+            else {
+                continue;
+            };
+            let catalog = table_info.table_info.catalog_name;
+            let schema = table_info.table_info.schema_name;
+            region_server
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: engine.clone(),
+                        region_dir: region_dir(&catalog, &schema, region_id),
+                        options: HashMap::new(),
+                    }),
+                )
+                .await?;
+            if open_with_writable {
+                let _ = region_server.set_writable(&engine, region_id, true);
+            }
+        }
+
+        info!("region server is initialized");
+
+        Ok(())
+    }
 
     async fn new_region_server(
         opts: &DatanodeOptions,
         plugins: Arc<Plugins>,
+        log_store: Arc<RaftEngineLogStore>,
     ) -> Result<RegionServer> {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -140,7 +300,6 @@ impl Datanode {
         );
 
         let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
-        let log_store = Self::build_log_store(opts).await?;
         let object_store = store::new_object_store(opts).await?;
         let engines = Self::build_store_engines(opts, log_store, object_store).await?;
         for engine in engines {
@@ -191,96 +350,5 @@ impl Datanode {
             }
         }
         Ok(engines)
-    }
-}
-
-pub struct DatanodeBuilder {
-    opts: DatanodeOptions,
-    plugins: Arc<Plugins>,
-    meta_client: Option<MetaClient>,
-    kv_backend: KvBackendRef,
-}
-
-impl DatanodeBuilder {
-    pub fn new(opts: DatanodeOptions, kv_backend: KvBackendRef, plugins: Arc<Plugins>) -> Self {
-        Self {
-            opts,
-            plugins,
-            meta_client: None,
-            kv_backend,
-        }
-    }
-
-    pub fn with_meta_client(self, meta_client: MetaClient) -> Self {
-        Self {
-            meta_client: Some(meta_client),
-            ..self
-        }
-    }
-
-    pub async fn build(mut self) -> Result<Datanode> {
-        // build and initialize region server
-        let region_server = Datanode::new_region_server(&self.opts, self.plugins.clone()).await?;
-
-        let mode = &self.opts.mode;
-
-        let heartbeat_task = match mode {
-            Mode::Distributed => {
-                let meta_client = if let Some(meta_client) = self.meta_client.take() {
-                    meta_client
-                } else {
-                    let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-
-                    let meta_config = self
-                        .opts
-                        .meta_client_options
-                        .as_ref()
-                        .context(MissingMetasrvOptsSnafu)?;
-
-                    new_metasrv_client(node_id, meta_config).await?
-                };
-
-                let heartbeat_task =
-                    HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?;
-                Some(heartbeat_task)
-            }
-            Mode::Standalone => None,
-        };
-
-        let services = match mode {
-            Mode::Distributed => Some(Services::try_new(region_server.clone(), &self.opts).await?),
-            Mode::Standalone => None,
-        };
-
-        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
-            Some(self.opts.storage.data_home.clone()),
-            mode,
-            self.opts.enable_telemetry,
-        )
-        .await;
-
-        Ok(Datanode {
-            opts: self.opts,
-            services,
-            heartbeat_task,
-            region_server,
-            greptimedb_telemetry_task,
-        })
-    }
-
-    /// Open all regions belong to this datanode.
-    async fn initialize_region_server(&self, region_server: &RegionServer) -> Result<()> {
-        let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
-        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        let mut region_ids = vec![];
-        let table_values = datanode_table_manager.tables(node_id);
-        while let Some(table_value) = table_values.next().await {
-            let table_value = table_value?;
-            for region_number in table_value.regions {
-                region_ids.push(RegionId::new(table_value.table_id, region_number));
-            }
-        }
-
-        Ok(())
     }
 }
