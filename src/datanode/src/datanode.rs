@@ -22,9 +22,12 @@ use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::info;
+use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
 use mito2::engine::MitoEngine;
@@ -35,6 +38,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::RegionEngineRef;
+use store_api::storage::RegionId;
 use tokio::fs;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
@@ -60,38 +64,6 @@ pub struct Datanode {
 }
 
 impl Datanode {
-    async fn new_region_server(
-        opts: &DatanodeOptions,
-        plugins: Arc<Plugins>,
-    ) -> Result<RegionServer> {
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
-            None,
-            false,
-            plugins,
-        );
-        let query_engine = query_engine_factory.query_engine();
-
-        let runtime = Arc::new(
-            Runtime::builder()
-                .worker_threads(opts.rpc_runtime_size)
-                .thread_name("io-handlers")
-                .build()
-                .context(RuntimeResourceSnafu)?,
-        );
-
-        let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
-        let log_store = Self::build_log_store(opts).await?;
-        let object_store = store::new_object_store(opts).await?;
-        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
-        for engine in engines {
-            region_server.register_engine(engine);
-        }
-
-        Ok(region_server)
-    }
-
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
 
@@ -146,6 +118,38 @@ impl Datanode {
 
     // internal utils
 
+    async fn new_region_server(
+        opts: &DatanodeOptions,
+        plugins: Arc<Plugins>,
+    ) -> Result<RegionServer> {
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in datanode only executes plan with resolved table source.
+            MemoryCatalogManager::with_default_setup(),
+            None,
+            false,
+            plugins,
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        let runtime = Arc::new(
+            Runtime::builder()
+                .worker_threads(opts.rpc_runtime_size)
+                .thread_name("io-handlers")
+                .build()
+                .context(RuntimeResourceSnafu)?,
+        );
+
+        let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
+        let log_store = Self::build_log_store(opts).await?;
+        let object_store = store::new_object_store(opts).await?;
+        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
+        for engine in engines {
+            region_server.register_engine(engine);
+        }
+
+        Ok(region_server)
+    }
+
     /// Build [RaftEngineLogStore]
     async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
         let data_home = normalize_dir(&opts.storage.data_home);
@@ -194,14 +198,16 @@ pub struct DatanodeBuilder {
     opts: DatanodeOptions,
     plugins: Arc<Plugins>,
     meta_client: Option<MetaClient>,
+    kv_backend: KvBackendRef,
 }
 
 impl DatanodeBuilder {
-    pub fn new(opts: DatanodeOptions, plugins: Arc<Plugins>) -> Self {
+    pub fn new(opts: DatanodeOptions, kv_backend: KvBackendRef, plugins: Arc<Plugins>) -> Self {
         Self {
             opts,
             plugins,
             meta_client: None,
+            kv_backend,
         }
     }
 
@@ -213,6 +219,7 @@ impl DatanodeBuilder {
     }
 
     pub async fn build(mut self) -> Result<Datanode> {
+        // build and initialize region server
         let region_server = Datanode::new_region_server(&self.opts, self.plugins.clone()).await?;
 
         let mode = &self.opts.mode;
@@ -259,5 +266,21 @@ impl DatanodeBuilder {
             region_server,
             greptimedb_telemetry_task,
         })
+    }
+
+    /// Open all regions belong to this datanode.
+    async fn initialize_region_server(&self, region_server: &RegionServer) -> Result<()> {
+        let datanode_table_manager = DatanodeTableManager::new(self.kv_backend.clone());
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        let mut region_ids = vec![];
+        let table_values = datanode_table_manager.tables(node_id);
+        while let Some(table_value) = table_values.next().await {
+            let table_value = table_value?;
+            for region_number in table_value.regions {
+                region_ids.push(RegionId::new(table_value.table_id, region_number));
+            }
+        }
+
+        Ok(())
     }
 }

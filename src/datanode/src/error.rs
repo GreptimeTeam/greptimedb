@@ -365,7 +365,7 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing node id option in distributed mode"))]
+    #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId { location: Location },
 
     #[snafu(display("Missing node id option in distributed mode"))]
