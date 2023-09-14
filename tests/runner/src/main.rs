@@ -29,16 +29,16 @@ struct Args {
     #[clap(short, long)]
     case_dir: Option<PathBuf>,
 
-    ///Fail this run as soon as one case fails if true
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    fail_fast: u8,
+    /// Fail this run as soon as one case fails if true
+    #[arg(short, long, default_value = "false")]
+    fail_fast: bool,
 
-    ///Environment Configuration File
+    /// Environment Configuration File
     #[clap(short, long, default_value = "config.toml")]
     env_config_file: String,
 
-    ///Name of test case to be matched
-    #[clap(short, long, default_value = "")]
+    /// Name of test cases to run. Accept as a regexp.
+    #[clap(short, long, default_value = ".*")]
     test_filter: String,
 }
 
@@ -53,7 +53,7 @@ async fn main() {
 
     let config = ConfigBuilder::default()
         .case_dir(util::get_case_dir(args.case_dir))
-        .fail_fast(matches!(args.fail_fast, 0))
+        .fail_fast(args.fail_fast)
         .test_filter(args.test_filter)
         .follow_links(true)
         .env_config_file(args.env_config_file)
