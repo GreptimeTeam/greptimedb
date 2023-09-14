@@ -190,10 +190,9 @@ async fn test_engine_truncate_after_flush() {
     put_rows(&engine, region_id, rows).await;
 
     // Scan the region.
-    let stream = engine
-        .handle_query(region_id, request.clone())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, request).unwrap();
+    assert_eq!(0, scanner.num_files());
+    let stream = scanner.scan().await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     let expected = "\
 +-------+---------+---------------------+
@@ -204,11 +203,6 @@ async fn test_engine_truncate_after_flush() {
 | 7     | 7.0     | 1970-01-01T00:00:07 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let scanner = engine.scanner(region_id, request).unwrap();
-    assert_eq!(0, scanner.num_files());
 }
 
 #[tokio::test]
