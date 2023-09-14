@@ -33,7 +33,7 @@ mod open_test;
 #[cfg(test)]
 mod projection_test;
 #[cfg(test)]
-mod tests;
+mod basic_test;
 
 use std::sync::Arc;
 
