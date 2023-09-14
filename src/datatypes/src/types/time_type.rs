@@ -86,36 +86,44 @@ impl TimeType {
 }
 
 macro_rules! impl_data_type_for_time {
-    ($unit: ident,$arrow_type: ident, $type: ty) => {
+    ($unit: ident,$arrow_type: ident, $type: ty, $TargetType: ident) => {
         paste! {
             #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
             pub struct [<Time $unit Type>];
 
-            // impl DataType for [<Time $unit Type>] {
-            //     fn name(&self) -> &str {
-            //         stringify!([<Time $unit>])
-            //     }
+            impl DataType for [<Time $unit Type>] {
+                fn name(&self) -> &str {
+                    stringify!([<Time $unit>])
+                }
 
-            //     fn logical_type_id(&self) -> LogicalTypeId {
-            //         LogicalTypeId::[<Time $unit>]
-            //     }
+                fn logical_type_id(&self) -> LogicalTypeId {
+                    LogicalTypeId::[<Time $unit>]
+                }
 
-            //     fn default_value(&self) -> Value {
-            //         Value::Time(Time::new(0, TimeUnit::$unit))
-            //     }
+                fn default_value(&self) -> Value {
+                    Value::Time(Time::new(0, TimeUnit::$unit))
+                }
 
-            //     fn as_arrow_type(&self) -> ArrowDataType {
-            //         ArrowDataType::$arrow_type(ArrowTimeUnit::$unit)
-            //     }
+                fn as_arrow_type(&self) -> ArrowDataType {
+                    ArrowDataType::$arrow_type(ArrowTimeUnit::$unit)
+                }
 
-            //     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-            //         Box::new([<Time $unit Vector Builder>]::with_capacity(capacity))
-            //     }
+                fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+                    Box::new([<Time $unit Vector Builder>]::with_capacity(capacity))
+                }
 
-            //     fn is_timestamp_compatible(&self) -> bool {
-            //         false
-            //     }
-            // }
+                fn is_timestamp_compatible(&self) -> bool {
+                    false
+                }
+
+                fn cast(&self, from: Value) -> Option<Value> {
+                    match from {
+                        Value::$TargetType(v) => Some(Value::Time(Time::new(v as i64, TimeUnit::$unit))),
+                        Value::Time(v) => Some(Value::Time(v)),
+                        _ => None,
+                    }
+                }
+            }
 
             impl LogicalPrimitiveType for [<Time $unit Type>] {
                 type ArrowPrimitive = [<Arrow Time $unit Type>];
@@ -172,174 +180,10 @@ macro_rules! impl_data_type_for_time {
     }
 }
 
-impl_data_type_for_time!(Second, Time32, i32);
-impl_data_type_for_time!(Millisecond, Time32, i32);
-impl_data_type_for_time!(Nanosecond, Time64, i64);
-impl_data_type_for_time!(Microsecond, Time64, i64);
-
-impl DataType for TimeSecondType {
-    #[doc = " Name of this data type."]
-    fn name(&self) -> &str {
-        stringify!(TimeSecondType)
-    }
-
-    #[doc = " Returns id of the Logical data type."]
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::TimeSecond
-    }
-
-    #[doc = " Returns the default value of this type."]
-    fn default_value(&self) -> Value {
-        Value::Time(Time::new_second(0))
-    }
-
-    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Time32(ArrowTimeUnit::Second)
-    }
-
-    #[doc = " Creates a mutable vector with given `capacity` of this type."]
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(TimeSecondVectorBuilder::with_capacity(capacity))
-    }
-
-    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
-    #[doc = " use it as a timestamp."]
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
-    fn cast(&self, from: Value) -> Option<Value> {
-        match from {
-            Value::Int32(v) => Some(Value::Time(Time::new_second(v as i64))),
-            Value::Time(v) => Some(Value::Time(v)),
-            _ => None,
-        }
-    }
-}
-
-impl DataType for TimeMillisecondType {
-    #[doc = " Name of this data type."]
-    fn name(&self) -> &str {
-        stringify!(TimeMillisecondType)
-    }
-
-    #[doc = " Returns id of the Logical data type."]
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::TimeMillisecond
-    }
-
-    #[doc = " Returns the default value of this type."]
-    fn default_value(&self) -> Value {
-        Value::Time(Time::new_millisecond(0))
-    }
-
-    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Time32(ArrowTimeUnit::Millisecond)
-    }
-
-    #[doc = " Creates a mutable vector with given `capacity` of this type."]
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(TimeMillisecondVectorBuilder::with_capacity(capacity))
-    }
-
-    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
-    #[doc = " use it as a timestamp."]
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
-    fn cast(&self, from: Value) -> Option<Value> {
-        match from {
-            Value::Int32(v) => Some(Value::Time(Time::new_millisecond(v as i64))),
-            Value::Time(v) => Some(Value::Time(v)),
-            _ => None,
-        }
-    }
-}
-
-impl DataType for TimeMicrosecondType {
-    #[doc = " Name of this data type."]
-    fn name(&self) -> &str {
-        stringify!(TimeMicrosecondType)
-    }
-
-    #[doc = " Returns id of the Logical data type."]
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::TimeMicrosecond
-    }
-
-    #[doc = " Returns the default value of this type."]
-    fn default_value(&self) -> Value {
-        Value::Time(Time::new_microsecond(0))
-    }
-
-    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Time64(ArrowTimeUnit::Microsecond)
-    }
-
-    #[doc = " Creates a mutable vector with given `capacity` of this type."]
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(TimeMicrosecondVectorBuilder::with_capacity(capacity))
-    }
-
-    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
-    #[doc = " use it as a timestamp."]
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
-    fn cast(&self, from: Value) -> Option<Value> {
-        match from {
-            Value::Int64(v) => Some(Value::Time(Time::new_microsecond(v))),
-            Value::Time(v) => Some(Value::Time(v)),
-            _ => None,
-        }
-    }
-}
-
-impl DataType for TimeNanosecondType {
-    #[doc = " Name of this data type."]
-    fn name(&self) -> &str {
-        stringify!(TimeNanosecondType)
-    }
-
-    #[doc = " Returns id of the Logical data type."]
-    fn logical_type_id(&self) -> LogicalTypeId {
-        LogicalTypeId::TimeNanosecond
-    }
-
-    #[doc = " Returns the default value of this type."]
-    fn default_value(&self) -> Value {
-        Value::Time(Time::new_nanosecond(0))
-    }
-
-    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
-    fn as_arrow_type(&self) -> ArrowDataType {
-        ArrowDataType::Time64(ArrowTimeUnit::Nanosecond)
-    }
-
-    #[doc = " Creates a mutable vector with given `capacity` of this type."]
-    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(TimeNanosecondVectorBuilder::with_capacity(capacity))
-    }
-
-    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
-    #[doc = " use it as a timestamp."]
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
-    fn cast(&self, from: Value) -> Option<Value> {
-        match from {
-            Value::Int64(v) => Some(Value::Time(Time::new_nanosecond(v))),
-            Value::Time(v) => Some(Value::Time(v)),
-            _ => None,
-        }
-    }
-}
+impl_data_type_for_time!(Second, Time32, i32, Int32);
+impl_data_type_for_time!(Millisecond, Time32, i32, Int32);
+impl_data_type_for_time!(Nanosecond, Time64, i64, Int64);
+impl_data_type_for_time!(Microsecond, Time64, i64, Int64);
 
 #[cfg(test)]
 mod tests {
