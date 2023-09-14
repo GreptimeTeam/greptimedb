@@ -22,8 +22,6 @@ pub mod ddl_manager;
 pub mod error;
 pub mod heartbeat;
 // TODO(weny): Removes it
-#[allow(deprecated)]
-pub mod helper;
 pub mod ident;
 pub mod instruction;
 pub mod key;

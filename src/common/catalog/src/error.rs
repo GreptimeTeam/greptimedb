@@ -21,36 +21,17 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Invalid catalog info: {}", key))]
-    InvalidCatalog { key: String, location: Location },
-
     #[snafu(display("Invalid full table name: {}", table_name))]
     InvalidFullTableName {
         table_name: String,
         location: Location,
-    },
-
-    #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
-    DeserializeCatalogEntryValue {
-        raw: String,
-        location: Location,
-        source: serde_json::error::Error,
-    },
-
-    #[snafu(display("Failed to serialize catalog entry value"))]
-    SerializeCatalogEntryValue {
-        location: Location,
-        source: serde_json::error::Error,
     },
 }
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::InvalidCatalog { .. }
-            | Error::DeserializeCatalogEntryValue { .. }
-            | Error::SerializeCatalogEntryValue { .. }
-            | Error::InvalidFullTableName { .. } => StatusCode::Unexpected,
+            Error::InvalidFullTableName { .. } => StatusCode::Unexpected,
         }
     }
 
