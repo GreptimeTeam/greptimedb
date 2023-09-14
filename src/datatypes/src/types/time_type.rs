@@ -119,7 +119,7 @@ macro_rules! impl_data_type_for_time {
                 fn cast(&self, from: Value) -> Option<Value> {
                     match from {
                         Value::$TargetType(v) => Some(Value::Time(Time::new(v as i64, TimeUnit::$unit))),
-                        Value::Time(v) => Some(Value::Time(v)),
+                        Value::Time(v) => v.convert_to(TimeUnit::$unit).map(Value::Time),
                         _ => None,
                     }
                 }
@@ -263,5 +263,20 @@ mod tests {
         let val = Value::Int32(123);
         let time = ConcreteDataType::time_microsecond_datatype().cast(val);
         assert_eq!(time, None);
+
+        // TimeSecond -> TimeMicroSecond
+        let second = Value::Time(Time::new_second(2023));
+        let microsecond = ConcreteDataType::time_microsecond_datatype()
+            .cast(second)
+            .unwrap();
+        assert_eq!(
+            microsecond,
+            Value::Time(Time::new_microsecond(2023 * 1000000))
+        );
+
+        // test overflow
+        let second = Value::Time(Time::new_second(i64::MAX));
+        let microsecond = ConcreteDataType::time_microsecond_datatype().cast(second);
+        assert_eq!(microsecond, None);
     }
 }

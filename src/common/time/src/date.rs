@@ -82,6 +82,10 @@ impl Date {
     pub fn to_chrono_date(&self) -> Option<NaiveDate> {
         NaiveDate::from_num_days_from_ce_opt(UNIX_EPOCH_FROM_CE + self.0)
     }
+
+    pub fn to_secs(&self) -> i64 {
+        self.0 as i64 * 24 * 3600
+    }
 }
 
 #[cfg(test)]

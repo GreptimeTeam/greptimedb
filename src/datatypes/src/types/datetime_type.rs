@@ -58,10 +58,7 @@ impl DataType for DateTimeType {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
             Value::Timestamp(v) => v.to_chrono_datetime().map(|d| Value::DateTime(d.into())),
-            Value::String(v) => match DateTime::from_str(v.as_utf8()) {
-                Ok(d) => Some(Value::DateTime(d)),
-                Err(_) => None,
-            },
+            Value::String(v) => DateTime::from_str(v.as_utf8()).map(Value::DateTime).ok(),
             _ => None,
         }
     }

@@ -277,15 +277,11 @@ macro_rules! define_non_timestamp_primitive {
 
             fn cast(&self, from: Value) -> Option<Value> {
                 match from {
-                    Value::Boolean(v) => bool_to_numeric(v).map(|val|Value::$TypeId(val)),
-                    Value::String(v) => match v.as_utf8().parse::<$Native>(){
-                        Ok(val) => Some(Value::from(val)),
-                        Err(_)=> None,
-                    }
+                    Value::Boolean(v) => bool_to_numeric(v).map(Value::$TypeId),
+                    Value::String(v) => v.as_utf8().parse::<$Native>().map(|val| Value::from(val)).ok(),
                     $(
                         Value::$TargetType(v) => num::cast::cast(v).map(Value::$TypeId),
                     )*
-
                     _ => None,
                 }
             }
@@ -377,10 +373,7 @@ impl DataType for Int64Type {
             Value::Int64(v) => Some(Value::Int64(v)),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int64),
-            Value::String(v) => match v.as_utf8().parse::<i64>() {
-                Ok(val) => Some(Value::Int64(val)),
-                Err(_) => None,
-            },
+            Value::String(v) => v.as_utf8().parse::<i64>().map(Value::Int64).ok(),
             Value::DateTime(v) => Some(Value::Int64(v.val())),
             Value::Timestamp(v) => Some(Value::Int64(v.value())),
             Value::Time(v) => Some(Value::Int64(v.value())),
@@ -434,10 +427,7 @@ impl DataType for Int32Type {
             Value::Int32(v) => Some(Value::Int32(v)),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
-            Value::String(v) => match v.as_utf8().parse::<i32>() {
-                Ok(val) => Some(Value::Int32(val)),
-                Err(_) => None,
-            },
+            Value::String(v) => v.as_utf8().parse::<i32>().map(Value::Int32).ok(),
             Value::Date(v) => Some(Value::Int32(v.val())),
             Value::Interval(v) => match v.unit() {
                 IntervalUnit::YearMonth => Some(Value::Int32(v.to_i32())),

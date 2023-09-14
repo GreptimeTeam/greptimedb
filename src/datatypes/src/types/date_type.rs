@@ -59,10 +59,7 @@ impl DataType for DateType {
     fn cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Int32(v) => Some(Value::Date(Date::from(v))),
-            Value::String(v) => match Date::from_str(v.as_utf8()) {
-                Ok(d) => Some(Value::Date(d)),
-                Err(_) => None,
-            },
+            Value::String(v) => Date::from_str(v.as_utf8()).map(Value::Date).ok(),
             Value::Timestamp(v) => v.to_chrono_date().map(|date| Value::Date(date.into())),
             _ => None,
         }

@@ -135,20 +135,11 @@ macro_rules! impl_data_type_for_timestamp {
 
                 fn cast(&self, from: Value)-> Option<Value>{
                     match from {
-                        Value::Timestamp(v) => Some(Value::Timestamp(v)),
-                        Value::String(v) => match Timestamp::from_str(v.as_utf8()){
-                            Ok(ts) => Some(Value::Timestamp(ts)),
-                            Err(_) => None
-                        }
+                        Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),
+                        Value::String(v) => Timestamp::from_str(v.as_utf8()).map(Value::Timestamp).ok(),
                         Value::Int64(v) => Some(Value::Timestamp(Timestamp::new(v, TimeUnit::$unit))),
-                        Value::DateTime(v) => match v.to_chrono_datetime(){
-                            Some(dt) => Some(Value::Timestamp(Timestamp::from_chrono_datetime(dt)?)),
-                            None => None
-                        },
-                        Value::Date(v) => match v.to_chrono_date(){
-                            Some(d) => Some(Value::Timestamp(Timestamp::from_chrono_date(d)?)),
-                            None => None
-                        },
+                        Value::DateTime(v) => Timestamp::new_second(v.val()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
+                        Value::Date(v) => Timestamp::new_second(v.to_secs()).convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         _ => None
                     }
                 }
@@ -243,32 +234,46 @@ mod tests {
     #[test]
     fn test_timestamp_cast() {
         std::env::set_var("TZ", "Asia/Shanghai");
-        // string -> timestamp
+        // String -> TimestampSecond
         let s = Value::String("2021-01-01 01:02:03".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype()
             .cast(s)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1609434123)));
+        // String cast failed
+        let s = Value::String("12345".to_string().into());
+        let ts = ConcreteDataType::timestamp_second_datatype().cast(s);
+        assert_eq!(ts, None);
 
         let n = Value::Int64(1694589525);
-        // Int64 -> timestamp
+        // Int64 -> TimestampSecond
         let ts = ConcreteDataType::timestamp_second_datatype()
             .cast(n)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1694589525)));
 
-        // datetime -> timestamp
+        // Datetime -> TimestampSecond
         let dt = Value::DateTime(DateTime::from(1234567));
         let ts = ConcreteDataType::timestamp_second_datatype()
             .cast(dt)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
-        // date -> timestamp
+        // Date -> TimestampMillisecond
         let d = Value::Date(Date::from_str("1970-01-01").unwrap());
         let ts = ConcreteDataType::timestamp_millisecond_datatype()
             .cast(d)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_millisecond(0)));
+
+        // TimestampSecond -> TimestampMicrosecond
+        let second = Value::Timestamp(Timestamp::new_second(123));
+        let microsecond = ConcreteDataType::timestamp_microsecond_datatype()
+            .cast(second)
+            .unwrap();
+        assert_eq!(
+            microsecond,
+            Value::Timestamp(Timestamp::new_microsecond(123 * 1000000))
+        )
     }
 }
