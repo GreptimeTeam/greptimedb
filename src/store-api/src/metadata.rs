@@ -233,14 +233,6 @@ impl RegionMetadata {
         self.primary_key.iter().position(|id| *id == column_id)
     }
 
-    /// Returns a column's index in fields if it is a field column.
-    ///
-    /// This does a linear search.
-    pub fn field_index(&self, column_id: ColumnId) -> Option<usize> {
-        self.field_columns()
-            .position(|column| column.column_id == column_id)
-    }
-
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.

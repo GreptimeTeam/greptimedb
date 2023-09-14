@@ -198,6 +198,8 @@ impl TestEnv {
 }
 
 /// Builder to mock a [RegionCreateRequest].
+///
+/// It builds schema like `[tag_0, tag_1, ..., field_0, field_1, ..., ts]`.
 pub struct CreateRequestBuilder {
     region_dir: String,
     tag_num: usize,
@@ -232,7 +234,7 @@ impl CreateRequestBuilder {
     }
 
     pub fn field_num(mut self, value: usize) -> Self {
-        self.tag_num = value;
+        self.field_num = value;
         self
     }
 
