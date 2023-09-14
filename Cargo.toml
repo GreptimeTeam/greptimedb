@@ -162,7 +162,6 @@ storage = { path = "src/storage" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }
-table-procedure = { path = "src/table-procedure" }
 
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
