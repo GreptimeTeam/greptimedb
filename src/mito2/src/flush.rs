@@ -101,7 +101,8 @@ impl WriteBufferManagerImpl {
 
     /// Returns the size limit for mutable memtables.
     fn get_mutable_limit(global_write_buffer_size: usize) -> usize {
-        global_write_buffer_size * 7 / 8
+        // Reserves half of the write buffer for mutable memtable.
+        global_write_buffer_size / 2
     }
 }
 
@@ -591,17 +592,17 @@ mod tests {
 
     #[test]
     fn test_get_mutable_limit() {
-        assert_eq!(7, WriteBufferManagerImpl::get_mutable_limit(8));
-        assert_eq!(8, WriteBufferManagerImpl::get_mutable_limit(10));
-        assert_eq!(56, WriteBufferManagerImpl::get_mutable_limit(64));
+        assert_eq!(4, WriteBufferManagerImpl::get_mutable_limit(8));
+        assert_eq!(5, WriteBufferManagerImpl::get_mutable_limit(10));
+        assert_eq!(32, WriteBufferManagerImpl::get_mutable_limit(64));
         assert_eq!(0, WriteBufferManagerImpl::get_mutable_limit(0));
     }
 
     #[test]
     fn test_over_mutable_limit() {
-        // Mutable limit is 800.
+        // Mutable limit is 500.
         let manager = WriteBufferManagerImpl::new(1000);
-        manager.reserve_mem(500);
+        manager.reserve_mem(400);
         assert!(!manager.should_flush_engine());
         assert!(!manager.should_stall());
 
@@ -610,20 +611,20 @@ mod tests {
         assert!(manager.should_flush_engine());
 
         // Freezes mutable.
-        manager.schedule_free_mem(500);
+        manager.schedule_free_mem(400);
         assert!(!manager.should_flush_engine());
-        assert_eq!(900, manager.memory_used.load(Ordering::Relaxed));
+        assert_eq!(800, manager.memory_used.load(Ordering::Relaxed));
         assert_eq!(400, manager.memory_active.load(Ordering::Relaxed));
 
         // Releases immutable.
-        manager.free_mem(500);
+        manager.free_mem(400);
         assert_eq!(400, manager.memory_used.load(Ordering::Relaxed));
         assert_eq!(400, manager.memory_active.load(Ordering::Relaxed));
     }
 
     #[test]
     fn test_over_global() {
-        // Mutable limit is 800.
+        // Mutable limit is 500.
         let manager = WriteBufferManagerImpl::new(1000);
         manager.reserve_mem(1100);
         assert!(manager.should_stall());
