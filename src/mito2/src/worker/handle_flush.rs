@@ -26,73 +26,6 @@ use crate::region::MitoRegionRef;
 use crate::request::{FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
-impl<S: LogStore> RegionWorkerLoop<S> {
-    /// On region flush job finished.
-    pub(crate) async fn handle_flush_finished(
-        &mut self,
-        region_id: RegionId,
-        mut request: FlushFinished,
-    ) {
-        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
-            return;
-        };
-
-        // Write region edit to manifest.
-        let edit = RegionEdit {
-            files_to_add: std::mem::take(&mut request.file_metas),
-            files_to_remove: Vec::new(),
-            compaction_time_window: None,
-            flushed_entry_id: Some(request.flushed_entry_id),
-            flushed_sequence: Some(request.flushed_sequence),
-        };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        if let Err(e) = region.manifest_manager.update(action_list).await {
-            error!(e; "Failed to write manifest, region: {}", region_id);
-            request.on_failure(e);
-            return;
-        }
-
-        // Apply edit to region's version.
-        region.version_control.apply_edit(
-            edit,
-            &request.memtables_to_remove,
-            region.file_purger.clone(),
-        );
-        region.update_flush_millis();
-
-        // Delete wal.
-        info!(
-            "Region {} flush finished, tries to bump wal to {}",
-            region_id, request.flushed_entry_id
-        );
-        if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
-            error!(e; "Failed to write wal, region: {}", region_id);
-            request.on_failure(e);
-            return;
-        }
-
-        // Notifies waiters.
-        request.on_success();
-
-        // Handle pending requests for the region.
-        if let Some((ddl_requests, write_requests)) =
-            self.flush_scheduler.on_flush_success(region_id)
-        {
-            // Perform DDLs first because they require empty memtables.
-            self.handle_ddl_requests(ddl_requests).await;
-            // Handle pending write requests, we don't stall these requests.
-            self.handle_write_requests(write_requests, false).await;
-        }
-
-        // Handle stalled requests.
-        let stalled = std::mem::take(&mut self.stalled_requests);
-        // We already stalled these requests, don't stall them again.
-        self.handle_write_requests(stalled.requests, false).await;
-
-        self.listener.on_flush_success(region_id);
-    }
-}
-
 impl<S> RegionWorkerLoop<S> {
     /// Handles manual flush request.
     pub(crate) async fn handle_flush_request(
@@ -189,5 +122,72 @@ impl<S> RegionWorkerLoop<S> {
             memtable_builder: self.memtable_builder.clone(),
             file_purger: region.file_purger.clone(),
         }
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// On region flush job finished.
+    pub(crate) async fn handle_flush_finished(
+        &mut self,
+        region_id: RegionId,
+        mut request: FlushFinished,
+    ) {
+        let Some(region) = self.regions.writable_region_or(region_id, &mut request) else {
+            return;
+        };
+
+        // Write region edit to manifest.
+        let edit = RegionEdit {
+            files_to_add: std::mem::take(&mut request.file_metas),
+            files_to_remove: Vec::new(),
+            compaction_time_window: None,
+            flushed_entry_id: Some(request.flushed_entry_id),
+            flushed_sequence: Some(request.flushed_sequence),
+        };
+        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+        if let Err(e) = region.manifest_manager.update(action_list).await {
+            error!(e; "Failed to write manifest, region: {}", region_id);
+            request.on_failure(e);
+            return;
+        }
+
+        // Apply edit to region's version.
+        region.version_control.apply_edit(
+            edit,
+            &request.memtables_to_remove,
+            region.file_purger.clone(),
+        );
+        region.update_flush_millis();
+
+        // Delete wal.
+        info!(
+            "Region {} flush finished, tries to bump wal to {}",
+            region_id, request.flushed_entry_id
+        );
+        if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
+            error!(e; "Failed to write wal, region: {}", region_id);
+            request.on_failure(e);
+            return;
+        }
+
+        // Notifies waiters.
+        request.on_success();
+
+        // Handle pending requests for the region.
+        if let Some((ddl_requests, write_requests)) =
+            self.flush_scheduler.on_flush_success(region_id)
+        {
+            // Perform DDLs first because they require empty memtables.
+            self.handle_ddl_requests(ddl_requests).await;
+            // Handle pending write requests, we don't stall these requests.
+            self.handle_write_requests(write_requests, false).await;
+        }
+
+        // Handle stalled requests.
+        let stalled = std::mem::take(&mut self.stalled_requests);
+        // We already stalled these requests, don't stall them again.
+        self.handle_write_requests(stalled.requests, false).await;
+
+        self.listener.on_flush_success(region_id);
     }
 }

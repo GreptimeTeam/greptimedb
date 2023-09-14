@@ -17,6 +17,8 @@
 #[cfg(test)]
 mod alter_test;
 #[cfg(test)]
+mod basic_test;
+#[cfg(test)]
 mod close_test;
 #[cfg(test)]
 mod compaction_test;
@@ -32,8 +34,6 @@ pub(crate) mod listener;
 mod open_test;
 #[cfg(test)]
 mod projection_test;
-#[cfg(test)]
-mod tests;
 
 use std::sync::Arc;
 
