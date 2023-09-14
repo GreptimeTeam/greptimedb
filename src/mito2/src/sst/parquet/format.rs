@@ -213,7 +213,6 @@ impl ReadFormat {
         }
 
         // Split record batch according to pk offsets.
-        // TODO(yingwen): If the dictionary has only one key, we can build the batch directly.
         let keys = pk_dict_array.keys();
         let pk_values = pk_dict_array
             .values()
@@ -324,7 +323,6 @@ fn primary_key_offsets(pk_dict_array: &DictionaryArray<UInt16Type>) -> Result<Ve
 }
 
 /// Fields for internal columns.
-// TODO(yingwen): Optimize: Don't store primary key column if there is no primary key.
 fn internal_fields() -> [FieldRef; 3] {
     // Internal columns are always not null.
     [
