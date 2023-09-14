@@ -195,9 +195,10 @@ mod test {
             r"
 CREATE TABLE {table_name} (
     a INT,
-    b STRING PRIMARY KEY,
+    b STRING,
     ts TIMESTAMP,
-    TIME INDEX (ts)
+    TIME INDEX (ts),
+    PRIMARY KEY (a, b)
 ) PARTITION BY RANGE COLUMNS(a) (
     PARTITION r0 VALUES LESS THAN (10),
     PARTITION r1 VALUES LESS THAN (20),
