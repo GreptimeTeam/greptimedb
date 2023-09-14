@@ -89,6 +89,10 @@ macro_rules! impl_data_type_for_interval {
                 fn is_timestamp_compatible(&self) -> bool {
                     false
                 }
+
+                fn cast(&self, _: Value) -> Option<Value> {
+                    unimplemented!()
+                }
             }
 
             impl LogicalPrimitiveType for [<Interval $unit Type>] {

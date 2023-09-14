@@ -272,6 +272,10 @@ macro_rules! define_non_timestamp_primitive {
             fn is_timestamp_compatible(&self) -> bool {
                 false
             }
+
+            fn cast(&self, _: Value) -> Option<Value> {
+                unimplemented!()
+            }
         }
     };
 }
@@ -312,6 +316,10 @@ impl DataType for Int64Type {
 
     fn is_timestamp_compatible(&self) -> bool {
         true
+    }
+
+    fn cast(&self, _: Value) -> Option<Value> {
+        unimplemented!()
     }
 }
 

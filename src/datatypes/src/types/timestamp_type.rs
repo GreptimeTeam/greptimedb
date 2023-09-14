@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use arrow::datatypes::{
     DataType as ArrowDataType, TimeUnit as ArrowTimeUnit,
     TimestampMicrosecondType as ArrowTimestampMicrosecondType,
@@ -130,6 +132,26 @@ macro_rules! impl_data_type_for_timestamp {
                 fn is_timestamp_compatible(&self) -> bool {
                     true
                 }
+
+                fn cast(&self, from: Value)-> Option<Value>{
+                    match from {
+                        Value::Timestamp(v) => Some(Value::Timestamp(v)),
+                        Value::String(v) => match Timestamp::from_str(v.as_utf8()){
+                            Ok(ts) => Some(Value::Timestamp(ts)),
+                            Err(_) => None
+                        }
+                        Value::Int64(v) => Some(Value::Timestamp(Timestamp::new(v, TimeUnit::$unit))),
+                        Value::DateTime(v) => match v.to_chrono_datetime(){
+                            Some(dt) => Some(Value::Timestamp(Timestamp::from_chrono_datetime(dt)?)),
+                            None => None
+                        },
+                        Value::Date(v) => match v.to_chrono_date(){
+                            Some(d) => Some(Value::Timestamp(Timestamp::from_chrono_date(d)?)),
+                            None => None
+                        },
+                        _ => None
+                    }
+                }
             }
 
             impl LogicalPrimitiveType for [<Timestamp $unit Type>] {
@@ -194,6 +216,8 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
+    use common_time::{Date, DateTime};
+
     use super::*;
 
     #[test]
@@ -214,5 +238,36 @@ mod tests {
             TimeUnit::Nanosecond,
             TimestampType::Nanosecond(TimestampNanosecondType).unit()
         );
+    }
+
+    #[test]
+    fn test_timestamp_cast() {
+        // string -> timestamp
+        let s = Value::String("2021-01-01 01:02:03".to_string().into());
+        let ts = ConcreteDataType::timestamp_second_datatype()
+            .cast(s)
+            .unwrap();
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1609434123)));
+
+        let n = Value::Int64(1694589525);
+        // Int64 -> timestamp
+        let ts = ConcreteDataType::timestamp_second_datatype()
+            .cast(n)
+            .unwrap();
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1694589525)));
+
+        // datetime -> timestamp
+        let dt = Value::DateTime(DateTime::from(1234567));
+        let ts = ConcreteDataType::timestamp_millisecond_datatype()
+            .cast(dt)
+            .unwrap();
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_millisecond(1234567)));
+
+        // date -> timestamp
+        let d = Value::Date(Date::from_str("1970-01-01").unwrap());
+        let ts = ConcreteDataType::timestamp_millisecond_datatype()
+            .cast(d)
+            .unwrap();
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_millisecond(0)));
     }
 }

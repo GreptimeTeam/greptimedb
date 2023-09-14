@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use arrow::datatypes::{DataType as ArrowDataType, Date64Type};
 use common_time::DateTime;
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,17 @@ impl DataType for DateTimeType {
 
     fn is_timestamp_compatible(&self) -> bool {
         false
+    }
+
+    fn cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
+            Value::String(v) => match DateTime::from_str(v.as_utf8()) {
+                Ok(d) => Some(Value::DateTime(d)),
+                Err(_) => None,
+            },
+            _ => None,
+        }
     }
 }
 

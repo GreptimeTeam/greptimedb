@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::DataType as ArrowDataType;
+use num_traits::Num;
 use serde::{Deserialize, Serialize};
 
 use crate::data_type::{DataType, DataTypeRef};
@@ -55,5 +56,69 @@ impl DataType for BooleanType {
 
     fn is_timestamp_compatible(&self) -> bool {
         false
+    }
+
+    fn cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Boolean(v) => Some(Value::Boolean(v)),
+            Value::UInt8(v) => numeric_to_bool(v),
+            Value::UInt16(v) => numeric_to_bool(v),
+            Value::UInt32(v) => numeric_to_bool(v),
+            Value::UInt64(v) => numeric_to_bool(v),
+            Value::Int8(v) => numeric_to_bool(v),
+            Value::Int16(v) => numeric_to_bool(v),
+            Value::Int32(v) => numeric_to_bool(v),
+            Value::Int64(v) => numeric_to_bool(v),
+            _ => None,
+        }
+    }
+}
+
+fn numeric_to_bool<T>(num: T) -> Option<Value>
+where
+    T: Num + Default,
+{
+    if num != T::default() {
+        Some(Value::Boolean(true))
+    } else {
+        Some(Value::Boolean(false))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::data_type::ConcreteDataType;
+
+    macro_rules! test_bool_conversion {
+        ($value: expr, $expected: expr) => {
+            let val = $value;
+            let b = ConcreteDataType::boolean_datatype().cast(val).unwrap();
+            assert_eq!(b, Value::Boolean($expected));
+        };
+    }
+
+    #[test]
+    fn test_bool_cast() {
+        // false cases
+        test_bool_conversion!(Value::UInt8(0), false);
+        test_bool_conversion!(Value::UInt16(0), false);
+        test_bool_conversion!(Value::UInt32(0), false);
+        test_bool_conversion!(Value::UInt64(0), false);
+        test_bool_conversion!(Value::Int8(0), false);
+        test_bool_conversion!(Value::Int16(0), false);
+        test_bool_conversion!(Value::Int32(0), false);
+        test_bool_conversion!(Value::Int64(0), false);
+
+        // true cases
+        test_bool_conversion!(Value::UInt8(1), true);
+        test_bool_conversion!(Value::UInt16(1), true);
+        test_bool_conversion!(Value::UInt32(1), true);
+        test_bool_conversion!(Value::UInt64(1), true);
+        test_bool_conversion!(Value::Int8(1), true);
+        test_bool_conversion!(Value::Int16(1), true);
+        test_bool_conversion!(Value::Int32(1), true);
+        test_bool_conversion!(Value::Int64(1), true);
     }
 }

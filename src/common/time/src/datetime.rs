@@ -50,6 +50,12 @@ impl From<DateTime> for serde_json::Value {
     }
 }
 
+impl From<NaiveDateTime> for DateTime {
+    fn from(value: NaiveDateTime) -> Self {
+        DateTime::from(value.timestamp_millis())
+    }
+}
+
 impl FromStr for DateTime {
     type Err = Error;
 

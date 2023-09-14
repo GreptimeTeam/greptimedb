@@ -456,6 +456,8 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Returns true if the data type is compatible with timestamp type so we can
     /// use it as a timestamp.
     fn is_timestamp_compatible(&self) -> bool;
+
+    fn cast(&self, from: Value) -> Option<Value>;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;

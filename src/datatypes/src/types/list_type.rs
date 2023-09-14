@@ -79,6 +79,10 @@ impl DataType for ListType {
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
+
+    fn cast(&self, _: Value) -> Option<Value> {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
