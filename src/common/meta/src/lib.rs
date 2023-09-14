@@ -21,7 +21,6 @@ pub mod ddl;
 pub mod ddl_manager;
 pub mod error;
 pub mod heartbeat;
-// TODO(weny): Removes it
 pub mod ident;
 pub mod instruction;
 pub mod key;
