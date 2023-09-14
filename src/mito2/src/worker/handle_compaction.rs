@@ -33,7 +33,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        let request = self.new_compaction_request(&region, sender);
+        let mut request = self.new_compaction_request(&region);
+        // Push waiter to the request.
+        request.push_waiter(sender);
         if let Err(e) = self.compaction_scheduler.schedule_compaction(request) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
@@ -82,11 +84,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     }
 
     /// Creates a new compaction request.
-    fn new_compaction_request(
-        &self,
-        region: &MitoRegionRef,
-        waiter: OptionOutputTx,
-    ) -> CompactionRequest {
+    fn new_compaction_request(&self, region: &MitoRegionRef) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();
         let file_purger = region.file_purger.clone();
@@ -97,7 +95,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ttl: None,                    // TODO(hl): get TTL info from region metadata
             compaction_time_window: None, // TODO(hl): get persisted region compaction time window
             request_sender: self.sender.clone(),
-            waiter,
+            waiters: Vec::new(),
             file_purger,
         }
     }

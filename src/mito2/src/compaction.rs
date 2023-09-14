@@ -30,7 +30,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
 use crate::error::Result;
 use crate::region::version::VersionRef;
-use crate::request::{OptionOutputTx, WorkerRequest};
+use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file_purger::FilePurgerRef;
 
@@ -40,14 +40,23 @@ pub struct CompactionRequest {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
+    /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    pub(crate) waiter: OptionOutputTx,
+    /// Waiters of the compaction request.
+    pub(crate) waiters: Vec<OutputTx>,
     pub(crate) file_purger: FilePurgerRef,
 }
 
 impl CompactionRequest {
     pub(crate) fn region_id(&self) -> RegionId {
         self.current_version.metadata.region_id
+    }
+
+    /// Push waiter to the request.
+    pub(crate) fn push_waiter(&mut self, mut waiter: OptionOutputTx) {
+        if let Some(waiter) = waiter.take_inner() {
+            self.waiters.push(waiter);
+        }
     }
 }
 
@@ -62,6 +71,7 @@ pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> Compactio
     }
 }
 
+/// Compaction scheduler tracks and manages compaction tasks.
 pub(crate) struct CompactionScheduler {
     scheduler: SchedulerRef,
     // TODO(hl): maybe tracks region compaction status in CompactionScheduler
