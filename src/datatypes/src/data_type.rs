@@ -457,6 +457,8 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     /// use it as a timestamp.
     fn is_timestamp_compatible(&self) -> bool;
 
+    /// Casts the value to this DataType.
+    /// Return None if cast failed.
     fn cast(&self, from: Value) -> Option<Value>;
 }
 

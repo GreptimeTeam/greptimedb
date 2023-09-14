@@ -106,7 +106,7 @@ mod tests {
     use super::*;
     use crate::data_type::ConcreteDataType;
 
-    macro_rules! test_bool {
+    macro_rules! test_cast_to_bool {
         ($value: expr, $expected: expr) => {
             let val = $value;
             let b = ConcreteDataType::boolean_datatype().cast(val).unwrap();
@@ -114,32 +114,79 @@ mod tests {
         };
     }
 
-    #[test]
-    fn test_other_type_cast_to_bool() {
-        // false cases
-        test_bool!(Value::UInt8(0), false);
-        test_bool!(Value::UInt16(0), false);
-        test_bool!(Value::UInt32(0), false);
-        test_bool!(Value::UInt64(0), false);
-        test_bool!(Value::Int8(0), false);
-        test_bool!(Value::Int16(0), false);
-        test_bool!(Value::Int32(0), false);
-        test_bool!(Value::Int64(0), false);
-        test_bool!(Value::Float32(OrderedFloat(0.0)), false);
-        test_bool!(Value::Float64(OrderedFloat(0.0)), false);
-        // true cases
-        test_bool!(Value::UInt8(1), true);
-        test_bool!(Value::UInt16(1), true);
-        test_bool!(Value::UInt32(1), true);
-        test_bool!(Value::UInt64(1), true);
-        test_bool!(Value::Int8(1), true);
-        test_bool!(Value::Int16(1), true);
-        test_bool!(Value::Int32(1), true);
-        test_bool!(Value::Int64(1), true);
-        test_bool!(Value::Float32(OrderedFloat(1.0)), true);
-        test_bool!(Value::Float64(OrderedFloat(1.0)), true);
+    macro_rules! test_cast_from_bool {
+        ($value: expr, $datatype: expr, $expected: expr) => {
+            let val = Value::Boolean($value);
+            let b = $datatype.cast(val).unwrap();
+            assert_eq!(b, $expected);
+        };
     }
 
     #[test]
-    fn test_bool_cast_to_other_type() {}
+    fn test_other_type_cast_to_bool() {
+        // false cases
+        test_cast_to_bool!(Value::UInt8(0), false);
+        test_cast_to_bool!(Value::UInt16(0), false);
+        test_cast_to_bool!(Value::UInt32(0), false);
+        test_cast_to_bool!(Value::UInt64(0), false);
+        test_cast_to_bool!(Value::Int8(0), false);
+        test_cast_to_bool!(Value::Int16(0), false);
+        test_cast_to_bool!(Value::Int32(0), false);
+        test_cast_to_bool!(Value::Int64(0), false);
+        test_cast_to_bool!(Value::Float32(OrderedFloat(0.0)), false);
+        test_cast_to_bool!(Value::Float64(OrderedFloat(0.0)), false);
+        // true cases
+        test_cast_to_bool!(Value::UInt8(1), true);
+        test_cast_to_bool!(Value::UInt16(1), true);
+        test_cast_to_bool!(Value::UInt32(1), true);
+        test_cast_to_bool!(Value::UInt64(1), true);
+        test_cast_to_bool!(Value::Int8(1), true);
+        test_cast_to_bool!(Value::Int16(1), true);
+        test_cast_to_bool!(Value::Int32(1), true);
+        test_cast_to_bool!(Value::Int64(1), true);
+        test_cast_to_bool!(Value::Float32(OrderedFloat(1.0)), true);
+        test_cast_to_bool!(Value::Float64(OrderedFloat(1.0)), true);
+    }
+
+    #[test]
+    fn test_bool_cast_to_other_type() {
+        // false cases
+        test_cast_from_bool!(false, ConcreteDataType::uint8_datatype(), Value::UInt8(0));
+        test_cast_from_bool!(false, ConcreteDataType::uint16_datatype(), Value::UInt16(0));
+        test_cast_from_bool!(false, ConcreteDataType::uint32_datatype(), Value::UInt32(0));
+        test_cast_from_bool!(false, ConcreteDataType::uint64_datatype(), Value::UInt64(0));
+        test_cast_from_bool!(false, ConcreteDataType::int8_datatype(), Value::Int8(0));
+        test_cast_from_bool!(false, ConcreteDataType::int16_datatype(), Value::Int16(0));
+        test_cast_from_bool!(false, ConcreteDataType::int32_datatype(), Value::Int32(0));
+        test_cast_from_bool!(false, ConcreteDataType::int64_datatype(), Value::Int64(0));
+        test_cast_from_bool!(
+            false,
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(0.0))
+        );
+        test_cast_from_bool!(
+            false,
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(0.0))
+        );
+        // true cases
+        test_cast_from_bool!(true, ConcreteDataType::uint8_datatype(), Value::UInt8(1));
+        test_cast_from_bool!(true, ConcreteDataType::uint16_datatype(), Value::UInt16(1));
+        test_cast_from_bool!(true, ConcreteDataType::uint32_datatype(), Value::UInt32(1));
+        test_cast_from_bool!(true, ConcreteDataType::uint64_datatype(), Value::UInt64(1));
+        test_cast_from_bool!(true, ConcreteDataType::int8_datatype(), Value::Int8(1));
+        test_cast_from_bool!(true, ConcreteDataType::int16_datatype(), Value::Int16(1));
+        test_cast_from_bool!(true, ConcreteDataType::int32_datatype(), Value::Int32(1));
+        test_cast_from_bool!(true, ConcreteDataType::int64_datatype(), Value::Int64(1));
+        test_cast_from_bool!(
+            true,
+            ConcreteDataType::float32_datatype(),
+            Value::Float32(OrderedFloat(1.0))
+        );
+        test_cast_from_bool!(
+            true,
+            ConcreteDataType::float64_datatype(),
+            Value::Float64(OrderedFloat(1.0))
+        );
+    }
 }
