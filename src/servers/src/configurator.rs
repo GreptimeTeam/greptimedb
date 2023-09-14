@@ -14,10 +14,15 @@
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::Router as HttpRouter;
+use tonic::transport::server::Router as GrpcRouter;
 
 pub trait Configurator: Send + Sync {
-    fn config_http(&self, route: Router) -> Router {
+    fn config_http(&self, route: HttpRouter) -> HttpRouter {
+        route
+    }
+
+    fn config_grpc(&self, route: GrpcRouter) -> GrpcRouter {
         route
     }
 }

@@ -22,6 +22,7 @@ use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::PluginsRef;
 use etcd_client::Client;
+use servers::configurator::ConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -81,7 +82,10 @@ impl MetaSrvInstance {
 
         self.signal_sender = Some(tx);
 
-        let router = router(self.meta_srv.clone());
+        let mut router = router(self.meta_srv.clone());
+        if let Some(configurator) = self.meta_srv.plugins().get::<ConfiguratorRef>() {
+            router = configurator.config_grpc(router);
+        }
 
         let meta_srv = bootstrap_meta_srv_with_router(&self.opts.bind_addr, router, rx);
         let addr = self
