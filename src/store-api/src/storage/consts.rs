@@ -84,7 +84,7 @@ pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 /// Name for reserved column: primary_key
 pub const PRIMARY_KEY_COLUMN_NAME: &str = "__primary_key";
 
-/// Internal Column Name 
+/// Internal Column Name
 static INTERNAL_COLUMN_VEC: [&str; 3] = [
     SEQUENCE_COLUMN_NAME,
     OP_TYPE_COLUMN_NAME,
@@ -92,7 +92,7 @@ static INTERNAL_COLUMN_VEC: [&str; 3] = [
 ];
 
 pub fn is_internal_column(name: &str) -> bool {
-    INTERNAL_COLUMN_VEC.iter().any(|&column| name.contains(column))
+    INTERNAL_COLUMN_VEC.contains(&name)
 }
 
 // -----------------------------------------------------------------------------
@@ -114,5 +114,15 @@ mod tests {
         assert_eq!(0x80000000, ReservedColumnId::version());
         assert_eq!(0x80000001, ReservedColumnId::sequence());
         assert_eq!(0x80000002, ReservedColumnId::op_type());
+    }
+
+    #[test]
+    fn test_is_internal_column() {
+        assert!(is_internal_column(SEQUENCE_COLUMN_NAME));
+        assert!(is_internal_column(OP_TYPE_COLUMN_NAME));
+        assert!(is_internal_column(PRIMARY_KEY_COLUMN_NAME));
+
+        let vaild_name: String = "GreptimeDB".to_string() + SEQUENCE_COLUMN_NAME;
+        assert!(!is_internal_column(&vaild_name));
     }
 }
