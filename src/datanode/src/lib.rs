@@ -18,6 +18,7 @@
 use query::query_engine::SqlStatementExecutor;
 
 pub mod alive_keeper;
+pub mod config;
 pub mod datanode;
 pub mod error;
 mod greptimedb_telemetry;

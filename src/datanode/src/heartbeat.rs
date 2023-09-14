@@ -33,7 +33,7 @@ use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
-use crate::datanode::DatanodeOptions;
+use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::region_server::RegionServer;
 

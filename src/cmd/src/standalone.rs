@@ -23,8 +23,8 @@ use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::datanode::builder::DatanodeBuilder;
-use datanode::datanode::{Datanode, DatanodeOptions, ProcedureConfig, StorageConfig};
+use datanode::config::{DatanodeOptions, ProcedureConfig, StorageConfig};
+use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use frontend::catalog::FrontendCatalogManager;
 use frontend::frontend::FrontendOptions;
@@ -469,7 +469,7 @@ mod tests {
         assert!(fe_opts.influxdb_options.enable);
 
         match &dn_opts.storage.store {
-            datanode::datanode::ObjectStoreConfig::S3(s3_config) => {
+            datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
                     format!("{:?}", s3_config.access_key_id)

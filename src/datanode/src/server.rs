@@ -22,7 +22,7 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
 
-use crate::datanode::DatanodeOptions;
+use crate::config::DatanodeOptions;
 use crate::error::{
     ParseAddrSnafu, Result, ShutdownServerSnafu, StartServerSnafu, WaitForGrpcServingSnafu,
 };
