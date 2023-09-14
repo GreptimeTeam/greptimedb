@@ -34,6 +34,7 @@ use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
 use crate::region_request::{AddColumn, AddColumnLocation, AlterKind};
 use crate::storage::{ColumnId, RegionId};
+use crate::storage::consts::is_internal_column;
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
@@ -367,6 +368,16 @@ impl RegionMetadata {
                 }
             );
         }
+
+        ensure!(
+            !is_internal_column(&column_metadata.column_schema.name),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "{} is internal column name that can not be used",
+                    column_metadata.column_schema.name
+                ),
+            }
+        );
 
         Ok(())
     }

@@ -84,6 +84,17 @@ pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 /// Name for reserved column: primary_key
 pub const PRIMARY_KEY_COLUMN_NAME: &str = "__primary_key";
 
+/// Internal Column Name 
+static INTERNAL_COLUMN_VEC: [&str; 3] = [
+    SEQUENCE_COLUMN_NAME,
+    OP_TYPE_COLUMN_NAME,
+    PRIMARY_KEY_COLUMN_NAME,
+];
+
+pub fn is_internal_column(name: &str) -> bool {
+    INTERNAL_COLUMN_VEC.iter().any(|&column| name.contains(column))
+}
+
 // -----------------------------------------------------------------------------
 
 // ---------- Default options --------------------------------------------------
