@@ -386,6 +386,7 @@ impl MigrateTableMetadata {
 
     async fn create_datanode_table_keys(&self, value: &TableGlobalValue) {
         let table_id = value.table_id();
+        let engine = value.table_info.meta.engine.as_str();
         let region_distribution: RegionDistribution =
             value.regions_id_map.clone().into_iter().collect();
 
@@ -394,7 +395,10 @@ impl MigrateTableMetadata {
             .map(|(datanode_id, regions)| {
                 let k = DatanodeTableKey::new(datanode_id, table_id);
                 info!("Creating DatanodeTableKey '{k}' => {regions:?}");
-                (k, DatanodeTableValue::new(table_id, regions))
+                (
+                    k,
+                    DatanodeTableValue::new(table_id, regions, engine.to_string()),
+                )
             })
             .collect::<Vec<_>>();
 
