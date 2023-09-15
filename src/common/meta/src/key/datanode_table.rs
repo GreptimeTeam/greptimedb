@@ -86,6 +86,7 @@ pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
     pub engine: String,
+    #[serde(default)]
     pub region_storage_path: String,
     version: u64,
 }
