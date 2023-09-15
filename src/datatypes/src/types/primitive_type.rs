@@ -300,7 +300,9 @@ define_non_timestamp_primitive!(
     u64, UInt64, UInt64Type, UInt64Type, UInt8, UInt16, UInt32, UInt64, Float32, Float64
 );
 define_non_timestamp_primitive!(i8, Int8, Int8Type, Int64Type, Int8, Float32, Float64);
-define_non_timestamp_primitive!(i16, Int16, Int16Type, Int64Type, Int8, Int16, Float32, Float64);
+define_non_timestamp_primitive!(
+    i16, Int16, Int16Type, Int64Type, Int8, Int16, UInt8, Float32, Float64
+);
 
 define_non_timestamp_primitive!(
     f32,
@@ -308,26 +310,22 @@ define_non_timestamp_primitive!(
     Float32Type,
     Float64Type,
     Float32,
-    Float64,
     UInt8,
     UInt16,
-    UInt32,
-    UInt64,
     Int8,
     Int16,
-    Int32,
-    Int64
+    Int32
 );
 define_non_timestamp_primitive!(
     f64,
     Float64,
     Float64Type,
     Float64Type,
+    Float32,
     Float64,
     UInt8,
     UInt16,
     UInt32,
-    UInt64,
     Int8,
     Int16,
     Int32,
@@ -371,6 +369,9 @@ impl DataType for Int64Type {
             Value::Int16(v) => num::cast::cast(v).map(Value::Int64),
             Value::Int32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Int64(v) => Some(Value::Int64(v)),
+            Value::UInt8(v) => num::cast::cast(v).map(Value::Int64),
+            Value::UInt16(v) => num::cast::cast(v).map(Value::Int64),
+            Value::UInt32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int64),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int64),
             Value::String(v) => v.as_utf8().parse::<i64>().map(Value::Int64).ok(),
@@ -425,6 +426,8 @@ impl DataType for Int32Type {
             Value::Int8(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int16(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int32(v) => Some(Value::Int32(v)),
+            Value::UInt8(v) => num::cast::cast(v).map(Value::Int32),
+            Value::UInt16(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
             Value::String(v) => v.as_utf8().parse::<i32>().map(Value::Int32).ok(),
@@ -578,16 +581,6 @@ mod tests {
             Value::Float32(OrderedFloat(12.0))
         );
         assert_primitive_cast!(
-            Value::UInt32(12),
-            ConcreteDataType::float32_datatype(),
-            Value::Float32(OrderedFloat(12.0))
-        );
-        assert_primitive_cast!(
-            Value::UInt64(12),
-            ConcreteDataType::float32_datatype(),
-            Value::Float32(OrderedFloat(12.0))
-        );
-        assert_primitive_cast!(
             Value::Int8(12),
             ConcreteDataType::float32_datatype(),
             Value::Float32(OrderedFloat(12.0))
@@ -599,11 +592,6 @@ mod tests {
         );
         assert_primitive_cast!(
             Value::Int32(12),
-            ConcreteDataType::float32_datatype(),
-            Value::Float32(OrderedFloat(12.0))
-        );
-        assert_primitive_cast!(
-            Value::Int64(12),
             ConcreteDataType::float32_datatype(),
             Value::Float32(OrderedFloat(12.0))
         );
@@ -621,11 +609,6 @@ mod tests {
         );
         assert_primitive_cast!(
             Value::UInt32(12),
-            ConcreteDataType::float64_datatype(),
-            Value::Float64(OrderedFloat(12.0))
-        );
-        assert_primitive_cast!(
-            Value::UInt64(12),
             ConcreteDataType::float64_datatype(),
             Value::Float64(OrderedFloat(12.0))
         );

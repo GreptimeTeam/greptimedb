@@ -58,7 +58,10 @@ impl DataType for BinaryType {
         false
     }
 
-    fn cast(&self, _: Value) -> Option<Value> {
-        unimplemented!()
+    fn cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Binary(v) => Some(Value::Binary(v)),
+            _ => None,
+        }
     }
 }

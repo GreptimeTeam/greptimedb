@@ -71,6 +71,7 @@ impl DataType for BooleanType {
             Value::Int64(v) => numeric_to_bool(v),
             Value::Float32(v) => numeric_to_bool(v),
             Value::Float64(v) => numeric_to_bool(v),
+            Value::String(v) => v.as_utf8().parse::<bool>().ok().map(Value::Boolean),
             _ => None,
         }
     }
