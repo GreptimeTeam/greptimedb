@@ -59,10 +59,13 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
+/// Last data truncated in the region.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionTruncate {
     pub region_id: RegionId,
+    /// Last WAL entry id of truncated data.
     pub truncated_entry_id: EntryId,
+    // Last sequence number of truncated data.
     pub truncated_sequence: SequenceNumber,
 }
 
