@@ -32,15 +32,21 @@ pub fn region_name(table_id: TableId, region_number: RegionNumber) -> String {
     format!("{table_id}_{region_number:010}")
 }
 
-#[inline]
-pub fn table_dir(catalog_name: &str, schema_name: &str, table_id: TableId) -> String {
-    format!("{DATA_DIR}{catalog_name}/{schema_name}/{table_id}/")
+// TODO(jeremy): There are still some dependencies on it. Someone will be here soon to remove it.
+pub fn table_dir_with_catalog_and_schema(catalog: &str, schema: &str, table_id: TableId) -> String {
+    let path = format!("{}/{}", catalog, schema);
+    table_dir(&path, table_id)
 }
 
-pub fn region_dir(catalog_name: &str, schema_name: &str, region_id: RegionId) -> String {
+#[inline]
+pub fn table_dir(path: &str, table_id: TableId) -> String {
+    format!("{DATA_DIR}{path}/{table_id}/")
+}
+
+pub fn region_dir(path: &str, region_id: RegionId) -> String {
     format!(
         "{}{}",
-        table_dir(catalog_name, schema_name, region_id.table_id()),
+        table_dir(path, region_id.table_id()),
         region_name(region_id.table_id(), region_id.region_number())
     )
 }
@@ -53,7 +59,7 @@ mod tests {
     fn test_region_dir() {
         let region_id = RegionId::new(42, 1);
         assert_eq!(
-            region_dir("my_catalog", "my_schema", region_id),
+            region_dir("my_catalog/my_schema", region_id),
             "data/my_catalog/my_schema/42/42_0000000001"
         );
     }

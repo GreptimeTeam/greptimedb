@@ -70,7 +70,6 @@ impl HeartbeatHandler for RegionLeaseHandler {
 mod test {
     use std::sync::Arc;
 
-    use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
     use common_meta::RegionIdent;
     use store_api::storage::{RegionId, RegionNumber};
@@ -131,11 +130,9 @@ mod test {
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,
-                table_ident: TableIdent {
-                    table_id: 1,
-                    ..Default::default()
-                },
+                table_id: 1,
                 region_number: 1,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();
@@ -143,11 +140,9 @@ mod test {
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,
-                table_ident: TableIdent {
-                    table_id: 1,
-                    ..Default::default()
-                },
+                table_id: 1,
                 region_number: 3,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();

@@ -14,16 +14,15 @@
 
 use std::sync::Arc;
 
-use catalog::remote::DummyKvCacheInvalidator;
+use catalog::kvbackend::{DummyKvCacheInvalidator, KvBackendCatalogManager};
 use common_base::Plugins;
 use common_config::KvStoreConfig;
 use common_procedure::options::ProcedureConfig;
 use datanode::datanode::builder::DatanodeBuilder;
 use datanode::datanode::DatanodeOptions;
-use frontend::catalog::FrontendCatalogManager;
-use frontend::instance::{Instance, StandaloneDatanodeManager};
+use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
-use crate::test_util::{create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
+use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
@@ -81,7 +80,7 @@ impl GreptimeDbStandaloneBuilder {
             .await
             .unwrap();
 
-        let catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManager::new(
             kv_store.clone(),
             Arc::new(DummyKvCacheInvalidator),
             Arc::new(StandaloneDatanodeManager(datanode.region_server())),
@@ -102,6 +101,10 @@ impl GreptimeDbStandaloneBuilder {
         )
         .await
         .unwrap();
+
+        test_util::prepare_another_catalog_and_schema(&instance).await;
+
+        instance.start().await.unwrap();
 
         GreptimeDbStandalone {
             instance: Arc::new(instance),

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
-use api::v1::InsertRequests;
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use axum::{http, Router};
@@ -54,7 +54,7 @@ impl GrpcQueryHandler for DummyInstance {
 #[async_trait]
 impl InfluxdbLineProtocolHandler for DummyInstance {
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<()> {
-        let requests: InsertRequests = request.try_into()?;
+        let requests: RowInsertRequests = request.try_into()?;
         for expr in requests.inserts {
             let _ = self
                 .tx

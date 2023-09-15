@@ -29,6 +29,7 @@ use storage::config::EngineConfig as StorageEngineConfig;
 use storage::region::RegionImpl;
 use storage::EngineImpl;
 use store_api::manifest::Manifest;
+use store_api::path_utils::table_dir_with_catalog_and_schema;
 use store_api::storage::{ReadContext, ScanRequest};
 use table::metadata::TableType;
 use table::requests::{
@@ -176,11 +177,11 @@ fn test_region_name() {
 fn test_table_dir() {
     assert_eq!(
         "data/greptime/public/1024/",
-        table_dir("greptime", "public", 1024)
+        table_dir_with_catalog_and_schema("greptime", "public", 1024)
     );
     assert_eq!(
         "data/0x4354a1/prometheus/1024/",
-        table_dir("0x4354a1", "prometheus", 1024)
+        table_dir_with_catalog_and_schema("0x4354a1", "prometheus", 1024)
     );
 }
 
@@ -880,7 +881,11 @@ async fn test_flush_table_all_regions() {
     let region_name = region_name(table_id, 0);
 
     let table_info = table.table_info();
-    let table_dir = table_dir(&table_info.catalog_name, &table_info.schema_name, table_id);
+    let table_dir = table_dir_with_catalog_and_schema(
+        &table_info.catalog_name,
+        &table_info.schema_name,
+        table_id,
+    );
 
     let region_dir = format!(
         "{}/{}/{}",
@@ -914,7 +919,11 @@ async fn test_flush_table_with_region_id() {
     let region_name = region_name(table_id, 0);
 
     let table_info = table.table_info();
-    let table_dir = table_dir(&table_info.catalog_name, &table_info.schema_name, table_id);
+    let table_dir = table_dir_with_catalog_and_schema(
+        &table_info.catalog_name,
+        &table_info.schema_name,
+        table_id,
+    );
 
     let region_dir = format!(
         "{}/{}/{}",

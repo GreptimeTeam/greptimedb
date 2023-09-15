@@ -105,7 +105,6 @@ async fn write_data(
         let (columns, row_count) = convert_record_batch(record_batch);
         let request = InsertRequest {
             table_name: TABLE_NAME.to_string(),
-            region_number: 0,
             columns,
             row_count,
         };
@@ -189,7 +188,7 @@ fn build_values(column: &ArrayRef) -> (Values, ColumnDataType) {
             let values = array.values();
             (
                 Values {
-                    ts_microsecond_values: values.to_vec(),
+                    timestamp_microsecond_values: values.to_vec(),
                     ..Default::default()
                 },
                 ColumnDataType::TimestampMicrosecond,
@@ -389,7 +388,6 @@ fn create_table_expr() -> CreateTableExpr {
         primary_keys: vec!["VendorID".to_string()],
         create_if_not_exists: false,
         table_options: Default::default(),
-        region_numbers: vec![0],
         table_id: None,
         engine: "mito".to_string(),
     }

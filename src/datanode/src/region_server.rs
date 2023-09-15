@@ -130,7 +130,7 @@ impl RegionServerHandler for RegionServer {
         for result in results {
             match result
                 .map_err(BoxedError::new)
-                .context(servers_error::ExecuteGrpcRequestSnafu)?
+                .context(ExecuteGrpcRequestSnafu)?
             {
                 Output::AffectedRows(rows) => affected_rows += rows,
                 Output::Stream(_) | Output::RecordBatches(_) => {
@@ -242,7 +242,9 @@ impl RegionServerInner {
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
-                self.region_map.remove(&region_id);
+                self.region_map
+                    .remove(&region_id)
+                    .map(|(id, engine)| engine.set_writable(id, false));
             }
         }
 
@@ -252,7 +254,11 @@ impl RegionServerInner {
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
-        let QueryRequest { region_id, plan } = request;
+        let QueryRequest {
+            header: _,
+            region_id,
+            plan,
+        } = request;
         let region_id = RegionId::from_u64(region_id);
 
         // build dummy catalog list
@@ -417,7 +423,7 @@ impl SchemaProvider for DummySchemaProvider {
     }
 }
 
-/// For [TableProvider](datafusion::datasource::TableProvider) and [DummyCatalogList]
+/// For [TableProvider](TableProvider) and [DummyCatalogList]
 #[derive(Clone)]
 struct DummyTableProvider {
     region_id: RegionId,

@@ -161,9 +161,7 @@ impl Display for Partitions {
         if !self.column_list.is_empty() {
             write!(
                 f,
-                r#"PARTITION BY RANGE COLUMNS ({}) (
-                    {}
-                )"#,
+                "PARTITION BY RANGE COLUMNS ({}) (\n{}\n)",
                 format_list_comma!(self.column_list),
                 format_list_indent!(self.entries),
             )
@@ -261,10 +259,10 @@ CREATE TABLE IF NOT EXISTS demo (
   PRIMARY KEY (ts, host)
 )
 PARTITION BY RANGE COLUMNS (ts) (
-                      PARTITION r0 VALUES LESS THAN (5),
+  PARTITION r0 VALUES LESS THAN (5),
   PARTITION r1 VALUES LESS THAN (9),
   PARTITION r2 VALUES LESS THAN (MAXVALUE)
-                )
+)
 ENGINE=mito
 WITH(
   regions = 1,

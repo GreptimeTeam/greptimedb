@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod distributed;
+mod distributed;
 mod grpc;
 mod influxdb;
 mod opentsdb;
@@ -27,7 +27,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::remote::CachedMetaKvBackend;
+use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
@@ -80,7 +80,6 @@ pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
 use self::standalone::StandaloneTableMetadataCreator;
-use crate::catalog::FrontendCatalogManager;
 use crate::delete::{Deleter, DeleterRef};
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
@@ -151,7 +150,7 @@ impl Instance {
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        let catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             datanode_clients.clone(),

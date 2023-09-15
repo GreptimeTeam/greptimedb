@@ -158,8 +158,8 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql { err_msg: String, location: Location },
 
-    #[snafu(display("Incomplete GRPC result: {}", err_msg))]
-    IncompleteGrpcResult { err_msg: String, location: Location },
+    #[snafu(display("Incomplete GRPC request: {}", err_msg))]
+    IncompleteGrpcRequest { err_msg: String, location: Location },
 
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
@@ -730,7 +730,8 @@ impl ErrorExt for Error {
             | Error::UnsupportedFormat { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaIncompatible { .. }
+            | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -787,8 +788,7 @@ impl ErrorExt for Error {
             | Error::MissingInsertBody { .. }
             | Error::InvalidRegionRequest { .. } => StatusCode::Internal,
 
-            Error::IncompleteGrpcResult { .. }
-            | Error::ContextValueNotFound { .. }
+            Error::ContextValueNotFound { .. }
             | Error::InvalidSystemTableDef { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 

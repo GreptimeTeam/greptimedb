@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::ddl_request::Expr as DdlExpr;
+use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
@@ -27,9 +27,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{
-    self, Error, IncompleteGrpcResultSnafu, NotSupportedSnafu, PermissionSnafu, Result,
-};
+use crate::error::{Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result};
 use crate::instance::Instance;
 
 #[async_trait]
@@ -53,7 +51,7 @@ impl GrpcQueryHandler for Instance {
             Request::Deletes(requests) => self.handle_deletes(requests, ctx.clone()).await?,
             Request::RowDeletes(requests) => self.handle_row_deletes(requests, ctx.clone()).await?,
             Request::Query(query_request) => {
-                let query = query_request.query.context(IncompleteGrpcResultSnafu {
+                let query = query_request.query.context(IncompleteGrpcRequestSnafu {
                     err_msg: "Missing field 'QueryRequest.query'",
                 })?;
                 match query {
@@ -93,9 +91,11 @@ impl GrpcQueryHandler for Instance {
                 }
             }
             Request::Ddl(request) => {
-                let expr = request.expr.context(error::UnexpectedSnafu {
-                    violated: "expected expr",
+                let mut expr = request.expr.context(IncompleteGrpcRequestSnafu {
+                    err_msg: "'expr' is absent in DDL request",
                 })?;
+
+                fill_catalog_and_schema_from_context(&mut expr, &ctx);
 
                 match expr {
                     DdlExpr::CreateTable(mut expr) => {
@@ -132,6 +132,38 @@ impl GrpcQueryHandler for Instance {
 
         let output = interceptor.post_execute(output, ctx)?;
         Ok(output)
+    }
+}
+
+fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryContextRef) {
+    let catalog = ctx.current_catalog();
+    let schema = ctx.current_schema();
+
+    macro_rules! check_and_fill {
+        ($expr:ident) => {
+            if $expr.catalog_name.is_empty() {
+                $expr.catalog_name = catalog.to_string();
+            }
+            if $expr.schema_name.is_empty() {
+                $expr.schema_name = schema.to_string();
+            }
+        };
+    }
+
+    match ddl_expr {
+        Expr::CreateDatabase(_) => { /* do nothing*/ }
+        Expr::CreateTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::Alter(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::DropTable(expr) => {
+            check_and_fill!(expr);
+        }
+        Expr::TruncateTable(expr) => {
+            check_and_fill!(expr);
+        }
     }
 }
 

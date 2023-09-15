@@ -42,7 +42,6 @@ use crate::ddl::DdlContext;
 use crate::error::{
     self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result, TableRouteNotFoundSnafu,
 };
-use crate::ident::TableIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -54,8 +53,8 @@ use crate::table_name::TableName;
 pub struct AlterTableProcedure {
     context: DdlContext,
     data: AlterTableData,
-    /// proto alter Kind.
-    kind: alter_request::Kind,
+    /// proto alter Kind for adding/dropping columns.
+    kind: Option<alter_request::Kind>,
 }
 
 impl AlterTableProcedure {
@@ -171,7 +170,7 @@ impl AlterTableProcedure {
         Ok(AlterRequest {
             region_id: region_id.as_u64(),
             schema_version: table_info.ident.version,
-            kind: Some(self.kind.clone()),
+            kind: self.kind.clone(),
         })
     }
 
@@ -308,34 +307,25 @@ impl AlterTableProcedure {
 
     /// Broadcasts the invalidating table cache instructions.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let table_ref = self.data.table_ref();
-
-        let table_ident = TableIdent {
-            catalog: table_ref.catalog.to_string(),
-            schema: table_ref.schema.to_string(),
-            table: table_ref.table.to_string(),
-            table_id: self.data.table_id(),
-            engine: self.data.table_info().meta.engine.to_string(),
-        };
-
-        self.context
-            .cache_invalidator
-            .invalidate_table(
-                &Context {
-                    subject: Some("Invalidate table cache by alter table procedure".to_string()),
-                },
-                table_ident,
-            )
-            .await?;
-
         let alter_kind = self.alter_kind()?;
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
-            Ok(Status::Done)
+        let cache_invalidator = &self.context.cache_invalidator;
+
+        let status = if matches!(alter_kind, Kind::RenameTable { .. }) {
+            cache_invalidator
+                .invalidate_table_name(&Context::default(), self.data.table_ref().into())
+                .await?;
+
+            Status::Done
         } else {
+            cache_invalidator
+                .invalidate_table_id(&Context::default(), self.data.table_id())
+                .await?;
+
             self.data.state = AlterTableState::SubmitAlterRegionRequests;
 
-            Ok(Status::executing(true))
-        }
+            Status::executing(true)
+        };
+        Ok(status)
     }
 
     fn lock_key_inner(&self) -> Vec<String> {
@@ -461,7 +451,7 @@ impl AlterTableData {
 pub fn create_proto_alter_kind(
     table_info: &RawTableInfo,
     alter_kind: &Kind,
-) -> Result<(alter_request::Kind, Option<ColumnId>)> {
+) -> Result<(Option<alter_request::Kind>, Option<ColumnId>)> {
     match alter_kind {
         Kind::AddColumns(x) => {
             let mut next_column_id = table_info.meta.next_column_id;
@@ -494,7 +484,7 @@ pub fn create_proto_alter_kind(
                 .collect::<Result<Vec<_>>>()?;
 
             Ok((
-                alter_request::Kind::AddColumns(AddColumns { add_columns }),
+                Some(alter_request::Kind::AddColumns(AddColumns { add_columns })),
                 Some(next_column_id),
             ))
         }
@@ -508,10 +498,12 @@ pub fn create_proto_alter_kind(
                 .collect::<Vec<_>>();
 
             Ok((
-                alter_request::Kind::DropColumns(DropColumns { drop_columns }),
+                Some(alter_request::Kind::DropColumns(DropColumns {
+                    drop_columns,
+                })),
                 None,
             ))
         }
-        Kind::RenameTable(_) => unreachable!(),
+        Kind::RenameTable(_) => Ok((None, None)),
     }
 }

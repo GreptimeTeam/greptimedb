@@ -15,7 +15,6 @@
 #![feature(assert_matches)]
 #![feature(trait_upcasting)]
 
-pub mod catalog;
 pub(crate) mod delete;
 pub mod error;
 pub mod expr_factory;
@@ -31,5 +30,7 @@ mod server;
 pub mod service_config;
 pub mod statement;
 pub mod table;
+#[cfg(test)]
+pub(crate) mod tests;
 
 pub const MAX_VALUE: &str = "MAXVALUE";

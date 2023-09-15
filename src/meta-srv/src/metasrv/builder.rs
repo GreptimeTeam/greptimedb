@@ -171,9 +171,7 @@ impl MetaSrvBuilder {
             server_addr: options.server_addr.clone(),
             kv_store: kv_store.clone(),
             meta_peer_client: meta_peer_client.clone(),
-            catalog: None,
-            schema: None,
-            table: None,
+            table_id: None,
         };
         let ddl_manager = build_ddl_manager(
             &options,
@@ -195,9 +193,7 @@ impl MetaSrvBuilder {
                         datanode_lease_secs: options.datanode_lease_secs,
                         kv_store: kv_store.clone(),
                         meta_peer_client: meta_peer_client.clone(),
-                        catalog: None,
-                        schema: None,
-                        table: None,
+                        table_id: None,
                     };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
                         options.region_lease_secs,

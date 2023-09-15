@@ -29,7 +29,7 @@ use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use crate::ddl::utils::{handle_operate_region_error, handle_retry_error};
+use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
@@ -161,8 +161,7 @@ impl CreateTableProcedure {
             column_defs,
             primary_key,
             create_if_not_exists: true,
-            catalog: String::new(),
-            schema: String::new(),
+            path: String::new(),
             options: create_table_expr.table_options.clone(),
         })
     }
@@ -174,6 +173,7 @@ impl CreateTableProcedure {
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
         let schema = &create_table_expr.schema_name;
+        let storage_path = region_storage_path(catalog, schema);
 
         let request_template = self.create_region_request_template()?;
 
@@ -191,9 +191,7 @@ impl CreateTableProcedure {
 
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
-                    create_region_request.catalog = catalog.to_string();
-                    create_region_request.schema = schema.to_string();
-
+                    create_region_request.path = storage_path.clone();
                     PbRegionRequest::Create(create_region_request)
                 })
                 .collect::<Vec<_>>();

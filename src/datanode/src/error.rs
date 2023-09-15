@@ -22,6 +22,7 @@ use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::error::Error as TableError;
+use table::metadata::TableId;
 
 /// Business error of datanode.
 #[derive(Debug, Snafu)]
@@ -54,9 +55,9 @@ pub enum Error {
         source: TableError,
     },
 
-    #[snafu(display("Failed to get table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to get table {table_id}, source: {source}, at {location}"))]
     GetTable {
-        table_name: String,
+        table_id: TableId,
         location: Location,
         source: TableError,
     },
