@@ -25,7 +25,9 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, Result};
+use crate::error::{
+    Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatingSnafu, Result,
+};
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionRef};
@@ -38,6 +40,7 @@ use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
+use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -185,6 +188,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
+    pub(crate) listener: WorkerListener,
 }
 
 impl RegionFlushTask {
@@ -226,6 +230,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
+        self.listener.on_flush_begin(self.region_id).await;
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
                 let memtables_to_remove = version_data
@@ -450,24 +455,33 @@ impl FlushScheduler {
 
     /// Notifies the scheduler that the region is dropped.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(flush_status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        );
     }
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+    }
+
+    /// Notifies the scheduler that the region is truncating.
+    pub(crate) fn on_region_truncating(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionTruncatingSnafu { region_id }.build()),
+        );
+    }
+
+    pub(crate) fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
             return;
         };
 
         // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        flush_status.on_failure(err);
     }
 
     /// Add ddl request to pending queue.

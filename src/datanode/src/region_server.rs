@@ -210,7 +210,8 @@ impl RegionServerInner {
             | RegionRequest::Delete(_)
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
-            | RegionRequest::Compact(_) => RegionChange::None,
+            | RegionRequest::Compact(_)
+            | RegionRequest::Truncate(_) => RegionChange::None,
         };
 
         let engine = match &region_change {

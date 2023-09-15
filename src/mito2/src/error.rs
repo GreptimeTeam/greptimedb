@@ -420,6 +420,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} is truncating, location: {}", region_id, location))]
+    RegionTruncating {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display(
         "Engine write buffer is full, rejecting write requests of region {}, location: {}",
         region_id,
@@ -540,6 +546,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            RegionTruncating { .. } => StatusCode::Cancelled,
             BuildCompactionPredicate { .. } => StatusCode::Internal,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),

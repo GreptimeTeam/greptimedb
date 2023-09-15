@@ -38,6 +38,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    Truncate(RegionTruncateRequest),
 }
 
 impl RegionRequest {
@@ -411,6 +412,9 @@ pub struct RegionFlushRequest {}
 
 #[derive(Debug)]
 pub struct RegionCompactRequest {}
+
+#[derive(Debug)]
+pub struct RegionTruncateRequest {}
 
 #[cfg(test)]
 mod tests {
