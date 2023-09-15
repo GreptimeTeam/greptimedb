@@ -94,6 +94,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to get info from meta server, source: {}", source))]
+    GetMetadata {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to execute sql, source: {}", source))]
     ExecuteSql {
         location: Location,
@@ -266,6 +272,12 @@ pub enum Error {
         source: common_runtime::error::Error,
     },
 
+    #[snafu(display("Expect KvBackend but not found"))]
+    MissingKvBackend { location: Location },
+
+    #[snafu(display("Expect MetaClient but not found, location: {}", location))]
+    MissingMetaClient { location: Location },
+
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -366,10 +378,10 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing node id option in distributed mode"))]
+    #[snafu(display("Missing node id in Datanode config, location: {}", location))]
     MissingNodeId { location: Location },
 
-    #[snafu(display("Missing node id option in distributed mode"))]
+    #[snafu(display("Missing node id option in distributed mode, location: {}", location))]
     MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
@@ -587,7 +599,9 @@ impl ErrorExt for Error {
             | ExecuteLogicalPlan { source, .. } => source.status_code(),
 
             BuildRegionRequests { source, .. } => source.status_code(),
-            HandleHeartbeatResponse { source, .. } => source.status_code(),
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+                source.status_code()
+            }
 
             DecodeLogicalPlan { source, .. } => source.status_code(),
             RegisterSchema { source, .. } => source.status_code(),
@@ -629,7 +643,9 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. }
             | InvalidInsertRowLen { .. }
-            | ColumnDataType { .. } => StatusCode::InvalidArguments,
+            | ColumnDataType { .. }
+            | MissingKvBackend { .. }
+            | MissingMetaClient { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | DecodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected

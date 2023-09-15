@@ -96,6 +96,17 @@ impl RegionServer {
             .collect()
     }
 
+    pub fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_writable(region_id, writable)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     pub fn runtime(&self) -> Arc<Runtime> {
         self.inner.runtime.clone()
     }

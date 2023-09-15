@@ -15,7 +15,7 @@
 use common_config::KvStoreConfig;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
-use datanode::datanode::{DatanodeOptions, ProcedureConfig};
+use datanode::config::{DatanodeOptions, ProcedureConfig};
 use frontend::frontend::FrontendOptions;
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,7 @@ use crate::error::{LoadLayeredConfigSnafu, Result};
 pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
+/// Options mixed up from datanode, frontend and metasrv.
 pub struct MixOptions {
     pub data_home: String,
     pub procedure_cfg: ProcedureConfig,
@@ -119,7 +120,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::datanode::{DatanodeOptions, ObjectStoreConfig};
+    use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 
     use super::*;
 
