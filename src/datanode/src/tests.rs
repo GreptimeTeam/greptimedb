@@ -84,6 +84,7 @@ fn close_region_instruction() -> Instruction {
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,
+        engine: "mito2".to_string(),
     })
 }
 
@@ -93,6 +94,7 @@ fn open_region_instruction() -> Instruction {
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,
+        engine: "mito2".to_string(),
     })
 }
 

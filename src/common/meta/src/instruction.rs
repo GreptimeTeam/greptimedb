@@ -28,6 +28,7 @@ pub struct RegionIdent {
     pub datanode_id: DatanodeId,
     pub table_id: TableId,
     pub region_number: RegionNumber,
+    pub engine: String,
 }
 
 impl RegionIdent {
@@ -40,8 +41,8 @@ impl Display for RegionIdent {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "RegionIdent(datanode_id='{}.{}', table_id={}, region_number={})",
-            self.cluster_id, self.datanode_id, self.table_id, self.region_number
+            "RegionIdent(datanode_id='{}.{}', table_id={}, region_number={}, engine = {})",
+            self.cluster_id, self.datanode_id, self.table_id, self.region_number, self.engine
         )
     }
 }
@@ -97,12 +98,13 @@ mod tests {
             datanode_id: 2,
             table_id: 1024,
             region_number: 1,
+            engine: "mito2".to_string(),
         });
 
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1}}"#,
+            r#"{"OpenRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
             serialized
         );
 
@@ -111,12 +113,13 @@ mod tests {
             datanode_id: 2,
             table_id: 1024,
             region_number: 1,
+            engine: "mito2".to_string(),
         });
 
         let serialized = serde_json::to_string(&close_region).unwrap();
 
         assert_eq!(
-            r#"{"CloseRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1}}"#,
+            r#"{"CloseRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
             serialized
         );
     }

@@ -43,7 +43,7 @@ fn build_rows_multi_tags_fields(
                 });
             }
             values.push(api::v1::Value {
-                value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
             });
 
             api::v1::Row { values }

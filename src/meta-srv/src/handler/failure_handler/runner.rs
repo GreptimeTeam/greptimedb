@@ -260,6 +260,7 @@ mod tests {
             cluster_id: 3,
             datanode_id: 2,
             region_number: 1,
+            engine: "mito2".to_string(),
         };
         let _ = container.get_failure_detector(ident.clone());
         assert!(container.0.contains_key(&ident));
@@ -283,6 +284,7 @@ mod tests {
             cluster_id: 3,
             datanode_id: 2,
             region_number: 1,
+            engine: "mito2".to_string(),
         };
         let _ = container.get_failure_detector(ident.clone());
 
@@ -318,6 +320,7 @@ mod tests {
                             cluster_id: 1,
                             datanode_id,
                             region_number,
+                            engine: "mito2".to_string(),
                         })
                         .collect(),
                     heartbeat_time: start + i * 1000 + rng.gen_range(0..100),

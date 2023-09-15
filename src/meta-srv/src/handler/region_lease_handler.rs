@@ -132,6 +132,7 @@ mod test {
                 datanode_id: 1,
                 table_id: 1,
                 region_number: 1,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();
@@ -141,6 +142,7 @@ mod test {
                 datanode_id: 1,
                 table_id: 1,
                 region_number: 3,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();

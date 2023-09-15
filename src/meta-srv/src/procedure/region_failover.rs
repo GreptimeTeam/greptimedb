@@ -453,6 +453,7 @@ mod tests {
                 region_number,
                 datanode_id: failed_datanode,
                 table_id: 1,
+                engine: "mito2".to_string(),
             }
         }
     }
@@ -653,7 +654,7 @@ mod tests {
 
         assert_eq!(
             procedure.dump().unwrap(),
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
@@ -693,12 +694,12 @@ mod tests {
         let s = procedure.dump().unwrap();
         assert_eq!(
             s,
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
         );
         let n: Node = serde_json::from_str(&s).unwrap();
         assert_eq!(
             format!("{n:?}"),
-            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_id: 1, region_number: 1 }, state: RegionFailoverStart { failover_candidate: None } }"#
+            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_id: 1, region_number: 1, engine: "mito2" }, state: RegionFailoverStart { failover_candidate: None } }"#
         );
     }
 
