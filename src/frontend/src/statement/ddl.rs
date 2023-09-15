@@ -23,7 +23,6 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
-use common_meta::ident::TableIdent;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
@@ -34,11 +33,12 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
 use sql::statements::sql_value_to_value;
+use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
@@ -46,10 +46,10 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
+    DeserializePartitionSnafu, InvalidPartitionColumnsSnafu, ParseSqlSnafu, Result,
+    SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu,
 };
-use crate::table::DistTable;
 use crate::{expr_factory, MAX_VALUE};
 
 impl StatementExecutor {
@@ -102,6 +102,8 @@ impl StatementExecutor {
 
         let (partitions, partition_cols) = parse_partitions(create_table, partitions)?;
 
+        validate_partition_columns(create_table, &partition_cols)?;
+
         let mut table_info = create_table_info(create_table, partition_cols, schema_opts)?;
 
         let resp = self
@@ -111,10 +113,9 @@ impl StatementExecutor {
         let table_id = resp.table_id.context(error::UnexpectedSnafu {
             violated: "expected table_id",
         })?;
-        info!("Successfully created distributed table '{table_name}' with table id {table_id}");
+        info!("Successfully created table '{table_name}' with table id {table_id}");
 
         table_info.ident.table_id = table_id;
-        let engine = table_info.meta.engine.to_string();
 
         let table_info = Arc::new(table_info.try_into().context(error::CreateTableInfoSnafu)?);
         create_table.table_id = Some(api::v1::TableId { id: table_id });
@@ -123,16 +124,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: table_name.catalog_name.to_string(),
-                    schema: table_name.schema_name.to_string(),
-                    table: table_name.table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -153,21 +145,11 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        let engine = table.table_info().meta.engine.to_string();
         self.drop_table_procedure(&table_name, table_id).await?;
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: table_name.catalog_name.to_string(),
-                    schema: table_name.schema_name.to_string(),
-                    table: table_name.table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -256,7 +238,6 @@ impl StatementExecutor {
             })?;
 
         let table_id = table.table_info().ident.table_id;
-        let engine = table.table_info().meta.engine.to_string();
         self.verify_alter(table_id, table.table_info(), expr.clone())?;
 
         info!(
@@ -276,16 +257,7 @@ impl StatementExecutor {
 
         // Invalidates local cache ASAP.
         self.cache_invalidator
-            .invalidate_table(
-                &Context::default(),
-                TableIdent {
-                    catalog: catalog_name.to_string(),
-                    schema: schema_name.to_string(),
-                    table: table_name.to_string(),
-                    table_id,
-                    engine,
-                },
-            )
+            .invalidate_table_id(&Context::default(), table_id)
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -375,6 +347,22 @@ impl StatementExecutor {
 
         Ok(Output::AffectedRows(1))
     }
+}
+
+fn validate_partition_columns(
+    create_table: &CreateTableExpr,
+    partition_cols: &[String],
+) -> Result<()> {
+    ensure!(
+        partition_cols
+            .iter()
+            .all(|col| &create_table.time_index == col || create_table.primary_keys.contains(col)),
+        InvalidPartitionColumnsSnafu {
+            table: &create_table.table_name,
+            reason: "partition column must belongs to primary keys or equals to time index"
+        }
+    );
+    Ok(())
 }
 
 fn parse_partitions(
@@ -561,6 +549,31 @@ mod test {
 
     use super::*;
     use crate::expr_factory;
+
+    #[test]
+    fn test_validate_partition_columns() {
+        let create_table = CreateTableExpr {
+            table_name: "my_table".to_string(),
+            time_index: "ts".to_string(),
+            primary_keys: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        };
+
+        assert!(validate_partition_columns(&create_table, &[]).is_ok());
+        assert!(validate_partition_columns(&create_table, &["ts".to_string()]).is_ok());
+        assert!(validate_partition_columns(&create_table, &["a".to_string()]).is_ok());
+        assert!(
+            validate_partition_columns(&create_table, &["b".to_string(), "a".to_string()]).is_ok()
+        );
+
+        assert_eq!(
+            validate_partition_columns(&create_table, &["a".to_string(), "c".to_string()])
+                .unwrap_err()
+                .to_string(),
+            "Invalid partition columns when creating table 'my_table', \
+            reason: partition column must belongs to primary keys or equals to time index",
+        );
+    }
 
     #[tokio::test]
     async fn test_parse_partitions() {

@@ -195,9 +195,10 @@ mod test {
             r"
 CREATE TABLE {table_name} (
     a INT,
-    b STRING PRIMARY KEY,
+    b STRING,
     ts TIMESTAMP,
-    TIME INDEX (ts)
+    TIME INDEX (ts),
+    PRIMARY KEY (a, b)
 ) PARTITION BY RANGE COLUMNS(a) (
     PARTITION r0 VALUES LESS THAN (10),
     PARTITION r1 VALUES LESS THAN (20),
@@ -306,7 +307,7 @@ CREATE TABLE {table_name} (
     }
 
     async fn test_insert_delete_and_query_on_existing_table(instance: &Instance, table_name: &str) {
-        let ts_millisecond_values = vec![
+        let timestamp_millisecond_values = vec![
             1672557972000,
             1672557973000,
             1672557974000,
@@ -334,26 +335,26 @@ CREATE TABLE {table_name} (
                         ..Default::default()
                     }),
                     null_mask: vec![32, 0],
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Int32 as i32,
                 },
                 Column {
                     column_name: "b".to_string(),
                     values: Some(Values {
-                        string_values: ts_millisecond_values
+                        string_values: timestamp_millisecond_values
                             .iter()
                             .map(|x| format!("ts: {x}"))
                             .collect(),
                         ..Default::default()
                     }),
-                    semantic_type: SemanticType::Tag as i32,
+                    semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::String as i32,
                     ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values,
+                        timestamp_millisecond_values,
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -362,7 +363,6 @@ CREATE TABLE {table_name} (
                 },
             ],
             row_count: 16,
-            ..Default::default()
         };
         let output = query(
             instance,
@@ -408,11 +408,10 @@ CREATE TABLE {table_name} (
 
         let new_grpc_delete_request = |a, b, ts, row_count| DeleteRequest {
             table_name: table_name.to_string(),
-            region_number: 0,
             key_columns: vec![
                 Column {
                     column_name: "a".to_string(),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
                         i32_values: a,
                         ..Default::default()
@@ -422,7 +421,7 @@ CREATE TABLE {table_name} (
                 },
                 Column {
                     column_name: "b".to_string(),
-                    semantic_type: SemanticType::Tag as i32,
+                    semantic_type: SemanticType::Field as i32,
                     values: Some(Values {
                         string_values: b,
                         ..Default::default()
@@ -434,7 +433,7 @@ CREATE TABLE {table_name} (
                     column_name: "ts".to_string(),
                     semantic_type: SemanticType::Timestamp as i32,
                     values: Some(Values {
-                        ts_millisecond_values: ts,
+                        timestamp_millisecond_values: ts,
                         ..Default::default()
                     }),
                     datatype: ColumnDataType::TimestampMillisecond as i32,
@@ -544,6 +543,7 @@ CREATE TABLE {table_name} (
                 .handle_read(RegionQueryRequest {
                     region_id: region_id.as_u64(),
                     plan: plan.to_vec(),
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
@@ -573,7 +573,11 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672557975000, 1672557976000, 1672557977000],
+                        timestamp_millisecond_values: vec![
+                            1672557975000,
+                            1672557976000,
+                            1672557977000,
+                        ],
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -582,7 +586,6 @@ CREATE TABLE {table_name} (
                 },
             ],
             row_count: 3,
-            ..Default::default()
         };
 
         // Test auto create not existed table upon insertion.
@@ -608,7 +611,11 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![1672557978000, 1672557979000, 1672557980000],
+                        timestamp_millisecond_values: vec![
+                            1672557978000,
+                            1672557979000,
+                            1672557980000,
+                        ],
                         ..Default::default()
                     }),
                     semantic_type: SemanticType::Timestamp as i32,
@@ -617,7 +624,6 @@ CREATE TABLE {table_name} (
                 },
             ],
             row_count: 3,
-            ..Default::default()
         };
 
         // Test auto add not existed column upon insertion.
@@ -652,11 +658,10 @@ CREATE TABLE {table_name} (
 
         let delete = DeleteRequest {
             table_name: "auto_created_table".to_string(),
-            region_number: 0,
             key_columns: vec![Column {
                 column_name: "ts".to_string(),
                 values: Some(Values {
-                    ts_millisecond_values: vec![1672557975000, 1672557979000],
+                    timestamp_millisecond_values: vec![1672557975000, 1672557979000],
                     ..Default::default()
                 }),
                 semantic_type: SemanticType::Timestamp as i32,
@@ -738,7 +743,7 @@ CREATE TABLE {table_name} (
                 Column {
                     column_name: "ts".to_string(),
                     values: Some(Values {
-                        ts_millisecond_values: vec![
+                        timestamp_millisecond_values: vec![
                             1672557972000,
                             1672557973000,
                             1672557974000,
@@ -756,7 +761,6 @@ CREATE TABLE {table_name} (
                 },
             ],
             row_count: 8,
-            ..Default::default()
         };
 
         let request = Request::Inserts(InsertRequests {

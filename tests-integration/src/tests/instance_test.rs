@@ -84,13 +84,11 @@ async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
         r#"create table demo(
-    host STRING,
-    cpu DOUBLE,
-    memory DOUBLE,
+    n INT PRIMARY KEY,
     ts timestamp,
     TIME INDEX(ts)
 )
-PARTITION BY RANGE COLUMNS (ts) (
+PARTITION BY RANGE COLUMNS (n) (
     PARTITION r0 VALUES LESS THAN (1),
     PARTITION r1 VALUES LESS THAN (10),
     PARTITION r2 VALUES LESS THAN (100),
@@ -111,27 +109,26 @@ PARTITION BY RANGE COLUMNS (ts) (
     let output = execute_sql(&frontend, "show create table demo").await;
 
     let expected = if instance.is_distributed_mode() {
-        r#"+-------+----------------------------------------------------------+
-| Table | Create Table                                             |
-+-------+----------------------------------------------------------+
-| demo  | CREATE TABLE IF NOT EXISTS "demo" (                      |
-|       |   "host" STRING NULL,                                    |
-|       |   "cpu" DOUBLE NULL,                                     |
-|       |   "memory" DOUBLE NULL,                                  |
-|       |   "ts" TIMESTAMP(3) NOT NULL,                            |
-|       |   TIME INDEX ("ts")                                      |
-|       | )                                                        |
-|       | PARTITION BY RANGE COLUMNS ("ts") (                      |
-|       |                       PARTITION r0 VALUES LESS THAN (1), |
-|       |   PARTITION r1 VALUES LESS THAN (10),                    |
-|       |   PARTITION r2 VALUES LESS THAN (100),                   |
-|       |   PARTITION r3 VALUES LESS THAN (MAXVALUE)               |
-|       |                 )                                        |
-|       | ENGINE=mito                                              |
-|       | WITH(                                                    |
-|       |   regions = 4                                            |
-|       | )                                                        |
-+-------+----------------------------------------------------------+"#
+        r#"+-------+--------------------------------------------+
+| Table | Create Table                               |
++-------+--------------------------------------------+
+| demo  | CREATE TABLE IF NOT EXISTS "demo" (        |
+|       |   "n" INT NULL,                            |
+|       |   "ts" TIMESTAMP(3) NOT NULL,              |
+|       |   TIME INDEX ("ts"),                       |
+|       |   PRIMARY KEY ("n")                        |
+|       | )                                          |
+|       | PARTITION BY RANGE COLUMNS ("n") (         |
+|       |   PARTITION r0 VALUES LESS THAN (1),       |
+|       |   PARTITION r1 VALUES LESS THAN (10),      |
+|       |   PARTITION r2 VALUES LESS THAN (100),     |
+|       |   PARTITION r3 VALUES LESS THAN (MAXVALUE) |
+|       | )                                          |
+|       | ENGINE=mito                                |
+|       | WITH(                                      |
+|       |   regions = 4                              |
+|       | )                                          |
++-------+--------------------------------------------+"#
     } else {
         r#"+-------+-------------------------------------+
 | Table | Create Table                        |
@@ -143,6 +140,7 @@ PARTITION BY RANGE COLUMNS (ts) (
 |       |   "ts" TIMESTAMP(3) NOT NULL,       |
 |       |   TIME INDEX ("ts")                 |
 |       | )                                   |
+|       |                                     |
 |       | ENGINE=mito                         |
 |       | WITH(                               |
 |       |   regions = 1                       |
@@ -1467,7 +1465,6 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
-    let is_distributed_mode = instance.is_distributed_mode();
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
@@ -1480,9 +1477,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
     let sql = "select table_catalog, table_schema, table_name, table_type, table_id, engine from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
 
     let output = execute_sql(&instance, sql).await;
-    let expected = match is_distributed_mode {
-        true => {
-            "\
+    let expected = "\
 +---------------+--------------------+------------+-----------------+----------+-------------+
 | table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
 +---------------+--------------------+------------+-----------------+----------+-------------+
@@ -1490,46 +1485,19 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 | greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
 | greptime      | public             | scripts    | BASE TABLE      | 1024     | mito        |
 | greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
-+---------------+--------------------+------------+-----------------+----------+-------------+"
-        }
-        false => {
-            "\
-+---------------+--------------------+------------+-----------------+----------+-------------+
-| table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
-+---------------+--------------------+------------+-----------------+----------+-------------+
-| greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
-| greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
-| greptime      | public             | scripts    | BASE TABLE      | 1        | mito        |
-| greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
-+---------------+--------------------+------------+-----------------+----------+-------------+"
-        }
-    };
++---------------+--------------------+------------+-----------------+----------+-------------+";
 
     check_output_stream(output, expected).await;
 
     let output = execute_sql_with(&instance, sql, query_ctx).await;
-    let expected = match is_distributed_mode {
-        true => {
-            "\
+    let expected = "\
 +-----------------+--------------------+---------------+-----------------+----------+--------+
 | table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
 +-----------------+--------------------+---------------+-----------------+----------+--------+
 | another_catalog | another_schema     | another_table | BASE TABLE      | 1025     | mito   |
 | another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
 | another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
-+-----------------+--------------------+---------------+-----------------+----------+--------+"
-        }
-        false => {
-            "\
-+-----------------+--------------------+---------------+-----------------+----------+--------+
-| table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
-+-----------------+--------------------+---------------+-----------------+----------+--------+
-| another_catalog | another_schema     | another_table | BASE TABLE      | 1024     | mito   |
-| another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
-| another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
-+-----------------+--------------------+---------------+-----------------+----------+--------+"
-        }
-    };
++-----------------+--------------------+---------------+-----------------+----------+--------+";
     check_output_stream(output, expected).await;
 }
 

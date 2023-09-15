@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use catalog::local::MemoryCatalogManager;
+use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::NUMBERS_TABLE_ID;
 use common_query::Output;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};

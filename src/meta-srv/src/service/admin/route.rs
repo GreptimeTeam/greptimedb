@@ -22,7 +22,7 @@ use tonic::codegen::http;
 
 use super::HttpHandler;
 use crate::error;
-use crate::error::Result;
+use crate::error::{Result, TableNotFoundSnafu, TableRouteNotFoundSnafu};
 
 pub struct RouteHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
@@ -53,15 +53,16 @@ impl HttpHandler for RouteHandler {
             .get(key)
             .await
             .context(error::TableMetadataManagerSnafu)?
-            .map(|x| x.table_id());
+            .map(|x| x.table_id())
+            .context(TableNotFoundSnafu { name: table_name })?;
 
         let table_route_value = self
             .table_metadata_manager
             .table_route_manager()
-            .get(table_id.context(error::TableNotFoundSnafu { name: table_name })?)
+            .get(table_id)
             .await
             .context(error::TableMetadataManagerSnafu)?
-            .context(error::TableRouteNotFoundSnafu { table_name })?;
+            .context(TableRouteNotFoundSnafu { table_id })?;
         http::Response::builder()
             .status(http::StatusCode::OK)
             .body(serde_json::to_string(&table_route_value).unwrap())

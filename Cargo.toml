@@ -38,6 +38,7 @@ members = [
     "src/mito",
     "src/mito2",
     "src/object-store",
+    "src/operator",
     "src/partition",
     "src/promql",
     "src/query",
@@ -78,7 +79,7 @@ datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git
 derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "1969b5d610209ad1c2ad8e4cd3e9c3c24e40f1c2" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "e81a60e817a348ee5b7dfbd991f86d35cd068ce5" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -148,6 +149,7 @@ meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
 mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
+operator = { path = "src/operator" }
 object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
 promql = { path = "src/promql" }

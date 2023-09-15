@@ -18,18 +18,15 @@ use api::v1::{
     column_def, AddColumnLocation as Location, AlterExpr, CreateTableExpr, DropColumns,
     RenameTable, SemanticType,
 };
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::AddColumnLocation;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use snafu::{ensure, OptionExt, ResultExt};
 use table::metadata::TableId;
-use table::requests::{
-    AddColumnRequest, AlterKind, AlterTableRequest, CreateTableRequest, TableOptions,
-};
+use table::requests::{AddColumnRequest, AlterKind, AlterTableRequest};
 
 use crate::error::{
-    ColumnNotFoundSnafu, InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu,
-    Result, UnknownLocationTypeSnafu, UnrecognizedTableOptionSnafu,
+    InvalidColumnDefSnafu, MissingFieldSnafu, MissingTimestampColumnSnafu, Result,
+    UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -119,65 +116,6 @@ pub fn create_table_schema(expr: &CreateTableExpr, require_time_index: bool) -> 
         .collect::<Vec<_>>();
 
     Ok(RawSchema::new(column_schemas))
-}
-
-pub fn create_expr_to_request(
-    table_id: TableId,
-    expr: CreateTableExpr,
-    require_time_index: bool,
-) -> Result<CreateTableRequest> {
-    let schema = create_table_schema(&expr, require_time_index)?;
-    let primary_key_indices = expr
-        .primary_keys
-        .iter()
-        .map(|key| {
-            // We do a linear search here.
-            schema
-                .column_schemas
-                .iter()
-                .position(|column_schema| column_schema.name == *key)
-                .context(ColumnNotFoundSnafu {
-                    column_name: key,
-                    table_name: &expr.table_name,
-                })
-        })
-        .collect::<Result<Vec<usize>>>()?;
-
-    let mut catalog_name = expr.catalog_name;
-    if catalog_name.is_empty() {
-        catalog_name = DEFAULT_CATALOG_NAME.to_string();
-    }
-    let mut schema_name = expr.schema_name;
-    if schema_name.is_empty() {
-        schema_name = DEFAULT_SCHEMA_NAME.to_string();
-    }
-    let desc = if expr.desc.is_empty() {
-        None
-    } else {
-        Some(expr.desc)
-    };
-
-    let region_numbers = if expr.region_numbers.is_empty() {
-        vec![0]
-    } else {
-        expr.region_numbers
-    };
-
-    let table_options =
-        TableOptions::try_from(&expr.table_options).context(UnrecognizedTableOptionSnafu)?;
-    Ok(CreateTableRequest {
-        id: table_id,
-        catalog_name,
-        schema_name,
-        table_name: expr.table_name,
-        desc,
-        schema,
-        region_numbers,
-        primary_key_indices,
-        create_if_not_exists: expr.create_if_not_exists,
-        table_options,
-        engine: expr.engine,
-    })
 }
 
 fn parse_location(location: Option<Location>) -> Result<Option<AddColumnLocation>> {

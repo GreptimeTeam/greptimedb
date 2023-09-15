@@ -247,8 +247,6 @@ impl FailureDetectorContainer {
 
 #[cfg(test)]
 mod tests {
-    use common_catalog::consts::MITO_ENGINE;
-    use common_meta::ident::TableIdent;
     use rand::Rng;
 
     use super::*;
@@ -258,16 +256,11 @@ mod tests {
     fn test_default_failure_detector_container() {
         let container = FailureDetectorContainer(DashMap::new());
         let ident = RegionIdent {
-            table_ident: TableIdent {
-                catalog: "a".to_string(),
-                schema: "b".to_string(),
-                table: "c".to_string(),
-                table_id: 1,
-                engine: MITO_ENGINE.to_string(),
-            },
+            table_id: 1,
             cluster_id: 3,
             datanode_id: 2,
             region_number: 1,
+            engine: "mito2".to_string(),
         };
         let _ = container.get_failure_detector(ident.clone());
         assert!(container.0.contains_key(&ident));
@@ -287,16 +280,11 @@ mod tests {
         let container = FailureDetectorContainer(DashMap::new());
 
         let ident = RegionIdent {
-            table_ident: TableIdent {
-                catalog: "a".to_string(),
-                schema: "b".to_string(),
-                table: "c".to_string(),
-                table_id: 1,
-                engine: MITO_ENGINE.to_string(),
-            },
+            table_id: 1,
             cluster_id: 3,
             datanode_id: 2,
             region_number: 1,
+            engine: "mito2".to_string(),
         };
         let _ = container.get_failure_detector(ident.clone());
 
@@ -328,16 +316,11 @@ mod tests {
                     region_idents: region_ids
                         .iter()
                         .map(|&region_number| RegionIdent {
-                            table_ident: TableIdent {
-                                catalog: "a".to_string(),
-                                schema: "b".to_string(),
-                                table: "c".to_string(),
-                                table_id: 0,
-                                engine: MITO_ENGINE.to_string(),
-                            },
+                            table_id: 0,
                             cluster_id: 1,
                             datanode_id,
                             region_number,
+                            engine: "mito2".to_string(),
                         })
                         .collect(),
                     heartbeat_time: start + i * 1000 + rng.gen_range(0..100),

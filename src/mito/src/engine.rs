@@ -31,7 +31,7 @@ use key_lock::KeyLock;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt, ResultExt};
 use storage::manifest::manifest_compress_type;
-use store_api::path_utils::{region_name, table_dir};
+use store_api::path_utils::{region_name, table_dir_with_catalog_and_schema};
 use store_api::storage::{
     CloseOptions, ColumnDescriptorBuilder, ColumnFamilyDescriptor, ColumnFamilyDescriptorBuilder,
     ColumnId, CompactionStrategy, EngineContext as StorageEngineContext, OpenOptions, RegionNumber,
@@ -433,7 +433,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
 
         let table_id = request.table_id;
         let engine_ctx = StorageEngineContext::default();
-        let table_dir = table_dir(catalog_name, schema_name, table_id);
+        let table_dir = table_dir_with_catalog_and_schema(catalog_name, schema_name, table_id);
 
         let Some((manifest, table_info)) = self
             .recover_table_manifest_and_info(table_name, &table_dir)
@@ -523,7 +523,7 @@ impl<S: StorageEngine> MitoEngineInner<S> {
         let name = &table_info.name;
         let table_id = table_info.ident.table_id;
 
-        let table_dir = table_dir(catalog, schema, table_id);
+        let table_dir = table_dir_with_catalog_and_schema(catalog, schema, table_id);
         let table_ref = TableReference {
             catalog,
             schema,

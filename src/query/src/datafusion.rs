@@ -507,7 +507,7 @@ mod tests {
     use crate::query_engine::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
-        let catalog_manager = catalog::local::new_memory_catalog_manager().unwrap();
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
         let req = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
             schema: DEFAULT_SCHEMA_NAME.to_string(),

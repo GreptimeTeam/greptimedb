@@ -46,7 +46,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(region_ident) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
-                    engine: region_ident.table_ident.engine,
+                    engine: region_ident.engine,
                     region_dir: "".to_string(),
                     options: HashMap::new(),
                 });
@@ -57,15 +57,14 @@ impl RegionHeartbeatResponseHandler {
                 let close_region_req = RegionRequest::Close(RegionCloseRequest {});
                 Ok((region_id, close_region_req))
             }
-            Instruction::InvalidateTableCache(_) => InvalidHeartbeatResponseSnafu.fail(),
+            Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
+                InvalidHeartbeatResponseSnafu.fail()
+            }
         }
     }
 
     fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
-        RegionId::new(
-            region_ident.table_ident.table_id,
-            region_ident.region_number,
-        )
+        RegionId::new(region_ident.table_id, region_ident.region_number)
     }
 
     fn reply_template_from_instruction(instruction: &Instruction) -> InstructionReply {
@@ -78,7 +77,7 @@ impl RegionHeartbeatResponseHandler {
                 result: false,
                 error: None,
             }),
-            Instruction::InvalidateTableCache(_) => {
+            Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InstructionReply::InvalidateTableCache(SimpleReply {
                     result: false,
                     error: None,

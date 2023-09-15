@@ -23,7 +23,7 @@ use common_telemetry::{debug, logging};
 use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
-use store_api::path_utils::table_dir;
+use store_api::path_utils::table_dir_with_catalog_and_schema;
 use table::engine::{EngineContext, TableEngine, TableEngineProcedure, TableReference};
 use table::error::TableOperationSnafu;
 use table::metadata::{TableId, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
@@ -245,7 +245,7 @@ impl EngineInner {
         let table_schema =
             Arc::new(Schema::try_from(request.schema).context(InvalidRawSchemaSnafu)?);
 
-        let table_dir = table_dir(&catalog_name, &schema_name, table_id);
+        let table_dir = table_dir_with_catalog_and_schema(&catalog_name, &schema_name, table_id);
 
         let table_full_name = table_ref.to_string();
 
@@ -345,7 +345,8 @@ impl EngineInner {
             }
 
             let table_id = request.table_id;
-            let table_dir = table_dir(&catalog_name, &schema_name, table_id);
+            let table_dir =
+                table_dir_with_catalog_and_schema(&catalog_name, &schema_name, table_id);
 
             let (metadata, table_info) = self
                 .recover_table_manifest_and_info(&table_full_name, &table_dir)
@@ -388,7 +389,8 @@ impl EngineInner {
         let _lock = self.table_mutex.lock().await;
         if let Some(table) = self.get_table(req.table_id) {
             let table_id = table.table_info().ident.table_id;
-            let table_dir = table_dir(&req.catalog_name, &req.schema_name, table_id);
+            let table_dir =
+                table_dir_with_catalog_and_schema(&req.catalog_name, &req.schema_name, table_id);
 
             delete_table_manifest(
                 &table_full_name,

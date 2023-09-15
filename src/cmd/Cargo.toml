@@ -23,6 +23,7 @@ chrono.workspace = true
 clap = { version = "3.1", features = ["derive"] }
 client = { workspace = true }
 common-base = { workspace = true }
+common-catalog = { workspace = true }
 common-config = { workspace = true }
 common-error = { workspace = true }
 common-meta = { workspace = true }
@@ -39,6 +40,7 @@ either = "1.8"
 etcd-client.workspace = true
 frontend = { workspace = true }
 futures.workspace = true
+lazy_static.workspace = true
 meta-client = { workspace = true }
 meta-srv = { workspace = true }
 metrics.workspace = true
@@ -47,8 +49,10 @@ partition = { workspace = true }
 prost.workspace = true
 query = { workspace = true }
 rand.workspace = true
+regex.workspace = true
 rustyline = "10.1"
 serde.workspace = true
+serde_json.workspace = true
 servers = { workspace = true }
 session = { workspace = true }
 snafu.workspace = true

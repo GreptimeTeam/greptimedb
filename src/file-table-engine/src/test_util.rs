@@ -20,7 +20,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema, Schema, SchemaBuilder, SchemaRef};
 use object_store::services::Fs;
 use object_store::ObjectStore;
-use store_api::path_utils::table_dir;
+use store_api::path_utils::table_dir_with_catalog_and_schema;
 use table::engine::{EngineContext, TableEngine};
 use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType};
 use table::requests::{self, CreateTableRequest, TableOptions};
@@ -143,7 +143,7 @@ pub async fn setup_test_engine_and_table(prefix: &str) -> TestEngineComponents {
 
     let table_info = table_ref.table_info();
 
-    let table_dir = table_dir(
+    let table_dir = table_dir_with_catalog_and_schema(
         &table_info.catalog_name,
         &table_info.schema_name,
         table_info.ident.table_id,

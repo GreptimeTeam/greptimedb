@@ -158,8 +158,8 @@ pub enum Error {
     #[snafu(display("Invalid SQL, error: {}", err_msg))]
     InvalidSql { err_msg: String, location: Location },
 
-    #[snafu(display("Incomplete GRPC result: {}", err_msg))]
-    IncompleteGrpcResult { err_msg: String, location: Location },
+    #[snafu(display("Incomplete GRPC request: {}", err_msg))]
+    IncompleteGrpcRequest { err_msg: String, location: Location },
 
     #[snafu(display("Failed to find Datanode by region: {:?}", region))]
     FindDatanode {
@@ -689,6 +689,17 @@ pub enum Error {
 
     #[snafu(display("Invalid region request, reason: {}", reason))]
     InvalidRegionRequest { reason: String },
+
+    #[snafu(display(
+        "Invalid partition columns when creating table '{}', reason: {}",
+        table,
+        reason
+    ))]
+    InvalidPartitionColumns {
+        table: String,
+        reason: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -713,7 +724,9 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::EmptyData { .. }
-            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnNoneDefaultValue { .. }
+            | Error::IncompleteGrpcRequest { .. }
+            | Error::InvalidPartitionColumns { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
@@ -770,8 +783,7 @@ impl ErrorExt for Error {
             | Error::MissingInsertBody { .. }
             | Error::InvalidRegionRequest { .. } => StatusCode::Internal,
 
-            Error::IncompleteGrpcResult { .. }
-            | Error::ContextValueNotFound { .. }
+            Error::ContextValueNotFound { .. }
             | Error::InvalidSystemTableDef { .. }
             | Error::EncodeJson { .. } => StatusCode::Unexpected,
 

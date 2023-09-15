@@ -307,7 +307,7 @@ pub(crate) fn i64_value(data: i64) -> v1::Value {
 #[cfg(test)]
 pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
     v1::Value {
-        value_data: Some(ValueData::TsMillisecondValue(data)),
+        value_data: Some(ValueData::TimestampMillisecondValue(data)),
     }
 }
 
@@ -467,7 +467,7 @@ pub fn build_rows(start: usize, end: usize) -> Vec<Row> {
                     value_data: Some(ValueData::F64Value(i as f64)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TsMillisecondValue(i as i64 * 1000)),
+                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
                 },
             ],
         })
@@ -519,7 +519,7 @@ pub fn build_rows_for_key(key: &str, start: usize, end: usize, value_start: usiz
                     value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
                 },
             ],
         })
@@ -535,7 +535,7 @@ pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row
                     value_data: Some(ValueData::StringValue(key.to_string())),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
                 },
             ],
         })
