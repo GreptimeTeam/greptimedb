@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use clap::Parser;
 use client::api::v1::meta::TableRouteValue;
 use common_meta::error as MetaError;
-use common_meta::helper::{CatalogKey as v1CatalogKey, SchemaKey as v1SchemaKey, TableGlobalValue};
 use common_meta::key::catalog_name::{CatalogNameKey, CatalogNameValue};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
@@ -39,6 +38,7 @@ use meta_srv::service::store::etcd::EtcdStore;
 use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use prost::Message;
 use snafu::ResultExt;
+use v1_helper::{CatalogKey as v1CatalogKey, SchemaKey as v1SchemaKey, TableGlobalValue};
 
 use crate::cli::{Instance, Tool};
 use crate::error::{self, ConnectEtcdSnafu, Result};
@@ -410,6 +410,151 @@ impl MigrateTableMetadata {
                 req = req.add_kv(key.as_raw_key(), value.try_as_raw_value().unwrap());
             }
             self.etcd_store.batch_put(req).await.unwrap();
+        }
+    }
+}
+
+#[deprecated(since = "0.4.0", note = "Used for migrate old version(v0.3) metadata")]
+mod v1_helper {
+    use std::collections::HashMap;
+    use std::fmt::{Display, Formatter};
+
+    use err::{DeserializeCatalogEntryValueSnafu, Error, InvalidCatalogSnafu};
+    use lazy_static::lazy_static;
+    use regex::Regex;
+    use serde::{Deserialize, Serialize};
+    use snafu::{ensure, OptionExt, ResultExt};
+    use table::metadata::{RawTableInfo, TableId};
+
+    pub const CATALOG_KEY_PREFIX: &str = "__c";
+    pub const SCHEMA_KEY_PREFIX: &str = "__s";
+
+    /// The pattern of a valid catalog, schema or table name.
+    const NAME_PATTERN: &str = "[a-zA-Z_:][a-zA-Z0-9_:]*";
+
+    lazy_static! {
+        static ref CATALOG_KEY_PATTERN: Regex =
+            Regex::new(&format!("^{CATALOG_KEY_PREFIX}-({NAME_PATTERN})$")).unwrap();
+    }
+
+    lazy_static! {
+        static ref SCHEMA_KEY_PATTERN: Regex = Regex::new(&format!(
+            "^{SCHEMA_KEY_PREFIX}-({NAME_PATTERN})-({NAME_PATTERN})$"
+        ))
+        .unwrap();
+    }
+
+    /// Table global info contains necessary info for a datanode to create table regions, including
+    /// table id, table meta(schema...), region id allocation across datanodes.
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct TableGlobalValue {
+        /// Id of datanode that created the global table info kv. only for debugging.
+        pub node_id: u64,
+        /// Allocation of region ids across all datanodes.
+        pub regions_id_map: HashMap<u64, Vec<u32>>,
+        pub table_info: RawTableInfo,
+    }
+
+    impl TableGlobalValue {
+        pub fn table_id(&self) -> TableId {
+            self.table_info.ident.table_id
+        }
+    }
+
+    pub struct CatalogKey {
+        pub catalog_name: String,
+    }
+
+    impl Display for CatalogKey {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str(CATALOG_KEY_PREFIX)?;
+            f.write_str("-")?;
+            f.write_str(&self.catalog_name)
+        }
+    }
+
+    impl CatalogKey {
+        pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+            let key = s.as_ref();
+            let captures = CATALOG_KEY_PATTERN
+                .captures(key)
+                .context(InvalidCatalogSnafu { key })?;
+            ensure!(captures.len() == 2, InvalidCatalogSnafu { key });
+            Ok(Self {
+                catalog_name: captures[1].to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct CatalogValue;
+
+    pub struct SchemaKey {
+        pub catalog_name: String,
+        pub schema_name: String,
+    }
+
+    impl Display for SchemaKey {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str(SCHEMA_KEY_PREFIX)?;
+            f.write_str("-")?;
+            f.write_str(&self.catalog_name)?;
+            f.write_str("-")?;
+            f.write_str(&self.schema_name)
+        }
+    }
+
+    impl SchemaKey {
+        pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+            let key = s.as_ref();
+            let captures = SCHEMA_KEY_PATTERN
+                .captures(key)
+                .context(InvalidCatalogSnafu { key })?;
+            ensure!(captures.len() == 3, InvalidCatalogSnafu { key });
+            Ok(Self {
+                catalog_name: captures[1].to_string(),
+                schema_name: captures[2].to_string(),
+            })
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct SchemaValue;
+
+    macro_rules! define_catalog_value {
+    ( $($val_ty: ty), *) => {
+            $(
+                impl $val_ty {
+                    pub fn parse(s: impl AsRef<str>) -> Result<Self, Error> {
+                        serde_json::from_str(s.as_ref())
+                            .context(DeserializeCatalogEntryValueSnafu { raw: s.as_ref() })
+                    }
+
+                    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Result<Self, Error> {
+                         Self::parse(&String::from_utf8_lossy(bytes.as_ref()))
+                    }
+                }
+            )*
+        }
+    }
+
+    define_catalog_value!(TableGlobalValue);
+
+    mod err {
+        use snafu::{Location, Snafu};
+
+        #[derive(Debug, Snafu)]
+        #[snafu(visibility(pub))]
+        pub enum Error {
+            #[snafu(display("Invalid catalog info: {}", key))]
+            InvalidCatalog { key: String, location: Location },
+
+            #[snafu(display("Failed to deserialize catalog entry value: {}", raw))]
+            DeserializeCatalogEntryValue {
+                raw: String,
+                location: Location,
+                source: serde_json::error::Error,
+            },
         }
     }
 }
