@@ -14,12 +14,12 @@
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::ident::TableIdent;
 use common_meta::instruction::Instruction;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use table::metadata::TableId;
 
 use super::failover_end::RegionFailoverEnd;
 use super::{RegionFailoverContext, State};
@@ -33,9 +33,9 @@ impl InvalidateCache {
     async fn broadcast_invalidate_table_cache_messages(
         &self,
         ctx: &RegionFailoverContext,
-        table_ident: &TableIdent,
+        table_id: TableId,
     ) -> Result<()> {
-        let instruction = Instruction::InvalidateTableCache(table_ident.clone());
+        let instruction = Instruction::InvalidateTableIdCache(table_id);
 
         let msg = &MailboxMessage::json_message(
             "Invalidate Table Cache",
@@ -62,12 +62,12 @@ impl State for InvalidateCache {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        let table_ident = TableIdent::from(failed_region.clone());
+        let table_id = failed_region.table_id;
         info!(
             "Broadcast invalidate table({}) cache message to frontend",
-            table_ident
+            table_id
         );
-        self.broadcast_invalidate_table_cache_messages(ctx, &table_ident)
+        self.broadcast_invalidate_table_cache_messages(ctx, table_id)
             .await?;
 
         Ok(Box::new(RegionFailoverEnd))
@@ -108,7 +108,7 @@ mod tests {
             let _ = heartbeat_receivers.insert(frontend_id, rx);
         }
 
-        let table_ident: TableIdent = failed_region.clone().into();
+        let table_id = failed_region.table_id;
 
         // lexicographical order
         // frontend-4,5,6,7
@@ -132,8 +132,7 @@ mod tests {
             assert_eq!(
                 received.payload,
                 Some(Payload::Json(
-                    serde_json::to_string(&Instruction::InvalidateTableCache(table_ident.clone()))
-                        .unwrap(),
+                    serde_json::to_string(&Instruction::InvalidateTableIdCache(table_id)).unwrap(),
                 ))
             );
         }

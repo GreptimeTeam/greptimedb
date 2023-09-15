@@ -18,6 +18,7 @@ use common_meta::peer::Peer;
 use common_runtime::JoinError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
 
@@ -246,9 +247,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table route not found: {}", table_name))]
+    #[snafu(display("Failed to find table route for {table_id}, at {location}"))]
     TableRouteNotFound {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 

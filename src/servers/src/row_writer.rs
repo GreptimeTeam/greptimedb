@@ -108,7 +108,6 @@ impl<'a> MultiTableData<'a> {
                 RowInsertRequest {
                     table_name: table_name.to_string(),
                     rows: Some(Rows { schema, rows }),
-                    ..Default::default()
                 }
             })
             .collect::<Vec<_>>();
@@ -227,14 +226,14 @@ pub fn write_ts_precision<'a>(
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
         });
-        one_row.push(ValueData::TsMillisecondValue(ts).into())
+        one_row.push(ValueData::TimestampMillisecondValue(ts).into())
     } else {
         check_schema(
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
             &schema[*index],
         )?;
-        one_row[*index].value_data = Some(ValueData::TsMillisecondValue(ts));
+        one_row[*index].value_data = Some(ValueData::TimestampMillisecondValue(ts));
     }
 
     Ok(())

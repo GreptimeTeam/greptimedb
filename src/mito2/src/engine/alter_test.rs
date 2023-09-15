@@ -147,7 +147,7 @@ fn build_rows_for_tags(
                     value_data: Some(ValueData::F64Value((value_start + idx) as f64)),
                 },
                 api::v1::Value {
-                    value_data: Some(ValueData::TsMillisecondValue(ts as i64 * 1000)),
+                    value_data: Some(ValueData::TimestampMillisecondValue(ts as i64 * 1000)),
                 },
                 api::v1::Value {
                     value_data: Some(ValueData::StringValue(tag1.to_string())),

@@ -19,7 +19,7 @@ use common_meta::rpc::router::{Table, TableRoute};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::TableId;
 
-use crate::error::{self, Result, TableMetadataManagerSnafu};
+use crate::error::{self, Result, TableMetadataManagerSnafu, TableRouteNotFoundSnafu};
 use crate::metasrv::Context;
 
 pub(crate) async fn fetch_table(
@@ -32,9 +32,7 @@ pub(crate) async fn fetch_table(
         .context(TableMetadataManagerSnafu)?;
 
     if let Some(table_info) = table_info {
-        let table_route = table_route.with_context(|| error::TableRouteNotFoundSnafu {
-            table_name: table_info.table_ref().to_string(),
-        })?;
+        let table_route = table_route.context(TableRouteNotFoundSnafu { table_id })?;
 
         let table = Table {
             id: table_id as u64,

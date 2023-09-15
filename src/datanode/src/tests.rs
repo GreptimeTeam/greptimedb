@@ -23,7 +23,6 @@ use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::ident::TableIdent;
 use common_meta::instruction::{Instruction, InstructionReply, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
@@ -81,31 +80,21 @@ async fn handle_instruction(
 
 fn close_region_instruction() -> Instruction {
     Instruction::CloseRegion(RegionIdent {
-        table_ident: TableIdent {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "demo".to_string(),
-            table_id: 1024,
-            engine: "mito".to_string(),
-        },
+        table_id: 1024,
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,
+        engine: "mito2".to_string(),
     })
 }
 
 fn open_region_instruction() -> Instruction {
     Instruction::OpenRegion(RegionIdent {
-        table_ident: TableIdent {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "demo".to_string(),
-            table_id: 1024,
-            engine: "mito".to_string(),
-        },
+        table_id: 1024,
         region_number: 0,
         cluster_id: 1,
         datanode_id: 2,
+        engine: "mito2".to_string(),
     })
 }
 

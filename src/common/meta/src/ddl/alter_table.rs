@@ -42,7 +42,6 @@ use crate::ddl::DdlContext;
 use crate::error::{
     self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result, TableRouteNotFoundSnafu,
 };
-use crate::ident::TableIdent;
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -308,34 +307,25 @@ impl AlterTableProcedure {
 
     /// Broadcasts the invalidating table cache instructions.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        let table_ref = self.data.table_ref();
-
-        let table_ident = TableIdent {
-            catalog: table_ref.catalog.to_string(),
-            schema: table_ref.schema.to_string(),
-            table: table_ref.table.to_string(),
-            table_id: self.data.table_id(),
-            engine: self.data.table_info().meta.engine.to_string(),
-        };
-
-        self.context
-            .cache_invalidator
-            .invalidate_table(
-                &Context {
-                    subject: Some("Invalidate table cache by alter table procedure".to_string()),
-                },
-                table_ident,
-            )
-            .await?;
-
         let alter_kind = self.alter_kind()?;
-        if matches!(alter_kind, Kind::RenameTable { .. }) {
-            Ok(Status::Done)
+        let cache_invalidator = &self.context.cache_invalidator;
+
+        let status = if matches!(alter_kind, Kind::RenameTable { .. }) {
+            cache_invalidator
+                .invalidate_table_name(&Context::default(), self.data.table_ref().into())
+                .await?;
+
+            Status::Done
         } else {
+            cache_invalidator
+                .invalidate_table_id(&Context::default(), self.data.table_id())
+                .await?;
+
             self.data.state = AlterTableState::SubmitAlterRegionRequests;
 
-            Ok(Status::executing(true))
-        }
+            Status::executing(true)
+        };
+        Ok(status)
     }
 
     fn lock_key_inner(&self) -> Vec<String> {
