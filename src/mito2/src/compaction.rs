@@ -178,21 +178,24 @@ impl CompactionScheduler {
     /// Callers must ensure that the region doesn't have compaction task running.
     fn submit_request(&mut self, req: CompactionRequest) -> Result<()> {
         let region_id = req.region_id();
+        // TODO(hl): build picker according to region options.
+        let picker =
+            compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
+        debug!(
+            "Pick compaction strategy {:?} for region: {}",
+            picker,
+            req.region_id()
+        );
+        // TODO(yingwen): Picker should takes `&req` so we can notify waiters outside
+        // of picker.
+        let Some(mut task) = picker.pick(req) else {
+            // Nothing to compact, remove it from the region map.
+            self.region_status.remove(&region_id);
+            return Ok(());
+        };
+
         self.scheduler
-            .schedule(Box::pin(async {
-                // TODO(hl): build picker according to region options.
-                let picker = compaction_strategy_to_picker(&CompactionStrategy::Twcs(
-                    TwcsOptions::default(),
-                ));
-                debug!(
-                    "Pick compaction strategy {:?} for region: {}",
-                    picker,
-                    req.region_id()
-                );
-                // FIXME(yingwen): We should remove the region from region status.
-                let Some(mut task) = picker.pick(req) else {
-                    return;
-                };
+            .schedule(Box::pin(async move {
                 task.run().await;
             }))
             .map_err(|e| {
