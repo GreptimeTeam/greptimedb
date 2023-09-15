@@ -272,7 +272,7 @@ pub enum Error {
         source: common_runtime::error::Error,
     },
 
-    #[snafu(display("Expect KvBackend but not found, location: {}", location))]
+    #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
     #[snafu(display("Expect MetaClient but not found, location: {}", location))]

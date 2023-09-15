@@ -317,7 +317,7 @@ impl CountdownTask {
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
-                                let _ = self.region_server.set_writable(self.region_id,true);
+                                let _ = self.region_server.set_writable(self.region_id, true);
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:

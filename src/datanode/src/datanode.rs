@@ -18,18 +18,17 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use catalog::local::MemoryCatalogManager;
-use catalog::remote::MetaKvBackend;
+use catalog::kvbackend::MetaKvBackend;
+use catalog::memory::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
-use common_meta::key::table_info::TableInfoManager;
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
@@ -39,7 +38,7 @@ use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::path_utils::{region_dir, WAL_DIR};
+use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -240,35 +239,31 @@ impl DatanodeBuilder {
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
                     table_value.engine.clone(),
+                    table_value.region_storage_path.clone(),
                 ));
             }
         }
 
         info!("going to open {} regions", regions.len());
 
-        let table_info_manager = TableInfoManager::new(kv_backend);
-        for (region_id, engine) in regions {
-            let Some(table_info) = table_info_manager
-                .get(region_id.table_id())
-                .await
-                .context(GetMetadataSnafu)?
-            else {
-                continue;
-            };
-            let catalog = table_info.table_info.catalog_name;
-            let schema = table_info.table_info.schema_name;
+        for (region_id, engine, region_dir) in regions {
             region_server
                 .handle_request(
                     region_id,
                     RegionRequest::Open(RegionOpenRequest {
                         engine: engine.clone(),
-                        region_dir: region_dir(&catalog, &schema, region_id),
+                        region_dir,
                         options: HashMap::new(),
                     }),
                 )
                 .await?;
             if open_with_writable {
-                let _ = region_server.set_writable(region_id, true);
+                if let Err(e) = region_server.set_writable(region_id, true) {
+                    error!(
+                        "failed to set writable for region {region_id}, error: {}",
+                        e
+                    );
+                }
             }
         }
 
