@@ -268,7 +268,7 @@ impl DatanodeBuilder {
                 )
                 .await?;
             if open_with_writable {
-                let _ = region_server.set_writable(&engine, region_id, true);
+                let _ = region_server.set_writable(region_id, true);
             }
         }
 
