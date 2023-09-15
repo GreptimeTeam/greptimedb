@@ -38,7 +38,7 @@ use query::QueryEngineFactory;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::path_utils::WAL_DIR;
+use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -246,7 +246,8 @@ impl DatanodeBuilder {
 
         info!("going to open {} regions", regions.len());
 
-        for (region_id, engine, region_dir) in regions {
+        for (region_id, engine, path) in regions {
+            let region_dir = region_dir(&path, region_id);
             region_server
                 .handle_request(
                     region_id,
