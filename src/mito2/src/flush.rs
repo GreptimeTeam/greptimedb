@@ -30,8 +30,7 @@ use crate::error::{
 };
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
-use crate::region::version::{VersionControlData, VersionRef};
-use crate::region::MitoRegionRef;
+use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
@@ -218,10 +217,10 @@ impl RegionFlushTask {
     /// Converts the flush task into a background job.
     ///
     /// We must call this in the region worker.
-    fn into_flush_job(mut self, region: &MitoRegionRef) -> Job {
+    fn into_flush_job(mut self, version_control: &VersionControlRef) -> Job {
         // Get a version of this region before creating a job to get current
         // wal entry id, sequence and immutable memtables.
-        let version_data = region.version_control.current();
+        let version_data = version_control.current();
 
         Box::pin(async move {
             self.do_flush(version_data).await;
@@ -353,14 +352,15 @@ impl FlushScheduler {
     /// Schedules a flush `task` for specific `region`.
     pub(crate) fn schedule_flush(
         &mut self,
-        region: &MitoRegionRef,
+        region_id: RegionId,
+        version_control: &VersionControlRef,
         task: RegionFlushTask,
     ) -> Result<()> {
-        debug_assert_eq!(region.region_id, task.region_id);
+        debug_assert_eq!(region_id, task.region_id);
 
-        let version = region.version_control.current().version;
+        let version = version_control.current().version;
         if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
-            debug_assert!(!self.region_status.contains_key(&region.region_id));
+            debug_assert!(!self.region_status.contains_key(&region_id));
             // The region has nothing to flush.
             task.on_success();
             return Ok(());
@@ -369,8 +369,8 @@ impl FlushScheduler {
         // Add this region to status map.
         let flush_status = self
             .region_status
-            .entry(region.region_id)
-            .or_insert_with(|| FlushStatus::new(region.clone()));
+            .entry(region_id)
+            .or_insert_with(|| FlushStatus::new(region_id, version_control.clone()));
         // Checks whether we can flush the region now.
         if flush_status.flushing {
             // There is already a flush job running.
@@ -386,18 +386,16 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region directly.
-        region
-            .version_control
-            .freeze_mutable(&task.memtable_builder);
+        version_control.freeze_mutable(&task.memtable_builder);
         // Submit a flush job.
-        let job = task.into_flush_job(region);
+        let job = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
             // If scheduler returns error, senders in the job will be dropped and waiters
             // can get recv errors.
-            error!(e; "Failed to schedule flush job for region {}", region.region_id);
+            error!(e; "Failed to schedule flush job for region {}", region_id);
 
             // Remove from region status if we can't submit the task.
-            self.region_status.remove(&region.region_id);
+            self.region_status.remove(&region_id);
             return Err(e);
         }
         flush_status.flushing = true;
@@ -531,9 +529,10 @@ impl FlushScheduler {
         };
         debug_assert!(!flush_status.flushing);
         let task = flush_status.pending_task.take().unwrap();
-        let region = flush_status.region.clone();
+        let region_id = flush_status.region_id;
+        let version_control = flush_status.version_control.clone();
 
-        self.schedule_flush(&region, task)
+        self.schedule_flush(region_id, &version_control, task)
     }
 }
 
@@ -551,7 +550,9 @@ impl Drop for FlushScheduler {
 /// Tracks running and pending flush tasks and all pending requests of a region.
 struct FlushStatus {
     /// Current region.
-    region: MitoRegionRef,
+    region_id: RegionId,
+    /// Version control of the region.
+    version_control: VersionControlRef,
     /// There is a flush task running.
     ///
     /// It is possible that a region is not flushing but has pending task if the scheduler
@@ -566,9 +567,10 @@ struct FlushStatus {
 }
 
 impl FlushStatus {
-    fn new(region: MitoRegionRef) -> FlushStatus {
+    fn new(region_id: RegionId, version_control: VersionControlRef) -> FlushStatus {
         FlushStatus {
-            region,
+            region_id,
+            version_control,
             flushing: false,
             pending_task: None,
             pending_ddls: Vec::new(),
@@ -591,14 +593,14 @@ impl FlushStatus {
         }
         for ddl in self.pending_ddls {
             ddl.sender.send(Err(err.clone()).context(FlushRegionSnafu {
-                region_id: self.region.region_id,
+                region_id: self.region_id,
             }));
         }
         for write_req in self.pending_writes {
             write_req
                 .sender
                 .send(Err(err.clone()).context(FlushRegionSnafu {
-                    region_id: self.region.region_id,
+                    region_id: self.region_id,
                 }));
         }
     }

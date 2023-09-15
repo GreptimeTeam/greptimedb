@@ -39,7 +39,10 @@ impl<S> RegionWorkerLoop<S> {
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);
         task.push_sender(sender);
-        if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
+        if let Err(e) =
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)
+        {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
         }
     }
@@ -90,7 +93,11 @@ impl<S> RegionWorkerLoop<S> {
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
                 let task = self.new_flush_task(region, FlushReason::EngineFull);
-                self.flush_scheduler.schedule_flush(region, task)?;
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
             }
         }
 
@@ -99,7 +106,11 @@ impl<S> RegionWorkerLoop<S> {
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(region, FlushReason::EngineFull);
-                self.flush_scheduler.schedule_flush(region, task)?;
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
             }
         }
 
