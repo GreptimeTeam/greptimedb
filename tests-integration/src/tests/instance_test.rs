@@ -161,6 +161,7 @@ async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
     let table_name = "various_type_json_with_schema";
     let sql = &format!(
         r#"CREATE EXTERNAL TABLE {table_name} (
+            ts TIMESTAMP TIME INDEX DEFAULT 0,
             a BIGINT NULL,
             b DOUBLE NULL,
             c BOOLEAN NULL,
@@ -177,6 +178,8 @@ async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let fe_instance = instance.frontend();
     let format = "csv";
     let location = find_testing_resource("/tests/data/csv/various_type.csv");
@@ -201,16 +204,16 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     let record_batches = record_batches.iter().collect::<Vec<_>>();
     let column = record_batches[0].column_by_name("Create Table").unwrap();
     let actual = column.get(0);
-    let expect = if instance.is_distributed_mode() {
-        format!(
-            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
+    let expect = format!(
+        r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
   "c_int" BIGINT NULL,
   "c_float" DOUBLE NULL,
   "c_string" DOUBLE NULL,
   "c_bool" BOOLEAN NULL,
   "c_date" DATE NULL,
   "c_datetime" TIMESTAMP(0) NULL,
-
+  "greptime_timestamp" TIMESTAMP(3) NOT NULL DEFAULT '1970-01-01 00:00:00+0000',
+  TIME INDEX ("greptime_timestamp")
 )
 
 ENGINE=file
@@ -219,25 +222,7 @@ WITH(
   location = '{location}',
   regions = 1
 )"#
-        )
-    } else {
-        format!(
-            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
-  "c_int" BIGINT NULL,
-  "c_float" DOUBLE NULL,
-  "c_string" DOUBLE NULL,
-  "c_bool" BOOLEAN NULL,
-  "c_date" DATE NULL,
-  "c_datetime" TIMESTAMP(0) NULL,
-
-)
-ENGINE=file
-WITH(
-  format = 'csv',
-  location = '{location}'
-)"#
-        )
-    };
+    );
     assert_eq!(actual.to_string(), expect);
 }
 
@@ -548,11 +533,49 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        r#"create external table test_table(
+        r#"create external table test_table_0(
+                            ts timestamp time index,
                             host string,
-                            ts timestamp,
                             cpu double default 0,
                             memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        r#"create external table test_table_1(
+                            ts timestamp,
+                            host string,
+                            cpu double default 0,
+                            memory double,
+                            time index (ts)
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        r#"create external table test_table_2(
+                            ts timestamp time index default 0,
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        r#"create external table test_table_3(
+                            ts timestamp default 0,
+                            host string,
+                            cpu double default 0,
+                            memory double,
+                            time index (ts)
                         ) with (location='/tmp/', format='csv');"#,
     )
     .await;
@@ -560,10 +583,22 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInstance>) {
+async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let output = execute_sql(
+        &instance,
+        r#"create external table test_table with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let result = try_execute_sql(
         &instance,
         r#"create external table test_table(
                             host string,
@@ -572,11 +607,42 @@ async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInst
                         ) with (location='/tmp/', format='csv');"#,
     )
     .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    assert!(matches!(result, Err(Error::InvalidSql { .. })));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let result = try_execute_sql(
+        &instance,
+        r#"create external table test_table(
+                            ts timestamp time index null,
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
+
+    let result = try_execute_sql(
+        &instance,
+        r#"create external table test_table(
+                            ts bigint time index,
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='/tmp/', format='csv');"#,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
 }
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "parquet";
     let location = find_testing_resource("/tests/data/parquet/various_type.parquet");
@@ -593,16 +659,17 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------+-----------------+-----+------+---------+---------------+
-| Column     | Type            | Key | Null | Default | Semantic Type |
-+------------+-----------------+-----+------+---------+---------------+
-| c_int      | Int64           |     | YES  |         | FIELD         |
-| c_float    | Float64         |     | YES  |         | FIELD         |
-| c_string   | Float64         |     | YES  |         | FIELD         |
-| c_bool     | Boolean         |     | YES  |         | FIELD         |
-| c_date     | Date            |     | YES  |         | FIELD         |
-| c_datetime | TimestampSecond |     | YES  |         | FIELD         |
-+------------+-----------------+-----+------+---------+---------------+";
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| Column             | Type                 | Key | Null | Default                  | Semantic Type |
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| c_int              | Int64                |     | YES  |                          | FIELD         |
+| c_float            | Float64              |     | YES  |                          | FIELD         |
+| c_string           | Float64              |     | YES  |                          | FIELD         |
+| c_bool             | Boolean              |     | YES  |                          | FIELD         |
+| c_date             | Date                 |     | YES  |                          | FIELD         |
+| c_datetime         | TimestampSecond      |     | YES  |                          | FIELD         |
+| greptime_timestamp | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
