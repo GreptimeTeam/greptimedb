@@ -663,7 +663,7 @@ enable_jaeger_tracing = false"#,
         store_type
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    assert_eq!(body_text, expected_toml_str,);
+    assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
