@@ -85,6 +85,7 @@ impl TableMetaKey for DatanodeTableKey {
 pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
+    #[serde(default)]
     pub engine: String,
     #[serde(default)]
     pub region_storage_path: String,
