@@ -139,6 +139,7 @@ impl StandaloneOptions {
 
     fn datanode_options(self) -> DatanodeOptions {
         DatanodeOptions {
+            node_id: Some(0),
             enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,

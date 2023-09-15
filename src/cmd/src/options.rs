@@ -26,6 +26,7 @@ use crate::error::{LoadLayeredConfigSnafu, Result};
 pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
+/// Options mixed up from datanode, frontend and metasrv.
 pub struct MixOptions {
     pub data_home: String,
     pub procedure_cfg: ProcedureConfig,

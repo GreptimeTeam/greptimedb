@@ -377,10 +377,10 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing node id in Datanode config"))]
+    #[snafu(display("Missing node id in Datanode config, location: {}", location))]
     MissingNodeId { location: Location },
 
-    #[snafu(display("Missing node id option in distributed mode"))]
+    #[snafu(display("Missing node id option in distributed mode, location: {}", location))]
     MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
