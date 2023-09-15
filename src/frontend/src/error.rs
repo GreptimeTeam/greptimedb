@@ -642,6 +642,15 @@ pub enum Error {
         source: query::error::Error,
     },
 
+    #[snafu(display(
+        "The schema of the file table is incompatible with the table schema: {}",
+        source
+    ))]
+    SchemaIncompatible {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
     #[snafu(display("Invalid COPY parameter, key: {}, value: {}", key, value))]
     InvalidCopyParameter {
         key: String,
@@ -727,7 +736,8 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::EmptyData { .. }
-            | Error::ColumnNoneDefaultValue { .. } => StatusCode::InvalidArguments,
+            | Error::ColumnNoneDefaultValue { .. }
+            | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

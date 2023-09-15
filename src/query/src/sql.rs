@@ -29,13 +29,13 @@ use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::Timestamp;
 use datatypes::prelude::*;
-use datatypes::schema::{ColumnSchema, RawSchema, Schema};
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, RawSchema, Schema};
 use datatypes::vectors::{Helper, StringVector};
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use sql::statements::create::Partitions;
 use sql::statements::show::{ShowDatabases, ShowKind, ShowTables};
 use table::requests::{FILE_TABLE_LOCATION_KEY, FILE_TABLE_PATTERN_KEY};
@@ -360,39 +360,85 @@ pub async fn infer_file_table_schema(
     ))
 }
 
-pub fn infer_time_index_or_add_default(columns: &mut Vec<ColumnSchema>) -> Result<String> {
-    if let Some(time_index_column) = columns.iter().find(|c| c.is_time_index()) {
-        return Ok(time_index_column.name.clone());
+// Converts the file column schemas to table column schemas.
+// Returns the column schemas and the time index column name.
+//
+// More specifically, this function will do the following:
+// 1. Add a default time index column if there is no time index column
+//    in the file column schemas, or
+// 2. If the file column schemas contain a column with name conflicts with
+//    the default time index column, it will replace the column schema
+//    with the default one.
+pub fn file_column_schemas_to_table(
+    file_column_schemas: &[ColumnSchema],
+) -> Result<(Vec<ColumnSchema>, String)> {
+    let mut column_schemas = file_column_schemas.to_owned();
+    if let Some(time_index_column) = column_schemas.iter().find(|c| c.is_time_index()) {
+        let time_index = time_index_column.name.clone();
+        return Ok((column_schemas, time_index));
     }
 
-    if let Some(column) = columns
+    let timestamp_type = ConcreteDataType::timestamp_millisecond_datatype();
+    let default_zero = Value::Timestamp(Timestamp::new_millisecond(0));
+    let timestamp_column_schema = ColumnSchema::new(GREPTIME_TIMESTAMP, timestamp_type, false)
+        .with_time_index(true)
+        .with_default_constraint(Some(ColumnDefaultConstraint::Value(default_zero)))
+        .unwrap();
+
+    if let Some(column_schema) = column_schemas
         .iter_mut()
-        .find(|column| column.name == GREPTIME_TIMESTAMP)
+        .find(|column_schema| column_schema.name == GREPTIME_TIMESTAMP)
     {
-        return if let ConcreteDataType::Timestamp(_) = column.data_type {
-            *column = column.clone().with_time_index(true);
-            Ok(GREPTIME_TIMESTAMP.to_string())
-        } else {
-            error::GreptimeTimestampColumnDataTypeSnafu {
-                data_type: column.data_type.clone(),
-            }
-            .fail()
-        };
+        // Replace the column schema with the default one
+        *column_schema = timestamp_column_schema;
+    } else {
+        column_schemas.push(timestamp_column_schema);
     }
 
-    let added_time_index_column = ColumnSchema::new(
-        GREPTIME_TIMESTAMP,
-        ConcreteDataType::timestamp_millisecond_datatype(),
-        false,
-    )
-    .with_time_index(true)
-    .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Value(
-        Value::Timestamp(Timestamp::new_millisecond(0)),
-    )))
-    .unwrap();
-    columns.push(added_time_index_column);
+    Ok((column_schemas, GREPTIME_TIMESTAMP.to_string()))
+}
 
-    Ok(GREPTIME_TIMESTAMP.to_string())
+/// This function checks if the column schemas from a file can be matched with
+/// the column schemas of a table.
+///
+/// More specifically, for each column seen in the table schema,
+/// - If the same column does exist in the file schema, it checks if the data
+/// type of the file column can be casted into the form of the table column.
+/// - If the same column does not exist in the file schema, it checks if the
+/// table column is nullable or has a default constraint.
+pub fn check_file_to_table_schema_compatibility(
+    file_column_schemas: &[ColumnSchema],
+    table_column_schemas: &[ColumnSchema],
+) -> Result<()> {
+    let file_schemas_map = file_column_schemas
+        .iter()
+        .map(|s| (s.name.clone(), s))
+        .collect::<HashMap<_, _>>();
+
+    for table_column in table_column_schemas {
+        if let Some(file_column) = file_schemas_map.get(&table_column.name) {
+            // TODO(zhongzc): a temporary solution, we should use `can_cast_to` once it's ready.
+            ensure!(
+                file_column
+                    .data_type
+                    .can_arrow_type_cast_to(&table_column.data_type),
+                error::ColumnSchemaIncompatibleSnafu {
+                    column: table_column.name.clone(),
+                    file_type: file_column.data_type.clone(),
+                    table_type: table_column.data_type.clone(),
+                }
+            );
+        } else {
+            ensure!(
+                table_column.is_nullable() || table_column.default_constraint().is_some(),
+                error::ColumnSchemaNoDefaultSnafu {
+                    column: table_column.name.clone(),
+                }
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn FileFormat>> {

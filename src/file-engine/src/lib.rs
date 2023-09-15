@@ -25,9 +25,11 @@ pub(crate) mod stream;
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod test_util;
 
+use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileOptions {
     pub files: Vec<String>,
+    pub file_column_schemas: Vec<ColumnSchema>,
 }

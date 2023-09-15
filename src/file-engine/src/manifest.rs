@@ -102,10 +102,9 @@ impl FileRegionManifest {
         self.get_option(table::requests::FILE_TABLE_LOCATION_KEY)
     }
 
-    pub fn files(&self) -> Result<Vec<String>> {
+    pub fn file_options(&self) -> Result<FileOptions> {
         let encoded_opts = self.get_option(table::requests::FILE_TABLE_META_KEY)?;
-        let meta: FileOptions = serde_json::from_str(&encoded_opts).context(DecodeJsonSnafu)?;
-        Ok(meta.files)
+        serde_json::from_str(&encoded_opts).context(DecodeJsonSnafu)
     }
 
     pub fn format(&self) -> Result<Format> {

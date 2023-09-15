@@ -25,7 +25,8 @@ use common_grpc_expr::util::ColumnExpr;
 use datatypes::schema::ColumnSchema;
 use file_engine::FileOptions;
 use query::sql::{
-    infer_file_table_schema, infer_time_index_or_add_default, prepare_file_table_files,
+    check_file_to_table_schema_compatibility, file_column_schemas_to_table,
+    infer_file_table_schema, prepare_file_table_files,
 };
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
@@ -41,7 +42,7 @@ use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
     InferFileTableTimeIndexSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    PrepareFileTableSnafu, Result, UnrecognizedTableOptionSnafu,
+    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::table::table_idents_to_full_name;
 
@@ -131,30 +132,38 @@ pub(crate) async fn create_external_expr(
         .await
         .context(PrepareFileTableSnafu)?;
 
-    let (time_index, primary_keys, column_defs) = if !create.columns.is_empty() {
+    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
+        .await
+        .context(InferFileTableSchemaSnafu)?
+        .column_schemas;
+
+    let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
+        // expanded form
         let time_index = find_time_index(&create.constraints)?;
         let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
-        let column_defs = columns_to_expr(&create.columns, &time_index, &primary_keys)?;
-        (time_index, primary_keys, column_defs)
+        let column_schemas = columns_to_column_schemas(&create.columns, &time_index)?;
+        (time_index, primary_keys, column_schemas)
     } else {
-        let mut column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
-            .await
-            .context(InferFileTableSchemaSnafu)?
-            .column_schemas;
-        let time_index = infer_time_index_or_add_default(&mut column_schemas)
+        // inferred form
+        let (column_schemas, time_index) = file_column_schemas_to_table(&file_column_schemas)
             .context(InferFileTableTimeIndexSnafu)?;
         let primary_keys = vec![];
-
-        let column_defs = column_schemas_to_defs(column_schemas, &primary_keys)?;
-        (time_index, primary_keys, column_defs)
+        (time_index, primary_keys, column_schemas)
     };
 
-    let meta = FileOptions { files };
+    check_file_to_table_schema_compatibility(&file_column_schemas, &table_column_schemas)
+        .context(SchemaIncompatibleSnafu)?;
+
+    let meta = FileOptions {
+        files,
+        file_column_schemas,
+    };
     let _ = table_options.insert(
         FILE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
 
+    let column_defs = column_schemas_to_defs(table_column_schemas, &primary_keys)?;
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
@@ -288,12 +297,18 @@ fn columns_to_expr(
     time_index: &str,
     primary_keys: &[String],
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = column_defs
+    let column_schemas = columns_to_column_schemas(column_defs, time_index)?;
+    column_schemas_to_defs(column_schemas, primary_keys)
+}
+
+fn columns_to_column_schemas(
+    column_defs: &[ColumnDef],
+    time_index: &str,
+) -> Result<Vec<ColumnSchema>> {
+    column_defs
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
-        .collect::<Result<Vec<ColumnSchema>>>()?;
-
-    column_schemas_to_defs(column_schemas, primary_keys)
+        .collect::<Result<Vec<ColumnSchema>>>()
 }
 
 pub(crate) fn column_schemas_to_defs(

@@ -243,13 +243,20 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Expected timestamp column to be of type Timestamp, but was: {:?}",
-        data_type
+        "Column schema incompatible, column: {}, file_type: {}, table_type: {}",
+        column,
+        file_type,
+        table_type
     ))]
-    GreptimeTimestampColumnDataType {
-        data_type: ConcreteDataType,
+    ColumnSchemaIncompatible {
+        column: String,
+        file_type: ConcreteDataType,
+        table_type: ConcreteDataType,
         location: Location,
     },
+
+    #[snafu(display("Column schema has no default value, column: {}", column))]
+    ColumnSchemaNoDefault { column: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -271,7 +278,8 @@ impl ErrorExt for Error {
             | BuildRegex { .. }
             | ConvertSchema { .. }
             | AddSystemTimeOverflow { .. }
-            | GreptimeTimestampColumnDataType { .. } => StatusCode::InvalidArguments,
+            | ColumnSchemaIncompatible { .. }
+            | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
             EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),

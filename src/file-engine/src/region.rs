@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::build_backend;
 use common_recordbatch::SendableRecordBatchStream;
+use datatypes::schema::Schema;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -27,11 +28,12 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::error::{BuildBackendSnafu, Result};
 use crate::manifest::FileRegionManifest;
 use crate::stream::{create_stream, CreateScanPlanContext, ScanPlanConfig};
+use crate::FileOptions;
 
 #[derive(Debug)]
 pub struct FileRegion {
     region_dir: String,
-    files: Vec<String>,
+    file_options: FileOptions,
     url: String,
     format: Format,
     options: HashMap<String, String>,
@@ -55,7 +57,7 @@ impl FileRegion {
 
         let region_dir = request.region_dir;
         let url = manifest.url()?;
-        let files = manifest.files()?;
+        let file_options = manifest.file_options()?;
         let format = manifest.format()?;
         let options = manifest.options.clone();
         let metadata = manifest.metadata()?;
@@ -65,7 +67,7 @@ impl FileRegion {
         Ok(Arc::new(Self {
             region_dir,
             url,
-            files,
+            file_options,
             format,
             options,
             metadata,
@@ -83,7 +85,7 @@ impl FileRegion {
         Ok(Arc::new(Self {
             region_dir: request.region_dir,
             url: manifest.url()?,
-            files: manifest.files()?,
+            file_options: manifest.file_options()?,
             format: manifest.format()?,
             metadata: manifest.metadata()?,
             options: manifest.options,
@@ -96,12 +98,13 @@ impl FileRegion {
 
     pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
+        let file_schema = Arc::new(Schema::new(self.file_options.file_column_schemas.clone()));
         create_stream(
             &self.format,
             &CreateScanPlanContext::default(),
             &ScanPlanConfig {
-                file_schema: self.metadata.schema.clone(),
-                files: &self.files,
+                file_schema,
+                files: &self.file_options.files,
                 projection: request.projection.as_ref(),
                 filters: &request.filters,
                 limit: request.limit,
@@ -143,7 +146,7 @@ mod tests {
 
         assert_eq!(region.region_dir, "create_region_dir/");
         assert_eq!(region.url, "test");
-        assert_eq!(region.files, vec!["1.csv"]);
+        assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
         assert_eq!(region.options, new_test_options());
         assert_eq!(region.metadata.region_id, region_id);
@@ -192,7 +195,7 @@ mod tests {
 
         assert_eq!(region.region_dir, "open_region_dir/");
         assert_eq!(region.url, "test");
-        assert_eq!(region.files, vec!["1.csv"]);
+        assert_eq!(region.file_options.files, vec!["1.csv"]);
         assert_matches!(region.format, Format::Csv { .. });
         assert_eq!(region.options, new_test_options());
         assert_eq!(region.metadata.region_id, region_id);
