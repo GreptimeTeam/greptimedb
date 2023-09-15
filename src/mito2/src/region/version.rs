@@ -105,7 +105,6 @@ impl VersionControl {
             VersionBuilder::from_version(version)
                 .apply_edit(edit, purger)
                 .remove_memtables(memtables_to_remove)
-                .truncated_entry_id(None)
                 .build(),
         );
 
