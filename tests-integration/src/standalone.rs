@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use catalog::remote::DummyKvCacheInvalidator;
+use catalog::kvbackend::DummyKvCacheInvalidator;
 use common_base::Plugins;
 use common_config::KvStoreConfig;
 use common_procedure::options::ProcedureConfig;

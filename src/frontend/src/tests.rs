@@ -12,25 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+mod partition_manager;
 
-pub use client::{CachedMetaKvBackend, MetaKvBackend};
-
-mod client;
-
-#[cfg(feature = "testing")]
-pub mod mock;
-
-#[async_trait::async_trait]
-pub trait KvCacheInvalidator: Send + Sync {
-    async fn invalidate_key(&self, key: &[u8]);
-}
-
-pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
-
-pub struct DummyKvCacheInvalidator;
-
-#[async_trait::async_trait]
-impl KvCacheInvalidator for DummyKvCacheInvalidator {
-    async fn invalidate_key(&self, _key: &[u8]) {}
-}
+pub(crate) use partition_manager::{create_partition_rule_manager, new_test_table_info};

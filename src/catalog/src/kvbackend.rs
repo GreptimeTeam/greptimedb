@@ -11,21 +11,29 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(assert_matches)]
 
-pub mod dist_table;
-pub mod engine;
-pub mod error;
-pub mod metadata;
-pub mod predicate;
-pub mod requests;
-pub mod stats;
-pub mod table;
-pub mod test_util;
-pub mod thin_table;
+use std::sync::Arc;
 
-pub use store_api::storage::RegionStat;
+pub use client::{CachedMetaKvBackend, MetaKvBackend};
 
-pub use crate::error::{Error, Result};
-pub use crate::stats::{ColumnStatistics, TableStatistics};
-pub use crate::table::{Table, TableRef};
+mod client;
+mod manager;
+
+#[cfg(feature = "testing")]
+pub mod mock;
+pub use manager::KvBackendCatalogManager;
+
+/// KvBackend cache invalidator
+#[async_trait::async_trait]
+pub trait KvCacheInvalidator: Send + Sync {
+    async fn invalidate_key(&self, key: &[u8]);
+}
+
+pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
+
+pub struct DummyKvCacheInvalidator;
+
+#[async_trait::async_trait]
+impl KvCacheInvalidator for DummyKvCacheInvalidator {
+    async fn invalidate_key(&self, _key: &[u8]) {}
+}

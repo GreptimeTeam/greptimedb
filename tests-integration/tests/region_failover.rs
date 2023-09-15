@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
-use catalog::remote::CachedMetaKvBackend;
+use catalog::kvbackend::CachedMetaKvBackend;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::ident::TableIdent;
 use common_meta::key::table_name::TableNameKey;

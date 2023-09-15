@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use catalog::remote::KvCacheInvalidatorRef;
+use catalog::kvbackend::KvCacheInvalidatorRef;
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,

@@ -16,13 +16,6 @@ use std::any::Any;
 use std::collections::BTreeSet;
 use std::sync::{Arc, Weak};
 
-use catalog::error::{
-    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
-    TableMetadataManagerSnafu,
-};
-use catalog::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
-use catalog::remote::KvCacheInvalidatorRef;
-use catalog::CatalogManager;
 use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
@@ -40,11 +33,18 @@ use common_telemetry::debug;
 use futures_util::TryStreamExt;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
+use table::dist_table::DistTable;
 use table::metadata::TableId;
 use table::table::numbers::{NumbersTable, NUMBERS_TABLE_NAME};
 use table::TableRef;
 
-use crate::table::DistTable;
+use crate::error::{
+    self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
+    TableMetadataManagerSnafu,
+};
+use crate::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
+use crate::kvbackend::KvCacheInvalidatorRef;
+use crate::CatalogManager;
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -52,7 +52,7 @@ use crate::table::DistTable;
 /// a kv-backend which persists the metadata of a table. And system tables
 /// comes from [SystemCatalog], which is static and read-only.
 #[derive(Clone)]
-pub struct FrontendCatalogManager {
+pub struct KvBackendCatalogManager {
     // TODO(LFC): Maybe use a real implementation for Standalone mode.
     // Now we use `NoopKvCacheInvalidator` for Standalone mode. In Standalone mode, the KV backend
     // is implemented by RaftEngine. Maybe we need a cache for it?
@@ -65,9 +65,10 @@ pub struct FrontendCatalogManager {
 }
 
 #[async_trait::async_trait]
-impl CacheInvalidator for FrontendCatalogManager {
+impl CacheInvalidator for KvBackendCatalogManager {
     async fn invalidate_table_name(&self, _ctx: &Context, table_name: TableName) -> MetaResult<()> {
         let key: TableNameKey = (&table_name).into();
+
         self.backend_cache_invalidator
             .invalidate_key(&key.as_raw_key())
             .await;
@@ -102,7 +103,7 @@ impl CacheInvalidator for FrontendCatalogManager {
     }
 }
 
-impl FrontendCatalogManager {
+impl KvBackendCatalogManager {
     pub fn new(
         backend: KvBackendRef,
         backend_cache_invalidator: KvCacheInvalidatorRef,
@@ -139,7 +140,7 @@ impl FrontendCatalogManager {
 }
 
 #[async_trait::async_trait]
-impl CatalogManager for FrontendCatalogManager {
+impl CatalogManager for KvBackendCatalogManager {
     async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
         let stream = self
             .table_metadata_manager
@@ -278,7 +279,7 @@ impl CatalogManager for FrontendCatalogManager {
 /// - information_schema.columns
 #[derive(Clone)]
 struct SystemCatalog {
-    catalog_manager: Weak<FrontendCatalogManager>,
+    catalog_manager: Weak<KvBackendCatalogManager>,
 }
 
 impl SystemCatalog {

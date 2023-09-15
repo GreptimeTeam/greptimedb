@@ -123,7 +123,7 @@ mod tests {
     use session::context::QueryContext;
 
     use super::*;
-    use crate::local::MemoryCatalogManager;
+    use crate::memory::MemoryCatalogManager;
 
     #[test]
     fn test_validate_table_ref() {

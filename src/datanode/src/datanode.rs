@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use catalog::local::MemoryCatalogManager;
+use catalog::memory::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::WalConfig;

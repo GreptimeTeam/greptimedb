@@ -65,7 +65,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
-    use crate::table::test::{create_partition_rule_manager, new_test_table_info};
+    use crate::tests::{create_partition_rule_manager, new_test_table_info};
 
     async fn prepare_mocked_backend() -> KvBackendRef {
         let backend = Arc::new(MemoryKvBackend::default());

@@ -38,6 +38,7 @@ use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
 use sql::statements::sql_value_to_value;
+use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
 use table::TableRef;
@@ -48,7 +49,6 @@ use crate::error::{
     DeserializePartitionSnafu, ParseSqlSnafu, Result, SchemaNotFoundSnafu,
     TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
 };
-use crate::table::DistTable;
 use crate::{expr_factory, MAX_VALUE};
 
 impl StatementExecutor {
