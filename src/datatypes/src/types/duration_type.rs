@@ -134,9 +134,6 @@ macro_rules! impl_data_type_for_duration {
                 fn cast_value_ref(value: ValueRef) -> crate::Result<Option<Self::Wrapper>> {
                     match value {
                         ValueRef::Null => Ok(None),
-                        ValueRef::Int64(v) =>{
-                            Ok(Some([<Duration $unit>]::from(v)))
-                        }
                         ValueRef::Duration(t) => match t.unit() {
                             TimeUnit::$unit => Ok(Some([<Duration $unit>](t))),
                             other => error::CastTypeSnafu {
