@@ -85,6 +85,7 @@ impl TableMetaKey for DatanodeTableKey {
 pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
+    #[serde(default)]
     pub engine: String,
     version: u64,
 }
@@ -254,6 +255,11 @@ mod tests {
 
         let actual = DatanodeTableValue::try_from_raw_value(literal).unwrap();
         assert_eq!(actual, value);
+
+        // test serde default
+        let raw_str = br#"{"table_id":42,"regions":[1,2,3],"version":1}"#;
+        let parsed = DatanodeTableValue::try_from_raw_value(raw_str);
+        assert!(parsed.is_ok());
     }
 
     #[test]
