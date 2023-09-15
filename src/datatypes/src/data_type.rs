@@ -223,7 +223,6 @@ impl ConcreteDataType {
     /// Try to cast data type as a [`DurationType`].
     pub fn as_duration(&self) -> Option<DurationType> {
         match self {
-            ConcreteDataType::Int64(_) => Some(DurationType::Millisecond(DurationMillisecondType)),
             ConcreteDataType::Duration(d) => Some(*d),
             _ => None,
         }
