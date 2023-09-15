@@ -253,9 +253,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table info not found: {}", table_name))]
+    #[snafu(display("Table info not found: {}", table_id))]
     TableInfoNotFound {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 

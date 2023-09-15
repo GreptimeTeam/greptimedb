@@ -42,3 +42,8 @@ pub fn handle_retry_error(e: Error) -> ProcedureError {
         ProcedureError::external(e)
     }
 }
+
+#[inline]
+pub fn region_storage_path(catalog: &str, schema: &str) -> String {
+    format!("{}/{}", catalog, schema)
+}

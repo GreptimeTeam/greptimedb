@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_meta::ddl::utils::region_storage_path;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
@@ -23,7 +24,9 @@ use snafu::{OptionExt, ResultExt};
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
-use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
+use crate::error::{
+    self, Result, RetryLaterSnafu, TableInfoNotFoundSnafu, TableRouteNotFoundSnafu,
+};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
@@ -68,6 +71,17 @@ impl UpdateRegionMetadata {
             .context(error::TableMetadataManagerSnafu)?
             .context(TableRouteNotFoundSnafu { table_id })?;
 
+        let table_info = ctx
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(TableInfoNotFoundSnafu { table_id })?
+            .table_info;
+        let region_storage_patch =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+
         let mut new_region_routes = table_route_value.region_routes.clone();
 
         for region_route in new_region_routes.iter_mut() {
@@ -84,7 +98,13 @@ impl UpdateRegionMetadata {
         );
 
         ctx.table_metadata_manager
-            .update_table_route(table_id, engine, table_route_value, new_region_routes)
+            .update_table_route(
+                table_id,
+                engine,
+                &region_storage_patch,
+                table_route_value,
+                new_region_routes,
+            )
             .await
             .context(error::UpdateTableRouteSnafu)?;
 
