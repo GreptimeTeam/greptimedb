@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use catalog::local::new_memory_catalog_manager;
+use catalog::memory::new_memory_catalog_manager;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;

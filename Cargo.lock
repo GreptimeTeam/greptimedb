@@ -1261,6 +1261,7 @@ dependencies = [
  "moka 0.11.3",
  "object-store",
  "parking_lot",
+ "partition",
  "regex",
  "serde",
  "serde_json",
