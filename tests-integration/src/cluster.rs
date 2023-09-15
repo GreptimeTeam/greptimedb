@@ -41,7 +41,8 @@ use tonic::transport::Server;
 use tower::service_fn;
 
 use crate::test_util::{
-    create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard, StorageType,
+    self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
+    StorageType,
 };
 
 pub struct GreptimeDbCluster {
@@ -100,6 +101,8 @@ impl GreptimeDbClusterBuilder {
         let frontend = self
             .build_frontend(meta_srv.clone(), datanode_clients)
             .await;
+
+        test_util::prepare_another_catalog_and_schema(frontend.as_ref()).await;
 
         frontend.start().await.unwrap();
 
