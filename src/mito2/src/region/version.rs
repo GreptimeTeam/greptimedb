@@ -202,7 +202,7 @@ pub(crate) struct Version {
     pub(crate) flushed_sequence: SequenceNumber,
     /// Latest entry id during the truncating table.
     ///
-    /// Used to check if it is a flush task during the truncation table.
+    /// Used to check if it is a flush task during the truncating table.
     pub(crate) truncated_entry_id: Option<EntryId>,
     // TODO(yingwen): RegionOptions.
 }
