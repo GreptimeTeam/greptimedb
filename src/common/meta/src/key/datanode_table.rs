@@ -87,15 +87,23 @@ pub struct DatanodeTableValue {
     pub regions: Vec<RegionNumber>,
     #[serde(default)]
     pub engine: String,
+    #[serde(default)]
+    pub region_storage_path: String,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, engine: String) -> Self {
+    pub fn new(
+        table_id: TableId,
+        regions: Vec<RegionNumber>,
+        engine: String,
+        region_storage_path: String,
+    ) -> Self {
         Self {
             table_id,
             regions,
             engine,
+            region_storage_path,
             version: 0,
         }
     }
@@ -147,13 +155,19 @@ impl DatanodeTableManager {
         &self,
         table_id: TableId,
         engine: &str,
+        region_storage_path: &str,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
                 let key = DatanodeTableKey::new(datanode_id, table_id);
-                let val = DatanodeTableValue::new(table_id, regions, engine.to_string());
+                let val = DatanodeTableValue::new(
+                    table_id,
+                    regions,
+                    engine.to_string(),
+                    region_storage_path.to_string(),
+                );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
             })
@@ -169,6 +183,7 @@ impl DatanodeTableManager {
         &self,
         table_id: TableId,
         engine: &str,
+        region_storage_path: &str,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
     ) -> Result<Txn> {
@@ -189,16 +204,26 @@ impl DatanodeTableManager {
                 if *current_region != regions {
                     let key = DatanodeTableKey::new(datanode, table_id);
                     let raw_key = key.as_raw_key();
-                    let val = DatanodeTableValue::new(table_id, regions, engine.to_string())
-                        .try_as_raw_value()?;
+                    let val = DatanodeTableValue::new(
+                        table_id,
+                        regions,
+                        engine.to_string(),
+                        region_storage_path.to_string(),
+                    )
+                    .try_as_raw_value()?;
                     opts.push(TxnOp::Put(raw_key, val));
                 }
             } else {
                 // New datanodes
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(table_id, regions, engine.to_string())
-                    .try_as_raw_value()?;
+                let val = DatanodeTableValue::new(
+                    table_id,
+                    regions,
+                    engine.to_string(),
+                    region_storage_path.to_string(),
+                )
+                .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
         }
@@ -246,9 +271,10 @@ mod tests {
             table_id: 42,
             regions: vec![1, 2, 3],
             engine: Default::default(),
+            region_storage_path: Default::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);

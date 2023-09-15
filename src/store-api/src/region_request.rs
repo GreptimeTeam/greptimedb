@@ -70,7 +70,7 @@ impl RegionRequest {
                     .map(ColumnMetadata::try_from_column_def)
                     .collect::<Result<Vec<_>>>()?;
                 let region_id = create.region_id.into();
-                let region_dir = region_dir(&create.catalog, &create.schema, region_id);
+                let region_dir = region_dir(&create.path, region_id);
                 Ok(vec![(
                     region_id,
                     Self::Create(RegionCreateRequest {
@@ -89,7 +89,7 @@ impl RegionRequest {
             )]),
             region_request::Body::Open(open) => {
                 let region_id = open.region_id.into();
-                let region_dir = region_dir(&open.catalog, &open.schema, region_id);
+                let region_dir = region_dir(&open.path, region_id);
                 Ok(vec![(
                     region_id,
                     Self::Open(RegionOpenRequest {

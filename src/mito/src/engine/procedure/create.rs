@@ -23,7 +23,7 @@ use common_telemetry::metric::Timer;
 use datatypes::schema::{Schema, SchemaRef};
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
-use store_api::path_utils::table_dir;
+use store_api::path_utils::table_dir_with_catalog_and_schema;
 use store_api::storage::{
     ColumnId, CompactionStrategy, CreateOptions, EngineContext, OpenOptions,
     RegionDescriptorBuilder, RegionId, RegionNumber, StorageEngine,
@@ -208,7 +208,7 @@ impl<S: StorageEngine> TableCreator<S> {
     /// - Callers MUST acquire the table lock first.
     /// - The procedure may call this method multiple times.
     pub(crate) async fn create_table(&mut self) -> Result<TableRef> {
-        let table_dir = table_dir(
+        let table_dir = table_dir_with_catalog_and_schema(
             &self.data.request.catalog_name,
             &self.data.request.schema_name,
             self.data.request.id,

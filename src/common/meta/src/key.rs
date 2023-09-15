@@ -71,6 +71,7 @@ use table_name::{TableNameKey, TableNameManager, TableNameValue};
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
+use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
@@ -242,6 +243,8 @@ impl TableMetadataManager {
         table_info.meta.region_numbers = region_numbers;
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.clone();
+        let region_storage_path =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
         // Creates table name.
         let table_name = TableNameKey::new(
@@ -261,9 +264,12 @@ impl TableMetadataManager {
 
         // Creates datanode table key value pairs.
         let distribution = region_distribution(&region_routes)?;
-        let create_datanode_table_txn =
-            self.datanode_table_manager()
-                .build_create_txn(table_id, &engine, distribution)?;
+        let create_datanode_table_txn = self.datanode_table_manager().build_create_txn(
+            table_id,
+            &engine,
+            &region_storage_path,
+            distribution,
+        )?;
 
         // Creates table route.
         let table_route_value = TableRouteValue::new(region_routes);
@@ -441,6 +447,7 @@ impl TableMetadataManager {
         &self,
         table_id: TableId,
         engine: &str,
+        region_storage_path: &str,
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
     ) -> Result<()> {
@@ -452,6 +459,7 @@ impl TableMetadataManager {
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
             engine,
+            region_storage_path,
             current_region_distribution,
             new_region_distribution,
         )?;
@@ -554,6 +562,7 @@ mod tests {
     use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder};
 
     use super::datanode_table::DatanodeTableKey;
+    use crate::ddl::utils::region_storage_path;
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
@@ -867,6 +876,8 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let engine = table_info.meta.engine.as_str();
+        let region_storage_path =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
         let current_table_route_value = TableRouteValue::new(region_routes.clone());
         // creates metadata.
         table_metadata_manager
@@ -884,6 +895,7 @@ mod tests {
             .update_table_route(
                 table_id,
                 engine,
+                &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
             )
@@ -896,6 +908,7 @@ mod tests {
             .update_table_route(
                 table_id,
                 engine,
+                &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
             )
@@ -909,6 +922,7 @@ mod tests {
             .update_table_route(
                 table_id,
                 engine,
+                &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
             )
@@ -925,7 +939,13 @@ mod tests {
             new_region_route(4, 4),
         ]);
         assert!(table_metadata_manager
-            .update_table_route(table_id, engine, wrong_table_route_value, new_region_routes)
+            .update_table_route(
+                table_id,
+                engine,
+                &region_storage_path,
+                wrong_table_route_value,
+                new_region_routes
+            )
             .await
             .is_err());
     }
