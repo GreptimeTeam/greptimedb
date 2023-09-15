@@ -116,8 +116,33 @@ impl CompactionScheduler {
         }
         req.push_waiter(waiter);
 
-        // Submit compaction request.
-        self.submit_request(req)
+        // TODO(hl): build picker according to region options.
+        let picker =
+            compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
+        let region_id = req.region_id();
+        debug!(
+            "Pick compaction strategy {:?} for region: {}",
+            picker, region_id
+        );
+        let Some(mut task) = picker.pick(req) else {
+            // Nothing to compact, remove it from the region map.
+            self.region_status.remove(&region_id);
+            return Ok(());
+        };
+
+        // Submit the compaction task.
+        self.scheduler
+            .schedule(Box::pin(async move {
+                task.run().await;
+            }))
+            .map_err(|e| {
+                error!(e; "Failed to submit compaction request for region {}", region_id);
+
+                // If failed to submit the job, we need to remove the region from the scheduler.
+                self.region_status.remove(&region_id);
+
+                e
+            })
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
@@ -125,6 +150,7 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
+        status.compacting = false;
 
         // TODO(yingwen): We should always try to compact the region until picker
         // returns None.
@@ -173,41 +199,6 @@ impl CompactionScheduler {
 
         // Notifies all pending tasks.
         status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
-    }
-
-    /// Submit a compaction request.
-    ///
-    /// Callers must ensure that the region doesn't have compaction task running.
-    fn submit_request(&mut self, req: CompactionRequest) -> Result<()> {
-        let region_id = req.region_id();
-        // TODO(hl): build picker according to region options.
-        let picker =
-            compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
-        debug!(
-            "Pick compaction strategy {:?} for region: {}",
-            picker,
-            req.region_id()
-        );
-        // TODO(yingwen): Picker should takes `&req` so we can notify waiters outside
-        // of picker.
-        let Some(mut task) = picker.pick(req) else {
-            // Nothing to compact, remove it from the region map.
-            self.region_status.remove(&region_id);
-            return Ok(());
-        };
-
-        self.scheduler
-            .schedule(Box::pin(async move {
-                task.run().await;
-            }))
-            .map_err(|e| {
-                error!(e; "Failed to submit compaction request for region {}", region_id);
-
-                // If failed to submit the job, we need to remove the region from the scheduler.
-                self.region_status.remove(&region_id);
-
-                e
-            })
     }
 
     /// Creates a new compaction request for compaction picker.
