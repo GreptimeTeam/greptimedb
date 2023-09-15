@@ -122,7 +122,7 @@ mod tests {
         assert!(is_internal_column(OP_TYPE_COLUMN_NAME));
         assert!(is_internal_column(PRIMARY_KEY_COLUMN_NAME));
 
-        let vaild_name: String = "GreptimeDB".to_string() + SEQUENCE_COLUMN_NAME;
-        assert!(!is_internal_column(&vaild_name));
+        let valid_name: String = "GreptimeDB".to_string() + SEQUENCE_COLUMN_NAME;
+        assert!(!is_internal_column(&valid_name));
     }
 }
