@@ -46,7 +46,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(region_ident) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
-                    engine: region_ident.engine.to_string(),
+                    engine: region_ident.engine,
                     region_dir: "".to_string(),
                     options: HashMap::new(),
                 });
