@@ -37,8 +37,24 @@ impl<'a> ParserContext<'a> {
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
+        } else if self.consume_token("FULL") {
+            if self.consume_token("TABLES") {
+                self.parse_show_full_tables()
+            } else {
+                self.unsupported(self.peek_token_as_string())
+            }
         } else {
             self.unsupported(self.peek_token_as_string())
+        }
+    }
+
+    fn parse_show_full_tables(&mut self) -> Result<Statement> {
+        match self.parser.peek_token().token {
+            Token::EOF | Token::SemiColon => Ok(Statement::ShowTables(ShowTables {
+                kind: ShowKind::Full,
+                database: None,
+            })),
+            _ => self.unsupported(self.peek_token_as_string()),
         }
     }
 
@@ -300,5 +316,21 @@ mod tests {
                 database: Some(_),
             })
         );
+    }
+
+    #[test]
+    pub fn test_show_full_tables() {
+        let sql = "SHOW FULL TABLES";
+        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowDatabases { .. });
+        match &stmts[0] {
+            Statement::ShowDatabases(show) => {
+                assert_eq!(ShowKind::Full, show.kind);
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }

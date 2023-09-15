@@ -20,6 +20,7 @@ use crate::ast::{Expr, Ident, ObjectName};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowKind {
     All,
+    Full,
     Like(Ident),
     Where(Expr),
 }
@@ -28,6 +29,7 @@ impl fmt::Display for ShowKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ShowKind::All => write!(f, "ALL"),
+            ShowKind::Full => write!(f, "FULL"),
             ShowKind::Like(ident) => write!(f, "LIKE {ident}"),
             ShowKind::Where(expr) => write!(f, "WHERE {expr}"),
         }
@@ -74,6 +76,7 @@ mod tests {
     #[test]
     fn test_kind_display() {
         assert_eq!("ALL", format!("{}", ShowKind::All));
+        assert_eq!("FULL", format!("{}", ShowKind::Full));
         assert_eq!(
             "LIKE test",
             format!(
@@ -136,5 +139,21 @@ mod tests {
     pub fn test_show_create_missing_table_name() {
         let sql = "SHOW CREATE TABLE";
         assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
+    }
+
+    #[test]
+    pub fn test_show_full_tables() {
+        let sql = "SHOW FULL TABLES";
+        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowDatabases { .. });
+        match &stmts[0] {
+            Statement::ShowDatabases(show) => {
+                assert_eq!(ShowKind::Full, show.kind);
+            }
+            _ => {
+                unreachable!();
+            }
+        }
     }
 }

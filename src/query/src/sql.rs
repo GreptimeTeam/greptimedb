@@ -135,6 +135,7 @@ pub async fn show_databases(
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
         }
+        ShowKind::Full => todo!(),
     }
 }
 
@@ -143,14 +144,14 @@ pub async fn show_tables(
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema = if let Some(database) = stmt.database {
+    let schema_name = if let Some(database) = stmt.database {
         database
     } else {
         query_ctx.current_schema().to_owned()
     };
     // TODO(sunng87): move this function into query_ctx
     let mut tables = catalog_manager
-        .table_names(query_ctx.current_catalog(), &schema)
+        .table_names(query_ctx.current_catalog(), &schema_name)
         .await
         .context(error::CatalogSnafu)?;
 
@@ -179,6 +180,40 @@ pub async fn show_tables(
             let tables =
                 Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?;
             let records = RecordBatches::try_from_columns(schema, vec![tables])
+                .context(error::CreateRecordBatchSnafu)?;
+            Ok(Output::RecordBatches(records))
+        }
+        ShowKind::Full => {
+            let mut table_types = Vec::new();
+            for table_name in &tables {
+                let table_type = catalog_manager
+                    .table(query_ctx.current_catalog(), &schema_name, table_name)
+                    .await
+                    .context(error::CatalogSnafu)?
+                    .unwrap()
+                    .table_type();
+
+                let table_type = match table_type {
+                    table::metadata::TableType::Base => "BASE TABLE",
+                    table::metadata::TableType::Temporary => "TEMPORARY",
+                    table::metadata::TableType::View => "VIEW",
+                };
+                table_types.push(table_type);
+            }
+
+            let table_types = Arc::new(StringVector::from(table_types)) as _;
+            let tables = Arc::new(StringVector::from(tables)) as _;
+
+            let schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new(
+                    format!("Tables_in_{schema_name}"),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("Table_type", ConcreteDataType::string_datatype(), false),
+            ]));
+
+            let records = RecordBatches::try_from_columns(schema, vec![tables, table_types])
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
         }
