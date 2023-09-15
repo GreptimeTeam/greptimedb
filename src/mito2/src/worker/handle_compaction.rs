@@ -74,10 +74,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .version_control
             .apply_edit(edit, &[], region.file_purger.clone());
         request.on_success();
+
+        // Schedule next compaction if necessary.
+        self.compaction_scheduler.on_compaction_finished(region_id);
     }
 
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
         error!(req.err; "Failed to compact region: {}", req.region_id);
+
+        self.compaction_scheduler
+            .on_compaction_failed(req.region_id, req.err);
     }
 }

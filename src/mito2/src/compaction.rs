@@ -121,7 +121,7 @@ impl CompactionScheduler {
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
-    pub(crate) fn on_compaction_success(&mut self, region_id: RegionId) {
+    pub(crate) fn on_compaction_finished(&mut self, region_id: RegionId) {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
