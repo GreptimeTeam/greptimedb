@@ -217,25 +217,25 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
         (
             ConcreteDataType::Duration(DurationType::Second(_)),
             DurationSecondVector,
-            dur_second_values,
+            duration_second_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Millisecond(_)),
             DurationMillisecondVector,
-            dur_millisecond_values,
+            duration_millisecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Microsecond(_)),
             DurationMicrosecondVector,
-            dur_microsecond_values,
+            duration_microsecond_values,
             |x| { x.into_native() }
         ),
         (
             ConcreteDataType::Duration(DurationType::Nanosecond(_)),
             DurationNanosecondVector,
-            dur_nanosecond_values,
+            duration_nanosecond_values,
             |x| { x.into_native() }
         )
     )
@@ -311,7 +311,7 @@ mod tests {
 
         let values = values(&[array]).unwrap();
 
-        assert_eq!(vec![1, 2, 3], values.dur_second_values);
+        assert_eq!(vec![1, 2, 3], values.duration_second_values);
     }
 
     #[test]

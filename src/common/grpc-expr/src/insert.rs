@@ -240,7 +240,7 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "duration")
                         .unwrap()
-                        .datatype
+                        .data_type
                 )
                 .unwrap()
             )
@@ -321,82 +321,16 @@ mod tests {
         );
 
         let duration_column = &add_columns.add_columns[4];
-        assert!(!duration_column.is_key);
 
         assert_eq!(
             ConcreteDataType::duration_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    duration_column.column_def.as_ref().unwrap().datatype
+                    duration_column.column_def.as_ref().unwrap().data_type
                 )
                 .unwrap()
             )
         );
-    }
-
-    #[test]
-    fn test_convert_duration_values() {
-        // second
-        let actual = convert_values(
-            &ConcreteDataType::Duration(DurationType::Second(DurationSecondType)),
-            Values {
-                dur_second_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Duration(Duration::new_second(1_i64)),
-            Value::Duration(Duration::new_second(2_i64)),
-            Value::Duration(Duration::new_second(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-
-        // millisecond
-        let actual = convert_values(
-            &ConcreteDataType::Duration(DurationType::Millisecond(DurationMillisecondType)),
-            Values {
-                dur_millisecond_values: vec![1_i64, 2_i64, 3_i64],
-                ..Default::default()
-            },
-        );
-        let expect = vec![
-            Value::Duration(Duration::new_millisecond(1_i64)),
-            Value::Duration(Duration::new_millisecond(2_i64)),
-            Value::Duration(Duration::new_millisecond(3_i64)),
-        ];
-        assert_eq!(expect, actual);
-    }
-
-    #[test]
-    fn test_to_table_insert_request() {
-        let (columns, row_count) = mock_insert_batch();
-        let request = GrpcInsertRequest {
-            table_name: "demo".to_string(),
-            columns,
-            row_count,
-            region_number: 0,
-        };
-        let insert_req = to_table_insert_request("greptime", "public", request).unwrap();
-
-        assert_eq!("greptime", insert_req.catalog_name);
-        assert_eq!("public", insert_req.schema_name);
-        assert_eq!("demo", insert_req.table_name);
-
-        let host = insert_req.columns_values.get("host").unwrap();
-        assert_eq!(Value::String("host1".into()), host.get(0));
-        assert_eq!(Value::String("host2".into()), host.get(1));
-
-        let cpu = insert_req.columns_values.get("cpu").unwrap();
-        assert_eq!(Value::Float64(0.31.into()), cpu.get(0));
-        assert_eq!(Value::Null, cpu.get(1));
-
-        let memory = insert_req.columns_values.get("memory").unwrap();
-        assert_eq!(Value::Null, memory.get(0));
-        assert_eq!(Value::Float64(0.1.into()), memory.get(1));
-
-        let ts = insert_req.columns_values.get("ts").unwrap();
-        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(100)), ts.get(0));
-        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
     }
 
     #[test]
@@ -487,7 +421,7 @@ mod tests {
         };
 
         let duration_vals = Values {
-            dur_millisecond_values: vec![100, 101],
+            duration_millisecond_values: vec![100, 101],
             ..Default::default()
         };
         let duration_column = Column {

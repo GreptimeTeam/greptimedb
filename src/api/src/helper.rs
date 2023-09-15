@@ -273,19 +273,19 @@ pub fn values_with_capacity(datatype: ColumnDataType, capacity: usize) -> Values
             ..Default::default()
         },
         ColumnDataType::DurationSecond => Values {
-            dur_second_values: Vec::with_capacity(capacity),
+            duration_second_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::DurationMillisecond => Values {
-            dur_millisecond_values: Vec::with_capacity(capacity),
+            duration_millisecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::DurationMicrosecond => Values {
-            dur_microsecond_values: Vec::with_capacity(capacity),
+            duration_microsecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
         ColumnDataType::DurationNanosecond => Values {
-            dur_nanosecond_values: Vec::with_capacity(capacity),
+            duration_nanosecond_values: Vec::with_capacity(capacity),
             ..Default::default()
         },
     }
@@ -336,10 +336,10 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
                 .push(convert_i128_to_interval(val.to_i128())),
         },
         Value::Duration(val) => match val.unit() {
-            TimeUnit::Second => values.dur_second_values.push(val.value()),
-            TimeUnit::Millisecond => values.dur_millisecond_values.push(val.value()),
-            TimeUnit::Microsecond => values.dur_microsecond_values.push(val.value()),
-            TimeUnit::Nanosecond => values.dur_nanosecond_values.push(val.value()),
+            TimeUnit::Second => values.duration_second_values.push(val.value()),
+            TimeUnit::Millisecond => values.duration_millisecond_values.push(val.value()),
+            TimeUnit::Microsecond => values.duration_microsecond_values.push(val.value()),
+            TimeUnit::Nanosecond => values.duration_nanosecond_values.push(val.value()),
         },
         Value::List(_) => unreachable!(),
     });
@@ -432,10 +432,10 @@ pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
             let interval = Interval::from_month_day_nano(v.months, v.days, v.nanoseconds);
             ValueRef::Interval(interval)
         }
-        ValueData::DurSecondValue(v) => ValueRef::Duration(Duration::new_second(*v)),
-        ValueData::DurMillisecondValue(v) => ValueRef::Duration(Duration::new_millisecond(*v)),
-        ValueData::DurMicrosecondValue(v) => ValueRef::Duration(Duration::new_microsecond(*v)),
-        ValueData::DurNanosecondValue(v) => ValueRef::Duration(Duration::new_nanosecond(*v)),
+        ValueData::DurationSecondValue(v) => ValueRef::Duration(Duration::new_second(*v)),
+        ValueData::DurationMillisecondValue(v) => ValueRef::Duration(Duration::new_millisecond(*v)),
+        ValueData::DurationMicrosecondValue(v) => ValueRef::Duration(Duration::new_microsecond(*v)),
+        ValueData::DurationNanosecondValue(v) => ValueRef::Duration(Duration::new_nanosecond(*v)),
     }
 }
 
@@ -509,17 +509,17 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
             }
         },
         ConcreteDataType::Duration(unit) => match unit {
-            DurationType::Second(_) => {
-                Arc::new(DurationSecondVector::from_vec(values.dur_second_values))
-            }
+            DurationType::Second(_) => Arc::new(DurationSecondVector::from_vec(
+                values.duration_second_values,
+            )),
             DurationType::Millisecond(_) => Arc::new(DurationMillisecondVector::from_vec(
-                values.dur_millisecond_values,
+                values.duration_millisecond_values,
             )),
             DurationType::Microsecond(_) => Arc::new(DurationMicrosecondVector::from_vec(
-                values.dur_microsecond_values,
+                values.duration_microsecond_values,
             )),
             DurationType::Nanosecond(_) => Arc::new(DurationNanosecondVector::from_vec(
-                values.dur_nanosecond_values,
+                values.duration_nanosecond_values,
             )),
         },
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
@@ -673,22 +673,22 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             })
             .collect(),
         ConcreteDataType::Duration(DurationType::Second(_)) => values
-            .dur_second_values
+            .duration_second_values
             .into_iter()
             .map(|v| Value::Duration(Duration::new_second(v)))
             .collect(),
         ConcreteDataType::Duration(DurationType::Millisecond(_)) => values
-            .dur_millisecond_values
+            .duration_millisecond_values
             .into_iter()
             .map(|v| Value::Duration(Duration::new_millisecond(v)))
             .collect(),
         ConcreteDataType::Duration(DurationType::Microsecond(_)) => values
-            .dur_microsecond_values
+            .duration_microsecond_values
             .into_iter()
             .map(|v| Value::Duration(Duration::new_microsecond(v)))
             .collect(),
         ConcreteDataType::Duration(DurationType::Nanosecond(_)) => values
-            .dur_nanosecond_values
+            .duration_nanosecond_values
             .into_iter()
             .map(|v| Value::Duration(Duration::new_nanosecond(v)))
             .collect(),
@@ -804,16 +804,16 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         },
         Value::Duration(v) => match v.unit() {
             TimeUnit::Second => v1::Value {
-                value_data: Some(ValueData::DurSecondValue(v.value())),
+                value_data: Some(ValueData::DurationSecondValue(v.value())),
             },
             TimeUnit::Millisecond => v1::Value {
-                value_data: Some(ValueData::DurMillisecondValue(v.value())),
+                value_data: Some(ValueData::DurationMillisecondValue(v.value())),
             },
             TimeUnit::Microsecond => v1::Value {
-                value_data: Some(ValueData::DurMicrosecondValue(v.value())),
+                value_data: Some(ValueData::DurationMicrosecondValue(v.value())),
             },
             TimeUnit::Nanosecond => v1::Value {
-                value_data: Some(ValueData::DurNanosecondValue(v.value())),
+                value_data: Some(ValueData::DurationNanosecondValue(v.value())),
             },
         },
         Value::List(_) => return None,
@@ -853,10 +853,10 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::IntervalYearMonthValues(_) => ColumnDataType::IntervalYearMonth,
         ValueData::IntervalDayTimeValues(_) => ColumnDataType::IntervalDayTime,
         ValueData::IntervalMonthDayNanoValues(_) => ColumnDataType::IntervalMonthDayNano,
-        ValueData::DurSecondValue(_) => ColumnDataType::DurationSecond,
-        ValueData::DurMillisecondValue(_) => ColumnDataType::DurationMillisecond,
-        ValueData::DurMicrosecondValue(_) => ColumnDataType::DurationMicrosecond,
-        ValueData::DurNanosecondValue(_) => ColumnDataType::DurationNanosecond,
+        ValueData::DurationSecondValue(_) => ColumnDataType::DurationSecond,
+        ValueData::DurationMillisecondValue(_) => ColumnDataType::DurationMillisecond,
+        ValueData::DurationMicrosecondValue(_) => ColumnDataType::DurationMicrosecond,
+        ValueData::DurationNanosecondValue(_) => ColumnDataType::DurationNanosecond,
     };
     Some(value_type)
 }
@@ -955,6 +955,12 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                     ValueData::IntervalMonthDayNanoValues(convert_i128_to_interval(v.to_i128()))
                 }
             }),
+            Value::Duration(v) => Some(match v.unit() {
+                TimeUnit::Second => ValueData::DurationSecondValue(v.value()),
+                TimeUnit::Millisecond => ValueData::DurationMillisecondValue(v.value()),
+                TimeUnit::Microsecond => ValueData::DurationMicrosecondValue(v.value()),
+                TimeUnit::Nanosecond => ValueData::DurationNanosecondValue(v.value()),
+            }),
             Value::List(_) => unreachable!(),
         },
     }
@@ -974,9 +980,9 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::types::{
-        Int32Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalYearMonthType,
-        TimeMillisecondType, TimeSecondType, TimestampMillisecondType, TimestampSecondType, DurationSecondType, DurationMillisecondType,
-        UInt32Type,
+        DurationMillisecondType, DurationSecondType, Int32Type, IntervalDayTimeType,
+        IntervalMonthDayNanoType, IntervalYearMonthType, TimeMillisecondType, TimeSecondType,
+        TimestampMillisecondType, TimestampSecondType, UInt32Type,
     };
     use datatypes::vectors::{
         BooleanVector, DurationMicrosecondVector, DurationMillisecondVector,
@@ -1060,7 +1066,7 @@ mod tests {
         assert_eq!(2, values.capacity());
 
         let values = values_with_capacity(ColumnDataType::DurationMillisecond, 2);
-        let values = values.dur_millisecond_values;
+        let values = values.duration_millisecond_values;
         assert_eq!(2, values.capacity());
     }
 
@@ -1403,28 +1409,28 @@ mod tests {
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![1, 2, 3],
-            column.values.as_ref().unwrap().dur_nanosecond_values
+            column.values.as_ref().unwrap().duration_nanosecond_values
         );
 
         let vector = Arc::new(DurationMicrosecondVector::from_vec(vec![7, 8, 9]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![7, 8, 9],
-            column.values.as_ref().unwrap().dur_microsecond_values
+            column.values.as_ref().unwrap().duration_microsecond_values
         );
 
         let vector = Arc::new(DurationMillisecondVector::from_vec(vec![4, 5, 6]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![4, 5, 6],
-            column.values.as_ref().unwrap().dur_millisecond_values
+            column.values.as_ref().unwrap().duration_millisecond_values
         );
 
         let vector = Arc::new(DurationSecondVector::from_vec(vec![10, 11, 12]));
         push_vals(&mut column, 3, vector);
         assert_eq!(
             vec![10, 11, 12],
-            column.values.as_ref().unwrap().dur_second_values
+            column.values.as_ref().unwrap().duration_second_values
         );
     }
 
@@ -1534,7 +1540,7 @@ mod tests {
         let actual = pb_values_to_values(
             &ConcreteDataType::Duration(DurationType::Second(DurationSecondType)),
             Values {
-                dur_second_values: vec![1_i64, 2_i64, 3_i64],
+                duration_second_values: vec![1_i64, 2_i64, 3_i64],
                 ..Default::default()
             },
         );
@@ -1549,7 +1555,7 @@ mod tests {
         let actual = pb_values_to_values(
             &ConcreteDataType::Duration(DurationType::Millisecond(DurationMillisecondType)),
             Values {
-                dur_millisecond_values: vec![1_i64, 2_i64, 3_i64],
+                duration_millisecond_values: vec![1_i64, 2_i64, 3_i64],
                 ..Default::default()
             },
         );
