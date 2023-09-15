@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use common_catalog::consts::default_engine;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -47,7 +46,7 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(region_ident) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
-                    engine: default_engine().to_string(),
+                    engine: region_ident.engine.to_string(),
                     region_dir: "".to_string(),
                     options: HashMap::new(),
                 });
