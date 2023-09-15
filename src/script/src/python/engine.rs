@@ -358,7 +358,7 @@ pub(crate) use tests::sample_script_engine;
 
 #[cfg(test)]
 mod tests {
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::NUMBERS_TABLE_ID;
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;

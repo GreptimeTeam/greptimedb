@@ -1375,7 +1375,7 @@ enum ScalarFunc {
 mod test {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;

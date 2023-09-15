@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
-use catalog::local::MemoryCatalogManager;
+use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};

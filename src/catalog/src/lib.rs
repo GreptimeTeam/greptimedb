@@ -31,7 +31,7 @@ use crate::error::Result;
 
 pub mod error;
 pub mod information_schema;
-pub mod local;
+pub mod memory;
 mod metrics;
 pub mod remote;
 pub mod system;

@@ -38,6 +38,7 @@ members = [
     "src/mito",
     "src/mito2",
     "src/object-store",
+    "src/operator",
     "src/partition",
     "src/promql",
     "src/query",
@@ -148,6 +149,7 @@ meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
 mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
+operator = { path = "src/operator" }
 object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
 promql = { path = "src/promql" }

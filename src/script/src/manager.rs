@@ -160,7 +160,7 @@ impl ScriptManager {
 
 #[cfg(test)]
 mod tests {
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use query::QueryEngineFactory;
 
     use super::*;
