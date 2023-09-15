@@ -19,8 +19,8 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub(crate) mod manifest;
+pub(crate) mod query;
 pub(crate) mod region;
-pub(crate) mod stream;
 
 #[cfg(any(test, feature = "test"))]
 pub(crate) mod test_util;

@@ -16,28 +16,23 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_datasource::file_format::Format;
-use common_datasource::object_store::build_backend;
-use common_recordbatch::SendableRecordBatchStream;
-use datatypes::schema::Schema;
 use object_store::ObjectStore;
-use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::RegionId;
 
-use crate::error::{BuildBackendSnafu, Result};
+use crate::error::Result;
 use crate::manifest::FileRegionManifest;
-use crate::stream::{create_stream, CreateScanPlanContext, ScanPlanConfig};
 use crate::FileOptions;
 
 #[derive(Debug)]
 pub struct FileRegion {
-    region_dir: String,
-    file_options: FileOptions,
-    url: String,
-    format: Format,
-    options: HashMap<String, String>,
-    metadata: RegionMetadataRef,
+    pub(crate) region_dir: String,
+    pub(crate) file_options: FileOptions,
+    pub(crate) url: String,
+    pub(crate) format: Format,
+    pub(crate) options: HashMap<String, String>,
+    pub(crate) metadata: RegionMetadataRef,
 }
 
 pub type FileRegionRef = Arc<FileRegion>;
@@ -94,23 +89,6 @@ impl FileRegion {
 
     pub async fn drop(&self, object_store: &ObjectStore) -> Result<()> {
         FileRegionManifest::delete(self.metadata.region_id, &self.region_dir, object_store).await
-    }
-
-    pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
-        let file_schema = Arc::new(Schema::new(self.file_options.file_column_schemas.clone()));
-        create_stream(
-            &self.format,
-            &CreateScanPlanContext::default(),
-            &ScanPlanConfig {
-                file_schema,
-                files: &self.file_options.files,
-                projection: request.projection.as_ref(),
-                filters: &request.filters,
-                limit: request.limit,
-                store,
-            },
-        )
     }
 
     pub fn metadata(&self) -> RegionMetadataRef {

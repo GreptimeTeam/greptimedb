@@ -636,12 +636,6 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to infer file table time index: {}", source))]
-    InferFileTableTimeIndex {
-        #[snafu(backtrace)]
-        source: query::error::Error,
-    },
-
     #[snafu(display(
         "The schema of the file table is incompatible with the table schema: {}",
         source
@@ -731,7 +725,6 @@ impl ErrorExt for Error {
             | Error::InvalidSchema { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
-            | Error::InferFileTableTimeIndex { .. }
             | Error::BuildCsvConfig { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }

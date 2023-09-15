@@ -371,11 +371,11 @@ pub async fn infer_file_table_schema(
 //    with the default one.
 pub fn file_column_schemas_to_table(
     file_column_schemas: &[ColumnSchema],
-) -> Result<(Vec<ColumnSchema>, String)> {
+) -> (Vec<ColumnSchema>, String) {
     let mut column_schemas = file_column_schemas.to_owned();
     if let Some(time_index_column) = column_schemas.iter().find(|c| c.is_time_index()) {
         let time_index = time_index_column.name.clone();
-        return Ok((column_schemas, time_index));
+        return (column_schemas, time_index);
     }
 
     let timestamp_type = ConcreteDataType::timestamp_millisecond_datatype();
@@ -395,7 +395,7 @@ pub fn file_column_schemas_to_table(
         column_schemas.push(timestamp_column_schema);
     }
 
-    Ok((column_schemas, GREPTIME_TIMESTAMP.to_string()))
+    (column_schemas, GREPTIME_TIMESTAMP.to_string())
 }
 
 /// This function checks if the column schemas from a file can be matched with

@@ -151,6 +151,23 @@ pub enum Error {
         source: DataFusionError,
         location: Location,
     },
+
+    #[snafu(display(
+        "Projection out of bounds, column_index: {}, bounds: {}",
+        column_index,
+        bounds
+    ))]
+    ProjectionOutOfBounds {
+        column_index: usize,
+        bounds: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to extract column from filter: {}", source))]
+    ExtractColumnFromFilter {
+        source: DataFusionError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -164,7 +181,8 @@ impl ErrorExt for Error {
             | ProjectSchema { .. }
             | MissingRequiredField { .. }
             | Unsupported { .. }
-            | InvalidMetadata { .. } => StatusCode::InvalidArguments,
+            | InvalidMetadata { .. }
+            | ProjectionOutOfBounds { .. } => StatusCode::InvalidArguments,
 
             RegionExists { .. } => StatusCode::RegionAlreadyExists,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
@@ -183,7 +201,8 @@ impl ErrorExt for Error {
             | ManifestExists { .. }
             | BuildStream { .. }
             | ParquetScanPlan { .. }
-            | UnexpectedEngine { .. } => StatusCode::Unexpected,
+            | UnexpectedEngine { .. }
+            | ExtractColumnFromFilter { .. } => StatusCode::Unexpected,
         }
     }
 

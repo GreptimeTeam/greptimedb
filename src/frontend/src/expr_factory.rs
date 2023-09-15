@@ -41,8 +41,8 @@ use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
     EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
-    InferFileTableTimeIndexSnafu, InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu,
-    PrepareFileTableSnafu, Result, SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
+    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::table::table_idents_to_full_name;
 
@@ -145,8 +145,7 @@ pub(crate) async fn create_external_expr(
         (time_index, primary_keys, column_schemas)
     } else {
         // inferred form
-        let (column_schemas, time_index) = file_column_schemas_to_table(&file_column_schemas)
-            .context(InferFileTableTimeIndexSnafu)?;
+        let (column_schemas, time_index) = file_column_schemas_to_table(&file_column_schemas);
         let primary_keys = vec![];
         (time_index, primary_keys, column_schemas)
     };
