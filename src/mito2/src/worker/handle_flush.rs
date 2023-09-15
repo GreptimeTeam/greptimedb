@@ -210,10 +210,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_write_requests(stalled.requests, false).await;
 
         // Schedules compaction.
-        if let Err(e) = self
-            .compaction_scheduler
-            .schedule_compaction(&region, OptionOutputTx::none())
-        {
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(
+            region.region_id,
+            &region.version_control,
+            &region.access_layer,
+            &region.file_purger,
+            OptionOutputTx::none(),
+        ) {
             warn!(
                 "Failed to schedule compaction after flush, region: {}, err: {}",
                 region.region_id, e

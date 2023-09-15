@@ -31,10 +31,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        if let Err(e) = self
-            .compaction_scheduler
-            .schedule_compaction(&region, sender)
-        {
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(
+            region.region_id,
+            &region.version_control,
+            &region.access_layer,
+            &region.file_purger,
+            sender,
+        ) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
