@@ -137,7 +137,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        // The flush task before truncating the region.
+        // The flush task before truncating the region fails immediately.
         let version_data = region.version_control.current();
         if let Some(truncated_entry_id) = version_data.version.truncated_entry_id {
             if truncated_entry_id >= request.flushed_entry_id {
