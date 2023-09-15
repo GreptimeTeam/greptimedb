@@ -22,14 +22,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
+use snafu::ResultExt;
 use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
-use crate::error::Result;
+use crate::error::{CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, Result};
 use crate::region::version::VersionRef;
 use crate::region::MitoRegionRef;
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -76,7 +77,7 @@ pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> Compactio
 /// Compaction scheduler tracks and manages compaction tasks.
 pub(crate) struct CompactionScheduler {
     scheduler: SchedulerRef,
-    /// Regions need compaction.
+    /// Compacting regions.
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
     request_sender: Sender<WorkerRequest>,
@@ -97,60 +98,142 @@ impl CompactionScheduler {
         region: &MitoRegionRef,
         waiter: OptionOutputTx,
     ) -> Result<()> {
-        if let Some(status) = self.region_status.get_mut(&region.region_id) {
-            // Region is compacting or wait for compaction. Add the waiter to pending list.
+        let status = self
+            .region_status
+            .entry(region.region_id)
+            .or_insert_with(|| CompactionStatus::new(region.clone()));
+        if status.compacting {
+            // Region is compacting. Add the waiter to pending list.
             status.merge_waiter(waiter);
             return Ok(());
         }
 
         // The region can compact directly.
-        let req = self.new_compaction_request(region, waiter);
+        let mut req = Self::new_compaction_request(self.request_sender.clone(), region);
+        // Merge with all pending requests.
+        if let Some(pending) = status.pending_compaction.take() {
+            req.waiters = pending.waiters;
+        }
+        req.push_waiter(waiter);
+
+        // Submit compaction request.
         self.submit_request(req)
+    }
+
+    /// Notifies the scheduler that the compaction job is finished successfully.
+    pub(crate) fn on_compaction_success(&mut self, region_id: RegionId) {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return;
+        };
+
+        if status.pending_compaction.is_none() {
+            // The region doesn't have pending compaction request, we can remove it.
+            self.region_status.remove(&region_id);
+            return;
+        }
+
+        let region = status.region.clone();
+        // Try to schedule next compaction task for this region.
+        if let Err(e) = self.schedule_compaction(&region, OptionOutputTx::none()) {
+            error!(e; "Failed to schedule next compaction for region {}", region_id);
+        }
+    }
+
+    /// Notifies the scheduler that the compaction job is failed.
+    pub(crate) fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
+        error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
+        // Remove this region.
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Fast fail: cancels all pending tasks and sends error to their waiters.
+        status.on_failure(err);
+    }
+
+    /// Notifies the scheduler that the region is dropped.
+    pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
+        // Remove this region.
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Notifies all pending tasks.
+        status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+    }
+
+    /// Notifies the scheduler that the region is closed.
+    pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
+        // Remove this region.
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Notifies all pending tasks.
+        status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
     /// Submit a compaction request.
     ///
     /// Callers must ensure that the region doesn't have compaction task running.
-    fn submit_request(&self, req: CompactionRequest) -> Result<()> {
-        self.scheduler.schedule(Box::pin(async {
-            // TODO(hl): build picker according to region options.
-            let picker =
-                compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
-            debug!(
-                "Pick compaction strategy {:?} for region: {}",
-                picker,
-                req.region_id()
-            );
-            // FIXME(yingwen): We should remove the region from region status.
-            let Some(mut task) = picker.pick(req) else {
-                return;
-            };
-            task.run().await;
-        }))
+    fn submit_request(&mut self, req: CompactionRequest) -> Result<()> {
+        let region_id = req.region_id();
+        self.scheduler
+            .schedule(Box::pin(async {
+                // TODO(hl): build picker according to region options.
+                let picker = compaction_strategy_to_picker(&CompactionStrategy::Twcs(
+                    TwcsOptions::default(),
+                ));
+                debug!(
+                    "Pick compaction strategy {:?} for region: {}",
+                    picker,
+                    req.region_id()
+                );
+                // FIXME(yingwen): We should remove the region from region status.
+                let Some(mut task) = picker.pick(req) else {
+                    return;
+                };
+                task.run().await;
+            }))
+            .map_err(|e| {
+                error!(e; "Failed to submit compaction request for region {}", region_id);
+
+                // If failed to submit the job, we need to remove the region from the scheduler.
+                self.region_status.remove(&region_id);
+
+                e
+            })
     }
 
     /// Creates a new compaction request for compaction picker.
     fn new_compaction_request(
-        &self,
+        request_sender: Sender<WorkerRequest>,
         region: &MitoRegionRef,
-        waiter: OptionOutputTx,
     ) -> CompactionRequest {
         let current_version = region.version_control.current().version;
         let access_layer = region.access_layer.clone();
         let file_purger = region.file_purger.clone();
 
-        let mut req = CompactionRequest {
+        let req = CompactionRequest {
             current_version,
             access_layer,
             ttl: None,                    // TODO(hl): get TTL info from region metadata
             compaction_time_window: None, // TODO(hl): get persisted region compaction time window
-            request_sender: self.request_sender.clone(),
+            request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger,
         };
-        req.push_waiter(waiter);
 
         req
+    }
+}
+
+impl Drop for CompactionScheduler {
+    fn drop(&mut self) {
+        for (region_id, status) in self.region_status.drain() {
+            // We are shutting down so notify all pending tasks.
+            status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        }
     }
 }
 
@@ -166,10 +249,23 @@ impl PendingCompaction {
             self.waiters.push(waiter);
         }
     }
+
+    /// Send flush error to waiter.
+    fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        for waiter in self.waiters.drain(..) {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
+        }
+    }
 }
 
 /// Status of running and pending region compaction tasks.
 struct CompactionStatus {
+    region: MitoRegionRef,
+    /// Whether a compaction task is running.
+    ///
+    /// It may be failed to submit a compaction task so we need this flag to track
+    /// whether the region is compacting.
+    compacting: bool,
     /// Compaction pending to schedule.
     ///
     /// For simplicity, we merge all pending compaction requests into one.
@@ -177,6 +273,15 @@ struct CompactionStatus {
 }
 
 impl CompactionStatus {
+    /// Creates a new [CompactionStatus]
+    fn new(region: MitoRegionRef) -> CompactionStatus {
+        CompactionStatus {
+            region,
+            compacting: false,
+            pending_compaction: None,
+        }
+    }
+
     /// Merge the watier to the pending compaction.
     fn merge_waiter(&mut self, waiter: OptionOutputTx) {
         let pending = self
@@ -185,5 +290,11 @@ impl CompactionStatus {
                 waiters: Vec::new(),
             });
         pending.push_waiter(waiter);
+    }
+
+    fn on_failure(self, err: Arc<Error>) {
+        if let Some(mut pending) = self.pending_compaction {
+            pending.on_failure(self.region.region_id, err.clone());
+        }
     }
 }

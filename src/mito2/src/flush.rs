@@ -378,6 +378,7 @@ impl FlushScheduler {
             return Ok(());
         }
 
+        // TODO(yingwen): We can merge with pending and execute directly.
         // If there are pending tasks, then we should push it to pending list.
         if flush_status.pending_task.is_some() {
             flush_status.merge_task(task);
@@ -518,7 +519,7 @@ impl FlushScheduler {
         debug_assert!(self
             .region_status
             .values()
-            .all(|status| !status.flushing && status.pending_task.is_some()));
+            .all(|status| status.flushing || status.pending_task.is_some()));
 
         // Get the first region from status map.
         let Some(flush_status) = self
@@ -551,8 +552,10 @@ impl Drop for FlushScheduler {
 struct FlushStatus {
     /// Current region.
     region: MitoRegionRef,
-    // TODO(yingwen): Maybe we can remove this flag.
     /// There is a flush task running.
+    ///
+    /// It is possible that a region is not flushing but has pending task if the scheduler
+    /// doesn't schedules this region.
     flushing: bool,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
