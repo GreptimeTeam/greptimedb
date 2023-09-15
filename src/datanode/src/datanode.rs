@@ -260,8 +260,7 @@ impl DatanodeBuilder {
             if open_with_writable {
                 if let Err(e) = region_server.set_writable(region_id, true) {
                     error!(
-                        "failed to set writable for region {region_id}, error: {}",
-                        e
+                        e; "failed to set writable for region {region_id}"
                     );
                 }
             }
