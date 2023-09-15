@@ -14,7 +14,7 @@
 
 //! Handling flush related requests.
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -197,6 +197,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         // We already stalled these requests, don't stall them again.
         self.handle_write_requests(stalled.requests, false).await;
+
+        // Schedules compaction.
+        if let Err(e) = self
+            .compaction_scheduler
+            .schedule_compaction(&region, OptionOutputTx::none())
+        {
+            warn!(
+                "Failed to schedule compaction after flush, region: {}, err: {}",
+                region.region_id, e
+            );
+        }
 
         self.listener.on_flush_success(region_id);
     }

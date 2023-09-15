@@ -126,6 +126,8 @@ impl CompactionScheduler {
             return;
         };
 
+        // TODO(yingwen): We should always try to compact the region until picker
+        // returns None.
         if status.pending_compaction.is_none() {
             // The region doesn't have pending compaction request, we can remove it.
             self.region_status.remove(&region_id);
