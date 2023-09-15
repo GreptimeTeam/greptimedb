@@ -118,11 +118,15 @@ mod tests {
 
     #[test]
     fn test_is_internal_column() {
+        // contain internal column names
         assert!(is_internal_column(SEQUENCE_COLUMN_NAME));
         assert!(is_internal_column(OP_TYPE_COLUMN_NAME));
         assert!(is_internal_column(PRIMARY_KEY_COLUMN_NAME));
 
-        let valid_name: String = "GreptimeDB".to_string() + SEQUENCE_COLUMN_NAME;
-        assert!(!is_internal_column(&valid_name));
+        // don't contain internal column names
+        assert!(!is_internal_column("my__column"));
+        assert!(!is_internal_column("my__sequence"));
+        assert!(!is_internal_column("my__op_type"));
+        assert!(!is_internal_column("my__primary_key"));
     }
 }
