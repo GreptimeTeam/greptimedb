@@ -19,7 +19,7 @@ use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionTruncatingSnafu, Result};
+use crate::error::{RegionTruncatedSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
@@ -152,7 +152,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let version_data = region.version_control.current();
         if let Some(truncated_entry_id) = version_data.version.truncated_entry_id {
             if truncated_entry_id >= request.flushed_entry_id {
-                request.on_failure(RegionTruncatingSnafu { region_id }.build());
+                request.on_failure(RegionTruncatedSnafu { region_id }.build());
                 return;
             }
         }

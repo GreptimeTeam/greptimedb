@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
 use crate::error::{
-    Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatingSnafu, Result,
+    Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
@@ -434,7 +434,7 @@ impl FlushScheduler {
         pending_requests
     }
 
-    /// Notifies the scheduler that the flush job is finished.
+    /// Notifies the scheduler that the flush job is failed.
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
 
@@ -465,15 +465,15 @@ impl FlushScheduler {
         self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
-    /// Notifies the scheduler that the region is truncating.
-    pub(crate) fn on_region_truncating(&mut self, region_id: RegionId) {
+    /// Notifies the scheduler that the region is truncated.
+    pub(crate) fn on_region_truncated(&mut self, region_id: RegionId) {
         self.remove_region_on_failure(
             region_id,
-            Arc::new(RegionTruncatingSnafu { region_id }.build()),
+            Arc::new(RegionTruncatedSnafu { region_id }.build()),
         );
     }
 
-    pub(crate) fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
             return;
@@ -684,6 +684,7 @@ mod tests {
             access_layer: env.access_layer.clone(),
             memtable_builder: builder.memtable_builder(),
             file_purger: builder.file_purger(),
+            listener: WorkerListener::default(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

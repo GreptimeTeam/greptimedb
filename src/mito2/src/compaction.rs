@@ -30,7 +30,9 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
-use crate::error::{CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, Result};
+use crate::error::{
+    CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
@@ -150,24 +152,23 @@ impl CompactionScheduler {
 
     /// Notifies the scheduler that the region is dropped.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        );
     }
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(status) = self.region_status.remove(&region_id) else {
-            return;
-        };
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+    }
 
-        // Notifies all pending tasks.
-        status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+    /// Notifies the scheduler that the region is truncated.
+    pub(crate) fn on_region_truncated(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionTruncatedSnafu { region_id }.build()),
+        );
     }
 
     /// Schedules a compaction request.
@@ -201,6 +202,16 @@ impl CompactionScheduler {
 
                 e
             })
+    }
+
+    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
+        // Remove this region.
+        let Some(status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        // Notifies all pending tasks.
+        status.on_failure(err);
     }
 }
 
