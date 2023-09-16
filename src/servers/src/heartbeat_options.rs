@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const HEARTBEAT_INTERVAL_MILLIS: u64 = 5000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HeartbeatOptions {
@@ -21,11 +23,25 @@ pub struct HeartbeatOptions {
     pub retry_interval_millis: u64,
 }
 
+impl HeartbeatOptions {
+    pub fn datanode_default() -> Self {
+        Default::default()
+    }
+
+    pub fn frontend_default() -> Self {
+        Self {
+            // Frontend can send heartbeat with a longer interval.
+            interval_millis: HEARTBEAT_INTERVAL_MILLIS * 10,
+            retry_interval_millis: HEARTBEAT_INTERVAL_MILLIS,
+        }
+    }
+}
+
 impl Default for HeartbeatOptions {
     fn default() -> Self {
         Self {
-            interval_millis: 5000,
-            retry_interval_millis: 5000,
+            interval_millis: HEARTBEAT_INTERVAL_MILLIS,
+            retry_interval_millis: HEARTBEAT_INTERVAL_MILLIS,
         }
     }
 }

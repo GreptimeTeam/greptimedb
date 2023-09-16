@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::HeartbeatRequest;
+use api::v1::meta::{HeartbeatRequest, RequestHeader, Role};
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -44,13 +44,13 @@ pub struct HeartbeatTask {
 impl HeartbeatTask {
     pub fn new(
         meta_client: Arc<MetaClient>,
-        heartbeat: HeartbeatOptions,
+        heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval: heartbeat.interval_millis,
-            retry_interval: heartbeat.retry_interval_millis,
+            report_interval: heartbeat_opts.interval_millis,
+            retry_interval: heartbeat_opts.retry_interval_millis,
             resp_handler_executor,
         }
     }
@@ -109,7 +109,12 @@ impl HeartbeatTask {
     ) {
         let report_interval = self.report_interval;
 
-        let _handle = common_runtime::spawn_bg(async move {
+        let req_header = Some(RequestHeader {
+            role: Role::Frontend as i32,
+            ..Default::default()
+        });
+
+        common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
 
@@ -120,6 +125,7 @@ impl HeartbeatTask {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
                                     let req = HeartbeatRequest {
+                                        header: req_header.clone(),
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
@@ -137,7 +143,11 @@ impl HeartbeatTask {
                     }
                     _ = &mut sleep => {
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
-                        Some(HeartbeatRequest::default())
+                        let req = HeartbeatRequest {
+                            header: req_header.clone(),
+                            ..Default::default()
+                        };
+                        Some(req)
                     }
                 };
 

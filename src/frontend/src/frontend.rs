@@ -48,7 +48,7 @@ impl Default for FrontendOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
-            heartbeat: HeartbeatOptions::default(),
+            heartbeat: HeartbeatOptions::frontend_default(),
             http_options: HttpOptions::default(),
             grpc_options: GrpcOptions::default(),
             mysql_options: MysqlOptions::default(),

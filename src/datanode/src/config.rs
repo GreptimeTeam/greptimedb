@@ -347,7 +347,7 @@ impl Default for DatanodeOptions {
             storage: StorageConfig::default(),
             region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
             logging: LoggingOptions::default(),
-            heartbeat: HeartbeatOptions::default(),
+            heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
         }
     }
