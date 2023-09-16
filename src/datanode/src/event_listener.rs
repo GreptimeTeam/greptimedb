@@ -23,10 +23,10 @@ pub enum RegionServerEvent {
 
 pub trait RegionServerEventListener: Sync + Send {
     /// Called *after* a new region was created/opened.
-    fn register_region(&self, _region_id: RegionId) {}
+    fn on_register_region(&self, _region_id: RegionId) {}
 
     /// Called *after* a region was closed.
-    fn deregister_region(&self, _region_id: RegionId) {}
+    fn on_deregister_region(&self, _region_id: RegionId) {}
 }
 
 pub type RegionServerEventListenerRef = Box<dyn RegionServerEventListener>;
@@ -39,7 +39,7 @@ impl RegionServerEventListener for NoopRegionServerEventListener {}
 pub struct RegionServerEventSender(pub(crate) UnboundedSender<RegionServerEvent>);
 
 impl RegionServerEventListener for RegionServerEventSender {
-    fn register_region(&self, region_id: RegionId) {
+    fn on_register_region(&self, region_id: RegionId) {
         if let Err(e) = self.0.send(RegionServerEvent::Register(region_id)) {
             error!(
                 "Failed to send registering region: {region_id} event, source: {}",
@@ -48,7 +48,7 @@ impl RegionServerEventListener for RegionServerEventSender {
         }
     }
 
-    fn deregister_region(&self, region_id: RegionId) {
+    fn on_deregister_region(&self, region_id: RegionId) {
         if let Err(e) = self.0.send(RegionServerEvent::Deregister(region_id)) {
             error!(
                 "Failed to send deregistering region: {region_id} event, source: {}",

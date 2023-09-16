@@ -266,14 +266,14 @@ impl RegionServerInner {
             RegionChange::Register(_) => {
                 info!("Region {region_id} is registered to engine {engine_type}");
                 self.region_map.insert(region_id, engine);
-                self.event_listener.register_region(region_id);
+                self.event_listener.on_register_region(region_id);
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
                 self.region_map
                     .remove(&region_id)
                     .map(|(id, engine)| engine.set_writable(id, false));
-                self.event_listener.deregister_region(region_id);
+                self.event_listener.on_deregister_region(region_id);
             }
         }
 

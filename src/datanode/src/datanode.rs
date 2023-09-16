@@ -67,7 +67,7 @@ pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
-    event_receiver: Option<RegionServerEventReceiver>,
+    region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
@@ -85,7 +85,7 @@ impl Datanode {
     pub async fn start_heartbeat(&mut self) -> Result<()> {
         if let Some(task) = &self.heartbeat_task {
             // Safety: The event_receiver must exist.
-            let receiver = self.event_receiver.take().unwrap();
+            let receiver = self.region_event_receiver.take().unwrap();
             task.start(receiver).await?;
         }
         Ok(())
@@ -194,7 +194,7 @@ impl DatanodeBuilder {
         let log_store = Self::build_log_store(&self.opts).await?;
         // TODO(weny): Adds a noop event listener for standalone mode.
 
-        let (tx, event_receiver) = match mode {
+        let (tx, region_event_receiver) = match mode {
             Mode::Distributed => {
                 let (tx, rx) = new_region_server_event_channel();
                 (Box::new(tx) as RegionServerEventListenerRef, Some(rx))
@@ -239,7 +239,7 @@ impl DatanodeBuilder {
             heartbeat_task,
             region_server,
             greptimedb_telemetry_task,
-            event_receiver,
+            region_event_receiver,
         })
     }
 
