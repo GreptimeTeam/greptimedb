@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, RequestHeader, Role};
+use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -169,14 +169,9 @@ impl HeartbeatTask {
         )
         .await?;
 
-        let req_header = Some(RequestHeader {
-            member_id: node_id,
-            role: Role::Datanode as i32,
-            ..Default::default()
-        });
         let self_peer = Some(Peer {
+            id: node_id,
             addr: addr.clone(),
-            ..Default::default()
         });
         let epoch = self.region_alive_keeper.epoch();
 
@@ -195,7 +190,6 @@ impl HeartbeatTask {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
                                     let req = HeartbeatRequest {
-                                        header: req_header.clone(),
                                         peer: self_peer.clone(),
                                         mailbox_message: Some(message),
                                         ..Default::default()
@@ -216,7 +210,6 @@ impl HeartbeatTask {
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
-                            header: req_header.clone(),
                             peer: self_peer.clone(),
                             region_stats,
                             duration_since_epoch,

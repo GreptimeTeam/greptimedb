@@ -99,8 +99,8 @@ impl Selector for LoadBasedSelector {
 
         Ok(tuples
             .into_iter()
-            .map(|(stat_key, lease_val, _)| Peer {
-                id: stat_key.node_id,
+            .map(|(lease_key, lease_val, _)| Peer {
+                id: lease_key.node_id,
                 addr: lease_val.node_addr,
             })
             .collect())
