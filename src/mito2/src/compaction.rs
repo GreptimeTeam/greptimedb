@@ -116,6 +116,8 @@ impl CompactionScheduler {
 
         // The region can compact directly.
         let request = status.new_compaction_request(self.request_sender.clone(), waiter);
+        // Mark the region as compacting.
+        status.compacting = true;
         self.schedule_compaction_request(request)
     }
 
