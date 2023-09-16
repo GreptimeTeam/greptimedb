@@ -9033,6 +9033,7 @@ name = "sqlness-runner"
 version = "0.4.0-nightly"
 dependencies = [
  "async-trait",
+ "clap 4.4.1",
  "client",
  "common-base",
  "common-error",
