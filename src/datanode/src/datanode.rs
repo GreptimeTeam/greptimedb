@@ -164,7 +164,7 @@ impl DatanodeBuilder {
 
                     let meta_config = self
                         .opts
-                        .meta_client_options
+                        .meta_client
                         .as_ref()
                         .context(MissingMetasrvOptsSnafu)?;
 

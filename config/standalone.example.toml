@@ -4,7 +4,7 @@ mode = "standalone"
 enable_telemetry = true
 
 # HTTP server options.
-[http_options]
+[http]
 # Server address, "127.0.0.1:4000" by default.
 addr = "127.0.0.1:4000"
 # HTTP request timeout, 30s by default.
@@ -14,14 +14,14 @@ timeout = "30s"
 body_limit = "64MB"
 
 # gRPC server options.
-[grpc_options]
+[grpc]
 # Server address, "127.0.0.1:4001" by default.
 addr = "127.0.0.1:4001"
 # The number of server worker threads, 8 by default.
 runtime_size = 8
 
 # MySQL server options.
-[mysql_options]
+[mysql]
 # Whether to enable
 enable = true
 # Server address, "127.0.0.1:4002" by default.
@@ -30,7 +30,7 @@ addr = "127.0.0.1:4002"
 runtime_size = 2
 
 # MySQL server TLS options.
-[mysql_options.tls]
+[mysql.tls]
 # TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
 # - "disable" (default value)
 # - "prefer"
@@ -44,7 +44,7 @@ cert_path = ""
 key_path = ""
 
 # PostgresSQL server options.
-[postgres_options]
+[postgres]
 # Whether to enable
 enable = true
 # Server address, "127.0.0.1:4003" by default.
@@ -53,7 +53,7 @@ addr = "127.0.0.1:4003"
 runtime_size = 2
 
 # PostgresSQL server TLS options, see `[mysql_options.tls]` section.
-[postgres_options.tls]
+[postgres.tls]
 # TLS mode.
 mode = "disable"
 # certificate file path.
@@ -62,7 +62,7 @@ cert_path = ""
 key_path = ""
 
 # OpenTSDB protocol options.
-[opentsdb_options]
+[opentsdb]
 # Whether to enable
 enable = true
 # OpenTSDB telnet API server address, "127.0.0.1:4242" by default.
@@ -71,12 +71,12 @@ addr = "127.0.0.1:4242"
 runtime_size = 2
 
 # InfluxDB protocol options.
-[influxdb_options]
+[influxdb]
 # Whether to enable InfluxDB protocol in HTTP API, true by default.
 enable = true
 
 # Prometheus remote storage options
-[prom_store_options]
+[prom_store]
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
 

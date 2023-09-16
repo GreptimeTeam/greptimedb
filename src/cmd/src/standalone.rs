@@ -123,14 +123,14 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
-            http_options: self.http_options,
-            grpc_options: self.grpc_options,
-            mysql_options: self.mysql_options,
-            postgres_options: self.postgres_options,
-            opentsdb_options: self.opentsdb_options,
-            influxdb_options: self.influxdb_options,
-            prom_store_options: self.prom_store_options,
-            meta_client_options: None,
+            http: self.http_options,
+            grpc: self.grpc_options,
+            mysql: self.mysql_options,
+            postgres: self.postgres_options,
+            opentsdb: self.opentsdb_options,
+            influxdb: self.influxdb_options,
+            prom_store: self.prom_store_options,
+            meta_client: None,
             logging: self.logging,
             ..Default::default()
         }
@@ -459,15 +459,15 @@ mod tests {
         let dn_opts = options.dn_opts;
         let logging_opts = options.logging_opts;
         assert_eq!(Mode::Standalone, fe_opts.mode);
-        assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http_options.addr);
-        assert_eq!(Duration::from_secs(30), fe_opts.http_options.timeout);
-        assert_eq!(ReadableSize::mb(128), fe_opts.http_options.body_limit);
-        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc_options.addr);
-        assert!(fe_opts.mysql_options.enable);
-        assert_eq!("127.0.0.1:4002", fe_opts.mysql_options.addr);
-        assert_eq!(2, fe_opts.mysql_options.runtime_size);
-        assert_eq!(None, fe_opts.mysql_options.reject_no_database);
-        assert!(fe_opts.influxdb_options.enable);
+        assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
+        assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
+        assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
+        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.addr);
+        assert!(fe_opts.mysql.enable);
+        assert_eq!("127.0.0.1:4002", fe_opts.mysql.addr);
+        assert_eq!(2, fe_opts.mysql.runtime_size);
+        assert_eq!(None, fe_opts.mysql.reject_no_database);
+        assert!(fe_opts.influxdb.enable);
 
         match &dn_opts.storage.store {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
@@ -512,7 +512,7 @@ mod tests {
         let toml_str = r#"
             mode = "standalone"
 
-            [http_options]
+            [http]
             addr = "127.0.0.1:4000"
 
             [logging]
@@ -544,7 +544,7 @@ mod tests {
                     Some("info"),
                 ),
                 (
-                    // http_options.addr = 127.0.0.1:24000
+                    // http.addr = 127.0.0.1:24000
                     [
                         env_prefix.to_string(),
                         "http_options".to_uppercase(),
@@ -578,11 +578,11 @@ mod tests {
                 assert_eq!(opts.logging_opts.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.fe_opts.http_options.addr, "127.0.0.1:14000");
-                assert_eq!(ReadableSize::mb(64), opts.fe_opts.http_options.body_limit);
+                assert_eq!(opts.fe_opts.http.addr, "127.0.0.1:14000");
+                assert_eq!(ReadableSize::mb(64), opts.fe_opts.http.body_limit);
 
                 // Should be default value.
-                assert_eq!(opts.fe_opts.grpc_options.addr, GrpcOptions::default().addr);
+                assert_eq!(opts.fe_opts.grpc.addr, GrpcOptions::default().addr);
             },
         );
     }
