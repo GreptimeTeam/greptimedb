@@ -323,9 +323,9 @@ mod tests {
         let sql = "SHOW FULL TABLES";
         let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::ShowDatabases { .. });
+        assert_matches!(&stmts[0], Statement::ShowTables { .. });
         match &stmts[0] {
-            Statement::ShowDatabases(show) => {
+            Statement::ShowTables(show) => {
                 assert_eq!(ShowKind::Full, show.kind);
             }
             _ => {
