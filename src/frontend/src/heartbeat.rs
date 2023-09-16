@@ -44,13 +44,13 @@ pub struct HeartbeatTask {
 impl HeartbeatTask {
     pub fn new(
         meta_client: Arc<MetaClient>,
-        heartbeat: HeartbeatOptions,
+        heartbeat_opts: HeartbeatOptions,
         resp_handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval: heartbeat.interval_millis,
-            retry_interval: heartbeat.retry_interval_millis,
+            report_interval: heartbeat_opts.interval_millis,
+            retry_interval: heartbeat_opts.retry_interval_millis,
             resp_handler_executor,
         }
     }
