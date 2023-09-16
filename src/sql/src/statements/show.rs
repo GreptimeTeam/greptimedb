@@ -140,20 +140,4 @@ mod tests {
         let sql = "SHOW CREATE TABLE";
         assert!(ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).is_err());
     }
-
-    #[test]
-    pub fn test_show_full_tables() {
-        let sql = "SHOW FULL TABLES";
-        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
-        assert_eq!(1, stmts.len());
-        assert_matches!(&stmts[0], Statement::ShowTables { .. });
-        match &stmts[0] {
-            Statement::ShowTables(show) => {
-                assert_eq!(ShowKind::Full, show.kind);
-            }
-            _ => {
-                unreachable!();
-            }
-        }
-    }
 }

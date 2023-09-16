@@ -135,7 +135,7 @@ pub async fn show_databases(
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
         }
-        ShowKind::Full => todo!(),
+        ShowKind::Full => error::UnsupportedExprSnafu { name: "FULL" }.fail()?,
     }
 }
 
@@ -186,14 +186,13 @@ pub async fn show_tables(
         ShowKind::Full => {
             let mut table_types = Vec::with_capacity(tables.len());
             for table_name in &tables {
-                let table_type = catalog_manager
+                if let Some(table_type) = catalog_manager
                     .table(query_ctx.current_catalog(), &schema_name, table_name)
                     .await
                     .context(error::CatalogSnafu)?
-                    .unwrap()
-                    .table_type();
-
-                table_types.push(format!("{table_type}"));
+                {
+                    table_types.push(table_type.table_type().to_string());
+                }
             }
 
             let table_types = Arc::new(StringVector::from(table_types)) as _;
