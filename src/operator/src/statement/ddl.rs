@@ -38,6 +38,7 @@ use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
 use sql::statements::sql_value_to_value;
+use sql::MAXVALUE;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
 use table::requests::{AlterTableRequest, TableOptions};
@@ -50,7 +51,7 @@ use crate::error::{
     SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
-use crate::{expr_factory, MAX_VALUE};
+use crate::expr_factory;
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -519,7 +520,7 @@ fn find_partition_entries(
                 // indexing is safe here because we have checked that "value_list" and "column_list" are matched in size
                 let (column_name, data_type) = &column_name_and_type[i];
                 let v = match v {
-                    SqlValue::Number(n, _) if n == MAX_VALUE => PartitionBound::MaxValue,
+                    SqlValue::Number(n, _) if n == MAXVALUE => PartitionBound::MaxValue,
                     _ => PartitionBound::Value(
                         sql_value_to_value(column_name, data_type, v).context(ParseSqlSnafu)?,
                     ),

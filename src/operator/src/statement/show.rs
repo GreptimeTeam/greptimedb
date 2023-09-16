@@ -19,14 +19,13 @@ use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use sql::ast::{Ident, Value as SqlValue};
-use sql::statements;
 use sql::statements::create::{PartitionEntry, Partitions};
 use sql::statements::show::{ShowDatabases, ShowTables};
+use sql::{statements, MAXVALUE};
 use table::TableRef;
 
 use crate::error::{self, ExecuteStatementSnafu, Result};
 use crate::statement::StatementExecutor;
-use crate::MAX_VALUE;
 
 impl StatementExecutor {
     pub(super) async fn show_databases(
@@ -93,7 +92,7 @@ fn create_partitions_stmt(partitions: Vec<PartitionInfo>) -> Result<Option<Parti
                 .map(|b| match b {
                     PartitionBound::Value(v) => statements::value_to_sql_value(v)
                         .with_context(|_| error::ConvertSqlValueSnafu { value: v.clone() }),
-                    PartitionBound::MaxValue => Ok(SqlValue::Number(MAX_VALUE.to_string(), false)),
+                    PartitionBound::MaxValue => Ok(SqlValue::Number(MAXVALUE.to_string(), false)),
                 })
                 .collect::<Result<Vec<_>>>()?;
 

@@ -22,4 +22,3 @@ pub mod statement;
 pub mod table;
 #[cfg(test)]
 pub(crate) mod tests;
-pub const MAX_VALUE: &str = "MAXVALUE";
