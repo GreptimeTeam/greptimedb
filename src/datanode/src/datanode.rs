@@ -192,7 +192,7 @@ impl DatanodeBuilder {
 
         // build and initialize region server
         let log_store = Self::build_log_store(&self.opts).await?;
-        let (tx, region_event_receiver) = match mode {
+        let (region_event_listener, region_event_receiver) = match mode {
             Mode::Distributed => {
                 let (tx, rx) = new_region_server_event_channel();
                 (Box::new(tx) as RegionServerEventListenerRef, Some(rx))
@@ -203,8 +203,13 @@ impl DatanodeBuilder {
             ),
         };
 
-        let region_server =
-            Self::new_region_server(&self.opts, self.plugins.clone(), log_store, tx).await?;
+        let region_server = Self::new_region_server(
+            &self.opts,
+            self.plugins.clone(),
+            log_store,
+            region_event_listener,
+        )
+        .await?;
         self.initialize_region_server(&region_server, kv_backend, matches!(mode, Mode::Standalone))
             .await?;
 
