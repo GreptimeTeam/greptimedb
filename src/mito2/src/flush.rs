@@ -608,7 +608,11 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::oneshot;
+
     use super::*;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_get_mutable_limit() {
@@ -661,5 +665,33 @@ mod tests {
         assert!(manager.should_flush_engine());
         manager.reserve_mem(100);
         assert!(manager.should_flush_engine());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_empty() {
+        let env = SchedulerEnv::new();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let builder = VersionControlBuilder::new();
+
+        let version_control = Arc::new(builder.build());
+        let (output_tx, output_rx) = oneshot::channel();
+        let mut task = RegionFlushTask {
+            region_id: builder.region_id(),
+            reason: FlushReason::Others,
+            senders: Vec::new(),
+            request_sender: tx,
+            access_layer: env.access_layer.clone(),
+            memtable_builder: builder.memtable_builder(),
+            file_purger: builder.file_purger(),
+        };
+        task.push_sender(OptionOutputTx::from(output_tx));
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        assert!(scheduler.region_status.is_empty());
+        let output = output_rx.await.unwrap().unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(scheduler.region_status.is_empty());
     }
 }

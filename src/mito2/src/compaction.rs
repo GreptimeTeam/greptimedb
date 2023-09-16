@@ -243,9 +243,6 @@ struct CompactionStatus {
     /// File purger of the region.
     file_purger: FilePurgerRef,
     /// Whether a compaction task is running.
-    ///
-    /// It may be failed to submit a compaction task so we need this flag to track
-    /// whether the region is compacting.
     compacting: bool,
     /// Compaction pending to schedule.
     ///
@@ -312,5 +309,58 @@ impl CompactionStatus {
         req.push_waiter(waiter);
 
         req
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_query::Output;
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::version_util::VersionControlBuilder;
+
+    #[tokio::test]
+    async fn test_schedule_empty() {
+        let env = SchedulerEnv::new();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let purger = builder.file_purger();
+
+        // Nothing to compact.
+        let version_control = Arc::new(builder.build());
+        let (output_tx, output_rx) = oneshot::channel();
+        let waiter = OptionOutputTx::from(output_tx);
+        scheduler
+            .schedule_compaction(
+                builder.region_id(),
+                &version_control,
+                &env.access_layer,
+                &purger,
+                waiter,
+            )
+            .unwrap();
+        let output = output_rx.await.unwrap().unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(scheduler.region_status.is_empty());
+
+        // Only one file, picker won't compact it.
+        let version_control = Arc::new(builder.push_l0_file(0, 1000).build());
+        let (output_tx, output_rx) = oneshot::channel();
+        let waiter = OptionOutputTx::from(output_tx);
+        scheduler
+            .schedule_compaction(
+                builder.region_id(),
+                &version_control,
+                &env.access_layer,
+                &purger,
+                waiter,
+            )
+            .unwrap();
+        let output = output_rx.await.unwrap().unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(scheduler.region_status.is_empty());
     }
 }
