@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, Role};
+use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, RequestHeader, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
@@ -169,7 +169,17 @@ impl HeartbeatTask {
         )
         .await?;
 
+        let req_header = Some(RequestHeader {
+            member_id: node_id,
+            role: Role::Datanode as i32,
+            ..Default::default()
+        });
+        let self_peer = Some(Peer {
+            addr: addr.clone(),
+            ..Default::default()
+        });
         let epoch = self.region_alive_keeper.epoch();
+
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
@@ -184,9 +194,9 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let peer = Some(Peer { id: node_id, addr: addr.clone() });
                                     let req = HeartbeatRequest {
-                                        peer,
+                                        header: req_header.clone(),
+                                        peer: self_peer.clone(),
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
@@ -202,12 +212,12 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        let peer = Some(Peer { id: node_id, addr: addr.clone() });
                         let region_stats = Self::load_region_stats(&region_server_clone).await;
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
-                            peer,
+                            header: req_header.clone(),
+                            peer: self_peer.clone(),
                             region_stats,
                             duration_since_epoch,
                             node_epoch,
