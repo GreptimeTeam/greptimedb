@@ -184,7 +184,7 @@ pub async fn show_tables(
             Ok(Output::RecordBatches(records))
         }
         ShowKind::Full => {
-            let mut table_types = Vec::new();
+            let mut table_types = Vec::with_capacity(tables.len());
             for table_name in &tables {
                 let table_type = catalog_manager
                     .table(query_ctx.current_catalog(), &schema_name, table_name)
@@ -193,12 +193,7 @@ pub async fn show_tables(
                     .unwrap()
                     .table_type();
 
-                let table_type = match table_type {
-                    table::metadata::TableType::Base => "BASE TABLE",
-                    table::metadata::TableType::Temporary => "TEMPORARY",
-                    table::metadata::TableType::View => "VIEW",
-                };
-                table_types.push(table_type);
+                table_types.push(format!("{table_type}"));
             }
 
             let table_types = Arc::new(StringVector::from(table_types)) as _;

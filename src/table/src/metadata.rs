@@ -80,6 +80,16 @@ pub enum TableType {
     Temporary,
 }
 
+impl std::fmt::Display for TableType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableType::Base => f.write_str("BASE TABLE"),
+            TableType::Temporary => f.write_str("TEMPORARY"),
+            TableType::View => f.write_str("VIEW"),
+        }
+    }
+}
+
 /// Identifier of the table.
 #[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct TableIdent {
