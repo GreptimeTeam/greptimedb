@@ -191,10 +191,10 @@ impl HeartbeatTask {
                 }
 
                 match event_receiver.0.recv().await {
-                    Some(RegionServerEvent::Register(region_id)) => {
+                    Some(RegionServerEvent::Registered(region_id)) => {
                         keeper.register_region(region_id).await;
                     }
-                    Some(RegionServerEvent::Deregister(region_id)) => {
+                    Some(RegionServerEvent::Deregistered(region_id)) => {
                         keeper.deregister_region(region_id).await;
                     }
                     None => {

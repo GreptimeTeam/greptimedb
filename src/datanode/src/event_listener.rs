@@ -17,16 +17,16 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 pub enum RegionServerEvent {
-    Register(RegionId),
-    Deregister(RegionId),
+    Registered(RegionId),
+    Deregistered(RegionId),
 }
 
 pub trait RegionServerEventListener: Sync + Send {
     /// Called *after* a new region was created/opened.
-    fn on_register_region(&self, _region_id: RegionId) {}
+    fn on_region_registered(&self, _region_id: RegionId) {}
 
     /// Called *after* a region was closed.
-    fn on_deregister_region(&self, _region_id: RegionId) {}
+    fn on_region_deregistered(&self, _region_id: RegionId) {}
 }
 
 pub type RegionServerEventListenerRef = Box<dyn RegionServerEventListener>;
@@ -39,8 +39,8 @@ impl RegionServerEventListener for NoopRegionServerEventListener {}
 pub struct RegionServerEventSender(pub(crate) UnboundedSender<RegionServerEvent>);
 
 impl RegionServerEventListener for RegionServerEventSender {
-    fn on_register_region(&self, region_id: RegionId) {
-        if let Err(e) = self.0.send(RegionServerEvent::Register(region_id)) {
+    fn on_region_registered(&self, region_id: RegionId) {
+        if let Err(e) = self.0.send(RegionServerEvent::Registered(region_id)) {
             error!(
                 "Failed to send registering region: {region_id} event, source: {}",
                 e
@@ -48,8 +48,8 @@ impl RegionServerEventListener for RegionServerEventSender {
         }
     }
 
-    fn on_deregister_region(&self, region_id: RegionId) {
-        if let Err(e) = self.0.send(RegionServerEvent::Deregister(region_id)) {
+    fn on_region_deregistered(&self, region_id: RegionId) {
+        if let Err(e) = self.0.send(RegionServerEvent::Deregistered(region_id)) {
             error!(
                 "Failed to send deregistering region: {region_id} event, source: {}",
                 e

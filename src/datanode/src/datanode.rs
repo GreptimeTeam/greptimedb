@@ -192,8 +192,6 @@ impl DatanodeBuilder {
 
         // build and initialize region server
         let log_store = Self::build_log_store(&self.opts).await?;
-        // TODO(weny): Adds a noop event listener for standalone mode.
-
         let (tx, region_event_receiver) = match mode {
             Mode::Distributed => {
                 let (tx, rx) = new_region_server_event_channel();
