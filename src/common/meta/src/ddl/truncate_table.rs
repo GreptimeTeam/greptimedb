@@ -20,22 +20,24 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::debug;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::storage::RegionId;
+use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
+use super::utils::handle_retry_error;
 use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
-use crate::error::{self, Result, TableNotFoundSnafu};
+use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
+use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::table_name::TableName;
@@ -52,18 +54,20 @@ impl Procedure for TruncateTableProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let error_handler = |e| {
-            if matches!(e, error::Error::RetryLater { .. }) {
-                ProcedureError::retry_later(e)
-            } else {
-                ProcedureError::external(e)
-            }
-        };
+        let state = &self.data.state;
+
+        let _timer = common_telemetry::timer!(
+            metrics::METRIC_META_PROCEDURE_TRUNCATE_TABLE,
+            &[("step", state.as_ref().to_string())]
+        );
+
         match self.data.state {
             TruncateTableState::Prepare => self.on_prepare().await,
-            TruncateTableState::DatanodeTruncateTable => self.on_datanode_truncate_table().await,
+            TruncateTableState::DatanodeTruncateRegions => {
+                self.on_datanode_truncate_regions().await
+            }
         }
-        .map_err(error_handler)
+        .map_err(handle_retry_error)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -83,7 +87,7 @@ impl Procedure for TruncateTableProcedure {
 }
 
 impl TruncateTableProcedure {
-    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTableProcedure";
+    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTable";
 
     pub(crate) fn new(
         cluster_id: u64,
@@ -125,12 +129,12 @@ impl TruncateTableProcedure {
             }
         );
 
-        self.data.state = TruncateTableState::DatanodeTruncateTable;
+        self.data.state = TruncateTableState::DatanodeTruncateRegions;
 
         Ok(Status::executing(true))
     }
 
-    async fn on_datanode_truncate_table(&mut self) -> Result<Status> {
+    async fn on_datanode_truncate_regions(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
 
         let region_routes = &self.data.region_routes;
@@ -195,7 +199,7 @@ impl TruncateTableData {
         region_routes: Vec<RegionRoute>,
     ) -> Self {
         Self {
-            state: TruncateTableState::DatanodeTruncateTable,
+            state: TruncateTableState::Prepare,
             cluster_id,
             task,
             table_info_value,
@@ -220,10 +224,10 @@ impl TruncateTableData {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, AsRefStr)]
 enum TruncateTableState {
     /// Prepares to truncate the table
     Prepare,
-    /// Datanode truncates the table
-    DatanodeTruncateTable,
+    /// Truncates regions on Datanode
+    DatanodeTruncateRegions,
 }

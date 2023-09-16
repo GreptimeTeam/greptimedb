@@ -421,6 +421,7 @@ pub struct RegionFlushRequest {}
 #[derive(Debug)]
 pub struct RegionCompactRequest {}
 
+/// Truncate region request.
 #[derive(Debug)]
 pub struct RegionTruncateRequest {}
 
