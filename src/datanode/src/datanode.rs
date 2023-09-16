@@ -50,6 +50,10 @@ use crate::error::{
     MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
     ShutdownInstanceSnafu,
 };
+use crate::event_listener::{
+    new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
+    RegionServerEventReceiver,
+};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
 use crate::region_server::RegionServer;
@@ -63,6 +67,7 @@ pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
+    event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 }
@@ -77,9 +82,11 @@ impl Datanode {
         self.start_services().await
     }
 
-    pub async fn start_heartbeat(&self) -> Result<()> {
+    pub async fn start_heartbeat(&mut self) -> Result<()> {
         if let Some(task) = &self.heartbeat_task {
-            task.start().await?;
+            // Safety: The event_receiver must exist.
+            let receiver = self.event_receiver.take().unwrap();
+            task.start(receiver).await?;
         }
         Ok(())
     }
@@ -185,8 +192,21 @@ impl DatanodeBuilder {
 
         // build and initialize region server
         let log_store = Self::build_log_store(&self.opts).await?;
+        // TODO(weny): Adds a noop event listener for standalone mode.
+
+        let (tx, event_receiver) = match mode {
+            Mode::Distributed => {
+                let (tx, rx) = new_region_server_event_channel();
+                (Box::new(tx) as RegionServerEventListenerRef, Some(rx))
+            }
+            Mode::Standalone => (
+                Box::new(NoopRegionServerEventListener) as RegionServerEventListenerRef,
+                None,
+            ),
+        };
+
         let region_server =
-            Self::new_region_server(&self.opts, self.plugins.clone(), log_store).await?;
+            Self::new_region_server(&self.opts, self.plugins.clone(), log_store, tx).await?;
         self.initialize_region_server(&region_server, kv_backend, matches!(mode, Mode::Standalone))
             .await?;
 
@@ -219,6 +239,7 @@ impl DatanodeBuilder {
             heartbeat_task,
             region_server,
             greptimedb_telemetry_task,
+            event_receiver,
         })
     }
 
@@ -276,6 +297,7 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         plugins: Arc<Plugins>,
         log_store: Arc<RaftEngineLogStore>,
+        event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -294,7 +316,8 @@ impl DatanodeBuilder {
                 .context(RuntimeResourceSnafu)?,
         );
 
-        let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
+        let mut region_server =
+            RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
         let object_store = store::new_object_store(opts).await?;
         let engines = Self::build_store_engines(opts, log_store, object_store).await?;
         for engine in engines {
