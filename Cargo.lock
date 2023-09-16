@@ -234,20 +234,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b3f9eb837c6a783fbf002e3e5cc7925a3aa6893d6d42f9169517528983777590"
 
 [[package]]
-name = "aquamarine"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df752953c49ce90719c7bf1fc587bc8227aed04732ea0c0f85e5397d7fdbd1a1"
-dependencies = [
- "include_dir",
- "itertools 0.10.5",
- "proc-macro-error",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
 name = "arc-swap"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2653,17 +2639,13 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
- "file-table-engine",
  "futures",
  "futures-util",
  "humantime-serde",
  "hyper",
- "key-lock",
  "log-store",
  "meta-client",
- "meta-srv",
  "metrics",
- "mito",
  "mito2",
  "object-store",
  "pin-project",
@@ -3277,14 +3259,12 @@ dependencies = [
  "log-store",
  "meta-client",
  "meta-srv",
- "meter-core",
- "meter-macros",
  "metrics",
- "mito",
  "moka 0.9.9",
  "object-store",
  "openmetrics-parser",
  "opentelemetry-proto",
+ "operator",
  "partition",
  "prost",
  "query",
@@ -4441,25 +4421,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18762faeff7122e89e0857b02f7ce6fcc0d101d5e9ad2ad7846cc01d61b7f19e"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b139284b5cf57ecfa712bcc66950bb635b31aff41c188e8a4cfc758eca374a3f"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5461,8 +5422,6 @@ version = "0.4.0-nightly"
 dependencies = [
  "anymap",
  "api",
- "aquamarine",
- "arc-swap",
  "async-channel",
  "async-compat",
  "async-stream",
@@ -5501,7 +5460,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "snafu",
- "storage",
  "store-api",
  "strum 0.25.0",
  "table",
@@ -6168,6 +6126,54 @@ dependencies = [
 [[package]]
 name = "operator"
 version = "0.4.0-nightly"
+dependencies = [
+ "api",
+ "async-compat",
+ "async-trait",
+ "auth",
+ "catalog",
+ "chrono",
+ "client",
+ "common-base",
+ "common-catalog",
+ "common-datasource",
+ "common-error",
+ "common-grpc-expr",
+ "common-meta",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-time",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "file-table-engine",
+ "futures",
+ "futures-util",
+ "meta-client",
+ "meter-core",
+ "meter-macros",
+ "metrics",
+ "object-store",
+ "partition",
+ "query",
+ "regex",
+ "serde",
+ "serde_json",
+ "servers",
+ "session",
+ "snafu",
+ "sql",
+ "sqlparser 0.34.0",
+ "storage",
+ "store-api",
+ "substrait 0.4.0-nightly",
+ "table",
+ "tokio",
+ "tonic 0.9.2",
+]
 
 [[package]]
 name = "optional"
@@ -8387,7 +8393,6 @@ dependencies = [
  "async-trait",
  "catalog",
  "common-catalog",
- "common-config",
  "common-error",
  "common-function",
  "common-query",
@@ -9188,7 +9193,6 @@ name = "store-api"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
- "aquamarine",
  "async-stream",
  "async-trait",
  "bytes",

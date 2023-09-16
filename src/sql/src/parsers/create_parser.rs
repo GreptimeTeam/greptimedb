@@ -40,8 +40,8 @@ use crate::statements::statement::Statement;
 use crate::statements::{sql_data_type_to_concrete_data_type, sql_value_to_value};
 use crate::util::parse_option_string;
 
-const ENGINE: &str = "ENGINE";
-const MAXVALUE: &str = "MAXVALUE";
+pub const ENGINE: &str = "ENGINE";
+pub const MAXVALUE: &str = "MAXVALUE";
 
 static LESS: Lazy<Token> = Lazy::new(|| Token::make_keyword("LESS"));
 static THAN: Lazy<Token> = Lazy::new(|| Token::make_keyword("THAN"));

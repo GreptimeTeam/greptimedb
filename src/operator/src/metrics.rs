@@ -12,6 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod common;
-pub mod delete;
-pub mod insert;
+pub const DIST_CREATE_TABLE: &str = "table.operator.create_table";
+pub const DIST_INGEST_ROW_COUNT: &str = "table.operator.ingest_rows";
+pub const DIST_DELETE_ROW_COUNT: &str = "table.operator.delete_rows";
