@@ -70,7 +70,7 @@ pub struct StatementExecutor {
 }
 
 impl StatementExecutor {
-    pub(crate) fn new(
+    pub fn new(
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
         ddl_task_executor: DdlTaskExecutorRef,

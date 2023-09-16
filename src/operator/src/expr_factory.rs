@@ -247,7 +247,7 @@ fn columns_to_expr(
     column_schemas_to_defs(column_schemas, primary_keys)
 }
 
-pub(crate) fn column_schemas_to_defs(
+pub fn column_schemas_to_defs(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],
 ) -> Result<Vec<api::v1::ColumnDef>> {

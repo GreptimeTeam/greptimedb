@@ -106,12 +106,6 @@ pub enum Error {
     #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
     InvalidMeta { reason: String, location: Location },
 
-    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
-    InvalidSchema {
-        source: datatypes::error::Error,
-        location: Location,
-    },
-
     #[snafu(display("Invalid region metadata, source: {}, location: {}", source, location))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
@@ -270,18 +264,6 @@ pub enum Error {
     #[snafu(display("Failed to write region, source: {}", source))]
     WriteGroup { source: Arc<Error> },
 
-    #[snafu(display(
-        "Row length mismatch, expect: {}, actual: {}, location: {}",
-        expect,
-        actual,
-        location
-    ))]
-    RowLengthMismatch {
-        expect: usize,
-        actual: usize,
-        location: Location,
-    },
-
     #[snafu(display("Row value mismatches field data type"))]
     FieldTypeMismatch { source: datatypes::error::Error },
 
@@ -437,16 +419,6 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build time range predicate for compaction, location: {}, source: {}",
-        location,
-        source
-    ))]
-    BuildCompactionPredicate {
-        source: table::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display(
         "Failed to compact region {}, location: {}, source:{}",
         region_id,
         location,
@@ -515,7 +487,6 @@ impl ErrorExt for Error {
             RegionExists { .. } => StatusCode::RegionAlreadyExists,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
-            | InvalidSchema { .. }
             | InvalidRequest { .. }
             | FillDefault { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
@@ -527,7 +498,6 @@ impl ErrorExt for Error {
             | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
-            RowLengthMismatch { .. } => StatusCode::InvalidArguments,
             FieldTypeMismatch { source, .. } => source.status_code(),
             SerializeField { .. } => StatusCode::Internal,
             NotSupportedField { .. } => StatusCode::Unsupported,
@@ -547,7 +517,6 @@ impl ErrorExt for Error {
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             RegionTruncating { .. } => StatusCode::Cancelled,
-            BuildCompactionPredicate { .. } => StatusCode::Internal,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,

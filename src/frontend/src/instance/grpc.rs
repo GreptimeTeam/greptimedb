@@ -27,7 +27,10 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result};
+use crate::error::{
+    Error, IncompleteGrpcRequestSnafu, NotSupportedSnafu, PermissionSnafu, Result,
+    TableOperationSnafu,
+};
 use crate::instance::Instance;
 
 #[async_trait]
@@ -176,6 +179,7 @@ impl Instance {
         self.inserter
             .handle_column_inserts(requests, ctx, self.statement_executor.as_ref())
             .await
+            .context(TableOperationSnafu)
     }
 
     pub async fn handle_row_inserts(
@@ -186,6 +190,7 @@ impl Instance {
         self.inserter
             .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
             .await
+            .context(TableOperationSnafu)
     }
 
     pub async fn handle_deletes(
@@ -193,7 +198,10 @@ impl Instance {
         requests: DeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        self.deleter.handle_column_deletes(requests, ctx).await
+        self.deleter
+            .handle_column_deletes(requests, ctx)
+            .await
+            .context(TableOperationSnafu)
     }
 
     pub async fn handle_row_deletes(
@@ -201,6 +209,9 @@ impl Instance {
         requests: RowDeleteRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
-        self.deleter.handle_row_deletes(requests, ctx).await
+        self.deleter
+            .handle_row_deletes(requests, ctx)
+            .await
+            .context(TableOperationSnafu)
     }
 }

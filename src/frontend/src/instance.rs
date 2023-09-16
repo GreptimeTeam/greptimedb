@@ -50,6 +50,10 @@ use common_telemetry::{error, timer};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
+use operator::delete::{Deleter, DeleterRef};
+use operator::insert::{Inserter, InserterRef};
+use operator::statement::StatementExecutor;
+use operator::table::table_idents_to_full_name;
 use partition::manager::PartitionRuleManager;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
@@ -80,20 +84,17 @@ pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
 use self::standalone::StandaloneTableMetadataCreator;
-use crate::delete::{Deleter, DeleterRef};
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    TableOperationSnafu,
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
-use crate::insert::{Inserter, InserterRef};
 use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
-use crate::statement::StatementExecutor;
-use crate::table::table_idents_to_full_name;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -412,7 +413,10 @@ impl Instance {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let stmt = QueryStatement::Sql(stmt);
-        self.statement_executor.execute_stmt(stmt, query_ctx).await
+        self.statement_executor
+            .execute_stmt(stmt, query_ctx)
+            .await
+            .context(TableOperationSnafu)
     }
 }
 
