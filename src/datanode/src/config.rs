@@ -323,8 +323,8 @@ pub struct DatanodeOptions {
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
     pub heartbeat: HeartbeatOptions,
-    pub http_opts: HttpOptions,
-    pub meta_client_options: Option<MetaClientOptions>,
+    pub http: HttpOptions,
+    pub meta_client: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     /// Options for different store engines.
@@ -341,8 +341,8 @@ impl Default for DatanodeOptions {
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
-            http_opts: HttpOptions::default(),
-            meta_client_options: None,
+            http: HttpOptions::default(),
+            meta_client: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
@@ -355,7 +355,7 @@ impl Default for DatanodeOptions {
 
 impl DatanodeOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client_options.metasrv_addrs"])
+        Some(&["meta_client.metasrv_addrs"])
     }
 
     pub fn to_toml_string(&self) -> String {

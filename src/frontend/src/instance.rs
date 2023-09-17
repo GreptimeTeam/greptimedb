@@ -224,10 +224,7 @@ impl Instance {
     }
 
     async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
-        let meta_client_options = opts
-            .meta_client_options
-            .as_ref()
-            .context(MissingMetasrvOptsSnafu)?;
+        let meta_client_options = opts.meta_client.as_ref().context(MissingMetasrvOptsSnafu)?;
         info!(
             "Creating Frontend instance in distributed mode with Meta server addr {:?}",
             meta_client_options.metasrv_addrs

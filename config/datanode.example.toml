@@ -14,7 +14,7 @@ rpc_runtime_size = 8
 interval_millis = 5000
 
 # Metasrv client options.
-[meta_client_options]
+[meta_client]
 # Metasrv address list.
 metasrv_addrs = ["127.0.0.1:3002"]
 # Operation timeout in milliseconds, 3000 by default.

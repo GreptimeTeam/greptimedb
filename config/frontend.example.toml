@@ -14,50 +14,50 @@ timeout = "30s"
 body_limit = "64MB"
 
 # gRPC server options, see `standalone.example.toml`.
-[grpc_options]
+[grpc]
 addr = "127.0.0.1:4001"
 runtime_size = 8
 
 # MySQL server options, see `standalone.example.toml`.
-[mysql_options]
+[mysql]
 enable = true
 addr = "127.0.0.1:4002"
 runtime_size = 2
 
 # MySQL server TLS options, see `standalone.example.toml`.
-[mysql_options.tls]
+[mysql.tls]
 mode = "disable"
 cert_path = ""
 key_path = ""
 
 # PostgresSQL server options, see `standalone.example.toml`.
-[postgres_options]
+[postgres]
 enable = true
 addr = "127.0.0.1:4003"
 runtime_size = 2
 
 # PostgresSQL server TLS options, see `standalone.example.toml`.
-[postgres_options.tls]
+[postgres.tls]
 mode = "disable"
 cert_path = ""
 key_path = ""
 
 # OpenTSDB protocol options, see `standalone.example.toml`.
-[opentsdb_options]
+[opentsdb]
 enable = true
 addr = "127.0.0.1:4242"
 runtime_size = 2
 
 # InfluxDB protocol options, see `standalone.example.toml`.
-[influxdb_options]
+[influxdb]
 enable = true
 
 # Prometheus remote storage options, see `standalone.example.toml`.
-[prom_store_options]
+[prom_store]
 enable = true
 
 # Metasrv client options, see `datanode.example.toml`.
-[meta_client_options]
+[meta_client]
 metasrv_addrs = ["127.0.0.1:3002"]
 timeout_millis = 3000
 # DDL timeouts options.
