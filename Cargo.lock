@@ -3222,6 +3222,7 @@ name = "frontend"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "arc-swap",
  "arrow-flight",
  "async-compat",
  "async-stream",
@@ -8389,6 +8390,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "script"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
+ "arc-swap",
  "arrow",
  "async-trait",
  "catalog",
@@ -8414,6 +8417,7 @@ dependencies = [
  "log-store",
  "mito",
  "once_cell",
+ "operator",
  "paste",
  "pyo3",
  "query",
@@ -8428,6 +8432,7 @@ dependencies = [
  "rustpython-stdlib",
  "rustpython-vm",
  "serde",
+ "servers",
  "session",
  "snafu",
  "sql",

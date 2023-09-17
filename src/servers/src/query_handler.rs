@@ -49,10 +49,15 @@ pub type ScriptHandlerRef = Arc<dyn ScriptHandler + Send + Sync>;
 
 #[async_trait]
 pub trait ScriptHandler {
-    async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()>;
+    async fn insert_script(
+        &self,
+        query_ctx: QueryContextRef,
+        name: &str,
+        script: &str,
+    ) -> Result<()>;
     async fn execute_script(
         &self,
-        schema: &str,
+        query_ctx: QueryContextRef,
         name: &str,
         params: HashMap<String, String>,
     ) -> Result<Output>;
