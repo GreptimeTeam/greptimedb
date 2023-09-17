@@ -104,7 +104,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
                     timestamp_millis: time_util::current_time_millis(),
                     cluster_id: header.cluster_id,
                     // datanode id
-                    id: header.member_id,
+                    id: peer.id,
                     // datanode address
                     addr: peer.addr,
                     rcus: region_stats.iter().map(|s| s.rcus).sum(),

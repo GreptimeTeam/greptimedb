@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatRequest, RequestHeader, Role};
+use api::v1::meta::HeartbeatRequest;
 use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
 };
@@ -109,11 +109,6 @@ impl HeartbeatTask {
     ) {
         let report_interval = self.report_interval;
 
-        let req_header = Some(RequestHeader {
-            role: Role::Frontend as i32,
-            ..Default::default()
-        });
-
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
@@ -125,7 +120,6 @@ impl HeartbeatTask {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
                                     let req = HeartbeatRequest {
-                                        header: req_header.clone(),
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
@@ -144,7 +138,6 @@ impl HeartbeatTask {
                     _ = &mut sleep => {
                         sleep.as_mut().reset(Instant::now() + Duration::from_millis(report_interval));
                         let req = HeartbeatRequest {
-                            header: req_header.clone(),
                             ..Default::default()
                         };
                         Some(req)

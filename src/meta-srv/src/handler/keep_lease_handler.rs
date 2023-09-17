@@ -37,12 +37,15 @@ impl HeartbeatHandler for KeepLeaseHandler {
         _acc: &mut HeartbeatAccumulator,
     ) -> Result<()> {
         let HeartbeatRequest { header, peer, .. } = req;
+        let Some(header) = &header else {
+            return Ok(());
+        };
         let Some(peer) = &peer else {
             return Ok(());
         };
 
         let key = LeaseKey {
-            cluster_id: header.as_ref().map_or(0, |h| h.cluster_id),
+            cluster_id: header.cluster_id,
             node_id: peer.id,
         };
         let value = LeaseValue {
