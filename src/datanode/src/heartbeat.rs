@@ -28,7 +28,7 @@ use common_telemetry::{debug, error, info, trace, warn};
 use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use snafu::ResultExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
@@ -96,6 +96,7 @@ impl HeartbeatTask {
         running: Arc<AtomicBool>,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
+        mut notify: Option<Arc<Notify>>,
     ) -> Result<HeartbeatSender> {
         let client_id = meta_client.id();
 
@@ -111,10 +112,12 @@ impl HeartbeatTask {
                 if let Some(msg) = res.mailbox_message.as_ref() {
                     info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
                 }
-
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()).await {
                     error!(e; "Error while handling heartbeat response");
+                }
+                if let Some(notify) = notify.take() {
+                    notify.notify_one();
                 }
                 if !running.load(Ordering::Acquire) {
                     info!("Heartbeat task shutdown");
@@ -137,7 +140,11 @@ impl HeartbeatTask {
     }
 
     /// Start heartbeat task, spawn background task.
-    pub async fn start(&self, mut event_receiver: RegionServerEventReceiver) -> Result<()> {
+    pub async fn start(
+        &self,
+        mut event_receiver: RegionServerEventReceiver,
+        notify: Arc<Notify>,
+    ) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -167,6 +174,7 @@ impl HeartbeatTask {
             running.clone(),
             handler_executor.clone(),
             mailbox.clone(),
+            Some(notify),
         )
         .await?;
 
@@ -256,6 +264,7 @@ impl HeartbeatTask {
                             running.clone(),
                             handler_executor.clone(),
                             mailbox.clone(),
+                            None,
                         )
                         .await
                         {

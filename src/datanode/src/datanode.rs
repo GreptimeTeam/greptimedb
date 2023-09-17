@@ -43,6 +43,7 @@ use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 use tokio::fs;
+use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
@@ -86,7 +87,10 @@ impl Datanode {
         if let Some(task) = &self.heartbeat_task {
             // Safety: The event_receiver must exist.
             let receiver = self.region_event_receiver.take().unwrap();
-            task.start(receiver).await?;
+            let notify = Arc::new(Notify::new());
+            task.start(receiver, notify.clone()).await?;
+            // Waits for first heartbeat response processed.
+            notify.notified().await;
         }
         Ok(())
     }
