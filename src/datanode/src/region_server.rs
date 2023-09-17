@@ -59,6 +59,7 @@ use crate::error::{
     GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
     RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
 };
+use crate::event_listener::RegionServerEventListenerRef;
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -66,9 +67,17 @@ pub struct RegionServer {
 }
 
 impl RegionServer {
-    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        runtime: Arc<Runtime>,
+        event_listener: RegionServerEventListenerRef,
+    ) -> Self {
         Self {
-            inner: Arc::new(RegionServerInner::new(query_engine, runtime)),
+            inner: Arc::new(RegionServerInner::new(
+                query_engine,
+                runtime,
+                event_listener,
+            )),
         }
     }
 
@@ -185,15 +194,21 @@ struct RegionServerInner {
     region_map: DashMap<RegionId, RegionEngineRef>,
     query_engine: QueryEngineRef,
     runtime: Arc<Runtime>,
+    event_listener: RegionServerEventListenerRef,
 }
 
 impl RegionServerInner {
-    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        runtime: Arc<Runtime>,
+        event_listener: RegionServerEventListenerRef,
+    ) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
             region_map: DashMap::new(),
             query_engine,
             runtime,
+            event_listener,
         }
     }
 
@@ -251,12 +266,14 @@ impl RegionServerInner {
             RegionChange::Register(_) => {
                 info!("Region {region_id} is registered to engine {engine_type}");
                 self.region_map.insert(region_id, engine);
+                self.event_listener.on_region_registered(region_id);
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
                 self.region_map
                     .remove(&region_id)
                     .map(|(id, engine)| engine.set_writable(id, false));
+                self.event_listener.on_region_deregistered(region_id);
             }
         }
 

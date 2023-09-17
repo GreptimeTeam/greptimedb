@@ -36,6 +36,7 @@ use session::context::QueryContextRef;
 use table::TableRef;
 use tokio::sync::mpsc::{self, Receiver};
 
+use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
 use crate::Instance;
 
@@ -142,5 +143,6 @@ pub fn mock_region_server() -> RegionServer {
     RegionServer::new(
         Arc::new(MockQueryEngine),
         Arc::new(Runtime::builder().build().unwrap()),
+        Box::new(NoopRegionServerEventListener),
     )
 }

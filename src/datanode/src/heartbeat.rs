@@ -35,6 +35,7 @@ use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
+use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -136,7 +137,7 @@ impl HeartbeatTask {
     }
 
     /// Start heartbeat task, spawn background task.
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, mut event_receiver: RegionServerEventReceiver) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -179,6 +180,32 @@ impl HeartbeatTask {
             ..Default::default()
         });
         let epoch = self.region_alive_keeper.epoch();
+
+        let keeper = self.region_alive_keeper.clone();
+
+        common_runtime::spawn_bg(async move {
+            loop {
+                if !running.load(Ordering::Relaxed) {
+                    info!("shutdown heartbeat task");
+                    break;
+                }
+
+                match event_receiver.0.recv().await {
+                    Some(RegionServerEvent::Registered(region_id)) => {
+                        keeper.register_region(region_id).await;
+                    }
+                    Some(RegionServerEvent::Deregistered(region_id)) => {
+                        keeper.deregister_region(region_id).await;
+                    }
+                    None => {
+                        info!("region server event sender closed!");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let running = self.running.clone();
 
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
