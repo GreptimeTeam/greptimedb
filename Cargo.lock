@@ -9228,6 +9228,7 @@ name = "store-api"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "aquamarine",
  "async-stream",
  "async-trait",
  "bytes",

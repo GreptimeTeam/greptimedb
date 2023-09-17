@@ -25,7 +25,7 @@ use crate::query_handler::OpentsdbProtocolHandlerRef;
 use crate::shutdown::Shutdown;
 
 /// Per-connection handler. Reads requests from `connection` and applies the OpenTSDB metric to
-/// [OpentsdbLineProtocolHandler].
+/// [OpentsdbProtocolHandlerRef].
 pub(crate) struct Handler<S: AsyncWrite + AsyncRead + Unpin> {
     query_handler: OpentsdbProtocolHandlerRef,
 

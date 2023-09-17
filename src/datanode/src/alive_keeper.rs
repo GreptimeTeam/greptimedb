@@ -38,9 +38,9 @@ use crate::region_server::RegionServer;
 
 const MAX_CLOSE_RETRY_TIMES: usize = 10;
 
-/// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
+/// [RegionAliveKeeper] manages all `CountdownTaskHandles`.
 ///
-/// [RegionAliveKeeper] starts a [CountdownTask] for each region. When deadline is reached,
+/// [RegionAliveKeeper] starts a `CountdownTask` for each region. When deadline is reached,
 /// the region will be closed.
 ///
 /// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
@@ -56,7 +56,7 @@ pub struct RegionAliveKeeper {
     heartbeat_interval_millis: u64,
     started: AtomicBool,
 
-    /// The epoch when [RegionAliveKeepers] is created. It's used to get a monotonically non-decreasing
+    /// The epoch when [RegionAliveKeeper] is created. It's used to get a monotonically non-decreasing
     /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
     /// non-decreasing). The heartbeat request will carry the duration since this epoch, and the
     /// duration acts like an "invariant point" for region's keep alive lease.

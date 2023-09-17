@@ -56,7 +56,7 @@ pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
 }
 
 impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, IS_RATE> {
-    /// Constructor. Other public usage should use [scalar_udf()] instead.
+    /// Constructor. Other public usage should use [scalar_udf()](ExtrapolatedRate::scalar_udf()) instead.
     fn new(range_length: i64) -> Self {
         Self { range_length }
     }
