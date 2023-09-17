@@ -158,7 +158,8 @@ mod tests {
         let dump = handler.failure_detect_runner.dump().await;
         assert_eq!(dump.iter().collect::<Vec<_>>().len(), 0);
     }
-    #[tokio::test(flavor = "multi_thread")]
+
+        #[tokio::test(flavor = "multi_thread")]
     async fn test_maintenance_mode() {
         let region_failover_manager = create_region_failover_manager();
         let in_memory = region_failover_manager.create_context().in_memory.clone();
