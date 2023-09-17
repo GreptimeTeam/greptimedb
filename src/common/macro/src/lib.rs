@@ -23,7 +23,7 @@ use range_fn::process_range_fn;
 use syn::{parse_macro_input, DeriveInput};
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
-/// This derive macro is expect to be used along with attribute macro [as_aggr_func_creator].
+/// This derive macro is expect to be used along with attribute macro [macro@as_aggr_func_creator].
 #[proc_macro_derive(AggrFuncTypeStore)]
 pub fn aggr_func_type_store_derive(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
@@ -59,7 +59,7 @@ pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStrea
 /// ```
 ///
 /// # Arguments
-/// - `name`: The name of the generated [ScalarUDF] struct.
+/// - `name`: The name of the generated `ScalarUDF` struct.
 /// - `ret`: The return type of the generated UDF function.
 /// - `display_name`: The display name of the generated UDF function.
 #[proc_macro_attribute]

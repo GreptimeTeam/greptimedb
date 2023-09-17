@@ -27,10 +27,10 @@ pub trait UserProvider: Send + Sync {
 
     /// Checks whether a connection request
     /// from a certain user to a certain catalog/schema is legal.
-    /// This method should be called after [`authenticate`].
+    /// This method should be called after [authenticate()](UserProvider::authenticate()).
     async fn authorize(&self, catalog: &str, schema: &str, user_info: &UserInfoRef) -> Result<()>;
 
-    /// Combination of [authenticate()] and [authorize()].
+    /// Combination of [authenticate()](UserProvider::authenticate()) and [authorize()](UserProvider::authorize()).
     /// In most cases it's preferred for both convenience and performance.
     async fn auth(
         &self,

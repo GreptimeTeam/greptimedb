@@ -44,7 +44,7 @@ pub type MemtableId = u32;
 #[derive(Debug, Default)]
 pub struct MemtableStats {
     /// The  estimated bytes allocated by this memtable from heap. Result
-    /// of this method may be larger than the estimated based on [`num_rows`] because
+    /// of this method may be larger than the estimated based on `num_rows` because
     /// of the implementor's pre-alloc behavior.
     pub estimated_bytes: usize,
     /// The max timestamp that this memtable contains.
@@ -267,7 +267,7 @@ impl Drop for AllocTracker {
     }
 }
 
-/// Default memtable builder that builds [BTreeMemtable].
+/// Default memtable builder that builds `BTreeMemtable`.
 #[derive(Debug, Default)]
 pub struct DefaultMemtableBuilder {
     memtable_id: AtomicU32,
