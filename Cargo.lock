@@ -8656,6 +8656,7 @@ dependencies = [
  "common-grpc",
  "common-grpc-expr",
  "common-mem-prof",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-runtime",

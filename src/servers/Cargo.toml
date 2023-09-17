@@ -28,6 +28,7 @@ common-error = { workspace = true }
 common-grpc = { workspace = true }
 common-grpc-expr = { workspace = true }
 common-mem-prof = { workspace = true, optional = true }
+common-meta = { workspace = true }
 common-query = { workspace = true }
 common-recordbatch = { workspace = true }
 common-runtime = { workspace = true }

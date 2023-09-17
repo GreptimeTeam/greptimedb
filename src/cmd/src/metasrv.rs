@@ -207,7 +207,6 @@ mod tests {
             bind_addr = "127.0.0.1:3002"
             server_addr = "127.0.0.1:3002"
             store_addr = "127.0.0.1:2379"
-            datanode_lease_secs = 15
             selector = "LeaseBased"
             use_memory_store = false
 
@@ -229,7 +228,6 @@ mod tests {
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
-        assert_eq!(15, options.datanode_lease_secs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
