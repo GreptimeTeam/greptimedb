@@ -14,6 +14,10 @@
 
 //! Utilities for testing.
 
+pub mod memtable_util;
+pub mod scheduler_util;
+pub mod version_util;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

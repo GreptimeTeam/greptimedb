@@ -42,7 +42,8 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{
-    CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu, InvalidRequestSnafu, Result,
+    CompactRegionSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu,
+    InvalidRequestSnafu, Result,
 };
 use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
@@ -661,15 +662,17 @@ pub(crate) struct CompactionFinished {
     pub(crate) compaction_outputs: Vec<FileMeta>,
     /// Compacted files that are to be removed from region version.
     pub(crate) compacted_files: Vec<FileMeta>,
-    /// Compaction result sender.
-    pub(crate) sender: OptionOutputTx,
+    /// Compaction result senders.
+    pub(crate) senders: Vec<OutputTx>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
 }
 
 impl CompactionFinished {
     pub fn on_success(self) {
-        self.sender.send(Ok(AffectedRows(0)));
+        for sender in self.senders {
+            sender.send(Ok(AffectedRows(0)));
+        }
         info!("Successfully compacted region: {}", self.region_id);
     }
 }
@@ -678,7 +681,12 @@ impl OnFailure for CompactionFinished {
     /// Compaction succeeded but failed to update manifest or region's already been dropped,
     /// clean compaction output files.
     fn on_failure(&mut self, err: Error) {
-        self.sender.send_mut(Err(err));
+        let err = Arc::new(err);
+        for sender in self.senders.drain(..) {
+            sender.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
         for file in &self.compacted_files {
             let file_id = file.file_id;
             warn!(

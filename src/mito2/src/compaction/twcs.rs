@@ -35,7 +35,7 @@ use crate::compaction::CompactionRequest;
 use crate::error;
 use crate::error::CompactRegionSnafu;
 use crate::request::{
-    BackgroundNotify, CompactionFailed, CompactionFinished, OptionOutputTx, WorkerRequest,
+    BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
 use crate::sst::file::{FileHandle, FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
@@ -123,7 +123,7 @@ impl Picker for TwcsPicker {
             ttl,
             compaction_time_window,
             request_sender,
-            waiter,
+            waiters,
             file_purger,
         } = req;
 
@@ -156,8 +156,10 @@ impl Picker for TwcsPicker {
         let outputs = self.build_output(&windows, active_window, time_window_size);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
-            // Nothing to compact.
-            waiter.send(Ok(Output::AffectedRows(0)));
+            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
+            for waiter in waiters {
+                waiter.send(Ok(Output::AffectedRows(0)));
+            }
             return None;
         }
         let task = TwcsCompactionTask {
@@ -169,7 +171,7 @@ impl Picker for TwcsPicker {
             sst_write_buffer_size: ReadableSize::mb(4),
             compaction_time_window: None,
             request_sender,
-            sender: waiter,
+            waiters,
             file_purger,
         };
         Some(Box::new(task))
@@ -227,8 +229,8 @@ pub(crate) struct TwcsCompactionTask {
     pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
-    /// Sender that are used to notify waiters waiting for pending compaction tasks.
-    pub sender: OptionOutputTx,
+    /// Senders that are used to notify waiters waiting for pending compaction tasks.
+    pub waiters: Vec<OutputTx>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -321,10 +323,11 @@ impl TwcsCompactionTask {
 
     /// Handles compaction failure, notifies all waiters.
     fn on_failure(&mut self, err: Arc<error::Error>) {
-        self.sender
-            .send_mut(Err(err.clone()).context(CompactRegionSnafu {
+        for waiter in self.waiters.drain(..) {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
+        }
     }
 
     /// Notifies region worker to handle post-compaction tasks.
@@ -352,7 +355,7 @@ impl CompactionTask for TwcsCompactionTask {
                     region_id: self.region_id,
                     compaction_outputs: added,
                     compacted_files: deleted,
-                    sender: self.sender.take(),
+                    senders: std::mem::take(&mut self.waiters),
                     file_purger: self.file_purger.clone(),
                 })
             }

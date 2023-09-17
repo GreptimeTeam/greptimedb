@@ -402,8 +402,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is truncating, location: {}", region_id, location))]
-    RegionTruncating {
+    #[snafu(display("Region {} is truncated, location: {}", region_id, location))]
+    RegionTruncated {
         region_id: RegionId,
         location: Location,
     },
@@ -516,7 +516,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
-            RegionTruncating { .. } => StatusCode::Cancelled,
+            RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,

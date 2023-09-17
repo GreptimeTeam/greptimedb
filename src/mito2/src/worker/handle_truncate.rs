@@ -44,8 +44,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region.manifest_manager.update(action_list).await?;
 
         // Notifies flush scheduler.
-        self.flush_scheduler.on_region_truncating(region_id);
-        // TODO(DevilExileSu): Notifies compaction scheduler.
+        self.flush_scheduler.on_region_truncated(region_id);
+        // Notifies compaction scheduler.
+        self.compaction_scheduler.on_region_truncated(region_id);
 
         // Reset region's version and mark all SSTs deleted.
         region.version_control.truncate(

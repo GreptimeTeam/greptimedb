@@ -55,7 +55,10 @@ impl<S> RegionWorkerLoop<S> {
 
             // Try to submit a flush task.
             let task = self.new_flush_task(&region, FlushReason::Alter);
-            if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
+            if let Err(e) =
+                self.flush_scheduler
+                    .schedule_flush(region.region_id, &region.version_control, task)
+            {
                 // Unable to flush the region, send error to waiter.
                 sender.send(Err(e));
                 return;
