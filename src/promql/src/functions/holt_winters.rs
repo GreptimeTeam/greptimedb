@@ -152,7 +152,7 @@ fn calc_trend_value(i: usize, tf: f64, s0: f64, s1: f64, b: f64) -> f64 {
     x + y
 }
 
-/// Refer to https://github.com/prometheus/prometheus/blob/main/promql/functions.go#L299
+/// Refer to <https://github.com/prometheus/prometheus/blob/main/promql/functions.go#L299>
 fn holt_winter_impl(values: &[f64], sf: f64, tf: f64) -> Option<f64> {
     if sf.is_nan() || tf.is_nan() || values.is_empty() {
         return Some(f64::NAN);
