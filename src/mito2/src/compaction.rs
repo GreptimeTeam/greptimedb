@@ -309,8 +309,10 @@ impl CompactionStatus {
         let mut req = CompactionRequest {
             current_version,
             access_layer: self.access_layer.clone(),
-            ttl: None,                    // TODO(hl): get TTL info from region metadata
-            compaction_time_window: None, // TODO(hl): get persisted region compaction time window
+            // TODO(hl): get TTL info from region metadata
+            ttl: None,
+            // TODO(hl): get persisted region compaction time window
+            compaction_time_window: None,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
