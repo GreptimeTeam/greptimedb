@@ -87,10 +87,19 @@ impl Datanode {
         if let Some(task) = &self.heartbeat_task {
             // Safety: The event_receiver must exist.
             let receiver = self.region_event_receiver.take().unwrap();
-            let notify = Arc::new(Notify::new());
-            task.start(receiver, notify.clone()).await?;
-            // Waits for first heartbeat response processed.
-            notify.notified().await;
+
+            if let Some(notify) = {
+                let notify = if self.opts.coordination {
+                    Some(Arc::new(Notify::new()))
+                } else {
+                    None
+                };
+                task.start(receiver, notify.clone()).await?;
+                notify
+            } {
+                // Waits for first heartbeat response processed.
+                notify.notified().await;
+            }
         }
         Ok(())
     }

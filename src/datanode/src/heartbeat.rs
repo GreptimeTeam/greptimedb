@@ -143,7 +143,7 @@ impl HeartbeatTask {
     pub async fn start(
         &self,
         event_receiver: RegionServerEventReceiver,
-        notify: Arc<Notify>,
+        notify: Option<Arc<Notify>>,
     ) -> Result<()> {
         let running = self.running.clone();
         if running
@@ -172,7 +172,7 @@ impl HeartbeatTask {
             running.clone(),
             handler_executor.clone(),
             mailbox.clone(),
-            Some(notify),
+            notify,
         )
         .await?;
 
