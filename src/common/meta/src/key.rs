@@ -78,7 +78,7 @@ use crate::rpc::router::{region_distribution, RegionRoute};
 use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
-pub const MAINTENANCE_KEY: &[u8] = "maintenance_key".as_bytes();
+pub const MAINTENANCE_KEY: &[u8] = "maintenance".as_bytes();
 
 const NAME_PATTERN: &str = "[a-zA-Z_:-][a-zA-Z0-9_:-]*";
 
