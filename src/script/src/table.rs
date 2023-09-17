@@ -184,8 +184,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             inserts: vec![insert],
         };
 
-        // FIXME(dennis)
-        let ret = self
+        let output = self
             .grpc_handler
             .do_query(Request::RowInserts(requests), query_ctx(&table_info))
             .await
@@ -196,7 +195,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
             "Inserted script: {} into scripts table: {}, output: {:?}.",
             name,
             table_info.full_table_name(),
-            ret
+            output
         );
 
         Ok(())
@@ -341,14 +340,14 @@ fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
 
 /// Returns the scripts schema's primary key indices
 pub fn get_primary_key_indices() -> Vec<usize> {
-    let mut indicies = vec![];
+    let mut indices = vec![];
     for (index, c) in build_insert_column_schemas().into_iter().enumerate() {
         if c.semantic_type == (SemanticType::Tag as i32) {
-            indicies.push(index);
+            indices.push(index);
         }
     }
 
-    indicies
+    indices
 }
 
 /// Build scripts table
