@@ -35,7 +35,7 @@ use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
-use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
+use crate::event_listener::RegionServerEventReceiver;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -142,7 +142,7 @@ impl HeartbeatTask {
     /// Start heartbeat task, spawn background task.
     pub async fn start(
         &self,
-        mut event_receiver: RegionServerEventReceiver,
+        event_receiver: RegionServerEventReceiver,
         notify: Arc<Notify>,
     ) -> Result<()> {
         let running = self.running.clone();
@@ -158,8 +158,6 @@ impl HeartbeatTask {
         let node_epoch = self.node_epoch;
         let addr = resolve_addr(&self.server_addr, &self.server_hostname);
         info!("Starting heartbeat to Metasrv with interval {interval}. My node id is {node_id}, address is {addr}.");
-
-        self.region_alive_keeper.start().await;
 
         let meta_client = self.meta_client.clone();
         let region_server_clone = self.region_server.clone();
@@ -184,31 +182,7 @@ impl HeartbeatTask {
         });
         let epoch = self.region_alive_keeper.epoch();
 
-        let keeper = self.region_alive_keeper.clone();
-
-        common_runtime::spawn_bg(async move {
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    info!("shutdown heartbeat task");
-                    break;
-                }
-
-                match event_receiver.0.recv().await {
-                    Some(RegionServerEvent::Registered(region_id)) => {
-                        keeper.register_region(region_id).await;
-                    }
-                    Some(RegionServerEvent::Deregistered(region_id)) => {
-                        keeper.deregister_region(region_id).await;
-                    }
-                    None => {
-                        info!("region server event sender closed!");
-                        break;
-                    }
-                }
-            }
-        });
-
-        let running = self.running.clone();
+        self.region_alive_keeper.start(Some(event_receiver)).await?;
 
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
