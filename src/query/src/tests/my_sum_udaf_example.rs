@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use common_function::scalars::aggregate::AggregateFunctionMeta;
-use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
+use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{CreateAccumulatorSnafu, Result as QueryResult};
 use common_query::logical_plan::{Accumulator, AggregateFunctionCreator};
 use common_query::prelude::*;

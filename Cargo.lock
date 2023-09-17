@@ -1717,7 +1717,7 @@ dependencies = [
  "arc-swap",
  "chrono-tz 0.6.3",
  "common-error",
- "common-function-macro",
+ "common-macro",
  "common-query",
  "common-time",
  "datafusion",
@@ -1731,22 +1731,6 @@ dependencies = [
  "serde",
  "snafu",
  "statrs",
-]
-
-[[package]]
-name = "common-function-macro"
-version = "0.4.0-nightly"
-dependencies = [
- "arc-swap",
- "backtrace",
- "common-query",
- "common-telemetry",
- "datatypes",
- "proc-macro2",
- "quote",
- "snafu",
- "static_assertions",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -1813,6 +1797,22 @@ dependencies = [
  "paste",
  "snafu",
  "table",
+]
+
+[[package]]
+name = "common-macro"
+version = "0.4.0-nightly"
+dependencies = [
+ "arc-swap",
+ "backtrace",
+ "common-query",
+ "common-telemetry",
+ "datatypes",
+ "proc-macro2",
+ "quote",
+ "snafu",
+ "static_assertions",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -6926,7 +6926,7 @@ dependencies = [
  "catalog",
  "common-catalog",
  "common-error",
- "common-function-macro",
+ "common-macro",
  "common-telemetry",
  "datafusion",
  "datatypes",
@@ -7197,7 +7197,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-function",
- "common-function-macro",
+ "common-macro",
  "common-meta",
  "common-query",
  "common-recordbatch",
