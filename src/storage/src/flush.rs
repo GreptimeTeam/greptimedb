@@ -106,7 +106,7 @@ impl SizeBasedStrategy {
     /// Returns whether to trigger an engine level flush.
     ///
     /// Inspired by RocksDB's WriteBufferManager.
-    /// https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94
+    /// <https://github.com/facebook/rocksdb/blob/main/include/rocksdb/write_buffer_manager.h#L94>
     fn should_flush_engine(&self) -> bool {
         // We only check global limit when it is Some.
         let Some(global_write_buffer_size) = self.global_write_buffer_size else {

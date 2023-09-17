@@ -524,7 +524,7 @@ impl Values {
         Ok(batch)
     }
 
-    /// Returns a vector of all columns converted to arrow [Array] in [Values].
+    /// Returns a vector of all columns converted to arrow [Array](datatypes::arrow::array::Array) in [Values].
     fn columns(&self) -> Vec<ArrayRef> {
         let mut res = Vec::with_capacity(3 + self.fields.len());
         res.push(self.timestamp.to_arrow_array());

@@ -50,7 +50,7 @@ pub struct ColumnMetadata {
 }
 
 impl ColumnMetadata {
-    /// Construct `Self` from protobuf struct [ColumnDef]
+    /// Construct `Self` from protobuf struct [RegionColumnDef]
     pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
         let column_id = column_def.column_id;
 

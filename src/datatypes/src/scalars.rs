@@ -35,7 +35,7 @@ fn get_iter_capacity<T, I: Iterator<Item = T>>(iter: &I) -> usize {
 }
 
 /// Owned scalar value
-/// primitive types, bool, Vec<u8> ...
+/// e.g. primitive types, bool, `Vec<u8>` ...
 pub trait Scalar: 'static + Sized + Default + Any
 where
     for<'a> Self::VectorType: ScalarVector<RefItem<'a> = Self::RefType<'a>>,
