@@ -126,23 +126,19 @@ impl RegionServerHandler for RegionServer {
             .context(ExecuteGrpcRequestSnafu)?;
         let join_tasks = requests.into_iter().map(|(region_id, req)| {
             let self_to_move = self.clone();
-            self.inner
-                .runtime
-                .spawn(async move { self_to_move.handle_request(region_id, req).await })
+            async move { self_to_move.handle_request(region_id, req).await }
         });
 
         let results = try_join_all(join_tasks)
             .await
-            .context(servers_error::JoinTaskSnafu)?;
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)?;
 
         // merge results by simply sum up affected rows.
         // only insert/delete will have multiple results.
         let mut affected_rows = 0;
         for result in results {
-            match result
-                .map_err(BoxedError::new)
-                .context(ExecuteGrpcRequestSnafu)?
-            {
+            match result {
                 Output::AffectedRows(rows) => affected_rows += rows,
                 Output::Stream(_) | Output::RecordBatches(_) => {
                     // TODO: change the output type to only contains `affected_rows`
@@ -172,10 +168,15 @@ impl FlightCraft for RegionServer {
         let ticket = request.into_inner().ticket;
         let request = QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
+        let trace_id = request
+            .header
+            .as_ref()
+            .map(|h| h.trace_id)
+            .unwrap_or_default();
 
         let result = self.handle_read(request).await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result));
+        let stream = Box::pin(FlightRecordBatchStream::new(result, trace_id));
         Ok(Response::new(stream))
     }
 }
