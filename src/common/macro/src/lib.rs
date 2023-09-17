@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod aggr_func;
+mod print_caller;
 mod range_fn;
 
+use aggr_func::{impl_aggr_func_type_store, impl_as_aggr_func_creator};
+use print_caller::process_print_caller;
 use proc_macro::TokenStream;
-use quote::{quote, quote_spanned, ToTokens};
 use range_fn::process_range_fn;
-use syn::parse::Parser;
-use syn::spanned::Spanned;
-use syn::{
-    parse_macro_input, AttributeArgs, DeriveInput, ItemFn, ItemStruct, Lit, Meta, NestedMeta,
-};
+use syn::{parse_macro_input, DeriveInput};
 
 /// Make struct implemented trait [AggrFuncTypeStore], which is necessary when writing UDAF.
 /// This derive macro is expect to be used along with attribute macro [as_aggr_func_creator].
@@ -31,62 +30,13 @@ pub fn aggr_func_type_store_derive(input: TokenStream) -> TokenStream {
     impl_aggr_func_type_store(&ast)
 }
 
-fn impl_aggr_func_type_store(ast: &DeriveInput) -> TokenStream {
-    let name = &ast.ident;
-    let gen = quote! {
-        use common_query::logical_plan::accumulator::AggrFuncTypeStore;
-        use common_query::error::{InvalidInputStateSnafu, Error as QueryError};
-        use datatypes::prelude::ConcreteDataType;
-
-        impl AggrFuncTypeStore for #name {
-            fn input_types(&self) -> std::result::Result<Vec<ConcreteDataType>, QueryError> {
-                let input_types = self.input_types.load();
-                snafu::ensure!(input_types.is_some(), InvalidInputStateSnafu);
-                Ok(input_types.as_ref().unwrap().as_ref().clone())
-            }
-
-            fn set_input_types(&self, input_types: Vec<ConcreteDataType>) -> std::result::Result<(), QueryError> {
-                let old = self.input_types.swap(Some(std::sync::Arc::new(input_types.clone())));
-                if let Some(old) = old {
-                    snafu::ensure!(old.len() == input_types.len(), InvalidInputStateSnafu);
-                    for (x, y) in old.iter().zip(input_types.iter()) {
-                        snafu::ensure!(x == y, InvalidInputStateSnafu);
-                    }
-                }
-                Ok(())
-            }
-        }
-    };
-    gen.into()
-}
-
 /// A struct can be used as a creator for aggregate function if it has been annotated with this
 /// attribute first. This attribute add a necessary field which is intended to store the input
 /// data's types to the struct.
 /// This attribute is expected to be used along with derive macro [AggrFuncTypeStore].
 #[proc_macro_attribute]
-pub fn as_aggr_func_creator(_args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut item_struct = parse_macro_input!(input as ItemStruct);
-    if let syn::Fields::Named(ref mut fields) = item_struct.fields {
-        let result = syn::Field::parse_named.parse2(quote! {
-            input_types: arc_swap::ArcSwapOption<Vec<ConcreteDataType>>
-        });
-        match result {
-            Ok(field) => fields.named.push(field),
-            Err(e) => return e.into_compile_error().into(),
-        }
-    } else {
-        return quote_spanned!(
-            item_struct.fields.span() => compile_error!(
-                "This attribute macro needs to add fields to the its annotated struct, \
-                so the struct must have \"{}\".")
-        )
-        .into();
-    }
-    quote! {
-        #item_struct
-    }
-    .into()
+pub fn as_aggr_func_creator(args: TokenStream, input: TokenStream) -> TokenStream {
+    impl_as_aggr_func_creator(args, input)
 }
 
 /// Attribute macro to convert an arithimetic function to a range function. The annotated function
@@ -135,92 +85,5 @@ pub fn range_fn(args: TokenStream, input: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
-    let mut depth = 1;
-
-    let args = parse_macro_input!(args as AttributeArgs);
-    for meta in args.iter() {
-        if let NestedMeta::Meta(Meta::NameValue(name_value)) = meta {
-            let ident = name_value
-                .path
-                .get_ident()
-                .expect("Expected an ident!")
-                .to_string();
-            if ident == "depth" {
-                let Lit::Int(i) = &name_value.lit else {
-                    panic!("Expected 'depth' to be a valid int!")
-                };
-                depth = i.base10_parse::<usize>().expect("Invalid 'depth' value");
-                break;
-            }
-        }
-    }
-
-    let tokens: TokenStream = quote! {
-        {
-            let curr_file = file!();
-
-            let bt = backtrace::Backtrace::new();
-            let call_stack = bt
-                .frames()
-                .iter()
-                .skip_while(|f| {
-                    !f.symbols().iter().any(|s| {
-                        s.filename()
-                            .map(|p| p.ends_with(curr_file))
-                            .unwrap_or(false)
-                    })
-                })
-                .skip(1)
-                .take(#depth);
-
-            let call_stack = call_stack
-                .map(|f| {
-                    f.symbols()
-                        .iter()
-                        .map(|s| {
-                            let filename = s
-                                .filename()
-                                .map(|p| format!("{:?}", p))
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            let lineno = s
-                                .lineno()
-                                .map(|l| format!("{}", l))
-                                .unwrap_or_else(|| "unknown".to_string());
-
-                            format!("filename: {}, lineno: {}", filename, lineno)
-                        })
-                        .collect::<Vec<String>>()
-                        .join(", ")
-                })
-                .collect::<Vec<_>>();
-
-            match call_stack.len() {
-                0 => common_telemetry::info!("unable to find call stack"),
-                1 => common_telemetry::info!("caller: {}", call_stack[0]),
-                _ => {
-                    let mut s = String::new();
-                    s.push_str("[\n");
-                    for e in call_stack {
-                        s.push_str("\t");
-                        s.push_str(&e);
-                        s.push_str("\n");
-                    }
-                    s.push_str("]");
-                    common_telemetry::info!("call stack: {}", s)
-                }
-            }
-        }
-    }
-    .into();
-
-    let stmt = match syn::parse(tokens) {
-        Ok(stmt) => stmt,
-        Err(e) => return e.into_compile_error().into(),
-    };
-
-    let mut item = parse_macro_input!(input as ItemFn);
-    item.block.stmts.insert(0, stmt);
-
-    item.into_token_stream().into()
+    process_print_caller(args, input)
 }
