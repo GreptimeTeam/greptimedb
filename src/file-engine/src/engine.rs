@@ -149,10 +149,8 @@ impl EngineInner {
     }
 
     fn set_writable(&self, _region_id: RegionId, _writable: bool) -> EngineResult<()> {
-        UnsupportedSnafu {
-            operation: "set writable",
-        }
-        .fail()
+        // TODO(zhongzc): Improve the semantics and implementation of this API.
+        Ok(())
     }
 }
 
