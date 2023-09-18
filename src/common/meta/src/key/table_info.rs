@@ -275,7 +275,6 @@ mod tests {
             created_on: chrono::DateTime::default(),
             primary_key_indices: vec![0, 1],
             next_column_id: 3,
-            engine_options: Default::default(),
             value_indices: vec![2, 3],
             options: Default::default(),
             region_numbers: vec![1],

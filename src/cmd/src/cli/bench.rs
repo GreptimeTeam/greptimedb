@@ -120,7 +120,6 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
         created_on: chrono::DateTime::default(),
         primary_key_indices: vec![],
         next_column_id: columns as u32 + 1,
-        engine_options: Default::default(),
         value_indices: vec![],
         options: Default::default(),
         region_numbers: (1..=100).collect(),
