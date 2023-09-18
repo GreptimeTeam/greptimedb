@@ -320,7 +320,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct DatanodeOptions {
     pub mode: Mode,
     pub node_id: Option<u64>,
-    pub coordination: bool,
+    pub require_lease_before_startup: bool,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
@@ -340,7 +340,7 @@ impl Default for DatanodeOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
-            coordination: false,
+            require_lease_before_startup: false,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,

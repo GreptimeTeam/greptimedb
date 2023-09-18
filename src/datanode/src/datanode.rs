@@ -72,7 +72,7 @@ pub struct Datanode {
     region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
-    coordinated_notifier: Option<Arc<Notify>>,
+    leases_notifier: Option<Arc<Notify>>,
 }
 
 impl Datanode {
@@ -91,15 +91,14 @@ impl Datanode {
             // Safety: The event_receiver must exist.
             let receiver = self.region_event_receiver.take().unwrap();
 
-            task.start(receiver, self.coordinated_notifier.clone())
-                .await?;
+            task.start(receiver, self.leases_notifier.clone()).await?;
         }
         Ok(())
     }
 
-    /// If `coordinated_notifier` exists, it waits for all regions to be coordinated.
+    /// If `leases_notifier` exists, it waits until leases have been obtained in all regions.
     pub async fn wait_coordinated(&mut self) {
-        if let Some(notifier) = self.coordinated_notifier.take() {
+        if let Some(notifier) = self.leases_notifier.take() {
             notifier.notified().await;
         }
     }
@@ -249,11 +248,12 @@ impl DatanodeBuilder {
         )
         .await;
 
-        let coordinated_notifier = if self.opts.coordination && matches!(mode, Mode::Distributed) {
-            Some(Arc::new(Notify::new()))
-        } else {
-            None
-        };
+        let leases_notifier =
+            if self.opts.require_lease_before_startup && matches!(mode, Mode::Distributed) {
+                Some(Arc::new(Notify::new()))
+            } else {
+                None
+            };
 
         Ok(Datanode {
             opts: self.opts,
@@ -262,7 +262,7 @@ impl DatanodeBuilder {
             region_server,
             greptimedb_telemetry_task,
             region_event_receiver,
-            coordinated_notifier,
+            leases_notifier,
         })
     }
 

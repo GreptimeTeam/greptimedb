@@ -8,9 +8,9 @@ rpc_addr = "127.0.0.1:3001"
 rpc_hostname = "127.0.0.1"
 # The number of gRPC server worker threads, 8 by default.
 rpc_runtime_size = 8
-# Start services after regions are coordinated. 
-# It will block the datanode start if it can't receive the heartbeat from metasrv.
-coordination = false
+# Start services after regions have obtained leases.
+# It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
+require_lease_before_startup = false
 
 [heartbeat]
 # Interval for sending heartbeat messages to the Metasrv in milliseconds, 5000 by default.
