@@ -72,6 +72,9 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
+    #[snafu(display("Failed to request RegionServer, code: {}, source: {}", code, source))]
+    RegionServer { code: Code, source: BoxedError },
+
     // Server error carried in Tonic Status's metadata.
     #[snafu(display("{}", msg))]
     Server { code: StatusCode, msg: String },
@@ -95,9 +98,9 @@ impl ErrorExt for Error {
             | Error::ClientStreaming { .. } => StatusCode::Internal,
 
             Error::Server { code, .. } => *code,
-            Error::FlightGet { source, .. } | Error::HandleRequest { source, .. } => {
-                source.status_code()
-            }
+            Error::FlightGet { source, .. }
+            | Error::HandleRequest { source, .. }
+            | Error::RegionServer { source, .. } => source.status_code(),
             Error::CreateChannel { source, .. } | Error::ConvertFlightData { source, .. } => {
                 source.status_code()
             }

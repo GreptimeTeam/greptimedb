@@ -518,10 +518,11 @@ impl ErrorExt for Error {
             | MissingInsertBody { .. }
             | ShutdownInstance { .. }
             | JoinTask { .. }
-            | RegionNotFound { .. }
             | RegionEngineNotFound { .. }
             | UnsupportedOutput { .. }
             | GetRegionMetadata { .. } => StatusCode::Internal,
+
+            RegionNotFound { .. } => StatusCode::RegionNotFound,
 
             StartServer { source, .. }
             | ShutdownServer { source, .. }
