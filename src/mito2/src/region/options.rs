@@ -27,7 +27,7 @@ use crate::error::{Error, JsonOptionsSnafu, Result};
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
@@ -35,15 +35,6 @@ pub struct RegionOptions {
     pub ttl: Option<Duration>,
     /// Compaction options.
     pub compaction: CompactionOptions,
-}
-
-impl Default for RegionOptions {
-    fn default() -> Self {
-        RegionOptions {
-            ttl: None,
-            compaction: CompactionOptions::default(),
-        }
-    }
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -107,7 +98,7 @@ impl TwcsOptions {
         self.time_window.and_then(|window| {
             let window_secs = window.as_secs();
             if window_secs == 0 {
-                return None;
+                None
             } else {
                 window_secs.try_into().ok()
             }
