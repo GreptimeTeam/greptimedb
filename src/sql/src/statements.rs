@@ -347,6 +347,7 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         default_constraint: default_constraint.unwrap_or_default(),
         // TODO(#1308): support adding new primary key columns
         semantic_type: SemanticType::Field as _,
+        comment: String::new(),
     })
 }
 

@@ -157,6 +157,7 @@ mod tests {
                         is_nullable: false,
                         default_constraint: vec![],
                         semantic_type: SemanticType::Field as i32,
+                        comment: String::new(),
                     }),
                     location: None,
                 }],
@@ -197,6 +198,7 @@ mod tests {
                             is_nullable: false,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
+                            comment: String::new(),
                         }),
                         location: Some(Location {
                             location_type: LocationType::First.into(),
@@ -210,6 +212,7 @@ mod tests {
                             is_nullable: false,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
+                            comment: String::new(),
                         }),
                         location: Some(Location {
                             location_type: LocationType::After.into(),

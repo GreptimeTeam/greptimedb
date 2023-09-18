@@ -256,6 +256,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
@@ -263,6 +264,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "tpep_dropoff_datetime".to_string(),
@@ -270,6 +272,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "passenger_count".to_string(),
@@ -277,6 +280,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "trip_distance".to_string(),
@@ -284,6 +288,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "RatecodeID".to_string(),
@@ -291,6 +296,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "store_and_fwd_flag".to_string(),
@@ -298,6 +304,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "PULocationID".to_string(),
@@ -305,6 +312,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "DOLocationID".to_string(),
@@ -312,6 +320,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "payment_type".to_string(),
@@ -319,6 +328,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "fare_amount".to_string(),
@@ -326,6 +336,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "extra".to_string(),
@@ -333,6 +344,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "mta_tax".to_string(),
@@ -340,6 +352,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "tip_amount".to_string(),
@@ -347,6 +360,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "tolls_amount".to_string(),
@@ -354,6 +368,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "improvement_surcharge".to_string(),
@@ -361,6 +376,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "total_amount".to_string(),
@@ -368,6 +384,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "congestion_surcharge".to_string(),
@@ -375,6 +392,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "airport_fee".to_string(),
@@ -382,6 +400,7 @@ fn create_table_expr() -> CreateTableExpr {
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
         ],
         time_index: "tpep_pickup_datetime".to_string(),
