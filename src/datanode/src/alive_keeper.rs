@@ -461,8 +461,8 @@ mod test {
         // wait for countdown task to finish
         let before_await = Instant::now();
         let (finish_instant, result) = rx.await.unwrap();
-        // the mock region server cannot close the region
-        assert_eq!(result, Some(false));
+        // it returns `RegionNotFound`
+        assert_eq!(result, Some(true));
         // this task should be finished after 5 * heartbeat_interval_millis
         // we assert 4 times here
         assert!(
