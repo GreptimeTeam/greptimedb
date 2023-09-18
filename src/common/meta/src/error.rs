@@ -77,7 +77,7 @@ pub enum Error {
         source: datatypes::Error,
     },
 
-    #[snafu(display("Primary key '{key}' not found when creating region request, at {location}"))]
+    #[snafu(display("Primary key '{key}' not found when creating region request"))]
     PrimaryKeyNotFound { key: String, location: Location },
 
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
@@ -146,13 +146,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert alter table request, at {location}"))]
+    #[snafu(display("Failed to convert alter table request"))]
     ConvertAlterTableRequest {
         source: common_grpc_expr::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Invalid protobuf message: {err_msg}, at {location}"))]
+    #[snafu(display("Invalid protobuf message: {err_msg}"))]
     InvalidProtoMsg { err_msg: String, location: Location },
 
     #[snafu(display("Unexpected: {err_msg}"))]

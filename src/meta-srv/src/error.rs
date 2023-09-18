@@ -243,7 +243,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to find table route for {table_id}, at {location}"))]
+    #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
         location: Location,
@@ -280,7 +280,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unexpected, violated: {violated}, at {location}"))]
+    #[snafu(display("Unexpected, violated: {violated}"))]
     Unexpected {
         violated: String,
         location: Location,

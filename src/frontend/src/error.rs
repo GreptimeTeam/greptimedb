@@ -105,7 +105,7 @@ pub enum Error {
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display("Invalid system table definition: {err_msg}, at {location}"))]
+    #[snafu(display("Invalid system table definition: {err_msg}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
 
     #[snafu(display("Table not found: {}", table_name))]

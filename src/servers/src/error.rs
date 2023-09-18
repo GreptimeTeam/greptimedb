@@ -304,31 +304,25 @@ pub enum Error {
     #[snafu(display(""))]
     Metrics { source: BoxedError },
 
-    #[snafu(display("DataFrame operation error, location: {location}"))]
+    #[snafu(display("DataFrame operation error"))]
     DataFrame {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to replace params with values in prepared statement, location: {location}"
-    ))]
+    #[snafu(display("Failed to replace params with values in prepared statement"))]
     ReplacePreparedStmtParams {
         source: query::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert scalar value, location: {location}"))]
+    #[snafu(display("Failed to convert scalar value"))]
     ConvertScalarValue {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display(
-        "Expected type: {:?}, actual: {:?}, location: {location}",
-        expected,
-        actual
-    ))]
+    #[snafu(display("Expected type: {:?}, actual: {:?}", expected, actual))]
     PreparedStmtTypeMismatch {
         expected: ConcreteDataType,
         actual: opensrv_mysql::ColumnType,

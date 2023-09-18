@@ -134,7 +134,7 @@ pub enum Error {
     #[snafu(display("Operation {} not supported", op))]
     NotSupported { op: String, location: Location },
 
-    #[snafu(display("Failed to open table {table_id} at {location}"))]
+    #[snafu(display("Failed to open table {table_id}"))]
     OpenTable {
         table_id: TableId,
         location: Location,
@@ -180,10 +180,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to upgrade weak catalog manager reference. location: {}",
-        location
-    ))]
+    #[snafu(display("Failed to upgrade weak catalog manager reference"))]
     UpgradeWeakCatalogManagerRef { location: Location },
 
     #[snafu(display("Failed to execute system catalog table scan"))]
