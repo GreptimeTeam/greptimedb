@@ -22,7 +22,7 @@ use api::v1::{
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, COMMENT_KEY};
 use file_table_engine::table::immutable::ImmutableFileTableOptions;
 use query::sql::prepare_immutable_file_table_files_and_schema;
 use session::context::QueryContextRef;
@@ -271,6 +271,11 @@ pub fn column_schemas_to_defs(
             } else {
                 SemanticType::Field
             } as i32;
+            let comment = schema
+                .metadata()
+                .get(COMMENT_KEY)
+                .cloned()
+                .unwrap_or_default();
 
             Ok(api::v1::ColumnDef {
                 name: schema.name.clone(),
@@ -287,6 +292,7 @@ pub fn column_schemas_to_defs(
                     }
                 },
                 semantic_type,
+                comment,
             })
         })
         .collect()

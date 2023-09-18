@@ -484,6 +484,7 @@ mod tests {
                             is_nullable: true,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
+                            comment: String::new(),
                         }),
                         column_id: 1,
                     }),
