@@ -84,7 +84,7 @@ impl Date {
     }
 
     pub fn to_secs(&self) -> i64 {
-        self.0 as i64 * 24 * 3600
+        (self.0 as i64) * 24 * 3600
     }
 }
 
