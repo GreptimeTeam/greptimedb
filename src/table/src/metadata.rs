@@ -107,6 +107,7 @@ pub struct TableMeta {
     #[builder(default, setter(into))]
     pub region_numbers: Vec<u32>,
     pub next_column_id: ColumnId,
+    // TODO(yingwen): Remove engine_options.
     /// Options for table engine.
     #[builder(default)]
     pub engine_options: HashMap<String, String>,
