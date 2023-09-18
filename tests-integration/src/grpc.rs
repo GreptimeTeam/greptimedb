@@ -91,6 +91,7 @@ mod test {
                         is_nullable: true,
                         default_constraint: vec![],
                         semantic_type: SemanticType::Field as i32,
+                        ..Default::default()
                     },
                     ColumnDef {
                         name: "ts".to_string(),
@@ -98,6 +99,7 @@ mod test {
                         is_nullable: false,
                         default_constraint: vec![],
                         semantic_type: SemanticType::Timestamp as i32,
+                        ..Default::default()
                     },
                 ],
                 time_index: "ts".to_string(),
@@ -121,6 +123,7 @@ mod test {
                             is_nullable: true,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
+                            ..Default::default()
                         }),
                         location: None,
                     }],
