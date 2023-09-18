@@ -27,7 +27,7 @@ use crate::error::{Error, JsonOptionsSnafu, Result};
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct RegionOptions {
     /// Region SST files TTL.
