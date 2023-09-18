@@ -29,7 +29,7 @@ mod timestamp_type;
 
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
-pub use cast::can_cast_type;
+pub use cast::cast_with_opt;
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
 pub use dictionary_type::DictionaryType;
