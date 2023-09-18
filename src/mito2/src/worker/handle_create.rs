@@ -62,6 +62,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .metadata(metadata)
         .region_dir(&request.region_dir)
+        .options(request.options)
         .create(&self.config)
         .await?;
 

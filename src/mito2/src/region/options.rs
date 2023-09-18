@@ -180,7 +180,21 @@ mod tests {
     }
 
     #[test]
+    fn test_with_ttl() {
+        let map = make_map(&[("ttl", "7d")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            ttl: Some(Duration::from_secs(3600 * 24 * 7)),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
     fn test_without_compaction_type() {
+        // If `compaction.type` is not provided, we ignore all compaction
+        // related options. Actually serde does not support deserialize
+        // an enum without knowning its type.
         let map = make_map(&[
             ("compaction.twcs.max_active_window_files", "8"),
             ("compaction.twcs.time_window", "2h"),
@@ -210,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_with_ttl() {
+    fn test_with_all() {
         let map = make_map(&[
             ("ttl", "7d"),
             ("compaction.twcs.max_active_window_files", "8"),
@@ -225,9 +239,7 @@ mod tests {
                 max_active_window_files: 8,
                 max_inactive_window_files: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
-                ..Default::default()
             }),
-            ..Default::default()
         };
         assert_eq!(expect, options);
     }

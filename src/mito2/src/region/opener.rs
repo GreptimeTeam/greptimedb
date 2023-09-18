@@ -14,6 +14,7 @@
 
 //! Region opener.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
@@ -48,6 +49,7 @@ pub(crate) struct RegionOpener {
     object_store: ObjectStore,
     region_dir: String,
     scheduler: SchedulerRef,
+    options: HashMap<String, String>,
 }
 
 impl RegionOpener {
@@ -65,6 +67,7 @@ impl RegionOpener {
             object_store,
             region_dir: String::new(),
             scheduler,
+            options: HashMap::new(),
         }
     }
 
@@ -77,6 +80,12 @@ impl RegionOpener {
     /// Sets the region dir.
     pub(crate) fn region_dir(mut self, value: &str) -> Self {
         self.region_dir = value.to_string();
+        self
+    }
+
+    /// Sets options for the region.
+    pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
+        self.options = value;
         self
     }
 
