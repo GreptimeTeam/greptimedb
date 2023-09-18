@@ -23,27 +23,27 @@ use std::time::Duration;
 pub struct RegionOptions {
     /// Region SST files TTL.
     pub ttl: Option<Duration>,
-    /// Compaction strategy.
-    pub compaction_strategy: CompactionStrategy,
+    /// Compaction options.
+    pub compaction: CompactionOptions,
 }
 
 impl Default for RegionOptions {
     fn default() -> Self {
         RegionOptions {
             ttl: None,
-            compaction_strategy: CompactionStrategy::default(),
+            compaction: CompactionOptions::default(),
         }
     }
 }
 
 /// Options for compactions
 #[derive(Debug, Clone)]
-pub enum CompactionStrategy {
+pub enum CompactionOptions {
     /// TWCS
     Twcs(TwcsOptions),
 }
 
-impl Default for CompactionStrategy {
+impl Default for CompactionOptions {
     fn default() -> Self {
         Self::Twcs(TwcsOptions::default())
     }

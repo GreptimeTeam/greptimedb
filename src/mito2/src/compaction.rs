@@ -33,7 +33,7 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
-use crate::region::options::{CompactionStrategy, TwcsOptions};
+use crate::region::options::{CompactionOptions, TwcsOptions};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
@@ -65,10 +65,10 @@ impl CompactionRequest {
     }
 }
 
-/// Builds compaction picker according to [CompactionStrategy].
-pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> CompactionPickerRef {
+/// Builds compaction picker according to [CompactionOptions].
+pub fn compaction_strategy_to_picker(strategy: &CompactionOptions) -> CompactionPickerRef {
     match strategy {
-        CompactionStrategy::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
+        CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
             twcs_opts.max_active_window_files,
             twcs_opts.max_inactive_window_files,
             twcs_opts.time_window_seconds(),
@@ -178,7 +178,7 @@ impl CompactionScheduler {
     fn schedule_compaction_request(&mut self, request: CompactionRequest) -> Result<()> {
         // TODO(hl): build picker according to region options.
         let picker =
-            compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
+            compaction_strategy_to_picker(&CompactionOptions::Twcs(TwcsOptions::default()));
         let region_id = request.region_id();
         debug!(
             "Pick compaction strategy {:?} for region: {}",
