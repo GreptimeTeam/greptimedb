@@ -101,6 +101,11 @@ macro_rules! impl_data_type_for_duration {
                 fn is_timestamp_compatible(&self) -> bool {
                     false
                 }
+
+                fn try_cast(&self, _: Value) -> Option<Value> {
+                    // TODO(QuenKar): Implement casting for duration types.
+                    None
+                }
             }
 
             impl LogicalPrimitiveType for [<Duration $unit Type>] {

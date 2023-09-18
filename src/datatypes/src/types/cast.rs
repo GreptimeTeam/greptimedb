@@ -115,8 +115,8 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         (Time(Microsecond(_)), Int64(_)) => true,
         (Time(Nanosecond(_)), Int64(_)) => true,
         // TODO(QuenKar): interval type cast
-        // (Interval(_), String(_)) => true,
-
+        (Interval(_), String(_)) => true,
+        (Duration(_), String(_)) => true,
         // other situations return false
         (_, _) => false,
     }

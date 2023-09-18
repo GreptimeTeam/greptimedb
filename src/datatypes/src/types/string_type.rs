@@ -83,6 +83,7 @@ impl DataType for StringType {
             Value::Timestamp(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
             Value::Time(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
             Value::Interval(v) => Some(Value::String(StringBytes::from(v.to_iso8601_string()))),
+            Value::Duration(v) => Some(Value::String(StringBytes::from(v.to_string()))),
 
             // StringBytes is only support for utf-8, Value::Binary is not allowed.
             Value::Binary(_) | Value::List(_) => None,
