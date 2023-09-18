@@ -31,6 +31,17 @@ impl CastOption {
     }
 }
 
+/// Cast the value to dest_type with CastOption.
+///
+/// # Arguments
+/// * `src_value` - The value to be casted.
+/// * `dest_type` - The destination type.
+/// * `cast_option` - The CastOption.
+///
+/// # Returns
+/// If success, return the casted value.
+/// If CastOption's strict is true, return an error if the cast fails.
+/// If CastOption's strict is false, return NULL if the cast fails.
 pub fn cast_with_opt(
     src_value: Value,
     dest_type: &ConcreteDataType,
@@ -180,6 +191,7 @@ mod tests {
 
     #[test]
     fn test_cast_with_opt() {
+        std::env::set_var("TZ", "Asia/Shanghai");
         // non-strict mode
         let cast_option = CastOption { strict: false };
         let src_value = Value::Int8(-1);

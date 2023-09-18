@@ -90,6 +90,6 @@ impl DataType for DictionaryType {
     }
 
     fn try_cast(&self, _: Value) -> Option<Value> {
-        unimplemented!()
+        unimplemented!("Value does not support Dictionary type yet.")
     }
 }

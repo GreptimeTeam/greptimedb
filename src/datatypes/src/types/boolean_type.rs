@@ -138,15 +138,15 @@ mod tests {
         test_cast_to_bool!(Value::Float64(OrderedFloat(0.0)), false);
         // true cases
         test_cast_to_bool!(Value::UInt8(1), true);
-        test_cast_to_bool!(Value::UInt16(1), true);
-        test_cast_to_bool!(Value::UInt32(1), true);
-        test_cast_to_bool!(Value::UInt64(1), true);
-        test_cast_to_bool!(Value::Int8(1), true);
-        test_cast_to_bool!(Value::Int16(1), true);
-        test_cast_to_bool!(Value::Int32(1), true);
-        test_cast_to_bool!(Value::Int64(1), true);
+        test_cast_to_bool!(Value::UInt16(2), true);
+        test_cast_to_bool!(Value::UInt32(3), true);
+        test_cast_to_bool!(Value::UInt64(4), true);
+        test_cast_to_bool!(Value::Int8(5), true);
+        test_cast_to_bool!(Value::Int16(6), true);
+        test_cast_to_bool!(Value::Int32(7), true);
+        test_cast_to_bool!(Value::Int64(8), true);
         test_cast_to_bool!(Value::Float32(OrderedFloat(1.0)), true);
-        test_cast_to_bool!(Value::Float64(OrderedFloat(1.0)), true);
+        test_cast_to_bool!(Value::Float64(OrderedFloat(2.0)), true);
     }
 
     #[test]

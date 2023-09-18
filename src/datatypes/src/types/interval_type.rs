@@ -91,7 +91,8 @@ macro_rules! impl_data_type_for_interval {
                 }
 
                 fn try_cast(&self, _: Value) -> Option<Value> {
-                    unimplemented!("interval type cast not implemented yet")
+                    // TODO(QuenKar): Implement casting for interval types.
+                    None
                 }
             }
 
