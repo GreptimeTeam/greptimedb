@@ -44,6 +44,7 @@ use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 use tokio::fs;
+use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
@@ -71,6 +72,7 @@ pub struct Datanode {
     region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    coordinated_notifier: Option<Arc<Notify>>,
 }
 
 impl Datanode {
@@ -78,6 +80,7 @@ impl Datanode {
         info!("Starting datanode instance...");
 
         self.start_heartbeat().await?;
+        self.wait_coordinated().await;
 
         let _ = self.greptimedb_telemetry_task.start();
         self.start_services().await
@@ -87,9 +90,18 @@ impl Datanode {
         if let Some(task) = &self.heartbeat_task {
             // Safety: The event_receiver must exist.
             let receiver = self.region_event_receiver.take().unwrap();
-            task.start(receiver).await?;
+
+            task.start(receiver, self.coordinated_notifier.clone())
+                .await?;
         }
         Ok(())
+    }
+
+    /// If `coordinated_notifier` exists, it waits for all regions to be coordinated.
+    pub async fn wait_coordinated(&mut self) {
+        if let Some(notifier) = self.coordinated_notifier.take() {
+            notifier.notified().await;
+        }
     }
 
     /// Start services of datanode. This method call will block until services are shutdown.
@@ -237,6 +249,12 @@ impl DatanodeBuilder {
         )
         .await;
 
+        let coordinated_notifier = if self.opts.coordination && matches!(mode, Mode::Distributed) {
+            Some(Arc::new(Notify::new()))
+        } else {
+            None
+        };
+
         Ok(Datanode {
             opts: self.opts,
             services,
@@ -244,6 +262,7 @@ impl DatanodeBuilder {
             region_server,
             greptimedb_telemetry_task,
             region_event_receiver,
+            coordinated_notifier,
         })
     }
 
