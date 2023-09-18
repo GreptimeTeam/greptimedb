@@ -23,6 +23,7 @@ use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
+use operator::error::Error as OperatorError;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -375,20 +376,28 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
         try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
-
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
 
     let output = execute_sql(&instance, "insert into demo2 select * from demo1").await;
@@ -705,6 +714,8 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "orc";
     let location = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
@@ -781,6 +792,8 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "orc";
     let location = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
@@ -830,6 +843,8 @@ async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn Moc
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "csv";
     let location = find_testing_resource("/tests/data/csv/various_type.csv");
@@ -877,6 +892,8 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -931,6 +948,8 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -993,6 +1012,8 @@ async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn Mo
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/type_cast.json");
@@ -1059,6 +1080,8 @@ async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn Mock
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/default_ts_column.json");
