@@ -28,16 +28,17 @@ common-recordbatch = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 common-test-util = { workspace = true }
-datanode = { workspace = true, features = ["testing"] }
+datanode = { workspace = true }
 datatypes = { workspace = true }
 dotenv = "0.15"
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
 meta-client = { workspace = true }
-meta-srv = { workspace = true }
+meta-srv = { workspace = true, features = ["mock"] }
 mito = { workspace = true, features = ["test"] }
 object-store = { workspace = true }
 once_cell.workspace = true
+operator = { workspace = true }
 query = { workspace = true }
 rand.workspace = true
 rstest = "0.17"

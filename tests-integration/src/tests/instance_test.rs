@@ -19,6 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
+use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
@@ -529,52 +530,34 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
 async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    let output = execute_sql(
-        &instance,
-        r#"create external table test_table_0(
-                            ts timestamp time index,
-                            host string,
-                            cpu double default 0,
-                            memory double
-                        ) with (location='/tmp/', format='csv');"#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create");
+    let location = tmp_dir.path().to_str().unwrap();
 
     let output = execute_sql(
         &instance,
-        r#"create external table test_table_1(
-                            ts timestamp,
-                            host string,
-                            cpu double default 0,
-                            memory double,
-                            time index (ts)
-                        ) with (location='/tmp/', format='csv');"#,
-    )
-    .await;
-    assert!(matches!(output, Output::AffectedRows(0)));
-
-    let output = execute_sql(
-        &instance,
-        r#"create external table test_table_2(
+        &format!(
+            r#"create external table test_table_0(
                             ts timestamp time index default 0,
                             host string,
                             cpu double default 0,
                             memory double
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 
     let output = execute_sql(
         &instance,
-        r#"create external table test_table_3(
+        &format!(
+            r#"create external table test_table_1(
                             ts timestamp default 0,
                             host string,
                             cpu double default 0,
                             memory double,
                             time index (ts)
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
@@ -584,9 +567,12 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
 async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_infer_format");
+    let location = tmp_dir.path().to_str().unwrap();
+
     let output = execute_sql(
         &instance,
-        r#"create external table test_table with (location='/tmp/', format='csv');"#,
+        &format!(r#"create external table test_table with (location='{location}', format='csv');"#),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
@@ -596,42 +582,54 @@ async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstanc
 async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_without_ts");
+    let location = tmp_dir.path().to_str().unwrap();
+
     let result = try_execute_sql(
         &instance,
-        r#"create external table test_table(
+        &format!(
+            r#"create external table test_table(
                             host string,
                             cpu double default 0,
                             memory double
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
-    assert!(matches!(result, Err(Error::InvalidSql { .. })));
+    assert!(matches!(result, Err(Error::TableOperation { .. })));
 }
 
 #[apply(both_instances_cases)]
 async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_with_invalid_ts");
+    let location = tmp_dir.path().to_str().unwrap();
+
     let result = try_execute_sql(
         &instance,
-        r#"create external table test_table(
+        &format!(
+            r#"create external table test_table(
                             ts timestamp time index null,
                             host string,
                             cpu double default 0,
                             memory double
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
     assert!(matches!(result, Err(Error::ParseSql { .. })));
 
     let result = try_execute_sql(
         &instance,
-        r#"create external table test_table(
+        &format!(
+            r#"create external table test_table(
                             ts bigint time index,
                             host string,
                             cpu double default 0,
                             memory double
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
     assert!(matches!(result, Err(Error::ParseSql { .. })));
