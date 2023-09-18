@@ -479,7 +479,7 @@ impl TableInfo {
             .map(|id| RegionId::new(self.table_id(), *id))
             .collect()
     }
-    /// Returns the full table name in the form of `{catalo}g.{schema}.{table}`.
+    /// Returns the full table name in the form of `{catalog}.{schema}.{table}`.
     pub fn full_table_name(&self) -> String {
         common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
     }
