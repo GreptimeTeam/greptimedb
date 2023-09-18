@@ -248,7 +248,7 @@ impl DatanodeBuilder {
         )
         .await;
 
-        let coordinated_notifier = if self.opts.coordination {
+        let coordinated_notifier = if self.opts.coordination && matches!(mode, Mode::Distributed) {
             Some(Arc::new(Notify::new()))
         } else {
             None
