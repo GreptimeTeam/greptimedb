@@ -25,15 +25,15 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use datanode::datanode::builder::DatanodeBuilder;
-use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
+use datanode::config::{DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
-use meta_srv::service::store::kv::KvStoreRef;
+use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
 use servers::Mode;
@@ -202,11 +202,15 @@ impl GreptimeDbClusterBuilder {
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
 
-        let datanode = DatanodeBuilder::new(opts, Arc::new(Plugins::default()))
-            .with_meta_client(meta_client)
-            .build()
-            .await
-            .unwrap();
+        let mut datanode = DatanodeBuilder::new(
+            opts,
+            Some(KvBackendAdapter::wrap(self.kv_store.clone())),
+            Arc::new(Plugins::default()),
+        )
+        .with_meta_client(meta_client)
+        .build()
+        .await
+        .unwrap();
 
         datanode.start_heartbeat().await.unwrap();
 

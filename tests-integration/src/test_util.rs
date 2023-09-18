@@ -28,7 +28,7 @@ use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{
+use datanode::config::{
     AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
     StorageConfig,
 };
@@ -291,6 +291,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 
 pub(crate) fn create_datanode_opts(store: ObjectStoreConfig, home_dir: String) -> DatanodeOptions {
     DatanodeOptions {
+        node_id: Some(0),
         storage: StorageConfig {
             data_home: home_dir,
             store,

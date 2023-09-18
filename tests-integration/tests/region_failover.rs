@@ -20,7 +20,7 @@ use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
-use common_meta::RegionIdent;
+use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
@@ -344,7 +344,7 @@ async fn run_region_failover_procedure(
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {
-                datanode_lease_secs: meta_srv.options().datanode_lease_secs,
+                datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
                 server_addr: meta_srv.options().server_addr.clone(),
                 kv_store: meta_srv.kv_store().clone(),
                 meta_peer_client: meta_srv.meta_peer_client().clone(),
