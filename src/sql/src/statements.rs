@@ -419,11 +419,14 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             Some(time_type.precision()),
             TimezoneInfo::None,
         )),
+        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
-        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Duration(_)
+        | ConcreteDataType::Null(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
-        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
     }
 }
 

@@ -17,14 +17,15 @@ use std::sync::Arc;
 use common_time::interval::IntervalUnit;
 
 use crate::data_type::DataType;
-use crate::types::{TimeType, TimestampType};
+use crate::types::{DurationType, TimeType, TimestampType};
 use crate::vectors::constant::ConstantVector;
 use crate::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, IntervalDayTimeVector,
-    IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector, PrimitiveVector, StringVector,
-    TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-    TimestampSecondVector, Vector,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, DurationMicrosecondVector,
+    DurationMillisecondVector, DurationNanosecondVector, DurationSecondVector,
+    IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector, ListVector,
+    PrimitiveVector, StringVector, TimeMicrosecondVector, TimeMillisecondVector,
+    TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, Vector,
 };
 use crate::with_match_primitive_type_id;
 
@@ -136,6 +137,20 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
                 is_vector_eq!(TimeNanosecondVector, lhs, rhs)
             }
         },
+        Duration(d) => match d {
+            DurationType::Second(_) => {
+                is_vector_eq!(DurationSecondVector, lhs, rhs)
+            }
+            DurationType::Millisecond(_) => {
+                is_vector_eq!(DurationMillisecondVector, lhs, rhs)
+            }
+            DurationType::Microsecond(_) => {
+                is_vector_eq!(DurationMicrosecondVector, lhs, rhs)
+            }
+            DurationType::Nanosecond(_) => {
+                is_vector_eq!(DurationNanosecondVector, lhs, rhs)
+            }
+        },
     }
 }
 
@@ -143,8 +158,9 @@ fn equal(lhs: &dyn Vector, rhs: &dyn Vector) -> bool {
 mod tests {
     use super::*;
     use crate::vectors::{
-        list, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector,
-        NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+        list, DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
+        DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
+        Int8Vector, NullVector, UInt16Vector, UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
     };
 
     fn assert_vector_ref_eq(vector: VectorRef) {
@@ -222,6 +238,10 @@ mod tests {
         assert_vector_ref_eq(Arc::new(IntervalMonthDayNanoVector::from_values([
             1000, 2000, 3000, 4000,
         ])));
+        assert_vector_ref_eq(Arc::new(DurationSecondVector::from_values([300, 310])));
+        assert_vector_ref_eq(Arc::new(DurationMillisecondVector::from_values([300, 310])));
+        assert_vector_ref_eq(Arc::new(DurationMicrosecondVector::from_values([300, 310])));
+        assert_vector_ref_eq(Arc::new(DurationNanosecondVector::from_values([300, 310])));
     }
 
     #[test]
@@ -286,6 +306,11 @@ mod tests {
         assert_vector_ref_ne(
             Arc::new(IntervalYearMonthVector::from_values([1000, 2000])),
             Arc::new(IntervalYearMonthVector::from_values([2100, 1200])),
+        );
+
+        assert_vector_ref_ne(
+            Arc::new(DurationSecondVector::from_values([300, 310])),
+            Arc::new(DurationSecondVector::from_values([300, 320])),
         );
     }
 }
