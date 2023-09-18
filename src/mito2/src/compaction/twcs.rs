@@ -376,7 +376,6 @@ impl CompactionTask for TwcsCompactionTask {
             notify,
         })
         .await;
-        // TODO(hl): handle reschedule
     }
 }
 
