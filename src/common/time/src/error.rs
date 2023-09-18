@@ -23,7 +23,7 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to parse string to date, raw: {}, source: {}", raw, source))]
+    #[snafu(display("Failed to parse string to date, raw: {}", raw))]
     ParseDateStr { raw: String, source: ParseError },
 
     #[snafu(display("Invalid date string, raw: {}", raw))]
@@ -35,7 +35,7 @@ pub enum Error {
     #[snafu(display("Failed to parse a string into Interval, raw string: {}", raw))]
     ParseInterval { raw: String, location: Location },
 
-    #[snafu(display("Current timestamp overflow, source: {}", source))]
+    #[snafu(display("Current timestamp overflow"))]
     TimestampOverflow {
         source: TryFromIntError,
         location: Location,

@@ -22,7 +22,7 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to read OPT_PROF, source: {}", source))]
+    #[snafu(display("Failed to read OPT_PROF"))]
     ReadOptProf { source: tikv_jemalloc_ctl::Error },
 
     #[snafu(display("Memory profiling is not enabled"))]
@@ -31,17 +31,13 @@ pub enum Error {
     #[snafu(display("Failed to build temp file from given path: {:?}", path))]
     BuildTempPath { path: PathBuf, location: Location },
 
-    #[snafu(display("Failed to open temp file: {}, source: {}", path, source))]
+    #[snafu(display("Failed to open temp file: {}", path))]
     OpenTempFile {
         path: String,
         source: std::io::Error,
     },
 
-    #[snafu(display(
-        "Failed to dump profiling data to temp file: {:?}, source: {}",
-        path,
-        source
-    ))]
+    #[snafu(display("Failed to dump profiling data to temp file: {:?}", path))]
     DumpProfileData {
         path: PathBuf,
         source: tikv_jemalloc_ctl::Error,

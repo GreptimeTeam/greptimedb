@@ -553,7 +553,7 @@ impl SkippedFields {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum MetadataError {
-    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
+    #[snafu(display("Invalid schema, location: {}", location))]
     InvalidSchema {
         source: datatypes::error::Error,
         location: Location,
@@ -562,21 +562,13 @@ pub enum MetadataError {
     #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
     InvalidMeta { reason: String, location: Location },
 
-    #[snafu(display(
-        "Failed to ser/de json object. Location: {}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to ser/de json object. Location: {}", location))]
     SerdeJson {
         location: Location,
         source: serde_json::Error,
     },
 
-    #[snafu(display(
-        "Failed to convert struct from datatypes, location: {}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to convert struct from datatypes, location: {}", location))]
     ConvertDatatypes {
         location: Location,
         source: datatypes::error::Error,

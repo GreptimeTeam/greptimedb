@@ -23,7 +23,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
-    #[snafu(display("Failed to build runtime, source: {}", source))]
+    #[snafu(display("Failed to build runtime"))]
     BuildRuntime {
         source: std::io::Error,
         location: Location,
@@ -32,11 +32,7 @@ pub enum Error {
     #[snafu(display("Repeated task {} is already started", name))]
     IllegalState { name: String, location: Location },
 
-    #[snafu(display(
-        "Failed to wait for repeated task {} to stop, source: {}",
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to wait for repeated task {} to stop", name))]
     WaitGcTaskStop {
         name: String,
         source: JoinError,

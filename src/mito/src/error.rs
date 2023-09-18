@@ -23,22 +23,14 @@ use table::metadata::{TableInfoBuilderError, TableMetaBuilderError, TableVersion
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display(
-        "Failed to build table meta for table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         source: TableMetaBuilderError,
         table_name: String,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build table info for table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to build table info for table: {}", table_name))]
     BuildTableInfo {
         source: TableInfoBuilderError,
         table_name: String,
@@ -54,11 +46,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build row key descriptor for table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to build row key descriptor for table: {}", table_name))]
     BuildRowKeyDescriptor {
         source: store_api::storage::RowKeyDescriptorBuilderError,
         table_name: String,
@@ -66,10 +54,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build column descriptor for table: {}, column: {}, source: {}",
+        "Failed to build column descriptor for table: {}, column: {}",
         table_name,
         column_name,
-        source,
     ))]
     BuildColumnDescriptor {
         source: store_api::storage::ColumnDescriptorBuilderError,
@@ -78,11 +65,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build column family descriptor for table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to build column family descriptor for table: {}", table_name))]
     BuildColumnFamilyDescriptor {
         source: store_api::storage::ColumnFamilyDescriptorBuilderError,
         table_name: String,
@@ -90,10 +73,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build region descriptor for table: {}, region: {}, source: {}",
+        "Failed to build region descriptor for table: {}, region: {}",
         table_name,
         region_name,
-        source,
     ))]
     BuildRegionDescriptor {
         source: store_api::storage::RegionDescriptorBuilderError,
@@ -102,22 +84,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to update table metadata to manifest,  table: {}, source: {}",
-        table_name,
-        source,
-    ))]
+    #[snafu(display("Failed to update table metadata to manifest,  table: {}", table_name))]
     UpdateTableManifest {
         location: Location,
         source: storage::error::Error,
         table_name: String,
     },
 
-    #[snafu(display(
-        "Failed to scan table metadata from manifest,  table: {}, source: {}",
-        table_name,
-        source,
-    ))]
+    #[snafu(display("Failed to scan table metadata from manifest,  table: {}", table_name))]
     ScanTableManifest {
         location: Location,
         source: storage::error::Error,
@@ -145,10 +119,7 @@ pub enum Error {
         column_qualified_name: String,
     },
 
-    #[snafu(display(
-        "Failed to convert metadata from deserialized data, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to convert metadata from deserialized data"))]
     ConvertRaw {
         location: Location,
         source: table::metadata::ConvertError,
@@ -161,7 +132,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid schema, source: {}", source))]
+    #[snafu(display("Invalid schema"))]
     InvalidRawSchema { source: datatypes::error::Error },
 
     #[snafu(display("Stale version found, expect: {}, current: {}", expect, current))]

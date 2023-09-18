@@ -35,44 +35,44 @@ pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
-    #[snafu(display("Internal IO error, source: {}", source))]
+    #[snafu(display("Internal IO error"))]
     InternalIo { source: std::io::Error },
 
-    #[snafu(display("Tokio IO error: {}, source: {}", err_msg, source))]
+    #[snafu(display("Tokio IO error: {}", err_msg))]
     TokioIo {
         err_msg: String,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to collect recordbatch, source: {}", source))]
+    #[snafu(display("Failed to collect recordbatch"))]
     CollectRecordbatch {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to start HTTP server, source: {}", source))]
+    #[snafu(display("Failed to start HTTP server"))]
     StartHttp { source: hyper::Error },
 
-    #[snafu(display("Failed to start gRPC server, source: {}", source))]
+    #[snafu(display("Failed to start gRPC server"))]
     StartGrpc { source: tonic::transport::Error },
 
     #[snafu(display("{} server is already started", server))]
     AlreadyStarted { server: String, location: Location },
 
-    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: SocketAddr,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to execute query, source: {}, query: {}", source, query))]
+    #[snafu(display("Failed to execute query, query: {}", query))]
     ExecuteQuery {
         query: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute plan, source: {}", source))]
+    #[snafu(display("Failed to execute plan"))]
     ExecutePlan {
         location: Location,
         source: BoxedError,
@@ -90,23 +90,23 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to check database validity, source: {}", source))]
+    #[snafu(display("Failed to check database validity"))]
     CheckDatabaseValidity {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to describe statement, source: {}", source))]
+    #[snafu(display("Failed to describe statement"))]
     DescribeStatement { source: BoxedError },
 
-    #[snafu(display("Failed to insert script with name: {}, source: {}", name, source))]
+    #[snafu(display("Failed to insert script with name: {}", name))]
     InsertScript {
         name: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to execute script by name: {}, source: {}", name, source))]
+    #[snafu(display("Failed to execute script by name: {}", name))]
     ExecuteScript {
         name: String,
         location: Location,
@@ -122,25 +122,25 @@ pub enum Error {
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery { reason: String, location: Location },
 
-    #[snafu(display("Failed to parse InfluxDB line protocol, source: {}", source))]
+    #[snafu(display("Failed to parse InfluxDB line protocol"))]
     InfluxdbLineProtocol {
         location: Location,
         source: influxdb_line_protocol::Error,
     },
 
-    #[snafu(display("Failed to write InfluxDB line protocol, source: {}", source))]
+    #[snafu(display("Failed to write InfluxDB line protocol"))]
     InfluxdbLinesWrite {
         location: Location,
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to write prometheus series, source: {}", source))]
+    #[snafu(display("Failed to write prometheus series"))]
     PromSeriesWrite {
         location: Location,
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to write OTLP metrics, source: {}", source))]
+    #[snafu(display("Failed to write OTLP metrics"))]
     OtlpMetricsWrite {
         location: Location,
         source: common_grpc::error::Error,
@@ -152,34 +152,34 @@ pub enum Error {
     #[snafu(display("Connection reset by peer"))]
     ConnResetByPeer { location: Location },
 
-    #[snafu(display("Hyper error, source: {}", source))]
+    #[snafu(display("Hyper error"))]
     Hyper { source: hyper::Error },
 
-    #[snafu(display("Invalid OpenTSDB line, source: {}", source))]
+    #[snafu(display("Invalid OpenTSDB line"))]
     InvalidOpentsdbLine {
         source: FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Invalid OpenTSDB Json request, source: {}", source))]
+    #[snafu(display("Invalid OpenTSDB Json request"))]
     InvalidOpentsdbJsonRequest {
         source: serde_json::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to decode prometheus remote request, source: {}", source))]
+    #[snafu(display("Failed to decode prometheus remote request"))]
     DecodePromRemoteRequest {
         location: Location,
         source: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decode OTLP request, source: {}", source))]
+    #[snafu(display("Failed to decode OTLP request"))]
     DecodeOtlpRequest {
         location: Location,
         source: prost::DecodeError,
     },
 
-    #[snafu(display("Failed to decompress prometheus remote request, source: {}", source))]
+    #[snafu(display("Failed to decompress prometheus remote request"))]
     DecompressPromRemoteRequest {
         location: Location,
         source: snap::Error,
@@ -191,7 +191,7 @@ pub enum Error {
     #[snafu(display("Invalid prometheus remote read query result, msg: {}", msg))]
     InvalidPromRemoteReadQueryResult { msg: String, location: Location },
 
-    #[snafu(display("Invalid Flight ticket, source: {}", source))]
+    #[snafu(display("Invalid Flight ticket"))]
     InvalidFlightTicket {
         source: api::DecodeError,
         location: Location,
@@ -200,7 +200,7 @@ pub enum Error {
     #[snafu(display("Tls is required for {}, plain connection is rejected", server))]
     TlsRequired { server: String },
 
-    #[snafu(display("Failed to get user info, source: {}", source))]
+    #[snafu(display("Failed to get user info"))]
     Auth {
         location: Location,
         source: auth::error::Error,
@@ -212,7 +212,7 @@ pub enum Error {
     #[snafu(display("Not found influx http authorization info"))]
     NotFoundInfluxAuth {},
 
-    #[snafu(display("Invalid visibility ASCII chars, source: {}", source))]
+    #[snafu(display("Invalid visibility ASCII chars"))]
     InvisibleASCII {
         source: hyper::header::ToStrError,
         location: Location,
@@ -224,26 +224,26 @@ pub enum Error {
     #[snafu(display("Invalid http authorization header"))]
     InvalidAuthorizationHeader { location: Location },
 
-    #[snafu(display("Invalid base64 value, source: {:?}", source))]
+    #[snafu(display("Invalid base64 value"))]
     InvalidBase64Value {
         source: DecodeError,
         location: Location,
     },
 
-    #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
+    #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
         source: FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Error accessing catalog: {}", source))]
+    #[snafu(display("Error accessing catalog"))]
     CatalogError { source: catalog::error::Error },
 
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
 
     #[cfg(feature = "mem-prof")]
-    #[snafu(display("Failed to dump profile data, source: {}", source))]
+    #[snafu(display("Failed to dump profile data"))]
     DumpProfileData {
         location: Location,
         source: common_mem_prof::error::Error,
@@ -255,7 +255,7 @@ pub enum Error {
     #[snafu(display("Invalid flush argument: {}", err_msg))]
     InvalidFlushArgument { err_msg: String },
 
-    #[snafu(display("Failed to build gRPC reflection service, source: {}", source))]
+    #[snafu(display("Failed to build gRPC reflection service"))]
     GrpcReflectionService {
         source: tonic_reflection::server::Error,
         location: Location,
@@ -274,7 +274,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get param types, source: {source}"))]
+    #[snafu(display("Failed to get param types"))]
     GetPreparedStmtParams {
         source: query::error::Error,
         location: Location,
@@ -285,20 +285,20 @@ pub enum Error {
 
     // this error is used for custom error mapping
     // please do not delete it
-    #[snafu(display("Other error, source: {}", source))]
+    #[snafu(display("Other error"))]
     Other {
         source: BoxedError,
         location: Location,
     },
 
-    #[snafu(display("Failed to join task, source: {}", source))]
+    #[snafu(display("Failed to join task"))]
     JoinTask {
         source: tokio::task::JoinError,
         location: Location,
     },
 
     #[cfg(feature = "pprof")]
-    #[snafu(display("Failed to dump pprof data, source: {}", source))]
+    #[snafu(display("Failed to dump pprof data"))]
     DumpPprof { source: common_pprof::Error },
 
     #[snafu(display("{source}"))]

@@ -85,7 +85,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize: {}", source))]
+    #[snafu(display("Failed to deserialize"))]
     Deserialize {
         source: prost::DecodeError,
         location: Location,

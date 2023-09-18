@@ -21,13 +21,13 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to serialize data, source: {}", source))]
+    #[snafu(display("Failed to serialize data"))]
     Serialize {
         source: serde_json::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize data, source: {}, json: {}", source, json))]
+    #[snafu(display("Failed to deserialize data, json: {}", json))]
     Deserialize {
         source: serde_json::Error,
         location: Location,
@@ -60,11 +60,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to parse version in schema meta, value: {}, source: {}",
-        value,
-        source
-    ))]
+    #[snafu(display("Failed to parse version in schema meta, value: {}", value))]
     ParseSchemaVersion {
         value: String,
         source: std::num::ParseIntError,
@@ -83,13 +79,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Arrow failed to compute, source: {}", source))]
+    #[snafu(display("Arrow failed to compute"))]
     ArrowCompute {
         source: arrow::error::ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to project arrow schema, source: {}", source))]
+    #[snafu(display("Failed to project arrow schema"))]
     ProjectArrowSchema {
         source: arrow::error::ArrowError,
         location: Location,

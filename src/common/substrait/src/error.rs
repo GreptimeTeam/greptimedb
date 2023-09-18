@@ -39,13 +39,13 @@ pub enum Error {
     #[snafu(display("Unsupported substrait type: {}", ty))]
     UnsupportedSubstraitType { ty: String, location: Location },
 
-    #[snafu(display("Failed to decode substrait relation, source: {}", source))]
+    #[snafu(display("Failed to decode substrait relation"))]
     DecodeRel {
         source: DecodeError,
         location: Location,
     },
 
-    #[snafu(display("Failed to encode substrait relation, source: {}", source))]
+    #[snafu(display("Failed to encode substrait relation"))]
     EncodeRel {
         source: EncodeError,
         location: Location,
@@ -67,13 +67,13 @@ pub enum Error {
     #[snafu(display("Invalid parameters: {}", reason))]
     InvalidParameters { reason: String, location: Location },
 
-    #[snafu(display("Internal error from DataFusion: {}", source))]
+    #[snafu(display("Internal error from DataFusion"))]
     DFInternal {
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Internal error: {}", source))]
+    #[snafu(display("Internal error"))]
     Internal {
         location: Location,
         source: BoxedError,
@@ -95,7 +95,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert DataFusion schema, source: {}", source))]
+    #[snafu(display("Failed to convert DataFusion schema"))]
     ConvertDfSchema {
         location: Location,
         source: datatypes::error::Error,
@@ -108,13 +108,13 @@ pub enum Error {
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to encode DataFusion plan, source: {}", source))]
+    #[snafu(display("Failed to encode DataFusion plan"))]
     EncodeDfPlan {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to decode DataFusion plan, source: {}", source))]
+    #[snafu(display("Failed to decode DataFusion plan"))]
     DecodeDfPlan {
         source: datafusion::error::DataFusionError,
         location: Location,

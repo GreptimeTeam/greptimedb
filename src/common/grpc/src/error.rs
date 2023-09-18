@@ -27,7 +27,7 @@ pub enum Error {
     #[snafu(display("Invalid client tls config, {}", msg))]
     InvalidTlsConfig { msg: String },
 
-    #[snafu(display("Invalid config file path, {}", source))]
+    #[snafu(display("Invalid config file path"))]
     InvalidConfigFilePath {
         source: io::Error,
         location: Location,
@@ -46,13 +46,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
         source: tonic::transport::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create RecordBatch, source: {}", source))]
+    #[snafu(display("Failed to create RecordBatch"))]
     CreateRecordBatch {
         location: Location,
         source: common_recordbatch::error::Error,
@@ -61,7 +61,7 @@ pub enum Error {
     #[snafu(display("Failed to convert Arrow type: {}", from))]
     Conversion { from: String, location: Location },
 
-    #[snafu(display("Failed to decode FlightData, source: {}", source))]
+    #[snafu(display("Failed to decode FlightData"))]
     DecodeFlightData {
         source: api::DecodeError,
         location: Location,
@@ -70,7 +70,7 @@ pub enum Error {
     #[snafu(display("Invalid FlightData, reason: {}", reason))]
     InvalidFlightData { reason: String, location: Location },
 
-    #[snafu(display("Failed to convert Arrow Schema, source: {}", source))]
+    #[snafu(display("Failed to convert Arrow Schema"))]
     ConvertArrowSchema {
         location: Location,
         source: datatypes::error::Error,

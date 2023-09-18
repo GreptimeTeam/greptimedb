@@ -23,7 +23,7 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum InnerError {
-    #[snafu(display("{}: {}", msg, source))]
+    #[snafu(display("msg: {}", msg))]
     Datafusion {
         msg: &'static str,
         source: DataFusionError,
@@ -33,22 +33,19 @@ pub enum InnerError {
     #[snafu(display("PhysicalPlan downcast failed"))]
     PhysicalPlanDowncast { location: Location },
 
-    #[snafu(display("Fail to convert arrow schema, source: {}", source))]
+    #[snafu(display("Fail to convert arrow schema"))]
     ConvertSchema {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to convert DataFusion's recordbatch stream, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    #[snafu(display("Failed to execute physical plan"))]
     ExecutePhysicalPlan {
         location: Location,
         source: common_query::error::Error,

@@ -34,22 +34,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to convert column default constraint, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Failed to convert column default constraint, column: {}", column))]
     ConvertColumnDefaultConstraint {
         column: String,
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid column default constraint, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Invalid column default constraint, column: {}", column))]
     InvalidColumnDefaultConstraint {
         column: String,
         location: Location,

@@ -27,51 +27,51 @@ use crate::pubsub::Message;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to create default catalog and schema, source: {}", source))]
+    #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to allocate next sequence number: {}", source))]
+    #[snafu(display("Failed to allocate next sequence number"))]
     NextSequence {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to submit ddl task: {}", source))]
+    #[snafu(display("Failed to submit ddl task"))]
     SubmitDdlTask {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to invalidate table cache: {}", source))]
+    #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to operate region on peer:{}, source: {}", peer, source))]
+    #[snafu(display("Failed to operate region on peer:{}", peer))]
     OperateRegion {
         location: Location,
         peer: Peer,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list catalogs: {}", source))]
+    #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list {}'s schemas: {}", catalog, source))]
+    #[snafu(display("Failed to list {}'s schemas", catalog))]
     ListSchemas {
         location: Location,
         catalog: String,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to join a future: {}", source))]
+    #[snafu(display("Failed to join a future"))]
     Join {
         location: Location,
         source: JoinError,
@@ -102,7 +102,7 @@ pub enum Error {
         available: usize,
     },
 
-    #[snafu(display("Failed to request Datanode {}, source: {}", peer, source))]
+    #[snafu(display("Failed to request Datanode {}", peer))]
     RequestDatanode {
         location: Location,
         peer: Peer,
@@ -112,7 +112,7 @@ pub enum Error {
     #[snafu(display("Failed to send shutdown signal"))]
     SendShutdownSignal { source: SendError<()> },
 
-    #[snafu(display("Failed to shutdown {} server, source: {}", server, source))]
+    #[snafu(display("Failed to shutdown {} server", server))]
     ShutdownServer {
         location: Location,
         source: servers::error::Error,
@@ -122,40 +122,36 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
-    #[snafu(display(
-        "Failed to execute via Etcd, source: {}, location: {}",
-        source,
-        location
-    ))]
+    #[snafu(display("Failed to execute via Etcd, location: {}", location))]
     EtcdFailed {
         source: etcd_client::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to connect to Etcd, source: {}", source))]
+    #[snafu(display("Failed to connect to Etcd"))]
     ConnectEtcd {
         source: etcd_client::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to bind address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: String,
         source: std::io::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to start gRPC server, source: {}", source))]
+    #[snafu(display("Failed to start gRPC server"))]
     StartGrpc {
         source: tonic::transport::Error,
         location: Location,
     },
-    #[snafu(display("Failed to start http server, source: {}", source))]
+    #[snafu(display("Failed to start http server"))]
     StartHttp {
         location: Location,
         source: servers::error::Error,
     },
-    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,
@@ -172,31 +168,31 @@ pub enum Error {
     #[snafu(display("Invalid inactive region key: {}", key))]
     InvalidInactiveRegionKey { key: String, location: Location },
 
-    #[snafu(display("Failed to parse datanode lease key from utf8: {}", source))]
+    #[snafu(display("Failed to parse datanode lease key from utf8"))]
     LeaseKeyFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode lease value from utf8: {}", source))]
+    #[snafu(display("Failed to parse datanode lease value from utf8"))]
     LeaseValueFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat key from utf8: {}", source))]
+    #[snafu(display("Failed to parse datanode stat key from utf8"))]
     StatKeyFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse datanode stat value from utf8: {}", source))]
+    #[snafu(display("Failed to parse datanode stat value from utf8"))]
     StatValueFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse invalid region key from utf8: {}", source))]
+    #[snafu(display("Failed to parse invalid region key from utf8"))]
     InvalidRegionKeyFromUtf8 {
         source: std::string::FromUtf8Error,
         location: Location,
@@ -216,7 +212,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse number: {}, source: {}", err_msg, source))]
+    #[snafu(display("Failed to parse number: {}", err_msg))]
     ParseNum {
         err_msg: String,
         source: std::num::ParseIntError,
@@ -229,19 +225,19 @@ pub enum Error {
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
     InvalidTxnResult { err_msg: String, location: Location },
 
-    #[snafu(display("Cannot parse catalog value, source: {}", source))]
+    #[snafu(display("Cannot parse catalog value"))]
     InvalidCatalogValue {
         location: Location,
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Cannot parse full table name, source: {}", source))]
+    #[snafu(display("Cannot parse full table name"))]
     InvalidFullTableName {
         location: Location,
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Failed to decode table route, source: {}", source))]
+    #[snafu(display("Failed to decode table route"))]
     DecodeTableRoute {
         source: prost::DecodeError,
         location: Location,
@@ -290,25 +286,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
         location: Location,
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to batch get KVs from leader's in_memory kv store, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to batch get KVs from leader's in_memory kv store"))]
     BatchGet {
         source: tonic::Status,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to batch range KVs from leader's in_memory kv store, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to batch range KVs from leader's in_memory kv store"))]
     Range {
         source: tonic::Status,
         location: Location,
@@ -323,7 +313,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid http body, source: {}", source))]
+    #[snafu(display("Invalid http body"))]
     InvalidHttpBody {
         source: http::Error,
         location: Location,
@@ -340,19 +330,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to lock based on etcd, source: {}", source))]
+    #[snafu(display("Failed to lock based on etcd"))]
     Lock {
         source: etcd_client::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to unlock based on etcd, source: {}", source))]
+    #[snafu(display("Failed to unlock based on etcd"))]
     Unlock {
         source: etcd_client::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to grant lease, source: {}", source))]
+    #[snafu(display("Failed to grant lease"))]
     LeaseGrant {
         source: etcd_client::Error,
         location: Location,
@@ -361,7 +351,7 @@ pub enum Error {
     #[snafu(display("Distributed lock is not configured"))]
     LockNotConfig { location: Location },
 
-    #[snafu(display("Invalid utf-8 value, source: {:?}", source))]
+    #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
         source: std::string::FromUtf8Error,
         location: Location,
@@ -425,11 +415,7 @@ pub enum Error {
     #[snafu(display("Missing request header"))]
     MissingRequestHeader { location: Location },
 
-    #[snafu(display(
-        "Failed to register procedure loader, type name: {}, source: {}",
-        type_name,
-        source
-    ))]
+    #[snafu(display("Failed to register procedure loader, type name: {}", type_name))]
     RegisterProcedureLoader {
         type_name: String,
         location: Location,
@@ -459,13 +445,13 @@ pub enum Error {
     #[snafu(display("Failed to update table metadata, err_msg: {}", err_msg))]
     UpdateTableMetadata { err_msg: String, location: Location },
 
-    #[snafu(display("Failed to convert table route, source: {}", source))]
+    #[snafu(display("Failed to convert table route"))]
     TableRouteConversion {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to convert proto data, source: {}", source))]
+    #[snafu(display("Failed to convert proto data"))]
     ConvertProtoData {
         location: Location,
         source: common_meta::error::Error,
@@ -479,25 +465,25 @@ pub enum Error {
 
     // this error is used for custom error mapping
     // please do not delete it
-    #[snafu(display("Other error, source: {}", source))]
+    #[snafu(display("Other error"))]
     Other {
         source: BoxedError,
         location: Location,
     },
 
-    #[snafu(display("Table metadata manager error: {}", source))]
+    #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to update table route: {}", source))]
+    #[snafu(display("Failed to update table route"))]
     UpdateTableRoute {
         source: common_meta::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to get table info error: {}", source))]
+    #[snafu(display("Failed to get table info error"))]
     GetFullTableInfo {
         source: common_meta::error::Error,
         location: Location,
@@ -506,7 +492,7 @@ pub enum Error {
     #[snafu(display("Invalid heartbeat request: {}", err_msg))]
     InvalidHeartbeatRequest { err_msg: String, location: Location },
 
-    #[snafu(display("Failed to publish message: {:?}", source))]
+    #[snafu(display("Failed to publish message"))]
     PublishMessage {
         source: SendError<Message>,
         location: Location,

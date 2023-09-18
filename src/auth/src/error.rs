@@ -28,13 +28,13 @@ pub enum Error {
     #[snafu(display("Internal state error: {}", msg))]
     InternalState { msg: String },
 
-    #[snafu(display("IO error, source: {}", source))]
+    #[snafu(display("IO error"))]
     Io {
         source: std::io::Error,
         location: Location,
     },
 
-    #[snafu(display("Auth failed, source: {}", source))]
+    #[snafu(display("Auth failed"))]
     AuthBackend {
         location: Location,
         source: BoxedError,

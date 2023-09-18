@@ -24,7 +24,7 @@ pub enum Error {
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
+    #[snafu(display("Column datatype error"))]
     ColumnDataType {
         location: Location,
         source: api::error::Error,
@@ -49,7 +49,7 @@ pub enum Error {
 
     #[snafu(display("Invalid column proto: {}", err_msg))]
     InvalidColumnProto { err_msg: String, location: Location },
-    #[snafu(display("Failed to create vector, source: {}", source))]
+    #[snafu(display("Failed to create vector"))]
     CreateVector {
         location: Location,
         source: datatypes::error::Error,
@@ -58,11 +58,7 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, location: Location },
 
-    #[snafu(display(
-        "Invalid column proto definition, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Invalid column proto definition, column: {}", column))]
     InvalidColumnDef {
         column: String,
         location: Location,

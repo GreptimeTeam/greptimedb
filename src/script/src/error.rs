@@ -27,25 +27,21 @@ pub enum Error {
     #[snafu(display("Scripts table not found"))]
     ScriptsTableNotFound { location: Location },
 
-    #[snafu(display(
-        "Failed to insert script to scripts table, name: {}, source: {}",
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to insert script to scripts table, name: {}", name))]
     InsertScript {
         name: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to compile python script, name: {}, source: {}", name, source))]
+    #[snafu(display("Failed to compile python script, name: {}", name))]
     CompilePython {
         name: String,
         location: Location,
         source: crate::python::error::Error,
     },
 
-    #[snafu(display("Failed to execute python script {}, source: {}", name, source))]
+    #[snafu(display("Failed to execute python script {}", name))]
     ExecutePython {
         name: String,
         location: Location,
@@ -55,7 +51,7 @@ pub enum Error {
     #[snafu(display("Script not found, name: {}", name))]
     ScriptNotFound { location: Location, name: String },
 
-    #[snafu(display("Failed to collect record batch, source: {}", source))]
+    #[snafu(display("Failed to collect record batch"))]
     CollectRecords {
         location: Location,
         source: common_recordbatch::error::Error,
@@ -64,13 +60,13 @@ pub enum Error {
     #[snafu(display("Failed to cast type, msg: {}", msg))]
     CastType { msg: String, location: Location },
 
-    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
         source: datafusion_common::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to execute internal statement, source: {}", source))]
+    #[snafu(display("Failed to execute internal statement"))]
     ExecuteInternalStatement {
         source: query::error::Error,
         location: Location,
