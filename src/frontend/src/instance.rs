@@ -393,7 +393,7 @@ impl FrontendInstance for Instance {
             heartbeat_task.start().await?;
         }
 
-        self.script_executor.start(self).await?;
+        self.script_executor.start(self)?;
 
         futures::future::try_join_all(self.servers.values().map(start_server))
             .await
