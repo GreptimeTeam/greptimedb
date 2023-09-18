@@ -16,8 +16,6 @@
 
 use std::time::Duration;
 
-use store_api::storage::CompactionStrategy;
-
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
@@ -34,6 +32,40 @@ impl Default for RegionOptions {
         RegionOptions {
             ttl: None,
             compaction_strategy: CompactionStrategy::default(),
+        }
+    }
+}
+
+/// Options for compactions
+#[derive(Debug, Clone)]
+pub enum CompactionStrategy {
+    /// TWCS
+    Twcs(TwcsOptions),
+}
+
+impl Default for CompactionStrategy {
+    fn default() -> Self {
+        Self::Twcs(TwcsOptions::default())
+    }
+}
+
+/// TWCS compaction options.
+#[derive(Debug, Clone)]
+pub struct TwcsOptions {
+    /// Max num of files that can be kept in active writing time window.
+    pub max_active_window_files: usize,
+    /// Max num of files that can be kept in inactive time window.
+    pub max_inactive_window_files: usize,
+    /// Compaction time window defined when creating tables.
+    pub time_window_seconds: Option<i64>,
+}
+
+impl Default for TwcsOptions {
+    fn default() -> Self {
+        Self {
+            max_active_window_files: 4,
+            max_inactive_window_files: 1,
+            time_window_seconds: None,
         }
     }
 }

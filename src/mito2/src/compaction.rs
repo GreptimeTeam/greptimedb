@@ -25,7 +25,7 @@ use std::time::Duration;
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
-use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
@@ -33,6 +33,7 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
+use crate::region::options::{CompactionStrategy, TwcsOptions};
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
