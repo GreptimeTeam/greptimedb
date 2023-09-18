@@ -240,13 +240,9 @@ impl EngineInner {
         let _lock = self.region_mutex.lock().await;
 
         let mut regions = self.regions.write().await;
-        if !regions.contains_key(&region_id) {
-            return Ok(Output::AffectedRows(0));
+        if regions.remove(&region_id).is_some() {
+            info!("Region closed, region_id: {}", region_id);
         }
-
-        info!("Try to close region, region_id: {}", region_id);
-        let _ = regions.remove(&region_id);
-        info!("Region closed, region_id: {}", region_id);
 
         Ok(Output::AffectedRows(0))
     }
