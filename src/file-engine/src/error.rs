@@ -129,8 +129,14 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to project schema: {}", source))]
-    ProjectSchema {
+    ProjectArrowSchema {
         source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project schema: {}", source))]
+    ProjectSchema {
+        source: datatypes::error::Error,
         location: Location,
     },
 
@@ -168,6 +174,16 @@ pub enum Error {
         source: DataFusionError,
         location: Location,
     },
+
+    #[snafu(display("Failed to create default value for column: {}", column))]
+    CreateDefault {
+        column: String,
+        source: datatypes::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Missing default value for column: {}", column))]
+    MissingColumnNoDefault { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -178,11 +194,14 @@ impl ErrorExt for Error {
 
         match self {
             BuildCsvConfig { .. }
+            | ProjectArrowSchema { .. }
             | ProjectSchema { .. }
             | MissingRequiredField { .. }
             | Unsupported { .. }
             | InvalidMetadata { .. }
-            | ProjectionOutOfBounds { .. } => StatusCode::InvalidArguments,
+            | ProjectionOutOfBounds { .. }
+            | CreateDefault { .. }
+            | MissingColumnNoDefault { .. } => StatusCode::InvalidArguments,
 
             RegionExists { .. } => StatusCode::RegionAlreadyExists,
             RegionNotFound { .. } => StatusCode::RegionNotFound,

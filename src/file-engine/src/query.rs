@@ -20,19 +20,20 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_datasource::object_store::build_backend;
+use common_error::ext::BoxedError;
 use common_query::prelude::Expr;
-use common_recordbatch::error::Result as RecordBatchResult;
+use common_recordbatch::error::{CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::logical_expr::utils as df_logical_expr_utils;
-use datatypes::prelude::DataType;
 use datatypes::schema::{Schema, SchemaRef};
 use futures::Stream;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::{CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{
-    BuildBackendSnafu, ExtractColumnFromFilterSnafu, ProjectionOutOfBoundsSnafu, Result,
+    BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
+    MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
 };
 use crate::region::FileRegion;
 
@@ -40,8 +41,8 @@ impl FileRegion {
     pub fn query(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let store = build_backend(&self.url, &self.options).context(BuildBackendSnafu)?;
 
-        let file_projection = self.projection_region_to_file(&request.projection)?;
-        let file_filters = self.filters_region_to_file(&request.filters)?;
+        let file_projection = self.projection_pushdown_to_file(&request.projection)?;
+        let file_filters = self.filters_pushdown_to_file(&request.filters)?;
         let file_schema = Arc::new(Schema::new(self.file_options.file_column_schemas.clone()));
 
         let file_stream = file_stream::create_stream(
@@ -57,29 +58,25 @@ impl FileRegion {
             },
         )?;
 
-        let region_schema = if let Some(indices) = &request.projection {
-            Arc::new(self.metadata.schema.try_project(indices).unwrap()) // TODO(zhongzc): error
-        } else {
-            self.metadata.schema.clone()
-        };
+        let scan_schema = self.scan_schema(&request.projection)?;
 
-        Ok(Box::pin(FileToRegionStream::new(
-            region_schema,
+        Ok(Box::pin(FileToScanRegionStream::new(
+            scan_schema,
             file_stream,
         )))
     }
 
-    fn projection_region_to_file(
+    fn projection_pushdown_to_file(
         &self,
-        region_projection: &Option<Vec<usize>>,
+        req_projection: &Option<Vec<usize>>,
     ) -> Result<Option<Vec<usize>>> {
-        let Some(region_projection) = region_projection.as_ref() else {
+        let Some(scan_projection) = req_projection.as_ref() else {
             return Ok(None);
         };
 
         let file_column_schemas = &self.file_options.file_column_schemas;
-        let mut file_projection = Vec::with_capacity(region_projection.len());
-        for column_index in region_projection {
+        let mut file_projection = Vec::with_capacity(scan_projection.len());
+        for column_index in scan_projection {
             ensure!(
                 *column_index < self.metadata.schema.num_columns(),
                 ProjectionOutOfBoundsSnafu {
@@ -99,8 +96,10 @@ impl FileRegion {
         Ok(Some(file_projection))
     }
 
-    fn filters_region_to_file(&self, region_filters: &[Expr]) -> Result<Vec<Expr>> {
-        let mut file_filters = Vec::with_capacity(region_filters.len());
+    // Collects filters that can be pushed down to the file, specifically filters where Expr
+    // only contains columns from the file.
+    fn filters_pushdown_to_file(&self, scan_filters: &[Expr]) -> Result<Vec<Expr>> {
+        let mut file_filters = Vec::with_capacity(scan_filters.len());
 
         let file_column_names = self
             .file_options
@@ -110,43 +109,49 @@ impl FileRegion {
             .collect::<HashSet<_>>();
 
         let mut aux_column_set = HashSet::new();
-        for region_filter in region_filters {
-            df_logical_expr_utils::expr_to_columns(region_filter.df_expr(), &mut aux_column_set)
+        for scan_filter in scan_filters {
+            df_logical_expr_utils::expr_to_columns(scan_filter.df_expr(), &mut aux_column_set)
                 .context(ExtractColumnFromFilterSnafu)?;
 
             let all_file_columns = aux_column_set
                 .iter()
                 .all(|column_in_expr| file_column_names.contains(&column_in_expr.name));
             if all_file_columns {
-                file_filters.push(region_filter.clone());
+                file_filters.push(scan_filter.clone());
             }
             aux_column_set.clear();
         }
         Ok(file_filters)
     }
+
+    fn scan_schema(&self, req_projection: &Option<Vec<usize>>) -> Result<SchemaRef> {
+        let schema = if let Some(indices) = req_projection {
+            Arc::new(
+                self.metadata
+                    .schema
+                    .try_project(indices)
+                    .context(ProjectSchemaSnafu)?,
+            )
+        } else {
+            self.metadata.schema.clone()
+        };
+
+        Ok(schema)
+    }
 }
 
-struct FileToRegionStream {
-    region_schema: SchemaRef,
+struct FileToScanRegionStream {
+    scan_schema: SchemaRef,
     file_stream: SendableRecordBatchStream,
 }
 
-impl FileToRegionStream {
-    fn new(region_schema: SchemaRef, file_stream: SendableRecordBatchStream) -> Self {
-        Self {
-            region_schema,
-            file_stream,
-        }
-    }
-}
-
-impl RecordBatchStream for FileToRegionStream {
+impl RecordBatchStream for FileToScanRegionStream {
     fn schema(&self) -> SchemaRef {
-        self.region_schema.clone()
+        self.scan_schema.clone()
     }
 }
 
-impl Stream for FileToRegionStream {
+impl Stream for FileToScanRegionStream {
     type Item = RecordBatchResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -154,37 +159,70 @@ impl Stream for FileToRegionStream {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(file_record_batch)) => {
                 let file_record_batch = file_record_batch?;
+
+                if self.schema_type_match(&file_record_batch) {
+                    return Poll::Ready(Some(Ok(file_record_batch)));
+                }
+
                 let file_row_count = file_record_batch.num_rows();
+                let scan_schema = self.scan_schema.clone();
+                let mut columns = Vec::with_capacity(scan_schema.num_columns());
+                for scan_column_schema in scan_schema.column_schemas() {
+                    let scan_data_type = &scan_column_schema.data_type;
 
-                let region_schema = self.region_schema.clone();
-                let mut columns = Vec::with_capacity(region_schema.num_columns());
-                for region_column_schema in region_schema.column_schemas() {
-                    let region_data_type = &region_column_schema.data_type;
-
-                    let file_column = file_record_batch.column_by_name(&region_column_schema.name);
+                    let file_column = file_record_batch.column_by_name(&scan_column_schema.name);
                     let column = if let Some(file_column) = file_column {
-                        if &file_column.data_type() != region_data_type {
-                            file_column.cast(region_data_type).unwrap() // TODO(zhongzc): error
-                        } else {
+                        if &file_column.data_type() == scan_data_type {
                             file_column.clone()
+                        } else {
+                            file_column.cast(scan_data_type).context(CastVectorSnafu {
+                                from_type: file_column.data_type(),
+                                to_type: scan_data_type.clone(),
+                            })?
                         }
-                    } else if let Some(constraint) = region_column_schema.default_constraint() {
-                        constraint
-                            .create_default_vector(region_data_type, true, file_row_count)
-                            .unwrap() // TODO(zhongzc): error
                     } else {
-                        let mut mutable_vector = region_data_type.create_mutable_vector(1);
-                        mutable_vector.push_null();
-                        let base_vector = mutable_vector.to_vector();
-                        base_vector.replicate(&[file_row_count])
+                        scan_column_schema
+                            .create_default_vector(file_row_count)
+                            .with_context(|_| CreateDefaultSnafu {
+                                column: scan_column_schema.name.clone(),
+                            })
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?
+                            .with_context(|| MissingColumnNoDefaultSnafu {
+                                column: scan_column_schema.name.clone(),
+                            })
+                            .map_err(BoxedError::new)
+                            .context(ExternalSnafu)?
                     };
+
                     columns.push(column);
                 }
 
-                let region_record_batch = RecordBatch::new(region_schema, columns)?;
-                Poll::Ready(Some(Ok(region_record_batch)))
+                let scan_record_batch = RecordBatch::new(scan_schema, columns)?;
+                Poll::Ready(Some(Ok(scan_record_batch)))
             }
             Poll::Ready(None) => Poll::Ready(None),
         }
+    }
+}
+
+impl FileToScanRegionStream {
+    fn new(scan_schema: SchemaRef, file_stream: SendableRecordBatchStream) -> Self {
+        Self {
+            scan_schema,
+            file_stream,
+        }
+    }
+
+    fn schema_type_match(&self, file_record_batch: &RecordBatch) -> bool {
+        self.scan_schema
+            .column_schemas()
+            .iter()
+            .all(|scan_column_schema| {
+                file_record_batch
+                    .column_by_name(&scan_column_schema.name)
+                    .map(|rb| rb.data_type() == scan_column_schema.data_type)
+                    .unwrap_or_default()
+            })
     }
 }
