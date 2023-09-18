@@ -57,7 +57,21 @@ pub struct TwcsOptions {
     /// Max num of files that can be kept in inactive time window.
     pub max_inactive_window_files: usize,
     /// Compaction time window defined when creating tables.
-    pub time_window_seconds: Option<i64>,
+    pub time_window: Option<Duration>,
+}
+
+impl TwcsOptions {
+    /// Returns time window in second resolution.
+    pub fn time_window_seconds(&self) -> Option<i64> {
+        self.time_window.and_then(|window| {
+            let window_secs = window.as_secs();
+            if window_secs == 0 {
+                return None;
+            } else {
+                window_secs.try_into().ok()
+            }
+        })
+    }
 }
 
 impl Default for TwcsOptions {
@@ -65,7 +79,7 @@ impl Default for TwcsOptions {
         Self {
             max_active_window_files: 4,
             max_inactive_window_files: 1,
-            time_window_seconds: None,
+            time_window: None,
         }
     }
 }
