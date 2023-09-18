@@ -80,7 +80,7 @@ impl<'a> ParserContext<'a> {
                 actual: self.peek_token_as_string(),
             })?;
         let (columns, constraints) = self.parse_columns()?;
-        let engine = self.parse_table_engine(common_catalog::consts::IMMUTABLE_FILE_ENGINE)?;
+        let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
             .parser
             .parse_options(Keyword::WITH)
@@ -817,7 +817,7 @@ mod tests {
     use std::assert_matches::assert_matches;
     use std::collections::HashMap;
 
-    use common_catalog::consts::IMMUTABLE_FILE_ENGINE;
+    use common_catalog::consts::FILE_ENGINE;
     use sqlparser::ast::ColumnOption::NotNull;
 
     use super::*;
@@ -859,7 +859,7 @@ mod tests {
                     ("location".to_string(), "/var/data/city.csv".to_string()),
                     ("format".to_string(), "csv".to_string()),
                 ]),
-                expected_engine: IMMUTABLE_FILE_ENGINE,
+                expected_engine: FILE_ENGINE,
                 expected_if_not_exist: false,
             },
             Test {

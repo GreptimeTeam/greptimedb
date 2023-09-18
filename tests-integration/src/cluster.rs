@@ -25,8 +25,8 @@ use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
-use datanode::datanode::builder::DatanodeBuilder;
-use datanode::datanode::{Datanode, DatanodeOptions, ObjectStoreConfig, ProcedureConfig};
+use datanode::config::{DatanodeOptions, ObjectStoreConfig};
+use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
@@ -202,7 +202,7 @@ impl GreptimeDbClusterBuilder {
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
 
-        let datanode = DatanodeBuilder::new(opts, Arc::new(Plugins::default()))
+        let mut datanode = DatanodeBuilder::new(opts, None, Arc::new(Plugins::default()))
             .with_meta_client(meta_client)
             .build()
             .await

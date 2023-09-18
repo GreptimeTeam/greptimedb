@@ -14,18 +14,44 @@
 
 use std::any::Any;
 
-use common_datasource::file_format::Format;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
-use table::metadata::{TableInfoBuilderError, TableMetaBuilderError};
+use store_api::storage::RegionId;
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("Unsupported operation: {}", operation))]
+    Unsupported {
+        operation: String,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected engine: {}", engine))]
+    UnexpectedEngine { engine: String, location: Location },
+
+    #[snafu(display("Invalid region metadata, source: {}", source))]
+    InvalidMetadata {
+        source: store_api::metadata::MetadataError,
+        location: Location,
+    },
+
+    #[snafu(display("Region {} already exists", region_id))]
+    RegionExists {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Region not found, region_id: {}", region_id))]
+    RegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Failed to check object from path: {}, source: {}", path, source))]
     CheckObject {
         path: String,
@@ -45,87 +71,41 @@ pub enum Error {
         source: JsonError,
     },
 
-    #[snafu(display("Failed to drop table, table: {}, source: {}", table_name, source))]
-    DropTable {
-        source: BoxedError,
-        table_name: String,
-        location: Location,
-    },
-
     #[snafu(display(
-        "Failed to write table manifest, table: {}, source: {}",
-        table_name,
+        "Failed to store region manifest, region_id: {}, source: {}",
+        region_id,
         source,
     ))]
-    WriteTableManifest {
+    StoreRegionManifest {
         source: object_store::Error,
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to write immutable manifest, path: {}", path))]
-    WriteImmutableManifest { path: String, location: Location },
-
-    #[snafu(display("Failed to delete table table manifest, source: {}", source,))]
-    DeleteTableManifest {
-        source: object_store::Error,
-        table_name: String,
+        region_id: RegionId,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to read table manifest, table: {}, source: {}",
-        table_name,
+        "Failed to load region manifest, region_id: {}, source: {}",
+        region_id,
         source,
     ))]
-    ReadTableManifest {
+    LoadRegionManifest {
         source: object_store::Error,
-        table_name: String,
+        region_id: RegionId,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to build table meta for table: {}, source: {}",
-        table_name,
-        source
+        "Failed to delete region manifest, region_id: {}, source: {}",
+        region_id,
+        source,
     ))]
-    BuildTableMeta {
-        source: TableMetaBuilderError,
-        table_name: String,
+    DeleteRegionManifest {
+        source: object_store::Error,
+        region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build table info for table: {}, source: {}",
-        table_name,
-        source
-    ))]
-    BuildTableInfo {
-        source: TableInfoBuilderError,
-        table_name: String,
-        location: Location,
-    },
-
-    #[snafu(display("Table already exists: {}", table_name))]
-    TableExists {
-        location: Location,
-        table_name: String,
-    },
-
-    #[snafu(display(
-        "Failed to convert metadata from deserialized data, source: {}",
-        source
-    ))]
-    ConvertRaw {
-        location: Location,
-        source: table::metadata::ConvertError,
-    },
-
-    #[snafu(display("Invalid schema, source: {}", source))]
-    InvalidRawSchema {
-        location: Location,
-        source: datatypes::error::Error,
-    },
+    #[snafu(display("Manifest already exists: {}", path))]
+    ManifestExists { path: String, location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
@@ -149,8 +129,14 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to project schema: {}", source))]
-    ProjectSchema {
+    ProjectArrowSchema {
         source: ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to project schema: {}", source))]
+    ProjectSchema {
+        source: datatypes::error::Error,
         location: Location,
     },
 
@@ -172,14 +158,32 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert schema: {}", source))]
-    ConvertSchema {
+    #[snafu(display(
+        "Projection out of bounds, column_index: {}, bounds: {}",
+        column_index,
+        bounds
+    ))]
+    ProjectionOutOfBounds {
+        column_index: usize,
+        bounds: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to extract column from filter: {}", source))]
+    ExtractColumnFromFilter {
+        source: DataFusionError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create default value for column: {}", column))]
+    CreateDefault {
+        column: String,
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Unsupported format: {:?}", format))]
-    UnsupportedFormat { format: Format, location: Location },
+    #[snafu(display("Missing default value for column: {}", column))]
+    MissingColumnNoDefault { column: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -189,32 +193,35 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            TableExists { .. }
-            | BuildTableMeta { .. }
-            | BuildTableInfo { .. }
-            | InvalidRawSchema { .. }
-            | BuildCsvConfig { .. }
+            BuildCsvConfig { .. }
+            | ProjectArrowSchema { .. }
             | ProjectSchema { .. }
             | MissingRequiredField { .. }
-            | ConvertSchema { .. }
-            | UnsupportedFormat { .. } => StatusCode::InvalidArguments,
+            | Unsupported { .. }
+            | InvalidMetadata { .. }
+            | ProjectionOutOfBounds { .. }
+            | CreateDefault { .. }
+            | MissingColumnNoDefault { .. } => StatusCode::InvalidArguments,
+
+            RegionExists { .. } => StatusCode::RegionAlreadyExists,
+            RegionNotFound { .. } => StatusCode::RegionNotFound,
 
             BuildBackend { source, .. } => source.status_code(),
             BuildStreamAdapter { source, .. } => source.status_code(),
             ParseFileFormat { source, .. } => source.status_code(),
 
-            WriteTableManifest { .. }
-            | DeleteTableManifest { .. }
-            | ReadTableManifest { .. }
-            | CheckObject { .. } => StatusCode::StorageUnavailable,
+            CheckObject { .. }
+            | StoreRegionManifest { .. }
+            | LoadRegionManifest { .. }
+            | DeleteRegionManifest { .. } => StatusCode::StorageUnavailable,
 
             EncodeJson { .. }
             | DecodeJson { .. }
-            | ConvertRaw { .. }
-            | DropTable { .. }
-            | WriteImmutableManifest { .. }
+            | ManifestExists { .. }
             | BuildStream { .. }
-            | ParquetScanPlan { .. } => StatusCode::Unexpected,
+            | ParquetScanPlan { .. }
+            | UnexpectedEngine { .. }
+            | ExtractColumnFromFilter { .. } => StatusCode::Unexpected,
         }
     }
 

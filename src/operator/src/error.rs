@@ -481,6 +481,27 @@ pub enum Error {
         reason: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to prepare file table: {}", source))]
+    PrepareFileTable {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to infer file table schema: {}", source))]
+    InferFileTableSchema {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
+
+    #[snafu(display(
+        "The schema of the file table is incompatible with the table schema: {}",
+        source
+    ))]
+    SchemaIncompatible {
+        #[snafu(backtrace)]
+        source: query::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -502,7 +523,10 @@ impl ErrorExt for Error {
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
-            | Error::InvalidPartitionColumns { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidPartitionColumns { .. }
+            | Error::PrepareFileTable { .. }
+            | Error::InferFileTableSchema { .. }
+            | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

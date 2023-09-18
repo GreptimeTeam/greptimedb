@@ -2653,6 +2653,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -3124,9 +3125,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-table-engine"
+name = "file-engine"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
  "async-trait",
  "common-catalog",
  "common-datasource",
@@ -3265,7 +3267,7 @@ dependencies = [
  "datafusion-expr",
  "datanode",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -6183,7 +6185,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "meta-client",

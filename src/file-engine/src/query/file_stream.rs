@@ -73,7 +73,7 @@ fn build_json_opener(
         Arc::new(
             file_schema
                 .project(projection)
-                .context(error::ProjectSchemaSnafu)?,
+                .context(error::ProjectArrowSchemaSnafu)?,
         )
     } else {
         file_schema

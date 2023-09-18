@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use common_config::WalConfig;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
@@ -345,7 +346,10 @@ impl Default for DatanodeOptions {
             meta_client: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig::default()),
+                RegionEngineConfig::File(FileEngineConfig::default()),
+            ],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
@@ -367,6 +371,8 @@ impl DatanodeOptions {
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),
+    #[serde(rename = "file")]
+    File(FileEngineConfig),
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::{error, info};
+use file_engine::engine::FileRegionEngine;
 use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
@@ -366,6 +367,10 @@ impl DatanodeBuilder {
                 RegionEngineConfig::Mito(config) => {
                     let engine: MitoEngine =
                         MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
+                    engines.push(Arc::new(engine) as _);
+                }
+                RegionEngineConfig::File(config) => {
+                    let engine = FileRegionEngine::new(config.clone(), object_store.clone());
                     engines.push(Arc::new(engine) as _);
                 }
             }

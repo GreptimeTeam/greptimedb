@@ -19,6 +19,7 @@ use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::logging;
+use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
@@ -159,6 +160,7 @@ async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
     let table_name = "various_type_json_with_schema";
     let sql = &format!(
         r#"CREATE EXTERNAL TABLE {table_name} (
+            ts TIMESTAMP TIME INDEX DEFAULT 0,
             a BIGINT NULL,
             b DOUBLE NULL,
             c BOOLEAN NULL,
@@ -175,6 +177,8 @@ async fn test_validate_external_table_options(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let fe_instance = instance.frontend();
     let format = "csv";
     let location = find_testing_resource("/tests/data/csv/various_type.csv");
@@ -199,16 +203,16 @@ async fn test_show_create_external_table(instance: Arc<dyn MockInstance>) {
     let record_batches = record_batches.iter().collect::<Vec<_>>();
     let column = record_batches[0].column_by_name("Create Table").unwrap();
     let actual = column.get(0);
-    let expect = if instance.is_distributed_mode() {
-        format!(
-            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
+    let expect = format!(
+        r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
   "c_int" BIGINT NULL,
   "c_float" DOUBLE NULL,
   "c_string" DOUBLE NULL,
   "c_bool" BOOLEAN NULL,
   "c_date" DATE NULL,
   "c_datetime" TIMESTAMP(0) NULL,
-
+  "greptime_timestamp" TIMESTAMP(3) NOT NULL DEFAULT '1970-01-01 00:00:00+0000',
+  TIME INDEX ("greptime_timestamp")
 )
 
 ENGINE=file
@@ -217,25 +221,7 @@ WITH(
   location = '{location}',
   regions = 1
 )"#
-        )
-    } else {
-        format!(
-            r#"CREATE EXTERNAL TABLE IF NOT EXISTS "various_type_csv" (
-  "c_int" BIGINT NULL,
-  "c_float" DOUBLE NULL,
-  "c_string" DOUBLE NULL,
-  "c_bool" BOOLEAN NULL,
-  "c_date" DATE NULL,
-  "c_datetime" TIMESTAMP(0) NULL,
-
-)
-ENGINE=file
-WITH(
-  format = 'csv',
-  location = '{location}'
-)"#
-        )
-    };
+    );
     assert_eq!(actual.to_string(), expect);
 }
 
@@ -544,37 +530,115 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
 async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create");
+    let location = tmp_dir.path().to_str().unwrap();
+
     let output = execute_sql(
         &instance,
-        r#"create external table test_table(
+        &format!(
+            r#"create external table test_table_0(
+                            ts timestamp time index default 0,
                             host string,
-                            ts timestamp,
                             cpu double default 0,
                             memory double
-                        ) with (location='/tmp/', format='csv');"#,
+                        ) with (location='{location}', format='csv');"#
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table test_table_1(
+                            ts timestamp default 0,
+                            host string,
+                            cpu double default 0,
+                            memory double,
+                            time index (ts)
+                        ) with (location='{location}', format='csv');"#
+        ),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_external_create_without_ts_type(instance: Arc<dyn MockInstance>) {
+async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
+
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_infer_format");
+    let location = tmp_dir.path().to_str().unwrap();
 
     let output = execute_sql(
         &instance,
-        r#"create external table test_table(
-                            host string,
-                            cpu double default 0,
-                            memory double
-                        ) with (location='/tmp/', format='csv');"#,
+        &format!(r#"create external table test_table with (location='{location}', format='csv');"#),
     )
     .await;
     assert!(matches!(output, Output::AffectedRows(0)));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_without_ts");
+    let location = tmp_dir.path().to_str().unwrap();
+
+    let result = try_execute_sql(
+        &instance,
+        &format!(
+            r#"create external table test_table(
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='{location}', format='csv');"#
+        ),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::TableOperation { .. })));
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_with_invalid_ts");
+    let location = tmp_dir.path().to_str().unwrap();
+
+    let result = try_execute_sql(
+        &instance,
+        &format!(
+            r#"create external table test_table(
+                            ts timestamp time index null,
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='{location}', format='csv');"#
+        ),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
+
+    let result = try_execute_sql(
+        &instance,
+        &format!(
+            r#"create external table test_table(
+                            ts bigint time index,
+                            host string,
+                            cpu double default 0,
+                            memory double
+                        ) with (location='{location}', format='csv');"#
+        ),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::ParseSql { .. })));
 }
 
 #[apply(both_instances_cases)]
 async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstance>) {
+    std::env::set_var("TZ", "UTC");
+
     let instance = instance.frontend();
     let format = "parquet";
     let location = find_testing_resource("/tests/data/parquet/various_type.parquet");
@@ -591,31 +655,32 @@ async fn test_execute_query_external_table_parquet(instance: Arc<dyn MockInstanc
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------+-----------------+-----+------+---------+---------------+
-| Column     | Type            | Key | Null | Default | Semantic Type |
-+------------+-----------------+-----+------+---------+---------------+
-| c_int      | Int64           |     | YES  |         | FIELD         |
-| c_float    | Float64         |     | YES  |         | FIELD         |
-| c_string   | Float64         |     | YES  |         | FIELD         |
-| c_bool     | Boolean         |     | YES  |         | FIELD         |
-| c_date     | Date            |     | YES  |         | FIELD         |
-| c_datetime | TimestampSecond |     | YES  |         | FIELD         |
-+------------+-----------------+-----+------+---------+---------------+";
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| Column             | Type                 | Key | Null | Default                  | Semantic Type |
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| c_int              | Int64                |     | YES  |                          | FIELD         |
+| c_float            | Float64              |     | YES  |                          | FIELD         |
+| c_string           | Float64              |     | YES  |                          | FIELD         |
+| c_bool             | Boolean              |     | YES  |                          | FIELD         |
+| c_date             | Date                 |     | YES  |                          | FIELD         |
+| c_datetime         | TimestampSecond      |     | YES  |                          | FIELD         |
+| greptime_timestamp | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
     let expect = "\
-+-------+-----------+----------+--------+------------+---------------------+
-| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          |
-+-------+-----------+----------+--------+------------+---------------------+
-| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 |
-| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 |
-| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 |
-| 4     | 4.4       |          | false  |            |                     |
-| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 |
-| 4     | 4000000.0 |          | false  |            |                     |
-| 4     | 4.0e-6    |          | false  |            |                     |
-+-------+-----------+----------+--------+------------+---------------------+";
++-------+-----------+----------+--------+------------+---------------------+---------------------+
+| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          | greptime_timestamp  |
++-------+-----------+----------+--------+------------+---------------------+---------------------+
+| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 | 1970-01-01T00:00:00 |
+| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 | 1970-01-01T00:00:00 |
+| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 | 1970-01-01T00:00:00 |
+| 4     | 4.4       |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 | 1970-01-01T00:00:00 |
+| 4     | 4000000.0 |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 4     | 4.0e-6    |          | false  |            |                     | 1970-01-01T00:00:00 |
++-------+-----------+----------+--------+------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(
@@ -656,43 +721,44 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------------------+---------------------+-----+------+---------+---------------+
-| Column                 | Type                | Key | Null | Default | Semantic Type |
-+------------------------+---------------------+-----+------+---------+---------------+
-| double_a               | Float64             |     | YES  |         | FIELD         |
-| a                      | Float32             |     | YES  |         | FIELD         |
-| b                      | Boolean             |     | YES  |         | FIELD         |
-| str_direct             | String              |     | YES  |         | FIELD         |
-| d                      | String              |     | YES  |         | FIELD         |
-| e                      | String              |     | YES  |         | FIELD         |
-| f                      | String              |     | YES  |         | FIELD         |
-| int_short_repeated     | Int32               |     | YES  |         | FIELD         |
-| int_neg_short_repeated | Int32               |     | YES  |         | FIELD         |
-| int_delta              | Int32               |     | YES  |         | FIELD         |
-| int_neg_delta          | Int32               |     | YES  |         | FIELD         |
-| int_direct             | Int32               |     | YES  |         | FIELD         |
-| int_neg_direct         | Int32               |     | YES  |         | FIELD         |
-| bigint_direct          | Int64               |     | YES  |         | FIELD         |
-| bigint_neg_direct      | Int64               |     | YES  |         | FIELD         |
-| bigint_other           | Int64               |     | YES  |         | FIELD         |
-| utf8_increase          | String              |     | YES  |         | FIELD         |
-| utf8_decrease          | String              |     | YES  |         | FIELD         |
-| timestamp_simple       | TimestampNanosecond |     | YES  |         | FIELD         |
-| date_simple            | Date                |     | YES  |         | FIELD         |
-+------------------------+---------------------+-----+------+---------+---------------+";
++------------------------+----------------------+-----+------+--------------------------+---------------+
+| Column                 | Type                 | Key | Null | Default                  | Semantic Type |
++------------------------+----------------------+-----+------+--------------------------+---------------+
+| double_a               | Float64              |     | YES  |                          | FIELD         |
+| a                      | Float32              |     | YES  |                          | FIELD         |
+| b                      | Boolean              |     | YES  |                          | FIELD         |
+| str_direct             | String               |     | YES  |                          | FIELD         |
+| d                      | String               |     | YES  |                          | FIELD         |
+| e                      | String               |     | YES  |                          | FIELD         |
+| f                      | String               |     | YES  |                          | FIELD         |
+| int_short_repeated     | Int32                |     | YES  |                          | FIELD         |
+| int_neg_short_repeated | Int32                |     | YES  |                          | FIELD         |
+| int_delta              | Int32                |     | YES  |                          | FIELD         |
+| int_neg_delta          | Int32                |     | YES  |                          | FIELD         |
+| int_direct             | Int32                |     | YES  |                          | FIELD         |
+| int_neg_direct         | Int32                |     | YES  |                          | FIELD         |
+| bigint_direct          | Int64                |     | YES  |                          | FIELD         |
+| bigint_neg_direct      | Int64                |     | YES  |                          | FIELD         |
+| bigint_other           | Int64                |     | YES  |                          | FIELD         |
+| utf8_increase          | String               |     | YES  |                          | FIELD         |
+| utf8_decrease          | String               |     | YES  |                          | FIELD         |
+| timestamp_simple       | TimestampNanosecond  |     | YES  |                          | FIELD         |
+| date_simple            | Date                 |     | YES  |                          | FIELD         |
+| greptime_timestamp     | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++------------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
     let expect = "\
-+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
-| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple |
-+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+
-| 1.0      | 1.0 | true  | a          | a   | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002    | 2023-04-01  |
-| 2.0      | 2.0 | false | cccccc     | bb  | cc  | bbbbb | 5                  | -5                     | 2         | 4             | 6          | -6             | 6             | -6                | -5           | bb            | dddd          | 2021-08-22T07:26:44.525777 | 2023-03-01  |
-| 3.0      |     |       |            |     |     |       |                    |                        |           |               |            |                |               |                   | 1            | ccc           | ccc           | 2023-01-01T00:00:00        | 2023-01-01  |
-| 4.0      | 4.0 | true  | ddd        | ccc | bb  | ccccc | 5                  | -5                     | 4         | 2             | 3          | -3             | 3             | -3                | 5            | dddd          | bb            | 2023-02-01T00:00:00        | 2023-02-01  |
-| 5.0      | 5.0 | false | ee         | ddd | a   | ddddd | 5                  | -5                     | 5         | 1             | 2          | -2             | 2             | -2                | 5            | eeeee         | a             | 2023-03-01T00:00:00        | 2023-03-01  |
-+----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+";
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+---------------------+
+| double_a | a   | b     | str_direct | d   | e   | f     | int_short_repeated | int_neg_short_repeated | int_delta | int_neg_delta | int_direct | int_neg_direct | bigint_direct | bigint_neg_direct | bigint_other | utf8_increase | utf8_decrease | timestamp_simple           | date_simple | greptime_timestamp  |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+---------------------+
+| 1.0      | 1.0 | true  | a          | a   | ddd | aaaaa | 5                  | -5                     | 1         | 5             | 1          | -1             | 1             | -1                | 5            | a             | eeeee         | 2023-04-01T20:15:30.002    | 2023-04-01  | 1970-01-01T00:00:00 |
+| 2.0      | 2.0 | false | cccccc     | bb  | cc  | bbbbb | 5                  | -5                     | 2         | 4             | 6          | -6             | 6             | -6                | -5           | bb            | dddd          | 2021-08-22T07:26:44.525777 | 2023-03-01  | 1970-01-01T00:00:00 |
+| 3.0      |     |       |            |     |     |       |                    |                        |           |               |            |                |               |                   | 1            | ccc           | ccc           | 2023-01-01T00:00:00        | 2023-01-01  | 1970-01-01T00:00:00 |
+| 4.0      | 4.0 | true  | ddd        | ccc | bb  | ccccc | 5                  | -5                     | 4         | 2             | 3          | -3             | 3             | -3                | 5            | dddd          | bb            | 2023-02-01T00:00:00        | 2023-02-01  | 1970-01-01T00:00:00 |
+| 5.0      | 5.0 | false | ee         | ddd | a   | ddddd | 5                  | -5                     | 5         | 1             | 2          | -2             | 2             | -2                | 5            | eeeee         | a             | 2023-03-01T00:00:00        | 2023-03-01  | 1970-01-01T00:00:00 |
++----------+-----+-------+------------+-----+-----+-------+--------------------+------------------------+-----------+---------------+------------+----------------+---------------+-------------------+--------------+---------------+---------------+----------------------------+-------------+---------------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(
@@ -731,31 +797,32 @@ async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) 
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+------------+-----------------+-----+------+---------+---------------+
-| Column     | Type            | Key | Null | Default | Semantic Type |
-+------------+-----------------+-----+------+---------+---------------+
-| c_int      | Int64           |     | YES  |         | FIELD         |
-| c_float    | Float64         |     | YES  |         | FIELD         |
-| c_string   | Float64         |     | YES  |         | FIELD         |
-| c_bool     | Boolean         |     | YES  |         | FIELD         |
-| c_date     | Date            |     | YES  |         | FIELD         |
-| c_datetime | TimestampSecond |     | YES  |         | FIELD         |
-+------------+-----------------+-----+------+---------+---------------+";
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| Column             | Type                 | Key | Null | Default                  | Semantic Type |
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| c_int              | Int64                |     | YES  |                          | FIELD         |
+| c_float            | Float64              |     | YES  |                          | FIELD         |
+| c_string           | Float64              |     | YES  |                          | FIELD         |
+| c_bool             | Boolean              |     | YES  |                          | FIELD         |
+| c_date             | Date                 |     | YES  |                          | FIELD         |
+| c_datetime         | TimestampSecond      |     | YES  |                          | FIELD         |
+| greptime_timestamp | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++--------------------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
     let expect = "\
-+-------+-----------+----------+--------+------------+---------------------+
-| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          |
-+-------+-----------+----------+--------+------------+---------------------+
-| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 |
-| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 |
-| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 |
-| 4     | 4.4       |          | false  |            |                     |
-| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 |
-| 4     | 4000000.0 |          | false  |            |                     |
-| 4     | 4.0e-6    |          | false  |            |                     |
-+-------+-----------+----------+--------+------------+---------------------+";
++-------+-----------+----------+--------+------------+---------------------+---------------------+
+| c_int | c_float   | c_string | c_bool | c_date     | c_datetime          | greptime_timestamp  |
++-------+-----------+----------+--------+------------+---------------------+---------------------+
+| 1     | 1.1       | 1.11     | true   | 1970-01-01 | 1970-01-01T00:00:00 | 1970-01-01T00:00:00 |
+| 2     | 2.2       | 2.22     | true   | 2020-11-08 | 2020-11-08T01:00:00 | 1970-01-01T00:00:00 |
+| 3     |           | 3.33     | true   | 1969-12-31 | 1969-11-08T02:00:00 | 1970-01-01T00:00:00 |
+| 4     | 4.4       |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 5     | 6.6       |          | false  | 1990-01-01 | 1990-01-01T03:00:00 | 1970-01-01T00:00:00 |
+| 4     | 4000000.0 |          | false  |            |                     | 1970-01-01T00:00:00 |
+| 4     | 4.0e-6    |          | false  |            |                     | 1970-01-01T00:00:00 |
++-------+-----------+----------+--------+------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 }
 
@@ -777,37 +844,39 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+--------+---------+-----+------+---------+---------------+
-| Column | Type    | Key | Null | Default | Semantic Type |
-+--------+---------+-----+------+---------+---------------+
-| a      | Int64   |     | YES  |         | FIELD         |
-| b      | Float64 |     | YES  |         | FIELD         |
-| c      | Boolean |     | YES  |         | FIELD         |
-| d      | String  |     | YES  |         | FIELD         |
-| e      | Int64   |     | YES  |         | FIELD         |
-| f      | String  |     | YES  |         | FIELD         |
-| g      | String  |     | YES  |         | FIELD         |
-+--------+---------+-----+------+---------+---------------+";
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| Column             | Type                 | Key | Null | Default                  | Semantic Type |
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| a                  | Int64                |     | YES  |                          | FIELD         |
+| b                  | Float64              |     | YES  |                          | FIELD         |
+| c                  | Boolean              |     | YES  |                          | FIELD         |
+| d                  | String               |     | YES  |                          | FIELD         |
+| e                  | Int64                |     | YES  |                          | FIELD         |
+| f                  | String               |     | YES  |                          | FIELD         |
+| g                  | String               |     | YES  |                          | FIELD         |
+| greptime_timestamp | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++--------------------+----------------------+-----+------+--------------------------+---------------+";
+
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
     let expect = "\
-+-----------------+------+-------+------+------------+----------------+-------------------------+
-| a               | b    | c     | d    | e          | f              | g                       |
-+-----------------+------+-------+------+------------+----------------+-------------------------+
-| 1               | 2.0  | false | 4    | 1681319393 | 1.02           | 2012-04-23T18:25:43.511 |
-| -10             | -3.5 | true  | 4    | 1681356393 | -0.3           | 2016-04-23T18:25:43.511 |
-| 2               | 0.6  | false | text | 1681329393 | 1377.223       |                         |
-| 1               | 2.0  | false | 4    |            | 1337.009       |                         |
-| 7               | -3.5 | true  | 4    |            | 1              |                         |
-| 1               | 0.6  | false | text |            | 1338           | 2018-10-23T18:33:16.481 |
-| 1               | 2.0  | false | 4    |            | 12345829100000 |                         |
-| 5               | -3.5 | true  | 4    |            | 99999999.99    |                         |
-| 1               | 0.6  | false | text |            | 1              |                         |
-| 1               | 2.0  | false | 4    |            | 1              |                         |
-| 1               | -3.5 | true  | 4    |            | 1              |                         |
-| 100000000000000 | 0.6  | false | text |            | 1              |                         |
-+-----------------+------+-------+------+------------+----------------+-------------------------+";
++-----------------+------+-------+------+------------+----------------+-------------------------+---------------------+
+| a               | b    | c     | d    | e          | f              | g                       | greptime_timestamp  |
++-----------------+------+-------+------+------------+----------------+-------------------------+---------------------+
+| 1               | 2.0  | false | 4    | 1681319393 | 1.02           | 2012-04-23T18:25:43.511 | 1970-01-01T00:00:00 |
+| -10             | -3.5 | true  | 4    | 1681356393 | -0.3           | 2016-04-23T18:25:43.511 | 1970-01-01T00:00:00 |
+| 2               | 0.6  | false | text | 1681329393 | 1377.223       |                         | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |            | 1337.009       |                         | 1970-01-01T00:00:00 |
+| 7               | -3.5 | true  | 4    |            | 1              |                         | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |            | 1338           | 2018-10-23T18:33:16.481 | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |            | 12345829100000 |                         | 1970-01-01T00:00:00 |
+| 5               | -3.5 | true  | 4    |            | 99999999.99    |                         | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |            | 1              |                         | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |            | 1              |                         | 1970-01-01T00:00:00 |
+| 1               | -3.5 | true  | 4    |            | 1              |                         | 1970-01-01T00:00:00 |
+| 100000000000000 | 0.6  | false | text |            | 1              |                         | 1970-01-01T00:00:00 |
++-----------------+------+-------+------+------------+----------------+-------------------------+---------------------+";
     check_output_stream(output, expect).await;
 }
 
@@ -828,7 +897,8 @@ async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn Mo
                 d STRING NULL,
                 e TIMESTAMP(0) NULL,
                 f DOUBLE NULL,
-                g TIMESTAMP(0) NULL,
+                g TIMESTAMP(0),
+                ts TIMESTAMP TIME INDEX DEFAULT 0,
               ) WITH (location='{location}', format='{format}');"#,
         ),
     )
@@ -837,37 +907,38 @@ async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn Mo
 
     let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
     let expect = "\
-+--------+-----------------+-----+------+---------+---------------+
-| Column | Type            | Key | Null | Default | Semantic Type |
-+--------+-----------------+-----+------+---------+---------------+
-| a      | Int64           |     | YES  |         | FIELD         |
-| b      | Float64         |     | YES  |         | FIELD         |
-| c      | Boolean         |     | YES  |         | FIELD         |
-| d      | String          |     | YES  |         | FIELD         |
-| e      | TimestampSecond |     | YES  |         | FIELD         |
-| f      | Float64         |     | YES  |         | FIELD         |
-| g      | TimestampSecond |     | YES  |         | FIELD         |
-+--------+-----------------+-----+------+---------+---------------+";
++--------+----------------------+-----+------+--------------------------+---------------+
+| Column | Type                 | Key | Null | Default                  | Semantic Type |
++--------+----------------------+-----+------+--------------------------+---------------+
+| a      | Int64                |     | YES  |                          | FIELD         |
+| b      | Float64              |     | YES  |                          | FIELD         |
+| c      | Boolean              |     | YES  |                          | FIELD         |
+| d      | String               |     | YES  |                          | FIELD         |
+| e      | TimestampSecond      |     | YES  |                          | FIELD         |
+| f      | Float64              |     | YES  |                          | FIELD         |
+| g      | TimestampSecond      |     | YES  |                          | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
++--------+----------------------+-----+------+--------------------------+---------------+";
     check_output_stream(output, expect).await;
 
     let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
     let expect = "\
-+-----------------+------+-------+------+---------------------+---------------+---------------------+
-| a               | b    | c     | d    | e                   | f             | g                   |
-+-----------------+------+-------+------+---------------------+---------------+---------------------+
-| 1               | 2.0  | false | 4    | 2023-04-12T17:09:53 | 1.02          | 2012-04-23T18:25:43 |
-| -10             | -3.5 | true  | 4    | 2023-04-13T03:26:33 | -0.3          | 2016-04-23T18:25:43 |
-| 2               | 0.6  | false | text | 2023-04-12T19:56:33 | 1377.223      |                     |
-| 1               | 2.0  | false | 4    |                     | 1337.009      |                     |
-| 7               | -3.5 | true  | 4    |                     | 1.0           |                     |
-| 1               | 0.6  | false | text |                     | 1338.0        | 2018-10-23T18:33:16 |
-| 1               | 2.0  | false | 4    |                     | 1.23458291e13 |                     |
-| 5               | -3.5 | true  | 4    |                     | 99999999.99   |                     |
-| 1               | 0.6  | false | text |                     | 1.0           |                     |
-| 1               | 2.0  | false | 4    |                     | 1.0           |                     |
-| 1               | -3.5 | true  | 4    |                     | 1.0           |                     |
-| 100000000000000 | 0.6  | false | text |                     | 1.0           |                     |
-+-----------------+------+-------+------+---------------------+---------------+---------------------+";
++-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+
+| a               | b    | c     | d    | e                   | f             | g                   | ts                  |
++-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+
+| 1               | 2.0  | false | 4    | 2023-04-12T17:09:53 | 1.02          | 2012-04-23T18:25:43 | 1970-01-01T00:00:00 |
+| -10             | -3.5 | true  | 4    | 2023-04-13T03:26:33 | -0.3          | 2016-04-23T18:25:43 | 1970-01-01T00:00:00 |
+| 2               | 0.6  | false | text | 2023-04-12T19:56:33 | 1377.223      |                     | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 1337.009      |                     | 1970-01-01T00:00:00 |
+| 7               | -3.5 | true  | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |                     | 1338.0        | 2018-10-23T18:33:16 | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 1.23458291e13 |                     | 1970-01-01T00:00:00 |
+| 5               | -3.5 | true  | 4    |                     | 99999999.99   |                     | 1970-01-01T00:00:00 |
+| 1               | 0.6  | false | text |                     | 1.0           |                     | 1970-01-01T00:00:00 |
+| 1               | 2.0  | false | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
+| 1               | -3.5 | true  | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
+| 100000000000000 | 0.6  | false | text |                     | 1.0           |                     | 1970-01-01T00:00:00 |
++-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+";
     check_output_stream(output, expect).await;
 }
 
