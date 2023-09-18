@@ -12,10 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use sqlparser::ast::Statement;
-use sqlparser_derive::{Visit, VisitMut};
+use std::ops::ControlFlow;
 
-#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
-pub struct Delete {
-    pub inner: Statement,
+use sqlparser::ast::{Visit, Visitor};
+
+use crate::statements::OptionMap;
+
+impl Visit for OptionMap {
+    fn visit<V: Visitor>(&self, visitor: &mut V) -> ControlFlow<V::Break> {
+        for (k, v) in &self.map {
+            k.visit(visitor)?;
+            v.visit(visitor)?;
+        }
+        ControlFlow::Continue(())
+    }
 }

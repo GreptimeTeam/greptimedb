@@ -11,14 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#[derive(Debug, Clone, PartialEq, Eq)]
+use sqlparser_derive::{Visit, VisitMut};
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Tql {
     Eval(TqlEval),
     Explain(TqlExplain),
     Analyze(TqlAnalyze),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlEval {
     pub start: String,
     pub end: String,
@@ -27,7 +29,7 @@ pub struct TqlEval {
 }
 
 /// TQL EXPLAIN (like SQL EXPLAIN): doesn't execute the query but tells how the query would be executed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlExplain {
     pub start: String,
     pub end: String,
@@ -36,7 +38,7 @@ pub struct TqlExplain {
 }
 
 /// TQL ANALYZE (like SQL ANALYZE): executes the plan and tells the detailed per-step execution time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TqlAnalyze {
     pub start: String,
     pub end: String,

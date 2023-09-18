@@ -1923,6 +1923,8 @@ dependencies = [
  "datatypes",
  "serde",
  "snafu",
+ "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "statrs",
  "tokio",
 ]
@@ -9043,10 +9045,12 @@ dependencies = [
  "datatypes",
  "hex",
  "itertools 0.10.5",
+ "lazy_static",
  "once_cell",
  "regex",
  "snafu",
  "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "table",
 ]
 

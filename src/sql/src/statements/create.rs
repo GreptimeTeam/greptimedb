@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
 use itertools::Itertools;
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint, Value as SqlValue};
+use crate::statements::OptionMap;
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -57,7 +58,7 @@ pub fn is_time_index(constraint: &TableConstraint) -> bool {
     }  if name.value == TIME_INDEX)
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateTable {
     /// Create if not exists
     pub if_not_exists: bool,
@@ -124,7 +125,7 @@ impl CreateTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct Partitions {
     pub column_list: Vec<Ident>,
     pub entries: Vec<PartitionEntry>,
@@ -139,7 +140,7 @@ impl Partitions {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct PartitionEntry {
     pub name: Ident,
     pub value_list: Vec<SqlValue>,
@@ -197,14 +198,14 @@ impl Display for CreateTable {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateDatabase {
     pub name: ObjectName,
     /// Create if not exists
     pub if_not_exists: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
 pub struct CreateExternalTable {
     /// Table name
     pub name: ObjectName,
@@ -212,7 +213,7 @@ pub struct CreateExternalTable {
     pub constraints: Vec<TableConstraint>,
     /// Table options in `WITH`.
     /// All keys are lowercase.
-    pub options: HashMap<String, String>,
+    pub options: OptionMap,
     pub if_not_exists: bool,
     pub engine: String,
 }

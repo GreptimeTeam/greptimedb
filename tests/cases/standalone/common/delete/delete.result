@@ -31,7 +31,7 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 | 2022-06-15T07:02:39 | host3 | 88.8 | 4096.0 |
 +---------------------+-------+------+--------+
 
-DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000000000::timestamp;
+DELETE FROM monitor WHERE host = 'host1' AND ts = 1655276557000::timestamp;
 
 Affected Rows: 1
 

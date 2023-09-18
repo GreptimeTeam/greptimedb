@@ -22,6 +22,7 @@ use crate::ast::{Expr, ObjectName};
 use crate::error::{self, Result, SyntaxSnafu};
 use crate::parsers::tql_parser;
 use crate::statements::statement::Statement;
+use crate::statements::transform_statements;
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
@@ -57,6 +58,8 @@ impl<'a> ParserContext<'a> {
             stmts.push(statement);
             expecting_statement_delimiter = true;
         }
+
+        transform_statements(&mut stmts)?;
 
         Ok(stmts)
     }
