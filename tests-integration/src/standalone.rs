@@ -18,8 +18,8 @@ use catalog::kvbackend::{DummyKvCacheInvalidator, KvBackendCatalogManager};
 use common_base::Plugins;
 use common_config::KvStoreConfig;
 use common_procedure::options::ProcedureConfig;
-use datanode::datanode::builder::DatanodeBuilder;
-use datanode::datanode::DatanodeOptions;
+use datanode::config::DatanodeOptions;
+use datanode::datanode::DatanodeBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -75,7 +75,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let plugins = Arc::new(self.plugin.unwrap_or_default());
 
-        let datanode = DatanodeBuilder::new(opts.clone(), plugins.clone())
+        let datanode = DatanodeBuilder::new(opts.clone(), Some(kv_store.clone()), plugins.clone())
             .build()
             .await
             .unwrap();

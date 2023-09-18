@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use sqlparser::ast::ObjectName;
+use sqlparser_derive::{Visit, VisitMut};
 
 /// TRUNCATE TABLE statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct TruncateTable {
     table_name: ObjectName,
 }

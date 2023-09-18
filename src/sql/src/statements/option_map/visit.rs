@@ -12,5 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[derive(Debug, Clone, Default)]
-pub struct EngineConfig {}
+use std::ops::ControlFlow;
+
+use sqlparser::ast::{Visit, Visitor};
+
+use crate::statements::OptionMap;
+
+impl Visit for OptionMap {
+    fn visit<V: Visitor>(&self, visitor: &mut V) -> ControlFlow<V::Break> {
+        for (k, v) in &self.map {
+            k.visit(visitor)?;
+            v.visit(visitor)?;
+        }
+        ControlFlow::Continue(())
+    }
+}

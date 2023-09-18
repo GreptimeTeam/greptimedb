@@ -1923,6 +1923,8 @@ dependencies = [
  "datatypes",
  "serde",
  "snafu",
+ "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "statrs",
  "tokio",
 ]
@@ -2653,6 +2655,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -3124,9 +3127,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-table-engine"
+name = "file-engine"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
  "async-trait",
  "common-catalog",
  "common-datasource",
@@ -3265,7 +3269,7 @@ dependencies = [
  "datafusion-expr",
  "datanode",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -6183,7 +6187,7 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "meta-client",
@@ -9041,10 +9045,12 @@ dependencies = [
  "datatypes",
  "hex",
  "itertools 0.10.5",
+ "lazy_static",
  "once_cell",
  "regex",
  "snafu",
  "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "table",
 ]
 

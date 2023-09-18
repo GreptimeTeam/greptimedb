@@ -16,6 +16,8 @@ datafusion.workspace = true
 datatypes = { workspace = true }
 serde.workspace = true
 snafu.workspace = true
+sqlparser.workspace = true
+sqlparser_derive = "0.1"
 statrs = "0.16"
 
 [dev-dependencies]

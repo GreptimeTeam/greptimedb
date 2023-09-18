@@ -14,10 +14,12 @@
 
 use std::fmt;
 
+use sqlparser_derive::{Visit, VisitMut};
+
 use crate::ast::{Expr, Ident, ObjectName};
 
 /// Show kind for SQL expressions like `SHOW DATABASE` or `SHOW TABLE`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum ShowKind {
     All,
     Like(Ident),
@@ -35,7 +37,7 @@ impl fmt::Display for ShowKind {
 }
 
 /// SQL structure for `SHOW DATABASES`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowDatabases {
     pub kind: ShowKind,
 }
@@ -48,14 +50,14 @@ impl ShowDatabases {
 }
 
 /// SQL structure for `SHOW TABLES`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowTables {
     pub kind: ShowKind,
     pub database: Option<String>,
 }
 
 /// SQL structure for `SHOW CREATE TABLE`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct ShowCreateTable {
     pub table_name: ObjectName,
 }

@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use common_config::WalConfig;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
@@ -319,6 +320,7 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct DatanodeOptions {
     pub mode: Mode,
     pub node_id: Option<u64>,
+    pub coordination: bool,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
@@ -338,6 +340,7 @@ impl Default for DatanodeOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
+            coordination: false,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
@@ -345,7 +348,10 @@ impl Default for DatanodeOptions {
             meta_client: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig::default()),
+                RegionEngineConfig::File(FileEngineConfig::default()),
+            ],
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
@@ -367,6 +373,8 @@ impl DatanodeOptions {
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),
+    #[serde(rename = "file")]
+    File(FileEngineConfig),
 }
 
 #[cfg(test)]

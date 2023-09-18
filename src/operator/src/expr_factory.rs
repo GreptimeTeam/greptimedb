@@ -23,8 +23,11 @@ use api::v1::{
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
 use datatypes::schema::{ColumnSchema, COMMENT_KEY};
-use file_table_engine::table::immutable::ImmutableFileTableOptions;
-use query::sql::prepare_immutable_file_table_files_and_schema;
+use file_engine::FileOptions;
+use query::sql::{
+    check_file_to_table_schema_compatibility, file_column_schemas_to_table,
+    infer_file_table_schema, prepare_file_table_files,
+};
 use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use sql::ast::{ColumnDef, ColumnOption, TableConstraint};
@@ -33,12 +36,13 @@ use sql::statements::create::{CreateExternalTable, CreateTable, TIME_INDEX};
 use sql::statements::{column_def_to_schema, sql_column_def_to_grpc_column_def};
 use sql::util::to_lowercase_options_map;
 use table::engine::TableReference;
-use table::requests::{TableOptions, IMMUTABLE_TABLE_META_KEY};
+use table::requests::{TableOptions, FILE_TABLE_META_KEY};
 
 use crate::error::{
     BuildCreateExprOnInsertionSnafu, ColumnDataTypeSnafu, ConvertColumnDefaultConstraintSnafu,
-    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InvalidSqlSnafu, NotSupportedSnafu,
-    ParseSqlSnafu, PrepareImmutableTableSnafu, Result, UnrecognizedTableOptionSnafu,
+    EncodeJsonSnafu, ExternalSnafu, IllegalPrimaryKeysDefSnafu, InferFileTableSchemaSnafu,
+    InvalidSqlSnafu, NotSupportedSnafu, ParseSqlSnafu, PrepareFileTableSnafu, Result,
+    SchemaIncompatibleSnafu, UnrecognizedTableOptionSnafu,
 };
 use crate::table::table_idents_to_full_name;
 
@@ -85,6 +89,34 @@ impl CreateExprFactory {
     }
 }
 
+// When the `CREATE EXTERNAL TABLE` statement is in expanded form, like
+// ```sql
+// CREATE EXTERNAL TABLE city (
+//   host string,
+//   ts timestamp,
+//   cpu float64,
+//   memory float64,
+//   TIME INDEX (ts),
+//   PRIMARY KEY(host)
+// ) WITH (location='/var/data/city.csv', format='csv');
+// ```
+// The user needs to specify the TIME INDEX column. If there is no suitable
+// column in the file to use as TIME INDEX, an additional placeholder column
+// needs to be created as the TIME INDEX, and a `DEFAULT <value>` constraint
+// should be added.
+//
+//
+// When the `CREATE EXTERNAL TABLE` statement is in inferred form, like
+// ```sql
+// CREATE EXTERNAL TABLE IF NOT EXISTS city WITH (location='/var/data/city.csv',format='csv');
+// ```
+// 1. If the TIME INDEX column can be inferred from metadata, use that column
+//    as the TIME INDEX. Otherwise,
+// 2. If a column named `greptime_timestamp` exists (with the requirement that
+//    the column is with type TIMESTAMP, otherwise an error is thrown), use
+//    that column as the TIME INDEX. Otherwise,
+// 3. Automatically create the `greptime_timestamp` column and add a `DEFAULT 0`
+//    constraint.
 pub(crate) async fn create_external_expr(
     create: CreateExternalTable,
     query_ctx: QueryContextRef,
@@ -94,30 +126,53 @@ pub(crate) async fn create_external_expr(
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 
-    let mut options = create.options;
+    let mut table_options = create.options;
 
-    let (files, schema) = prepare_immutable_file_table_files_and_schema(&options, &create.columns)
+    let (object_store, files) = prepare_file_table_files(&table_options.map)
         .await
-        .context(PrepareImmutableTableSnafu)?;
+        .context(PrepareFileTableSnafu)?;
 
-    let meta = ImmutableFileTableOptions { files };
-    let _ = options.insert(
-        IMMUTABLE_TABLE_META_KEY.to_string(),
+    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options.map)
+        .await
+        .context(InferFileTableSchemaSnafu)?
+        .column_schemas;
+
+    let (time_index, primary_keys, table_column_schemas) = if !create.columns.is_empty() {
+        // expanded form
+        let time_index = find_time_index(&create.constraints)?;
+        let primary_keys = find_primary_keys(&create.columns, &create.constraints)?;
+        let column_schemas = columns_to_column_schemas(&create.columns, &time_index)?;
+        (time_index, primary_keys, column_schemas)
+    } else {
+        // inferred form
+        let (column_schemas, time_index) = file_column_schemas_to_table(&file_column_schemas);
+        let primary_keys = vec![];
+        (time_index, primary_keys, column_schemas)
+    };
+
+    check_file_to_table_schema_compatibility(&file_column_schemas, &table_column_schemas)
+        .context(SchemaIncompatibleSnafu)?;
+
+    let meta = FileOptions {
+        files,
+        file_column_schemas,
+    };
+    table_options.insert(
+        FILE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
 
-    let primary_keys = vec![];
-
+    let column_defs = column_schemas_to_defs(table_column_schemas, &primary_keys)?;
     let expr = CreateTableExpr {
         catalog_name,
         schema_name,
         table_name,
         desc: "".to_string(),
-        column_defs: column_schemas_to_defs(schema.column_schemas, &primary_keys)?,
-        time_index: "".to_string(),
-        primary_keys: vec![],
+        column_defs,
+        time_index,
+        primary_keys,
         create_if_not_exists: create.if_not_exists,
-        table_options: options,
+        table_options: table_options.map,
         table_id: None,
         engine: create.engine.to_string(),
     };
@@ -239,12 +294,18 @@ fn columns_to_expr(
     time_index: &str,
     primary_keys: &[String],
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_schemas = column_defs
+    let column_schemas = columns_to_column_schemas(column_defs, time_index)?;
+    column_schemas_to_defs(column_schemas, primary_keys)
+}
+
+fn columns_to_column_schemas(
+    column_defs: &[ColumnDef],
+    time_index: &str,
+) -> Result<Vec<ColumnSchema>> {
+    column_defs
         .iter()
         .map(|c| column_def_to_schema(c, c.name.to_string() == time_index).context(ParseSqlSnafu))
-        .collect::<Result<Vec<ColumnSchema>>>()?;
-
-    column_schemas_to_defs(column_schemas, primary_keys)
+        .collect::<Result<Vec<ColumnSchema>>>()
 }
 
 pub fn column_schemas_to_defs(

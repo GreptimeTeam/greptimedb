@@ -35,6 +35,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }
+file-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true

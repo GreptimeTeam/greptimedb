@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
@@ -141,7 +142,7 @@ pub struct RegionDeleteRequest {
     pub rows: Rows,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegionCreateRequest {
     /// Region engine name
     pub engine: String,
@@ -415,6 +416,23 @@ pub struct RegionCompactRequest {}
 
 #[derive(Debug)]
 pub struct RegionTruncateRequest {}
+
+impl fmt::Display for RegionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegionRequest::Put(_) => write!(f, "Put"),
+            RegionRequest::Delete(_) => write!(f, "Delete"),
+            RegionRequest::Create(_) => write!(f, "Create"),
+            RegionRequest::Drop(_) => write!(f, "Drop"),
+            RegionRequest::Open(_) => write!(f, "Open"),
+            RegionRequest::Close(_) => write!(f, "Close"),
+            RegionRequest::Alter(_) => write!(f, "Alter"),
+            RegionRequest::Flush(_) => write!(f, "Flush"),
+            RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::Truncate(_) => write!(f, "Truncate"),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

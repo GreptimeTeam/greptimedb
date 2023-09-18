@@ -12,12 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+use serde::{Deserialize, Serialize};
 
-pub mod config;
-pub mod engine;
-pub mod error;
-pub mod manifest;
-pub mod table;
-#[cfg(any(test, feature = "test"))]
-pub(crate) mod test_util;
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EngineConfig {}

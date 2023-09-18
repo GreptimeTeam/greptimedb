@@ -41,7 +41,7 @@ pub fn default_engine() -> &'static str {
     MITO_ENGINE
 }
 
-pub const IMMUTABLE_FILE_ENGINE: &str = "file";
+pub const FILE_ENGINE: &str = "file";
 
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
