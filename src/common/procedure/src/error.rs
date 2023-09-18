@@ -44,7 +44,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
+    #[snafu(display("Failed to put state, key: '{key}', source: "))]
     PutState {
         key: String,
         location: Location,
@@ -57,14 +57,14 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
+    #[snafu(display("Failed to delete keys: '{keys}', source: "))]
     DeleteStates {
         keys: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
+    #[snafu(display("Failed to list state, path: '{path}', source: "))]
     ListState {
         path: String,
         location: Location,
@@ -105,7 +105,7 @@ pub enum Error {
         procedure_id: ProcedureId,
     },
 
-    #[snafu(display("Corrupted data, error: {source}"))]
+    #[snafu(display("Corrupted data, error: "))]
     CorruptedData { source: FromUtf8Error },
 
     #[snafu(display("Failed to start the remove_outdated_meta method, error"))]

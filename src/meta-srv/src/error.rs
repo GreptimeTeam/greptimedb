@@ -360,19 +360,19 @@ pub enum Error {
     #[snafu(display("Missing required parameter, param: {:?}", param))]
     MissingRequiredParameter { param: String },
 
-    #[snafu(display("Failed to recover procedure, source: {source}"))]
+    #[snafu(display("Failed to recover procedure, source: "))]
     RecoverProcedure {
         location: Location,
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to wait procedure done, source: {source}"))]
+    #[snafu(display("Failed to wait procedure done, source: "))]
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to submit procedure, source: {source}"))]
+    #[snafu(display("Failed to submit procedure, source: "))]
     SubmitProcedure {
         location: Location,
         source: common_procedure::Error,
@@ -457,7 +457,7 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to convert Etcd txn object: {source}"))]
+    #[snafu(display("Failed to convert Etcd txn object: "))]
     ConvertEtcdTxnObject {
         source: common_meta::error::Error,
         location: Location,

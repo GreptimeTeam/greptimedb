@@ -101,7 +101,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Unable to resolve table: {table_name}, error: {source}"))]
+    #[snafu(display("Unable to resolve table: {table_name}, error: "))]
     ResolveTable {
         table_name: String,
         location: Location,

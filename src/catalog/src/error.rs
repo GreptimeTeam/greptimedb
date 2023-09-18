@@ -134,7 +134,7 @@ pub enum Error {
     #[snafu(display("Operation {} not supported", op))]
     NotSupported { op: String, location: Location },
 
-    #[snafu(display("Failed to open table {table_id}, source: {source}, at {location}"))]
+    #[snafu(display("Failed to open table {table_id}, source: , at {location}"))]
     OpenTable {
         table_id: TableId,
         location: Location,
@@ -174,7 +174,7 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     Internal {
         location: Location,
         source: BoxedError,

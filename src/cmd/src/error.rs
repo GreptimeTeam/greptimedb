@@ -111,20 +111,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to request database, sql: {sql}, source: {source}"))]
+    #[snafu(display("Failed to request database, sql: {sql}, source: "))]
     RequestDatabase {
         sql: String,
         location: Location,
         source: client::Error,
     },
 
-    #[snafu(display("Failed to collect RecordBatches, source: {source}"))]
+    #[snafu(display("Failed to collect RecordBatches, source: "))]
     CollectRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to pretty print Recordbatches, source: {source}"))]
+    #[snafu(display("Failed to pretty print Recordbatches, source: "))]
     PrettyPrintRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,

@@ -42,7 +42,7 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     External {
         #[snafu(backtrace)]
         source: BoxedError,
@@ -154,7 +154,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to read table: {table_name}, source: {source}"))]
+    #[snafu(display("Failed to read table: {table_name}, source: "))]
     ReadTable {
         table_name: String,
         #[snafu(backtrace)]
@@ -167,7 +167,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     InvokeRegionServer {
         #[snafu(backtrace)]
         source: servers::error::Error,

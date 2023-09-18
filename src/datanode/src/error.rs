@@ -128,7 +128,7 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Missing insert body, source: {source}"))]
+    #[snafu(display("Missing insert body, source: "))]
     MissingInsertBody {
         source: sql::error::Error,
         location: Location,

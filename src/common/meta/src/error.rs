@@ -53,7 +53,7 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to submit procedure, source: {source}"))]
+    #[snafu(display("Failed to submit procedure, source: "))]
     SubmitProcedure {
         location: Location,
         source: common_procedure::Error,
@@ -65,7 +65,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to wait procedure done, source: {source}"))]
+    #[snafu(display("Failed to wait procedure done, source: "))]
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
@@ -146,7 +146,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert alter table request, source: {source}, at {location}"))]
+    #[snafu(display("Failed to convert alter table request, source: , at {location}"))]
     ConvertAlterTableRequest {
         source: common_grpc_expr::error::Error,
         location: Location,

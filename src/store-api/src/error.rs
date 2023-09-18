@@ -24,14 +24,14 @@ pub enum Error {
     #[snafu(display("Invalid raw region request: {err}, at {location}"))]
     InvalidRawRegionRequest { err: String, location: Location },
 
-    #[snafu(display("Invalid default constraint: {constraint}, source: {source}, at {location}"))]
+    #[snafu(display("Invalid default constraint: {constraint}, source: , at {location}"))]
     InvalidDefaultConstraint {
         constraint: String,
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build column descriptor: {source}, at {location}"))]
+    #[snafu(display("Failed to build column descriptor: , at {location}"))]
     BuildColumnDescriptor {
         source: ColumnDescriptorBuilderError,
         location: Location,

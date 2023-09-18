@@ -99,7 +99,7 @@ pub enum Error {
     ))]
     TableNameNotFound { location: Location },
 
-    #[snafu(display("General catalog error: {source}, location: {}", location))]
+    #[snafu(display("General catalog error: , location: {}", location))]
     Catalog {
         location: Location,
         source: catalog::error::Error,

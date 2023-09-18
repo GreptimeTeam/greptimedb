@@ -78,13 +78,13 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display("Execute gRPC query error"))]
     ExecuteGrpcQuery {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display("Execute gRPC request error"))]
     ExecuteGrpcRequest {
         location: Location,
         source: BoxedError,
@@ -261,13 +261,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to build HTTP response, source: {source}"))]
+    #[snafu(display("Failed to build HTTP response"))]
     BuildHttpResponse {
         source: http::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse PromQL: {query:?}, source: {source}"))]
+    #[snafu(display("Failed to parse PromQL: {query:?}"))]
     ParsePromQL {
         query: PromQuery,
         location: Location,
@@ -301,24 +301,24 @@ pub enum Error {
     #[snafu(display("Failed to dump pprof data"))]
     DumpPprof { source: common_pprof::Error },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     Metrics { source: BoxedError },
 
-    #[snafu(display("DataFrame operation error, source: {source}, location: {location}"))]
+    #[snafu(display("DataFrame operation error, source: , location: {location}"))]
     DataFrame {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to replace params with values in prepared statement, source: {source}, location: {location}"
+        "Failed to replace params with values in prepared statement, source: , location: {location}"
     ))]
     ReplacePreparedStmtParams {
         source: query::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert scalar value, source: {source}, location: {location}"))]
+    #[snafu(display("Failed to convert scalar value, source: , location: {location}"))]
     ConvertScalarValue {
         source: datatypes::error::Error,
         location: Location,

@@ -51,7 +51,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid offset string {raw}: {source}"))]
+    #[snafu(display("Invalid offset string {raw}: "))]
     ParseOffsetStr {
         raw: String,
         source: ParseIntError,
