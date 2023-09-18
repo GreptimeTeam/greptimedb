@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionOpenRequest, RegionPutRequest, RegionRequest};
+use store_api::region_request::{
+    RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
@@ -124,4 +127,43 @@ async fn test_engine_open_readonly() {
     // Set writable and write.
     engine.set_writable(region_id, true).unwrap();
     put_rows(&engine, region_id, rows).await;
+}
+
+#[tokio::test]
+async fn test_engine_region_open_with_options() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Close the region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    // Open the region again with options.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        Duration::from_secs(3600 * 24 * 4),
+        region.version().options.ttl.unwrap()
+    );
 }
