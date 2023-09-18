@@ -49,7 +49,7 @@ impl<S> RegionWorkerLoop<S> {
         let version = region.version();
         if version.metadata.schema_version > request.schema_version {
             warn!(
-                "region id:{}, region schema version {} greater than request schema version {}",
+                "Ignored alert request, region id:{}, region schema version {} is greater than request schema version {}",
                 region_id, version.metadata.schema_version, request.schema_version
             );
             // Returns if it altered.
