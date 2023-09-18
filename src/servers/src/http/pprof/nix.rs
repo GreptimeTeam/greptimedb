@@ -22,25 +22,25 @@ use snafu::{Location, ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum Error {
-    #[snafu(display("Failed to create profiler guard, location: {}", source, location))]
+    #[snafu(display("Failed to create profiler guard, location: {}", location))]
     CreateGuard {
         source: pprof::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create report, location: {}", source, location))]
+    #[snafu(display("Failed to create report, location: {}", location))]
     CreateReport {
         source: pprof::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create flamegraph, location: {}", source, location))]
+    #[snafu(display("Failed to create flamegraph, location: {}", location))]
     CreateFlamegraph {
         source: pprof::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create pprof report, location: {}", source, location))]
+    #[snafu(display("Failed to create pprof report, location: {}", location))]
     ReportPprof {
         source: pprof::Error,
         location: Location,

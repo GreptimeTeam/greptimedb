@@ -24,7 +24,7 @@ pub enum Error {
     #[snafu(display("Invalid raw region request: {err}, at {location}"))]
     InvalidRawRegionRequest { err: String, location: Location },
 
-    #[snafu(display("Invalid default constraint: {constraint}, source: , at {location}"))]
+    #[snafu(display("Invalid default constraint: {constraint}, at {location}"))]
     InvalidDefaultConstraint {
         constraint: String,
         source: datatypes::error::Error,

@@ -138,13 +138,13 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to encode WAL header, source"))]
+    #[snafu(display("Failed to encode WAL header"))]
     EncodeWalHeader {
         location: Location,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to decode WAL header, source"))]
+    #[snafu(display("Failed to decode WAL header"))]
     DecodeWalHeader {
         location: Location,
         source: std::io::Error,

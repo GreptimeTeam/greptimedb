@@ -44,7 +44,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to put state, key: '{key}', source: "))]
+    #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
         location: Location,
@@ -57,14 +57,14 @@ pub enum Error {
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to delete keys: '{keys}', source: "))]
+    #[snafu(display("Failed to delete keys: '{keys}'"))]
     DeleteStates {
         keys: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list state, path: '{path}', source: "))]
+    #[snafu(display("Failed to list state, path: '{path}'"))]
     ListState {
         path: String,
         location: Location,
@@ -95,11 +95,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Procedure retry exceeded max times, procedure_id: {}, source:{}",
-        procedure_id,
-        source
-    ))]
+    #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
         source: Arc<Error>,
         procedure_id: ProcedureId,

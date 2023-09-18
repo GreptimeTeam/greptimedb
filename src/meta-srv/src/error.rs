@@ -360,19 +360,19 @@ pub enum Error {
     #[snafu(display("Missing required parameter, param: {:?}", param))]
     MissingRequiredParameter { param: String },
 
-    #[snafu(display("Failed to recover procedure, source: "))]
+    #[snafu(display("Failed to recover procedure"))]
     RecoverProcedure {
         location: Location,
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to wait procedure done, source: "))]
+    #[snafu(display("Failed to wait procedure done"))]
     WaitProcedure {
         location: Location,
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to submit procedure, source: "))]
+    #[snafu(display("Failed to submit procedure"))]
     SubmitProcedure {
         location: Location,
         source: common_procedure::Error,

@@ -89,7 +89,7 @@ pub enum Error {
         source: auth::error::Error,
     },
 
-    #[snafu(display("Unsupported selector type, {} source", selector_type))]
+    #[snafu(display("Unsupported selector type: {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
         location: Location,
@@ -111,20 +111,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to request database, sql: {sql}, source: "))]
+    #[snafu(display("Failed to request database, sql: {sql}"))]
     RequestDatabase {
         sql: String,
         location: Location,
         source: client::Error,
     },
 
-    #[snafu(display("Failed to collect RecordBatches, source: "))]
+    #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to pretty print Recordbatches, source: "))]
+    #[snafu(display("Failed to pretty print Recordbatches"))]
     PrettyPrintRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,

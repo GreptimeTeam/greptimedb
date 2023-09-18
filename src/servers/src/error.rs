@@ -304,21 +304,21 @@ pub enum Error {
     #[snafu(display(""))]
     Metrics { source: BoxedError },
 
-    #[snafu(display("DataFrame operation error, source: , location: {location}"))]
+    #[snafu(display("DataFrame operation error, location: {location}"))]
     DataFrame {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to replace params with values in prepared statement, source: , location: {location}"
+        "Failed to replace params with values in prepared statement, location: {location}"
     ))]
     ReplacePreparedStmtParams {
         source: query::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert scalar value, source: , location: {location}"))]
+    #[snafu(display("Failed to convert scalar value, location: {location}"))]
     ConvertScalarValue {
         source: datatypes::error::Error,
         location: Location,

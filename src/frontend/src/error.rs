@@ -154,7 +154,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to read table: {table_name}, source: "))]
+    #[snafu(display("Failed to read table: {table_name}"))]
     ReadTable {
         table_name: String,
         #[snafu(backtrace)]

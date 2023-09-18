@@ -357,12 +357,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to compact region {}, location: {}, source:{}",
-        region_id,
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to compact region {}, location: {}", region_id, location))]
     CompactRegion {
         region_id: RegionId,
         source: Arc<Error>,
@@ -381,7 +376,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{}, location: {}", source, location))]
+    #[snafu(display("Invalue region req"))]
     InvalidRegionRequest {
         source: store_api::metadata::MetadataError,
         location: Location,
