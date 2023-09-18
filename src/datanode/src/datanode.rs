@@ -71,6 +71,7 @@ pub struct Datanode {
     region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    coordinated_notifier: Option<Arc<Notify>>,
 }
 
 impl Datanode {
@@ -78,6 +79,7 @@ impl Datanode {
         info!("Starting datanode instance...");
 
         self.start_heartbeat().await?;
+        self.wait_coordinated().await;
 
         let _ = self.greptimedb_telemetry_task.start();
         self.start_services().await
@@ -88,20 +90,17 @@ impl Datanode {
             // Safety: The event_receiver must exist.
             let receiver = self.region_event_receiver.take().unwrap();
 
-            if let Some(notify) = {
-                let notify = if self.opts.coordination {
-                    Some(Arc::new(Notify::new()))
-                } else {
-                    None
-                };
-                task.start(receiver, notify.clone()).await?;
-                notify
-            } {
-                // Waits for first heartbeat response processed.
-                notify.notified().await;
-            }
+            task.start(receiver, self.coordinated_notifier.clone())
+                .await?;
         }
         Ok(())
+    }
+
+    /// If `coordinated_notifier` exists, it waits for all regions to be coordinated.
+    pub async fn wait_coordinated(&mut self) {
+        if let Some(notifier) = self.coordinated_notifier.take() {
+            notifier.notified().await;
+        }
     }
 
     /// Start services of datanode. This method call will block until services are shutdown.
@@ -249,6 +248,12 @@ impl DatanodeBuilder {
         )
         .await;
 
+        let coordinated_notifier = if self.opts.coordination {
+            Some(Arc::new(Notify::new()))
+        } else {
+            None
+        };
+
         Ok(Datanode {
             opts: self.opts,
             services,
@@ -256,6 +261,7 @@ impl DatanodeBuilder {
             region_server,
             greptimedb_telemetry_task,
             region_event_receiver,
+            coordinated_notifier,
         })
     }
 
