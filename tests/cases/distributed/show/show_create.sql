@@ -2,7 +2,7 @@ CREATE TABLE system_metrics (
   id INT UNSIGNED,
   host STRING,
   cpu DOUBLE,
-  disk FLOAT,
+  disk FLOAT COMMENT 'comment',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
