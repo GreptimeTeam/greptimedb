@@ -128,12 +128,11 @@ pub(crate) async fn create_external_expr(
 
     let mut table_options = create.options;
 
-
-    let (object_store, files) = prepare_file_table_files(&table_options)
+    let (object_store, files) = prepare_file_table_files(&table_options.map)
         .await
         .context(PrepareFileTableSnafu)?;
 
-    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options)
+    let file_column_schemas = infer_file_table_schema(&object_store, &files, &table_options.map)
         .await
         .context(InferFileTableSchemaSnafu)?
         .column_schemas;
@@ -158,7 +157,7 @@ pub(crate) async fn create_external_expr(
         files,
         file_column_schemas,
     };
-    let _ = table_options.insert(
+    table_options.insert(
         FILE_TABLE_META_KEY.to_string(),
         serde_json::to_string(&meta).context(EncodeJsonSnafu)?,
     );
@@ -173,7 +172,7 @@ pub(crate) async fn create_external_expr(
         time_index,
         primary_keys,
         create_if_not_exists: create.if_not_exists,
-        table_options: options.map,
+        table_options: table_options.map,
         table_id: None,
         engine: create.engine.to_string(),
     };
