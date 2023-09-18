@@ -780,6 +780,55 @@ async fn test_execute_query_external_table_orc(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_query_external_table_orc_with_schema(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "orc";
+    let location = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
+    let table_name = "various_type_orc";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} (
+                a float,
+                b boolean,
+                d string,
+                missing string,
+                timestamp_simple timestamp time index,
+            ) with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++------------------+----------------------+-----+------+---------+---------------+
+| Column           | Type                 | Key | Null | Default | Semantic Type |
++------------------+----------------------+-----+------+---------+---------------+
+| a                | Float32              |     | YES  |         | FIELD         |
+| b                | Boolean              |     | YES  |         | FIELD         |
+| d                | String               |     | YES  |         | FIELD         |
+| missing          | String               |     | YES  |         | FIELD         |
+| timestamp_simple | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++------------------+----------------------+-----+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-----+-------+-----+---------+-------------------------+
+| a   | b     | d   | missing | timestamp_simple        |
++-----+-------+-----+---------+-------------------------+
+| 1.0 | true  | a   |         | 2023-04-01T20:15:30.002 |
+| 2.0 | false | bb  |         | 2021-08-22T07:26:44.525 |
+|     |       |     |         | 2023-01-01T00:00:00     |
+| 4.0 | true  | ccc |         | 2023-02-01T00:00:00     |
+| 5.0 | false | ddd |         | 2023-03-01T00:00:00     |
++-----+-------+-----+---------+-------------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_query_external_table_csv(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "csv";
@@ -881,7 +930,7 @@ async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>)
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn MockInstance>) {
+async fn test_execute_query_external_table_json_with_schema(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
     let format = "json";
     let location = find_testing_resource("/tests/data/json/various_type.json");
@@ -939,6 +988,123 @@ async fn test_execute_query_external_table_json_with_schame(instance: Arc<dyn Mo
 | 1               | -3.5 | true  | 4    |                     | 1.0           |                     | 1970-01-01T00:00:00 |
 | 100000000000000 | 0.6  | false | text |                     | 1.0           |                     | 1970-01-01T00:00:00 |
 +-----------------+------+-------+------+---------------------+---------------+---------------------+---------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_query_external_table_json_type_cast(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "json";
+    let location = find_testing_resource("/tests/data/json/type_cast.json");
+    let table_name = "type_cast";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} (
+                hostname STRING,
+                environment STRING,
+                usage_user DOUBLE,
+                usage_system DOUBLE,
+                usage_idle DOUBLE,
+                usage_nice DOUBLE,
+                usage_iowait DOUBLE,
+                usage_irq DOUBLE,
+                usage_softirq DOUBLE,
+                usage_steal DOUBLE,
+                usage_guest DOUBLE,
+                usage_guest_nice DOUBLE,
+                ts TIMESTAMP TIME INDEX,
+                PRIMARY KEY(hostname)
+            ) with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++------------------+----------------------+-----+------+---------+---------------+
+| Column           | Type                 | Key | Null | Default | Semantic Type |
++------------------+----------------------+-----+------+---------+---------------+
+| hostname         | String               | PRI | YES  |         | TAG           |
+| environment      | String               |     | YES  |         | FIELD         |
+| usage_user       | Float64              |     | YES  |         | FIELD         |
+| usage_system     | Float64              |     | YES  |         | FIELD         |
+| usage_idle       | Float64              |     | YES  |         | FIELD         |
+| usage_nice       | Float64              |     | YES  |         | FIELD         |
+| usage_iowait     | Float64              |     | YES  |         | FIELD         |
+| usage_irq        | Float64              |     | YES  |         | FIELD         |
+| usage_softirq    | Float64              |     | YES  |         | FIELD         |
+| usage_steal      | Float64              |     | YES  |         | FIELD         |
+| usage_guest      | Float64              |     | YES  |         | FIELD         |
+| usage_guest_nice | Float64              |     | YES  |         | FIELD         |
+| ts               | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++------------------+----------------------+-----+------+---------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
+| hostname | environment | usage_user | usage_system | usage_idle | usage_nice | usage_iowait | usage_irq | usage_softirq | usage_steal | usage_guest | usage_guest_nice | ts                  |
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+
+| host_0   | test        | 32.0       | 58.0         | 36.0       | 72.0       | 61.0         | 21.0      | 53.0          | 12.0        | 59.0        | 72.0             | 2023-04-01T00:00:00 |
+| host_1   | staging     | 12.0       | 32.0         | 50.0       | 84.0       | 19.0         | 73.0      | 38.0          | 37.0        | 72.0        | 2.0              | 2023-04-01T00:00:00 |
+| host_2   | test        | 98.0       | 5.0          | 40.0       | 95.0       | 64.0         | 39.0      | 21.0          | 63.0        | 53.0        | 94.0             | 2023-04-01T00:00:00 |
+| host_3   | test        | 98.0       | 95.0         | 7.0        | 48.0       | 99.0         | 67.0      | 14.0          | 86.0        | 36.0        | 23.0             | 2023-04-01T00:00:00 |
+| host_4   | test        | 32.0       | 44.0         | 11.0       | 53.0       | 64.0         | 9.0       | 17.0          | 39.0        | 20.0        | 7.0              | 2023-04-01T00:00:00 |
++----------+-------------+------------+--------------+------------+------------+--------------+-----------+---------------+-------------+-------------+------------------+---------------------+";
+    check_output_stream(output, expect).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_execute_query_external_table_json_default_ts_column(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let format = "json";
+    let location = find_testing_resource("/tests/data/json/default_ts_column.json");
+    let table_name = "default_ts_column";
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            r#"create external table {table_name} with (location='{location}', format='{format}');"#,
+        ),
+    )
+    .await;
+    assert!(matches!(output, Output::AffectedRows(0)));
+
+    let output = execute_sql(&instance, &format!("desc table {table_name};")).await;
+    let expect = "\
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| Column             | Type                 | Key | Null | Default                  | Semantic Type |
++--------------------+----------------------+-----+------+--------------------------+---------------+
+| environment        | String               |     | YES  |                          | FIELD         |
+| greptime_timestamp | TimestampMillisecond | PRI | NO   | 1970-01-01 00:00:00+0000 | TIMESTAMP     |
+| hostname           | String               |     | YES  |                          | FIELD         |
+| usage_guest        | Int64                |     | YES  |                          | FIELD         |
+| usage_guest_nice   | Int64                |     | YES  |                          | FIELD         |
+| usage_idle         | Int64                |     | YES  |                          | FIELD         |
+| usage_iowait       | Int64                |     | YES  |                          | FIELD         |
+| usage_irq          | Int64                |     | YES  |                          | FIELD         |
+| usage_nice         | Int64                |     | YES  |                          | FIELD         |
+| usage_softirq      | Int64                |     | YES  |                          | FIELD         |
+| usage_steal        | Int64                |     | YES  |                          | FIELD         |
+| usage_system       | Int64                |     | YES  |                          | FIELD         |
+| usage_user         | Int64                |     | YES  |                          | FIELD         |
++--------------------+----------------------+-----+------+--------------------------+---------------+";
+    check_output_stream(output, expect).await;
+
+    let output = execute_sql(&instance, &format!("select * from {table_name};")).await;
+    let expect = "\
++-------------+---------------------+----------+-------------+------------------+------------+--------------+-----------+------------+---------------+-------------+--------------+------------+
+| environment | greptime_timestamp  | hostname | usage_guest | usage_guest_nice | usage_idle | usage_iowait | usage_irq | usage_nice | usage_softirq | usage_steal | usage_system | usage_user |
++-------------+---------------------+----------+-------------+------------------+------------+--------------+-----------+------------+---------------+-------------+--------------+------------+
+| test        | 2023-04-01T00:00:00 | host_0   | 59          | 72               | 36         | 61           | 21        | 72         | 53            | 12          | 58           | 32         |
+| staging     | 2023-04-01T00:00:00 | host_1   | 72          | 2                | 50         | 19           | 73        | 84         | 38            | 37          | 32           | 12         |
+| test        | 2023-04-01T00:00:00 | host_2   | 53          | 94               | 40         | 64           | 39        | 95         | 21            | 63          | 5            | 98         |
+| test        | 2023-04-01T00:00:00 | host_3   | 36          | 23               | 7          | 99           | 67        | 48         | 14            | 86          | 95           | 98         |
+| test        | 2023-04-01T00:00:00 | host_4   | 20          | 7                | 11         | 64           | 9         | 53         | 17            | 39          | 44           | 32         |
++-------------+---------------------+----------+-------------+------------------+------------+--------------+-----------+------------+---------------+-------------+--------------+------------+";
     check_output_stream(output, expect).await;
 }
 
