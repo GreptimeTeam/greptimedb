@@ -347,7 +347,7 @@ CREATE TABLE {table_name} (
                             .collect(),
                         ..Default::default()
                     }),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::String as i32,
                     ..Default::default()
                 },
@@ -421,7 +421,7 @@ CREATE TABLE {table_name} (
                 },
                 Column {
                     column_name: "b".to_string(),
-                    semantic_type: SemanticType::Field as i32,
+                    semantic_type: SemanticType::Tag as i32,
                     values: Some(Values {
                         string_values: b,
                         ..Default::default()

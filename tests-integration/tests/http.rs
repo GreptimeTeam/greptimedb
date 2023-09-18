@@ -605,15 +605,17 @@ pub async fn test_config_api(store_type: StorageType) {
     assert_eq!(res_get.status(), StatusCode::OK);
     let expected_toml_str = format!(
         r#"mode = "standalone"
+node_id = 0
+coordination = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 enable_telemetry = true
 
 [heartbeat]
-interval_millis = 5000
-retry_interval_millis = 5000
+interval_millis = 3000
+retry_interval_millis = 3000
 
-[http_opts]
+[http]
 addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
@@ -657,6 +659,10 @@ max_background_jobs = 4
 auto_flush_interval = "30m"
 global_write_buffer_size = "1GiB"
 global_write_buffer_reject_size = "2GiB"
+
+[[region_engine]]
+
+[region_engine.file]
 
 [logging]
 enable_jaeger_tracing = false"#,

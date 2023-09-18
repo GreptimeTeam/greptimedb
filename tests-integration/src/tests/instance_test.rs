@@ -23,6 +23,7 @@ use common_test_util::temp_dir;
 use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef};
 use frontend::error::{Error, Result};
 use frontend::instance::Instance;
+use operator::error::Error as OperatorError;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -375,20 +376,28 @@ async fn test_execute_insert_by_select(instance: Arc<dyn MockInstance>) {
         try_execute_sql(&instance, "insert into demo2(host) select * from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2 select cpu,memory from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
-
     assert!(matches!(
         try_execute_sql(&instance, "insert into demo2(ts) select memory from demo1")
             .await
             .unwrap_err(),
-        Error::PlanStatement { .. }
+        Error::TableOperation {
+            source: OperatorError::PlanStatement { .. },
+            ..
+        }
     ));
 
     let output = execute_sql(&instance, "insert into demo2 select * from demo1").await;
