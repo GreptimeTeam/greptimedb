@@ -25,7 +25,8 @@ use common_query::prelude::Expr;
 use common_recordbatch::error::{CastVectorSnafu, ExternalSnafu, Result as RecordBatchResult};
 use common_recordbatch::{RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::logical_expr::utils as df_logical_expr_utils;
-use datatypes::schema::{Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::vectors::VectorRef;
 use futures::Stream;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
@@ -181,16 +182,7 @@ impl Stream for FileToScanRegionStream {
                             })?
                         }
                     } else {
-                        scan_column_schema
-                            .create_default_vector(file_row_count)
-                            .with_context(|_| CreateDefaultSnafu {
-                                column: scan_column_schema.name.clone(),
-                            })
-                            .map_err(BoxedError::new)
-                            .context(ExternalSnafu)?
-                            .with_context(|| MissingColumnNoDefaultSnafu {
-                                column: scan_column_schema.name.clone(),
-                            })
+                        Self::create_default_vector(scan_column_schema, file_row_count)
                             .map_err(BoxedError::new)
                             .context(ExternalSnafu)?
                     };
@@ -223,6 +215,17 @@ impl FileToScanRegionStream {
                     .column_by_name(&scan_column_schema.name)
                     .map(|rb| rb.data_type() == scan_column_schema.data_type)
                     .unwrap_or_default()
+            })
+    }
+
+    fn create_default_vector(column_schema: &ColumnSchema, num_rows: usize) -> Result<VectorRef> {
+        column_schema
+            .create_default_vector(num_rows)
+            .with_context(|_| CreateDefaultSnafu {
+                column: column_schema.name.clone(),
+            })?
+            .with_context(|| MissingColumnNoDefaultSnafu {
+                column: column_schema.name.clone(),
             })
     }
 }
