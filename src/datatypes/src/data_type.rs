@@ -120,6 +120,10 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Boolean(_))
     }
 
+    pub fn is_string(&self) -> bool {
+        matches!(self, ConcreteDataType::String(_))
+    }
+
     pub fn is_stringifiable(&self) -> bool {
         matches!(
             self,
@@ -156,6 +160,22 @@ impl ConcreteDataType {
                 | ConcreteDataType::UInt16(_)
                 | ConcreteDataType::UInt32(_)
                 | ConcreteDataType::UInt64(_)
+        )
+    }
+
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+                | ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_)
+                | ConcreteDataType::Float32(_)
+                | ConcreteDataType::Float64(_)
         )
     }
 
@@ -457,7 +477,7 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     /// use it as a timestamp.
     fn is_timestamp_compatible(&self) -> bool;
 
-    /// Casts the value to this DataType.
+    /// Casts the value to specific DataType.
     /// Return None if cast failed.
     fn try_cast(&self, from: Value) -> Option<Value>;
 }

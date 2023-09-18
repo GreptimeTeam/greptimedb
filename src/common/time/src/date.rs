@@ -136,4 +136,14 @@ mod tests {
         let d: Date = 42.into();
         assert_eq!(42, d.val());
     }
+
+    #[test]
+    fn test_to_secs() {
+        let d = Date::from_str("1970-01-01").unwrap();
+        assert_eq!(d.to_secs(), 0);
+        let d = Date::from_str("1970-01-02").unwrap();
+        assert_eq!(d.to_secs(), 24 * 3600);
+        let d = Date::from_str("1970-01-03").unwrap();
+        assert_eq!(d.to_secs(), 2 * 24 * 3600);
+    }
 }

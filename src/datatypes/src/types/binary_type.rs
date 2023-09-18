@@ -61,6 +61,7 @@ impl DataType for BinaryType {
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Binary(v) => Some(Value::Binary(v)),
+            Value::String(v) => Some(Value::Binary(Bytes::from(v.as_utf8().as_bytes()))),
             _ => None,
         }
     }

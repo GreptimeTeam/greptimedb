@@ -289,19 +289,29 @@ macro_rules! define_non_timestamp_primitive {
     };
 }
 
-define_non_timestamp_primitive!(u8, UInt8, UInt8Type, UInt64Type, UInt8, Float32, Float64);
 define_non_timestamp_primitive!(
-    u16, UInt16, UInt16Type, UInt64Type, UInt8, UInt16, Float32, Float64
+    u8, UInt8, UInt8Type, UInt64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
 );
 define_non_timestamp_primitive!(
-    u32, UInt32, UInt32Type, UInt64Type, UInt8, UInt16, UInt32, Float32, Float64
+    u16, UInt16, UInt16Type, UInt64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
 );
 define_non_timestamp_primitive!(
-    u64, UInt64, UInt64Type, UInt64Type, UInt8, UInt16, UInt32, UInt64, Float32, Float64
+    u32, UInt32, UInt32Type, UInt64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
 );
-define_non_timestamp_primitive!(i8, Int8, Int8Type, Int64Type, Int8, Float32, Float64);
 define_non_timestamp_primitive!(
-    i16, Int16, Int16Type, Int64Type, Int8, Int16, UInt8, Float32, Float64
+    u64, UInt64, UInt64Type, UInt64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
+);
+define_non_timestamp_primitive!(
+    i8, Int8, Int8Type, Int64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
+);
+define_non_timestamp_primitive!(
+    i16, Int16, Int16Type, Int64Type, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64,
+    Float32, Float64
 );
 
 define_non_timestamp_primitive!(
@@ -309,27 +319,32 @@ define_non_timestamp_primitive!(
     Float32,
     Float32Type,
     Float64Type,
-    Float32,
-    UInt8,
-    UInt16,
     Int8,
     Int16,
-    Int32
+    Int32,
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64
 );
 define_non_timestamp_primitive!(
     f64,
     Float64,
     Float64Type,
     Float64Type,
-    Float32,
-    Float64,
-    UInt8,
-    UInt16,
-    UInt32,
     Int8,
     Int16,
     Int32,
-    Int64
+    Int64,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+    Float64
 );
 
 // Timestamp primitive:
@@ -389,33 +404,26 @@ impl DataType for Int64Type {
 }
 
 impl DataType for Int32Type {
-    #[doc = " Name of this data type."]
     fn name(&self) -> &str {
         "Int32"
     }
 
-    #[doc = " Returns id of the Logical data type."]
     fn logical_type_id(&self) -> LogicalTypeId {
         LogicalTypeId::Int32
     }
 
-    #[doc = " Returns the default value of this type."]
     fn default_value(&self) -> Value {
         Value::Int32(0)
     }
 
-    #[doc = " Convert this type as [arrow::datatypes::DataType]."]
     fn as_arrow_type(&self) -> ArrowDataType {
         ArrowDataType::Int32
     }
 
-    #[doc = " Creates a mutable vector with given `capacity` of this type."]
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(PrimitiveVectorBuilder::<Int32Type>::with_capacity(capacity))
     }
 
-    #[doc = " Returns true if the data type is compatible with timestamp type so we can"]
-    #[doc = " use it as a timestamp."]
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
@@ -426,8 +434,11 @@ impl DataType for Int32Type {
             Value::Int8(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int16(v) => num::cast::cast(v).map(Value::Int32),
             Value::Int32(v) => Some(Value::Int32(v)),
+            Value::Int64(v) => num::cast::cast(v).map(Value::Int64),
             Value::UInt8(v) => num::cast::cast(v).map(Value::Int32),
             Value::UInt16(v) => num::cast::cast(v).map(Value::Int32),
+            Value::UInt32(v) => num::cast::cast(v).map(Value::UInt32),
+            Value::UInt64(v) => num::cast::cast(v).map(Value::UInt64),
             Value::Float32(v) => num::cast::cast(v).map(Value::Int32),
             Value::Float64(v) => num::cast::cast(v).map(Value::Int32),
             Value::String(v) => v.as_utf8().parse::<i32>().map(Value::Int32).ok(),
