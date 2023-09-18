@@ -128,7 +128,7 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
             .context(CompilePythonSnafu { name })
     }
 
-    /// Get or create the scripts table in the catalog
+    /// Get the scripts table in the catalog
     pub fn get_scripts_table(&self, catalog: &str) -> Option<ScriptsTableRef<E>> {
         self.tables.read().unwrap().get(catalog).cloned()
     }
@@ -136,6 +136,11 @@ impl<E: ErrorExt + Send + Sync + 'static> ScriptManager<E> {
     /// Insert a scripts table.
     pub fn insert_scripts_table(&self, catalog: &str, table: TableRef) {
         let mut tables = self.tables.write().unwrap();
+
+        if tables.get(catalog).is_some() {
+            return;
+        }
+
         tables.insert(
             catalog.to_string(),
             Arc::new(ScriptsTable::new(
