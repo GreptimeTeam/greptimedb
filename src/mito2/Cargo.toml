@@ -11,8 +11,7 @@ test = ["common-test-util"]
 [dependencies]
 anymap = "1.0.0-beta.2"
 api.workspace = true
-aquamarine = "0.3"
-arc-swap = "1.0"
+aquamarine.workspace = true
 async-channel = "1.9"
 async-compat = "0.2"
 async-stream.workspace = true
@@ -38,7 +37,6 @@ datatypes = { workspace = true }
 futures.workspace = true
 humantime-serde = { workspace = true }
 lazy_static = "1.4"
-log-store = { workspace = true }
 memcomparable = "0.2"
 metrics.workspace = true
 object-store = { workspace = true }
@@ -50,7 +48,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
-storage = { workspace = true }
 store-api = { workspace = true }
 strum.workspace = true
 table = { workspace = true }
@@ -61,3 +58,4 @@ uuid.workspace = true
 [dev-dependencies]
 common-procedure-test = { workspace = true }
 common-test-util = { workspace = true }
+log-store = { workspace = true }

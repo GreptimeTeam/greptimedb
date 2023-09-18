@@ -28,7 +28,6 @@ arrow.workspace = true
 async-trait.workspace = true
 catalog = { workspace = true }
 common-catalog = { workspace = true }
-common-config = { workspace = true }
 common-error = { workspace = true }
 common-function = { workspace = true }
 common-query = { workspace = true }

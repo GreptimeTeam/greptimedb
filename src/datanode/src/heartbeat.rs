@@ -33,8 +33,9 @@ use tokio::time::Instant;
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
-use crate::datanode::DatanodeOptions;
+use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
+use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -136,7 +137,7 @@ impl HeartbeatTask {
     }
 
     /// Start heartbeat task, spawn background task.
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, mut event_receiver: RegionServerEventReceiver) -> Result<()> {
         let running = self.running.clone();
         if running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -169,7 +170,38 @@ impl HeartbeatTask {
         )
         .await?;
 
+        let self_peer = Some(Peer {
+            id: node_id,
+            addr: addr.clone(),
+        });
         let epoch = self.region_alive_keeper.epoch();
+
+        let keeper = self.region_alive_keeper.clone();
+
+        common_runtime::spawn_bg(async move {
+            loop {
+                if !running.load(Ordering::Relaxed) {
+                    info!("shutdown heartbeat task");
+                    break;
+                }
+
+                match event_receiver.0.recv().await {
+                    Some(RegionServerEvent::Registered(region_id)) => {
+                        keeper.register_region(region_id).await;
+                    }
+                    Some(RegionServerEvent::Deregistered(region_id)) => {
+                        keeper.deregister_region(region_id).await;
+                    }
+                    None => {
+                        info!("region server event sender closed!");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let running = self.running.clone();
+
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
@@ -184,9 +216,8 @@ impl HeartbeatTask {
                         if let Some(message) = message {
                             match outgoing_message_to_mailbox_message(message) {
                                 Ok(message) => {
-                                    let peer = Some(Peer { id: node_id, addr: addr.clone() });
                                     let req = HeartbeatRequest {
-                                        peer,
+                                        peer: self_peer.clone(),
                                         mailbox_message: Some(message),
                                         ..Default::default()
                                     };
@@ -202,12 +233,11 @@ impl HeartbeatTask {
                         }
                     }
                     _ = &mut sleep => {
-                        let peer = Some(Peer { id: node_id, addr: addr.clone() });
                         let region_stats = Self::load_region_stats(&region_server_clone).await;
                         let now = Instant::now();
                         let duration_since_epoch = (now - epoch).as_millis() as u64;
                         let req = HeartbeatRequest {
-                            peer,
+                            peer: self_peer.clone(),
                             region_stats,
                             duration_since_epoch,
                             node_epoch,

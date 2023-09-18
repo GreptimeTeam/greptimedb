@@ -22,7 +22,7 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
 use snafu::ResultExt;
 
-use crate::datanode::DatanodeOptions;
+use crate::config::DatanodeOptions;
 use crate::error::{
     ParseAddrSnafu, Result, ShutdownServerSnafu, StartServerSnafu, WaitForGrpcServingSnafu,
 };
@@ -49,7 +49,7 @@ impl Services {
                 None,
                 runtime,
             ),
-            http_server: HttpServerBuilder::new(opts.http_opts.clone())
+            http_server: HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build(),
@@ -60,8 +60,8 @@ impl Services {
         let grpc_addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,
         })?;
-        let http_addr = opts.http_opts.addr.parse().context(ParseAddrSnafu {
-            addr: &opts.http_opts.addr,
+        let http_addr = opts.http.addr.parse().context(ParseAddrSnafu {
+            addr: &opts.http.addr,
         })?;
         let grpc = self.grpc_server.start(grpc_addr);
         let http = self.http_server.start(http_addr);

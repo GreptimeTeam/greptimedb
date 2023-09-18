@@ -50,7 +50,7 @@ use crate::CatalogManager;
 ///
 /// The result comes from two source, all the user tables are presented in
 /// a kv-backend which persists the metadata of a table. And system tables
-/// comes from [SystemCatalog], which is static and read-only.
+/// comes from `SystemCatalog`, which is static and read-only.
 #[derive(Clone)]
 pub struct KvBackendCatalogManager {
     // TODO(LFC): Maybe use a real implementation for Standalone mode.

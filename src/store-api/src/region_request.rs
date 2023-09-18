@@ -39,6 +39,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    Truncate(RegionTruncateRequest),
 }
 
 impl RegionRequest {
@@ -413,6 +414,9 @@ pub struct RegionFlushRequest {}
 #[derive(Debug)]
 pub struct RegionCompactRequest {}
 
+#[derive(Debug)]
+pub struct RegionTruncateRequest {}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -425,6 +429,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::Truncate(_) => write!(f, "Truncate"),
         }
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "common-function-macro"
+name = "common-macro"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

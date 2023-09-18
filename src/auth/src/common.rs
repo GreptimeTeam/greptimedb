@@ -26,7 +26,7 @@ use crate::{UserInfoRef, UserProviderRef};
 
 pub(crate) const DEFAULT_USERNAME: &str = "greptime";
 
-/// construct a [`UserInfo`] impl with name
+/// construct a [`UserInfo`](crate::user_info::UserInfo) impl with name
 /// use default username `greptime` if None is provided
 pub fn userinfo_by_name(username: Option<String>) -> UserInfoRef {
     DefaultUserInfo::with_name(username.unwrap_or_else(|| DEFAULT_USERNAME.to_string()))

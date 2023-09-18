@@ -38,21 +38,25 @@ use crate::region_server::RegionServer;
 
 const MAX_CLOSE_RETRY_TIMES: usize = 10;
 
-/// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
+/// [RegionAliveKeeper] manages all `CountdownTaskHandles`.
 ///
-/// [RegionAliveKeeper] starts a [CountdownTask] for each region. When deadline is reached,
+/// [RegionAliveKeeper] starts a `CountdownTask` for each region. When deadline is reached,
 /// the region will be closed.
+///
 /// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
 /// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
 /// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
 /// countdown.
+///
+/// On each lease extension, [RegionAliveKeeper] will reset the deadline to the corresponding time, and
+/// set region's status to "writable".
 pub struct RegionAliveKeeper {
     region_server: RegionServer,
     tasks: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
     heartbeat_interval_millis: u64,
     started: AtomicBool,
 
-    /// The epoch when [RegionAliveKeepers] is created. It's used to get a monotonically non-decreasing
+    /// The epoch when [RegionAliveKeeper] is created. It's used to get a monotonically non-decreasing
     /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
     /// non-decreasing). The heartbeat request will carry the duration since this epoch, and the
     /// duration acts like an "invariant point" for region's keep alive lease.
@@ -313,6 +317,7 @@ impl CountdownTask {
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
+                                let _ = self.region_server.set_writable(self.region_id, true);
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:

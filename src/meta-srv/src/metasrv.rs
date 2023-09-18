@@ -46,23 +46,16 @@ use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
-pub const DEFAULT_DATANODE_LEASE_SECS: u64 = 20;
-/// The lease seconds of a region. It's set by two default heartbeat intervals (5 second × 2) plus
-/// two roundtrip time (2 second × 2 × 2), plus some extra buffer (2 second).
-pub const DEFAULT_REGION_LEASE_SECS: u64 = 20;
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetaSrvOptions {
     pub bind_addr: String,
     pub server_addr: String,
     pub store_addr: String,
-    pub datanode_lease_secs: u64,
-    pub region_lease_secs: u64,
     pub selector: SelectorType,
     pub use_memory_store: bool,
     pub enable_region_failover: bool,
-    pub http_opts: HttpOptions,
+    pub http: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
     pub datanode: DatanodeOptions,
@@ -76,12 +69,10 @@ impl Default for MetaSrvOptions {
             bind_addr: "127.0.0.1:3002".to_string(),
             server_addr: "127.0.0.1:3002".to_string(),
             store_addr: "127.0.0.1:2379".to_string(),
-            datanode_lease_secs: DEFAULT_DATANODE_LEASE_SECS,
-            region_lease_secs: DEFAULT_REGION_LEASE_SECS,
             selector: SelectorType::default(),
             use_memory_store: false,
             enable_region_failover: true,
-            http_opts: HttpOptions::default(),
+            http: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),
                 ..Default::default()

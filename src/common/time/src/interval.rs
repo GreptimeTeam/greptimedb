@@ -212,7 +212,7 @@ impl Interval {
         IntervalFormat::from(self).to_sql_standard_string()
     }
 
-    /// Interval Type and i128[MonthDayNano] Convert
+    /// Interval Type and i128 [IntervalUnit::MonthDayNano] Convert
     /// v consists of months(i32) | days(i32) | nsecs(i64)
     pub fn from_i128(v: i128) -> Self {
         Interval {
@@ -223,7 +223,7 @@ impl Interval {
         }
     }
 
-    /// `Interval` Type and i64[DayTime] Convert
+    /// `Interval` Type and i64 [IntervalUnit::DayTime] Convert
     /// v consists of days(i32) | milliseconds(i32)
     pub fn from_i64(v: i64) -> Self {
         Interval {
@@ -234,7 +234,7 @@ impl Interval {
         }
     }
 
-    /// `Interval` Type and i32[YearMonth] Convert
+    /// `Interval` Type and i32 [IntervalUnit::YearMonth] Convert
     /// v consists of months(i32)
     pub fn from_i32(v: i32) -> Self {
         Interval {
@@ -302,7 +302,7 @@ impl Display for Interval {
     }
 }
 
-/// https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-INTERVAL-OUTPUT
+/// <https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-INTERVAL-OUTPUT>
 /// support postgres format, iso8601 format and sql standard format
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct IntervalFormat {
@@ -392,7 +392,7 @@ impl IntervalFormat {
     }
 
     /// Convert IntervalFormat to sql standard format string
-    /// SQL standard pattern - [years - months] [days] [hours:minutes:seconds[.fractional seconds]]
+    /// SQL standard pattern `- [years - months] [days] [hours:minutes:seconds[.fractional seconds]]`
     /// for example: 1-2 3:4:5.678
     pub fn to_sql_standard_string(self) -> String {
         if self.is_zero() {
@@ -425,7 +425,7 @@ impl IntervalFormat {
     }
 
     /// Convert IntervalFormat to postgres format string
-    /// postgres pattern - [years - months] [days] [hours[:minutes[:seconds[.fractional seconds]]]]
+    /// postgres pattern `- [years - months] [days] [hours[:minutes[:seconds[.fractional seconds]]]]`
     /// for example: -1 year -2 mons +3 days -04:05:06
     pub fn to_postgres_string(&self) -> String {
         if self.is_zero() {

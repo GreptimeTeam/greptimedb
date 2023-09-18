@@ -115,7 +115,7 @@ impl RegionWriteCtx {
         }
     }
 
-    /// Push [SenderWriteRequest] to the context.
+    /// Push mutation to the context.
     pub(crate) fn push_mutation(&mut self, op_type: i32, rows: Option<Rows>, tx: OptionOutputTx) {
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
         self.wal_entry.mutations.push(Mutation {

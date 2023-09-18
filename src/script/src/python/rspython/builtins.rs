@@ -223,7 +223,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
 }
 
 /// use to bind to Data Fusion's UDF function
-/// P.S: seems due to proc macro issues, can't just use #[pyfunction] in here
+/// P.S: seems due to proc macro issues, can't just use `#[pyfunction]` in here
 macro_rules! bind_call_unary_math_function {
     ($DF_FUNC: ident, $vm: ident $(,$ARG: ident)*) => {
         fn inner_fn($($ARG: PyObjectRef,)* vm: &VirtualMachine) -> PyResult<PyObjectRef> {

@@ -52,7 +52,7 @@ impl TimeZone {
     /// scope.
     ///
     /// String examples are available as described in
-    /// https://dev.mysql.com/doc/refman/8.0/en/time-zone-support.html
+    /// <https://dev.mysql.com/doc/refman/8.0/en/time-zone-support.html>
     ///
     /// - `SYSTEM`
     /// - Offset to UTC: `+08:00` , `-11:30`

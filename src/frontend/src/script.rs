@@ -67,6 +67,7 @@ mod python {
     use common_error::ext::BoxedError;
     use common_meta::table_name::TableName;
     use common_telemetry::logging::error;
+    use operator::expr_factory;
     use script::manager::ScriptManager;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
@@ -75,7 +76,6 @@ mod python {
 
     use super::*;
     use crate::error::{CatalogSnafu, InvalidSystemTableDefSnafu, TableNotFoundSnafu};
-    use crate::expr_factory;
     use crate::instance::Instance;
 
     pub struct ScriptExecutor {

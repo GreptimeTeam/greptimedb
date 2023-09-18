@@ -138,6 +138,29 @@ impl VersionControl {
         let mut version_data = self.data.write().unwrap();
         version_data.version = new_version;
     }
+
+    /// Truncate current version.
+    pub(crate) fn truncate(
+        &self,
+        truncated_entry_id: EntryId,
+        truncated_sequence: SequenceNumber,
+        memtable_builder: &MemtableBuilderRef,
+    ) {
+        let version = self.current().version;
+
+        let new_mutable = memtable_builder.build(&version.metadata);
+        let new_version = Arc::new(
+            VersionBuilder::new(version.metadata.clone(), new_mutable)
+                .flushed_entry_id(truncated_entry_id)
+                .flushed_sequence(truncated_sequence)
+                .truncated_entry_id(Some(truncated_entry_id))
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version.ssts.mark_all_deleted();
+        version_data.version = new_version;
+    }
 }
 
 pub(crate) type VersionControlRef = Arc<VersionControl>;
@@ -177,6 +200,10 @@ pub(crate) struct Version {
     pub(crate) flushed_entry_id: EntryId,
     /// Inclusive max sequence of flushed data.
     pub(crate) flushed_sequence: SequenceNumber,
+    /// Latest entry id during the truncating table.
+    ///
+    /// Used to check if it is a flush task during the truncating table.
+    pub(crate) truncated_entry_id: Option<EntryId>,
     // TODO(yingwen): RegionOptions.
 }
 
@@ -189,6 +216,7 @@ pub(crate) struct VersionBuilder {
     ssts: SstVersionRef,
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
+    truncated_entry_id: Option<EntryId>,
 }
 
 impl VersionBuilder {
@@ -200,6 +228,7 @@ impl VersionBuilder {
             ssts: Arc::new(SstVersion::new()),
             flushed_entry_id: 0,
             flushed_sequence: 0,
+            truncated_entry_id: None,
         }
     }
 
@@ -211,6 +240,7 @@ impl VersionBuilder {
             ssts: version.ssts.clone(),
             flushed_entry_id: version.flushed_entry_id,
             flushed_sequence: version.flushed_sequence,
+            truncated_entry_id: version.truncated_entry_id,
         }
     }
 
@@ -235,6 +265,12 @@ impl VersionBuilder {
     /// Sets flushed sequence.
     pub(crate) fn flushed_sequence(mut self, sequence: SequenceNumber) -> Self {
         self.flushed_sequence = sequence;
+        self
+    }
+
+    /// Sets truncated entty id.
+    pub(crate) fn truncated_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
+        self.truncated_entry_id = entry_id;
         self
     }
 
@@ -287,6 +323,7 @@ impl VersionBuilder {
             ssts: self.ssts,
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
+            truncated_entry_id: self.truncated_entry_id,
         }
     }
 }

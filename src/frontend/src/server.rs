@@ -58,7 +58,7 @@ impl Services {
 
         {
             // Always init GRPC server
-            let opts = &opts.grpc_options;
+            let opts = &opts.grpc;
             let grpc_addr = parse_addr(&opts.addr)?;
 
             let grpc_runtime = Arc::new(
@@ -83,7 +83,7 @@ impl Services {
 
         {
             // Always init HTTP server
-            let http_options = &opts.http_options;
+            let http_options = &opts.http;
             let http_addr = parse_addr(&http_options.addr)?;
 
             let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
@@ -95,21 +95,21 @@ impl Services {
                 let _ = http_server_builder.with_user_provider(user_provider);
             }
 
-            if opts.opentsdb_options.enable {
+            if opts.opentsdb.enable {
                 let _ = http_server_builder.with_opentsdb_handler(instance.clone());
             }
 
-            if opts.influxdb_options.enable {
+            if opts.influxdb.enable {
                 let _ = http_server_builder.with_influxdb_handler(instance.clone());
             }
 
-            if opts.prom_store_options.enable {
+            if opts.prom_store.enable {
                 let _ = http_server_builder
                     .with_prom_handler(instance.clone())
                     .with_prometheus_handler(instance.clone());
             }
 
-            if opts.otlp_options.enable {
+            if opts.otlp.enable {
                 let _ = http_server_builder.with_otlp_handler(instance.clone());
             }
 
@@ -122,9 +122,9 @@ impl Services {
             result.push((Box::new(http_server), http_addr));
         }
 
-        if opts.mysql_options.enable {
+        if opts.mysql.enable {
             // Init MySQL server
-            let opts = &opts.mysql_options;
+            let opts = &opts.mysql;
             let mysql_addr = parse_addr(&opts.addr)?;
 
             let mysql_io_runtime = Arc::new(
@@ -154,9 +154,9 @@ impl Services {
             result.push((mysql_server, mysql_addr));
         }
 
-        if opts.postgres_options.enable {
+        if opts.postgres.enable {
             // Init PosgresSQL Server
-            let opts = &opts.postgres_options;
+            let opts = &opts.postgres;
             let pg_addr = parse_addr(&opts.addr)?;
 
             let pg_io_runtime = Arc::new(
@@ -177,9 +177,9 @@ impl Services {
             result.push((pg_server, pg_addr));
         }
 
-        if opts.opentsdb_options.enable {
+        if opts.opentsdb.enable {
             // Init OpenTSDB server
-            let opts = &opts.opentsdb_options;
+            let opts = &opts.opentsdb;
             let addr = parse_addr(&opts.addr)?;
 
             let io_runtime = Arc::new(

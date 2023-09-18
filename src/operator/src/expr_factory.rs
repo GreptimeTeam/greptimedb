@@ -308,7 +308,7 @@ fn columns_to_column_schemas(
         .collect::<Result<Vec<ColumnSchema>>>()
 }
 
-pub(crate) fn column_schemas_to_defs(
+pub fn column_schemas_to_defs(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],
 ) -> Result<Vec<api::v1::ColumnDef>> {

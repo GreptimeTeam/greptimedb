@@ -12,17 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
-use static_assertions::{assert_fields, assert_impl_all};
-
-#[as_aggr_func_creator]
-#[derive(Debug, Default, AggrFuncTypeStore)]
-struct Foo {}
-
-#[test]
-#[allow(clippy::extra_unused_type_parameters)]
-fn test_derive() {
-    let _ = Foo::default();
-    assert_fields!(Foo: input_types);
-    assert_impl_all!(Foo: std::fmt::Debug, Default, AggrFuncTypeStore);
-}
+pub const DIST_CREATE_TABLE: &str = "table.operator.create_table";
+pub const DIST_INGEST_ROW_COUNT: &str = "table.operator.ingest_rows";
+pub const DIST_DELETE_ROW_COUNT: &str = "table.operator.delete_rows";

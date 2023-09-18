@@ -3,12 +3,11 @@ CREATE TABLE system_metrics (
   host STRING,
   cpu DOUBLE,
   disk FLOAT,
-  n INT COMMENT 'range key',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (n) (
+PARTITION BY RANGE COLUMNS (id) (
     PARTITION r0 VALUES LESS THAN (5),
     PARTITION r1 VALUES LESS THAN (9),
     PARTITION r2 VALUES LESS THAN (MAXVALUE),
@@ -31,16 +30,15 @@ SHOW CREATE TABLE system_metrics;
 |                |   "host" STRING NULL,                                     |
 |                |   "cpu" DOUBLE NULL,                                      |
 |                |   "disk" FLOAT NULL,                                      |
-|                |   "n" INT NULL,                                           |
 |                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
 |                |   TIME INDEX ("ts"),                                      |
 |                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
-|                | PARTITION BY RANGE COLUMNS ("n") (                        |
-|                |                       PARTITION r0 VALUES LESS THAN (5),  |
+|                | PARTITION BY RANGE COLUMNS ("id") (                       |
+|                |   PARTITION r0 VALUES LESS THAN (5),                      |
 |                |   PARTITION r1 VALUES LESS THAN (9),                      |
 |                |   PARTITION r2 VALUES LESS THAN (MAXVALUE)                |
-|                |                 )                                         |
+|                | )                                                         |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
 |                |   regions = 3,                                            |
@@ -84,12 +82,11 @@ CREATE TABLE not_supported_table_options_keys (
   host STRING,
   cpu DOUBLE,
   disk FLOAT,
-  n INT COMMENT 'range key',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (n) (
+PARTITION BY RANGE COLUMNS (id) (
     PARTITION r0 VALUES LESS THAN (5),
     PARTITION r1 VALUES LESS THAN (9),
     PARTITION r2 VALUES LESS THAN (MAXVALUE),

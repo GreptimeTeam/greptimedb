@@ -140,7 +140,7 @@ pub trait BatchOp {
     /// being masked out.
     fn filter(&self, batch: &Batch, filter: &BooleanVector) -> Result<Batch>;
 
-    /// Unselect deleted rows according to the [`OpType`](store_api::storage::OpType).
+    /// Unselect deleted rows according to the [`OpType`](api::v1::OpType).
     ///
     /// # Panics
     /// Panics if

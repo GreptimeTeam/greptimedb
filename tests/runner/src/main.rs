@@ -12,20 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
+
+use clap::Parser;
 use env::Env;
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
 mod util;
 
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+/// SQL Harness for GrepTimeDB
+struct Args {
+    /// Directory of test cases
+    #[clap(short, long)]
+    case_dir: Option<PathBuf>,
+
+    /// Fail this run as soon as one case fails if true
+    #[arg(short, long, default_value = "false")]
+    fail_fast: bool,
+
+    /// Environment Configuration File
+    #[clap(short, long, default_value = "config.toml")]
+    env_config_file: String,
+
+    /// Name of test cases to run. Accept as a regexp.
+    #[clap(short, long, default_value = ".*")]
+    test_filter: String,
+}
+
 #[tokio::main]
 async fn main() {
-    let mut args: Vec<String> = std::env::args().collect();
-    let test_filter = if args.len() > 1 {
-        args.pop().unwrap()
-    } else {
-        "".to_string()
-    };
+    let args = Args::parse();
 
     #[cfg(windows)]
     let data_home = std::env::temp_dir();
@@ -33,10 +52,11 @@ async fn main() {
     let data_home = std::path::PathBuf::from("/tmp");
 
     let config = ConfigBuilder::default()
-        .case_dir(util::get_case_dir())
-        .fail_fast(false)
-        .test_filter(test_filter)
+        .case_dir(util::get_case_dir(args.case_dir))
+        .fail_fast(args.fail_fast)
+        .test_filter(args.test_filter)
         .follow_links(true)
+        .env_config_file(args.env_config_file)
         .build()
         .unwrap();
     let runner = Runner::new(config, Env::new(data_home));
