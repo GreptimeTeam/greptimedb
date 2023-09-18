@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use arrow::datatypes::{DataType as ArrowDataType, Date32Type};
 use common_time::Date;
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,15 @@ impl DataType for DateType {
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
+
+    fn try_cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Int32(v) => Some(Value::Date(Date::from(v))),
+            Value::String(v) => Date::from_str(v.as_utf8()).map(Value::Date).ok(),
+            Value::Timestamp(v) => v.to_chrono_date().map(|date| Value::Date(date.into())),
+            _ => None,
+        }
+    }
 }
 
 impl LogicalPrimitiveType for DateType {
@@ -87,5 +98,41 @@ impl LogicalPrimitiveType for DateType {
             }
             .fail(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::bytes::StringBytes;
+    use common_time::Timestamp;
+
+    use super::*;
+
+    #[test]
+    fn test_date_cast() {
+        std::env::set_var("TZ", "Asia/Shanghai");
+        // timestamp -> date
+        let ts = Value::Timestamp(Timestamp::from_str("2000-01-01 08:00:01").unwrap());
+        let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
+
+        // this case bind with local timezone.
+        let ts = Value::Timestamp(Timestamp::from_str("2000-01-02 07:59:59").unwrap());
+        let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
+
+        // Int32 -> date
+        let val = Value::Int32(0);
+        let date = ConcreteDataType::date_datatype().try_cast(val).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("1970-01-01").unwrap()));
+
+        let val = Value::Int32(19614);
+        let date = ConcreteDataType::date_datatype().try_cast(val).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("2023-09-14").unwrap()));
+
+        // String -> date
+        let s = Value::String(StringBytes::from("1970-02-12"));
+        let date = ConcreteDataType::date_datatype().try_cast(s).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("1970-02-12").unwrap()));
     }
 }
