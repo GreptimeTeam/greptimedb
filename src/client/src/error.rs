@@ -33,7 +33,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failure occurs during handling request, location: {}", location))]
+    #[snafu(display("Failure occurs during handling request"))]
     HandleRequest {
         location: Location,
         source: BoxedError,

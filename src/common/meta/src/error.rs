@@ -59,7 +59,7 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
         location: Location,
@@ -226,7 +226,7 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Invalid heartbeat response, location: {}", location))]
+    #[snafu(display("Invalid heartbeat response"))]
     InvalidHeartbeatResponse { location: Location },
 
     #[snafu(display("Failed to operate on datanode: {}", peer))]

@@ -32,7 +32,7 @@ use crate::worker::WorkerId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("OpenDAL operator failed. Location: {}", location))]
+    #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         location: Location,
         source: object_store::Error,
@@ -52,7 +52,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to ser/de json object. Location: {}", location))]
+    #[snafu(display("Failed to ser/de json object"))]
     SerdeJson {
         location: Location,
         source: serde_json::Error,
@@ -65,83 +65,78 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid UTF-8 content. Location: {}", location))]
+    #[snafu(display("Invalid UTF-8 content"))]
     Utf8 {
         location: Location,
         source: std::str::Utf8Error,
     },
 
-    #[snafu(display("Cannot find RegionMetadata. Location: {}", location))]
+    #[snafu(display("Cannot find RegionMetadata"))]
     RegionMetadataNotFound { location: Location },
 
-    #[snafu(display("Failed to join handle, location: {}", location))]
+    #[snafu(display("Failed to join handle"))]
     Join {
         source: common_runtime::JoinError,
         location: Location,
     },
 
-    #[snafu(display("Worker {} is stopped, location: {}", id, location))]
+    #[snafu(display("Worker {} is stopped", id))]
     WorkerStopped { id: WorkerId, location: Location },
 
-    #[snafu(display("Failed to recv result, location: {}", location))]
+    #[snafu(display("Failed to recv result"))]
     Recv {
         source: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
 
-    #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
+    #[snafu(display("Invalid metadata, {}", reason))]
     InvalidMeta { reason: String, location: Location },
 
-    #[snafu(display("Invalid region metadata, location: {}", location))]
+    #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
         location: Location,
     },
 
-    #[snafu(display("Region {} already exists, location: {}", region_id, location))]
+    #[snafu(display("Region {} already exists", region_id))]
     RegionExists {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Failed to create RecordBatch from vectors, location: {}", location))]
+    #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
         location: Location,
         source: ArrowError,
     },
 
-    #[snafu(display("Failed to write to buffer, location: {}", location))]
+    #[snafu(display("Failed to write to buffer"))]
     WriteBuffer {
         location: Location,
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to write parquet file, path: {}, location: {}", path, location,))]
+    #[snafu(display("Failed to write parquet file, path: {}", path))]
     WriteParquet {
         path: String,
         location: Location,
         source: parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to read parquet file, path: {}, location: {}", path, location,))]
+    #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
         source: parquet::errors::ParquetError,
         location: Location,
     },
 
-    #[snafu(display("Region {} not found, location: {}", region_id, location))]
+    #[snafu(display("Region {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display(
-        "Region {} is corrupted, reason: {}, location: {}",
-        region_id,
-        reason,
-        location
-    ))]
+    #[snafu(display("Region {} is corrupted, reason: {}", region_id, reason))]
     RegionCorrupted {
         region_id: RegionId,
         reason: String,
@@ -174,46 +169,34 @@ pub enum Error {
         source: datatypes::Error,
     },
 
-    #[snafu(display(
-        "Failed to encode WAL entry, region_id: {}, location: {}",
-        region_id,
-        location,
-    ))]
+    #[snafu(display("Failed to encode WAL entry, region_id: {}", region_id))]
     EncodeWal {
         region_id: RegionId,
         location: Location,
         source: EncodeError,
     },
 
-    #[snafu(display("Failed to write WAL, location: {}", location))]
+    #[snafu(display("Failed to write WAL"))]
     WriteWal {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}, location: {}", region_id, location,))]
+    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
     ReadWal {
         region_id: RegionId,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to decode WAL entry, region_id: {}, location: {}",
-        region_id,
-        location,
-    ))]
+    #[snafu(display("Failed to decode WAL entry, region_id: {}", region_id))]
     DecodeWal {
         region_id: RegionId,
         location: Location,
         source: DecodeError,
     },
 
-    #[snafu(display(
-        "Failed to delete WAL, region_id: {}, location: {}",
-        region_id,
-        location,
-    ))]
+    #[snafu(display("Failed to delete WAL, region_id: {}", region_id))]
     DeleteWal {
         region_id: RegionId,
         location: Location,
@@ -227,89 +210,78 @@ pub enum Error {
     #[snafu(display("Row value mismatches field data type"))]
     FieldTypeMismatch { source: datatypes::error::Error },
 
-    #[snafu(display("Failed to serialize field, location: {}", location))]
+    #[snafu(display("Failed to serialize field"))]
     SerializeField {
         source: memcomparable::Error,
         location: Location,
     },
 
     #[snafu(display(
-        "Data type: {} does not support serialization/deserialization, location: {}",
+        "Data type: {} does not support serialization/deserialization",
         data_type,
-        location
     ))]
     NotSupportedField {
         data_type: ConcreteDataType,
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize field, location: {}", location))]
+    #[snafu(display("Failed to deserialize field"))]
     DeserializeField {
         source: memcomparable::Error,
         location: Location,
     },
 
-    #[snafu(display(
-        "Invalid parquet SST file {}, location: {}, reason: {}",
-        file,
-        location,
-        reason
-    ))]
+    #[snafu(display("Invalid parquet SST file {}, reason: {}", file, reason))]
     InvalidParquet {
         file: String,
         reason: String,
         location: Location,
     },
 
-    #[snafu(display("Invalid batch, {}, location: {}", reason, location))]
+    #[snafu(display("Invalid batch, {}", reason))]
     InvalidBatch { reason: String, location: Location },
 
-    #[snafu(display("Invalid arrow record batch, {}, location: {}", reason, location))]
+    #[snafu(display("Invalid arrow record batch, {}", reason))]
     InvalidRecordBatch { reason: String, location: Location },
 
-    #[snafu(display("Failed to convert array to vector, location: {}", location))]
+    #[snafu(display("Failed to convert array to vector"))]
     ConvertVector {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to compute arrow arrays, location: {}", location))]
+    #[snafu(display("Failed to compute arrow arrays"))]
     ComputeArrow {
         location: Location,
         source: datatypes::arrow::error::ArrowError,
     },
 
-    #[snafu(display("Failed to compute vector, location: {}", location))]
+    #[snafu(display("Failed to compute vector"))]
     ComputeVector {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Primary key length mismatch, expect: {}, actual: {}, location: {}",
-        expect,
-        actual,
-        location
-    ))]
+    #[snafu(display("Primary key length mismatch, expect: {}, actual: {}", expect, actual))]
     PrimaryKeyLengthMismatch {
         expect: usize,
         actual: usize,
         location: Location,
     },
 
-    #[snafu(display("Invalid sender, location: {}", location,))]
+    #[snafu(display("Invalid sender",))]
     InvalidSender { location: Location },
 
-    #[snafu(display("Invalid scheduler state, location: {}", location))]
+    #[snafu(display("Invalid scheduler state"))]
     InvalidSchedulerState { location: Location },
 
-    #[snafu(display("Failed to stop scheduler, location: {}", location))]
+    #[snafu(display("Failed to stop scheduler"))]
     StopScheduler {
         source: JoinError,
         location: Location,
     },
 
-    #[snafu(display("Failed to build scan predicate, location: {}", location))]
+    #[snafu(display("Failed to build scan predicate"))]
     BuildPredicate {
         source: table::error::Error,
         location: Location,
@@ -322,42 +294,41 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to flush region {}, location: {}", region_id, location))]
+    #[snafu(display("Failed to flush region {}", region_id))]
     FlushRegion {
         region_id: RegionId,
         source: Arc<Error>,
         location: Location,
     },
 
-    #[snafu(display("Region {} is dropped, location: {}", region_id, location))]
+    #[snafu(display("Region {} is dropped", region_id))]
     RegionDropped {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Region {} is closed, location: {}", region_id, location))]
+    #[snafu(display("Region {} is closed", region_id))]
     RegionClosed {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Region {} is truncated, location: {}", region_id, location))]
+    #[snafu(display("Region {} is truncated", region_id))]
     RegionTruncated {
         region_id: RegionId,
         location: Location,
     },
 
     #[snafu(display(
-        "Engine write buffer is full, rejecting write requests of region {}, location: {}",
+        "Engine write buffer is full, rejecting write requests of region {}",
         region_id,
-        location
     ))]
     RejectWrite {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Failed to compact region {}, location: {}", region_id, location))]
+    #[snafu(display("Failed to compact region {}", region_id))]
     CompactRegion {
         region_id: RegionId,
         source: Arc<Error>,
@@ -365,10 +336,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to compat readers for region {}, reason: {}, location: {}",
+        "Failed to compat readers for region {}, reason: {}",
         region_id,
         reason,
-        location
     ))]
     CompatReader {
         region_id: RegionId,
@@ -382,7 +352,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} is read only, location: {}", region_id, location))]
+    #[snafu(display("Region {} is read only", region_id))]
     RegionReadonly {
         region_id: RegionId,
         location: Location,

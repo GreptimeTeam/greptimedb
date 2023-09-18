@@ -492,7 +492,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to join spawned tasks, location: {}", location))]
+    #[snafu(display("Failed to join spawned tasks"))]
     JoinError {
         source: JoinError,
         location: Location,

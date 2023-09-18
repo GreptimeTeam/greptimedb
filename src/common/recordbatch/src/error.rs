@@ -37,7 +37,7 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("External error, location: {}", location))]
+    #[snafu(display("External error"))]
     External {
         location: Location,
         source: BoxedError,

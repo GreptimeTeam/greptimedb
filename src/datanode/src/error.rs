@@ -200,7 +200,7 @@ pub enum Error {
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
-    #[snafu(display("Expect MetaClient but not found, location: {}", location))]
+    #[snafu(display("Expect MetaClient but not found"))]
     MissingMetaClient { location: Location },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
@@ -280,10 +280,10 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing node id in Datanode config, location: {}", location))]
+    #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId { location: Location },
 
-    #[snafu(display("Missing node id option in distributed mode, location: {}", location))]
+    #[snafu(display("Missing node id option in distributed mode"))]
     MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
@@ -367,44 +367,35 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to handle request for region {}, location: {}",
-        region_id,
-        location
-    ))]
+    #[snafu(display("Failed to handle request for region {}", region_id))]
     HandleRegionRequest {
         region_id: RegionId,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("RegionId {} not found, location: {}", region_id, location))]
+    #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Region engine {} is not registered, location: {}", name, location))]
+    #[snafu(display("Region engine {} is not registered", name))]
     RegionEngineNotFound { name: String, location: Location },
 
-    #[snafu(display("Unsupported gRPC request, kind: {}, location: {}", kind, location))]
+    #[snafu(display("Unsupported gRPC request, kind: {}", kind))]
     UnsupportedGrpcRequest { kind: String, location: Location },
 
-    #[snafu(display(
-        "Unsupported output type, expected: {}, location: {}",
-        expected,
-        location
-    ))]
+    #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to get metadata from engine {} for region_id {}, location: {}",
+        "Failed to get metadata from engine {} for region_id {}",
         engine,
         region_id,
-        location,
     ))]
     GetRegionMetadata {
         engine: String,
@@ -413,13 +404,13 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to build region requests, location:{}", location))]
+    #[snafu(display("Failed to build region requests"))]
     BuildRegionRequests {
         location: Location,
         source: store_api::metadata::MetadataError,
     },
 
-    #[snafu(display("Failed to stop region engine {}, location:{}", name, location))]
+    #[snafu(display("Failed to stop region engine {}", name))]
     StopRegionEngine {
         name: String,
         location: Location,

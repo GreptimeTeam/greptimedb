@@ -226,14 +226,10 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
-    #[snafu(display("Unknown table type, downcast failed, location: {}", location))]
+    #[snafu(display("Unknown table type, downcast failed"))]
     UnknownTable { location: Location },
 
-    #[snafu(display(
-        "Cannot find time index column in table {}, location: {}",
-        table,
-        location
-    ))]
+    #[snafu(display("Cannot find time index column in table {}", table))]
     TimeIndexNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to add duration '{:?}' to SystemTime, overflowed", duration))]

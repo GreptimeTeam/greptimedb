@@ -122,7 +122,7 @@ pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
 
-    #[snafu(display("Failed to execute via Etcd, location: {}", location))]
+    #[snafu(display("Failed to execute via Etcd"))]
     EtcdFailed {
         source: etcd_client::Error,
         location: Location,
@@ -498,10 +498,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Too many partitions, location: {}", location))]
+    #[snafu(display("Too many partitions"))]
     TooManyPartitions { location: Location },
 
-    #[snafu(display("Unsupported operation {}, location: {}", operation, location))]
+    #[snafu(display("Unsupported operation {}", operation))]
     Unsupported {
         operation: String,
         location: Location,
