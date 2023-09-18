@@ -47,6 +47,11 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
+        if version.metadata.schema_version >= request.schema_version {
+            // Returns if it altered.
+            sender.send(Ok(Output::AffectedRows(0)));
+            return;
+        }
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
             // If memtable is not empty, we can't alter it directly and need to flush
