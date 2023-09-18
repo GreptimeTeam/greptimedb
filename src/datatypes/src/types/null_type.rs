@@ -57,7 +57,7 @@ impl DataType for NullType {
     }
 
     // Unconditional cast other type to Value::Null
-    fn cast(&self, _from: Value) -> Option<Value> {
+    fn try_cast(&self, _from: Value) -> Option<Value> {
         Some(Value::Null)
     }
 }

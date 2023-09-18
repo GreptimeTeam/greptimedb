@@ -58,7 +58,7 @@ impl DataType for BooleanType {
         false
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Boolean(v) => Some(Value::Boolean(v)),
             Value::UInt8(v) => numeric_to_bool(v),
@@ -110,7 +110,7 @@ mod tests {
     macro_rules! test_cast_to_bool {
         ($value: expr, $expected: expr) => {
             let val = $value;
-            let b = ConcreteDataType::boolean_datatype().cast(val).unwrap();
+            let b = ConcreteDataType::boolean_datatype().try_cast(val).unwrap();
             assert_eq!(b, Value::Boolean($expected));
         };
     }
@@ -118,7 +118,7 @@ mod tests {
     macro_rules! test_cast_from_bool {
         ($value: expr, $datatype: expr, $expected: expr) => {
             let val = Value::Boolean($value);
-            let b = $datatype.cast(val).unwrap();
+            let b = $datatype.try_cast(val).unwrap();
             assert_eq!(b, $expected);
         };
     }

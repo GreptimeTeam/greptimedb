@@ -90,7 +90,7 @@ macro_rules! impl_data_type_for_interval {
                     false
                 }
 
-                fn cast(&self, _: Value) -> Option<Value> {
+                fn try_cast(&self, _: Value) -> Option<Value> {
                     unimplemented!("interval type cast not implemented yet")
                 }
             }

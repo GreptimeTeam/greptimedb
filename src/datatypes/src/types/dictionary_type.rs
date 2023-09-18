@@ -89,7 +89,7 @@ impl DataType for DictionaryType {
         false
     }
 
-    fn cast(&self, _: Value) -> Option<Value> {
+    fn try_cast(&self, _: Value) -> Option<Value> {
         unimplemented!()
     }
 }

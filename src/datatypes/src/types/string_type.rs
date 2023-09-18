@@ -58,7 +58,7 @@ impl DataType for StringType {
         false
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         if from.logical_type_id() == self.logical_type_id() {
             return Some(from);
         }

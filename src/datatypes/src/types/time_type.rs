@@ -116,7 +116,7 @@ macro_rules! impl_data_type_for_time {
                     false
                 }
 
-                fn cast(&self, from: Value) -> Option<Value> {
+                fn try_cast(&self, from: Value) -> Option<Value> {
                     match from {
                         Value::$TargetType(v) => Some(Value::Time(Time::new(v as i64, TimeUnit::$unit))),
                         Value::Time(v) => v.convert_to(TimeUnit::$unit).map(Value::Time),
@@ -230,44 +230,46 @@ mod tests {
     fn test_time_cast() {
         // Int32 -> TimeSecondType
         let val = Value::Int32(1000);
-        let time = ConcreteDataType::time_second_datatype().cast(val).unwrap();
+        let time = ConcreteDataType::time_second_datatype()
+            .try_cast(val)
+            .unwrap();
         assert_eq!(time, Value::Time(Time::new_second(1000)));
 
         // Int32 -> TimeMillisecondType
         let val = Value::Int32(2000);
         let time = ConcreteDataType::time_millisecond_datatype()
-            .cast(val)
+            .try_cast(val)
             .unwrap();
         assert_eq!(time, Value::Time(Time::new_millisecond(2000)));
 
         // Int64 -> TimeMicrosecondType
         let val = Value::Int64(3000);
         let time = ConcreteDataType::time_microsecond_datatype()
-            .cast(val)
+            .try_cast(val)
             .unwrap();
         assert_eq!(time, Value::Time(Time::new_microsecond(3000)));
 
         // Int64 -> TimeNanosecondType
         let val = Value::Int64(4000);
         let time = ConcreteDataType::time_nanosecond_datatype()
-            .cast(val)
+            .try_cast(val)
             .unwrap();
         assert_eq!(time, Value::Time(Time::new_nanosecond(4000)));
 
         // Other situations will return None, such as Int64 -> TimeSecondType or
         // Int32 -> TimeMicrosecondType etc.
         let val = Value::Int64(123);
-        let time = ConcreteDataType::time_second_datatype().cast(val);
+        let time = ConcreteDataType::time_second_datatype().try_cast(val);
         assert_eq!(time, None);
 
         let val = Value::Int32(123);
-        let time = ConcreteDataType::time_microsecond_datatype().cast(val);
+        let time = ConcreteDataType::time_microsecond_datatype().try_cast(val);
         assert_eq!(time, None);
 
         // TimeSecond -> TimeMicroSecond
         let second = Value::Time(Time::new_second(2023));
         let microsecond = ConcreteDataType::time_microsecond_datatype()
-            .cast(second)
+            .try_cast(second)
             .unwrap();
         assert_eq!(
             microsecond,
@@ -276,7 +278,7 @@ mod tests {
 
         // test overflow
         let second = Value::Time(Time::new_second(i64::MAX));
-        let microsecond = ConcreteDataType::time_microsecond_datatype().cast(second);
+        let microsecond = ConcreteDataType::time_microsecond_datatype().try_cast(second);
         assert_eq!(microsecond, None);
     }
 }

@@ -133,7 +133,7 @@ macro_rules! impl_data_type_for_timestamp {
                     true
                 }
 
-                fn cast(&self, from: Value)-> Option<Value>{
+                fn try_cast(&self, from: Value)-> Option<Value>{
                     match from {
                         Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),
                         Value::String(v) => Timestamp::from_str(v.as_utf8()).map(Value::Timestamp).ok(),
@@ -237,39 +237,39 @@ mod tests {
         // String -> TimestampSecond
         let s = Value::String("2021-01-01 01:02:03".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype()
-            .cast(s)
+            .try_cast(s)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1609434123)));
         // String cast failed
         let s = Value::String("12345".to_string().into());
-        let ts = ConcreteDataType::timestamp_second_datatype().cast(s);
+        let ts = ConcreteDataType::timestamp_second_datatype().try_cast(s);
         assert_eq!(ts, None);
 
         let n = Value::Int64(1694589525);
         // Int64 -> TimestampSecond
         let ts = ConcreteDataType::timestamp_second_datatype()
-            .cast(n)
+            .try_cast(n)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1694589525)));
 
         // Datetime -> TimestampSecond
         let dt = Value::DateTime(DateTime::from(1234567));
         let ts = ConcreteDataType::timestamp_second_datatype()
-            .cast(dt)
+            .try_cast(dt)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1234567)));
 
         // Date -> TimestampMillisecond
         let d = Value::Date(Date::from_str("1970-01-01").unwrap());
         let ts = ConcreteDataType::timestamp_millisecond_datatype()
-            .cast(d)
+            .try_cast(d)
             .unwrap();
         assert_eq!(ts, Value::Timestamp(Timestamp::new_millisecond(0)));
 
         // TimestampSecond -> TimestampMicrosecond
         let second = Value::Timestamp(Timestamp::new_second(123));
         let microsecond = ConcreteDataType::timestamp_microsecond_datatype()
-            .cast(second)
+            .try_cast(second)
             .unwrap();
         assert_eq!(
             microsecond,

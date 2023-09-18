@@ -54,7 +54,7 @@ impl DataType for DateTimeType {
         false
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
             Value::Timestamp(v) => v.to_chrono_datetime().map(|d| Value::DateTime(d.into())),
@@ -113,13 +113,13 @@ mod tests {
     fn test_datetime_cast() {
         // cast from Int64
         let val = Value::Int64(1000);
-        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(dt, Value::DateTime(DateTime::from(1000)));
 
         // cast from String
         std::env::set_var("TZ", "Asia/Shanghai");
         let val = Value::String("1970-01-01 00:00:00+0800".into());
-        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,
             Value::DateTime(DateTime::from_str("1970-01-01 00:00:00+0800").unwrap())
@@ -127,7 +127,7 @@ mod tests {
 
         // cast from Timestamp
         let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29.042+0800").unwrap());
-        let dt = ConcreteDataType::datetime_datatype().cast(val).unwrap();
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,
             Value::DateTime(DateTime::from_str("2020-09-08 21:42:29+0800").unwrap())

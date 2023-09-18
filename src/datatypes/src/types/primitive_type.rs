@@ -275,7 +275,7 @@ macro_rules! define_non_timestamp_primitive {
                 false
             }
 
-            fn cast(&self, from: Value) -> Option<Value> {
+            fn try_cast(&self, from: Value) -> Option<Value> {
                 match from {
                     Value::Boolean(v) => bool_to_numeric(v).map(Value::$TypeId),
                     Value::String(v) => v.as_utf8().parse::<$Native>().map(|val| Value::from(val)).ok(),
@@ -362,7 +362,7 @@ impl DataType for Int64Type {
         true
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Boolean(v) => bool_to_numeric(v).map(Value::Int64),
             Value::Int8(v) => num::cast::cast(v).map(Value::Int64),
@@ -420,7 +420,7 @@ impl DataType for Int32Type {
         false
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Boolean(v) => bool_to_numeric(v).map(Value::Int32),
             Value::Int8(v) => num::cast::cast(v).map(Value::Int32),
@@ -494,7 +494,7 @@ mod tests {
     macro_rules! assert_primitive_cast {
         ($value: expr, $datatype:expr, $expected: expr) => {
             let val = $value;
-            let b = $datatype.cast(val).unwrap();
+            let b = $datatype.try_cast(val).unwrap();
             assert_eq!(b, $expected);
         };
     }

@@ -80,7 +80,7 @@ impl DataType for ListType {
         false
     }
 
-    fn cast(&self, from: Value) -> Option<Value> {
+    fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::List(v) => Some(Value::List(v)),
             _ => None,

@@ -459,7 +459,7 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
 
     /// Casts the value to this DataType.
     /// Return None if cast failed.
-    fn cast(&self, from: Value) -> Option<Value>;
+    fn try_cast(&self, from: Value) -> Option<Value>;
 }
 
 pub type DataTypeRef = Arc<dyn DataType>;
