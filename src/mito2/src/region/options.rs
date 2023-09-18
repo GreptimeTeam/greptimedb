@@ -158,7 +158,7 @@ mod tests {
 
     fn make_map(options: &[(&str, &str)]) -> HashMap<String, String> {
         options
-            .into_iter()
+            .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     }
