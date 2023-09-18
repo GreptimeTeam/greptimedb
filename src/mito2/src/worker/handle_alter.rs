@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -47,15 +47,11 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
-<<<<<<< Updated upstream
-        if version.metadata.schema_version >= request.schema_version {
-=======
         if version.metadata.schema_version > request.schema_version {
             warn!(
-                "region schema version {} greater than request schema version {}",
-                version.metadata.schema_version, request.schema_version
+                "region id:{}, region schema version {} greater than request schema version {}",
+                region_id, version.metadata.schema_version, request.schema_version
             );
->>>>>>> Stashed changes
             // Returns if it altered.
             sender.send(Ok(Output::AffectedRows(0)));
             return;
