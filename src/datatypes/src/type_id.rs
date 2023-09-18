@@ -51,6 +51,12 @@ pub enum LogicalTypeId {
     TimeMillisecond,
     TimeMicrosecond,
     TimeNanosecond,
+    /// A 64-bit duration representing the elapsed time in either seconds,
+    /// milliseconds, microseconds or nanoseconds.
+    DurationSecond,
+    DurationMillisecond,
+    DurationMicrosecond,
+    DurationNanosecond,
     /// A 32-bit interval representing the elapsed time in months.
     IntervalYearMonth,
     /// A 64-bit interval representing the elapsed time in days and milliseconds.
@@ -113,6 +119,10 @@ impl LogicalTypeId {
             LogicalTypeId::IntervalMonthDayNano => {
                 ConcreteDataType::interval_month_day_nano_datatype()
             }
+            LogicalTypeId::DurationSecond => ConcreteDataType::duration_second_datatype(),
+            LogicalTypeId::DurationMillisecond => ConcreteDataType::duration_millisecond_datatype(),
+            LogicalTypeId::DurationMicrosecond => ConcreteDataType::duration_microsecond_datatype(),
+            LogicalTypeId::DurationNanosecond => ConcreteDataType::duration_nanosecond_datatype(),
         }
     }
 }

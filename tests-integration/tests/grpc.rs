@@ -253,6 +253,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         is_nullable: true,
         default_constraint: vec![],
         semantic_type: SemanticType::Field as i32,
+        ..Default::default()
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
@@ -343,6 +344,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: false,
             default_constraint: vec![],
             semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "cpu".to_string(),
@@ -350,6 +352,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: true,
             default_constraint: vec![],
             semantic_type: SemanticType::Field as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "memory".to_string(),
@@ -357,6 +360,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: true,
             default_constraint: vec![],
             semantic_type: SemanticType::Field as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "ts".to_string(),
@@ -364,6 +368,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: false,
             default_constraint: vec![],
             semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
         },
     ];
     CreateTableExpr {

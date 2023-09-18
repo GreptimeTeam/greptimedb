@@ -77,6 +77,19 @@ impl Time {
         self.value
     }
 
+    /// Convert a time to given time unit.
+    /// Return `None` if conversion causes overflow.
+    pub fn convert_to(&self, unit: TimeUnit) -> Option<Time> {
+        if self.unit().factor() >= unit.factor() {
+            let mul = self.unit().factor() / unit.factor();
+            let value = self.value.checked_mul(mul as i64)?;
+            Some(Time::new(value, unit))
+        } else {
+            let mul = unit.factor() / self.unit().factor();
+            Some(Time::new(self.value.div_euclid(mul as i64), unit))
+        }
+    }
+
     /// Split a [Time] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
     fn split(&self) -> (i64, u32) {

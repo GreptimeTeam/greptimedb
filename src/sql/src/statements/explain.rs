@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use sqlparser::ast::Statement as SpStatement;
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::Error;
 
 /// Explain statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct Explain {
     pub inner: SpStatement,
 }

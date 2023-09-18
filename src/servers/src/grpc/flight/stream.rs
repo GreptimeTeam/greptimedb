@@ -18,7 +18,7 @@ use std::task::{Context, Poll};
 use arrow_flight::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::warn;
+use common_telemetry::{warn, TRACE_ID};
 use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
@@ -39,12 +39,11 @@ pub struct FlightRecordBatchStream {
 }
 
 impl FlightRecordBatchStream {
-    pub fn new(recordbatches: SendableRecordBatchStream) -> Self {
+    pub fn new(recordbatches: SendableRecordBatchStream, trace_id: u64) -> Self {
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
-        let join_handle =
-            common_runtime::spawn_read(
-                async move { Self::flight_data_stream(recordbatches, tx).await },
-            );
+        let join_handle = common_runtime::spawn_read(TRACE_ID.scope(trace_id, async move {
+            Self::flight_data_stream(recordbatches, tx).await
+        }));
         Self {
             rx,
             join_handle,
@@ -146,7 +145,7 @@ mod test {
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()])
             .unwrap()
             .as_stream();
-        let mut stream = FlightRecordBatchStream::new(recordbatches);
+        let mut stream = FlightRecordBatchStream::new(recordbatches, 0);
 
         let mut raw_data = Vec::with_capacity(2);
         raw_data.push(stream.next().await.unwrap().unwrap());

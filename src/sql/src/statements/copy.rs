@@ -12,35 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use sqlparser::ast::ObjectName;
+use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crate::statements::OptionMap;
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Copy {
     CopyTable(CopyTable),
     CopyDatabase(CopyDatabaseArgument),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum CopyTable {
     To(CopyTableArgument),
     From(CopyTableArgument),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct CopyDatabaseArgument {
     pub database_name: ObjectName,
-    pub with: HashMap<String, String>,
-    pub connection: HashMap<String, String>,
+    pub with: OptionMap,
+    pub connection: OptionMap,
     pub location: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct CopyTableArgument {
     pub table_name: ObjectName,
-    pub with: HashMap<String, String>,
-    pub connection: HashMap<String, String>,
+    pub with: OptionMap,
+    pub connection: OptionMap,
     /// Copy tbl [To|From] 'location'.
     pub location: String,
 }

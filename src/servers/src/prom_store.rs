@@ -189,7 +189,7 @@ impl PartialOrd for TimeSeriesId {
 }
 
 /// Collect each row's timeseries id
-/// This processing is ugly, hope https://github.com/GreptimeTeam/greptimedb/issues/336 making some progress in future.
+/// This processing is ugly, hope <https://github.com/GreptimeTeam/greptimedb/issues/336> making some progress in future.
 fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<TimeSeriesId> {
     let row_count = recordbatch.num_rows();
     let mut timeseries_ids = Vec::with_capacity(row_count);

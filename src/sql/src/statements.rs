@@ -20,10 +20,12 @@ pub mod describe;
 pub mod drop;
 pub mod explain;
 pub mod insert;
+mod option_map;
 pub mod query;
 pub mod show;
 pub mod statement;
 pub mod tql;
+mod transform;
 pub mod truncate;
 
 use std::str::FromStr;
@@ -38,7 +40,9 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::TimestampType;
 use datatypes::value::{OrderedF32, OrderedF64, Value};
+pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
+pub use transform::{get_data_type_by_alias_name, transform_statements};
 
 use crate::ast::{
     ColumnDef, ColumnOption, ColumnOptionDef, DataType as SqlDataType, Expr, TimezoneInfo,
@@ -343,6 +347,7 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         default_constraint: default_constraint.unwrap_or_default(),
         // TODO(#1308): support adding new primary key columns
         semantic_type: SemanticType::Field as _,
+        comment: String::new(),
     })
 }
 
@@ -414,11 +419,14 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
             Some(time_type.precision()),
             TimezoneInfo::None,
         )),
+        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
-        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Duration(_)
+        | ConcreteDataType::Null(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_) => {
             unreachable!()
         }
-        ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
     }
 }
 

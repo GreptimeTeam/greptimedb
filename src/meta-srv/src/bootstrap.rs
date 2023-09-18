@@ -60,7 +60,7 @@ impl MetaSrvInstance {
     pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts).await?;
         let http_srv = Arc::new(
-            HttpServerBuilder::new(opts.http_opts.clone())
+            HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build(),
@@ -82,14 +82,9 @@ impl MetaSrvInstance {
 
         let meta_srv =
             bootstrap_meta_srv_with_router(&self.opts.bind_addr, router(self.meta_srv.clone()), rx);
-        let addr = self
-            .opts
-            .http_opts
-            .addr
-            .parse()
-            .context(error::ParseAddrSnafu {
-                addr: &self.opts.http_opts.addr,
-            })?;
+        let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
+            addr: &self.opts.http.addr,
+        })?;
         let http_srv = self.http_srv.start(addr);
         select! {
             v = meta_srv => v?,

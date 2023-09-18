@@ -12,7 +12,7 @@ members = [
     "src/common/datasource",
     "src/common/error",
     "src/common/function",
-    "src/common/function-macro",
+    "src/common/macro",
     "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
@@ -30,7 +30,7 @@ members = [
     "src/common/version",
     "src/datanode",
     "src/datatypes",
-    "src/file-table-engine",
+    "src/file-engine",
     "src/frontend",
     "src/log-store",
     "src/meta-client",
@@ -61,6 +61,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+aquamarine = "0.3"
 arrow = { version = "43.0" }
 etcd-client = "0.11"
 arrow-array = "43.0"
@@ -79,7 +80,7 @@ datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git
 derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "e81a60e817a348ee5b7dfbd991f86d35cd068ce5" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -123,7 +124,7 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }
-common-function-macro = { path = "src/common/function-macro" }
+common-macro = { path = "src/common/macro" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
 common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
@@ -142,7 +143,7 @@ common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
-file-table-engine = { path = "src/file-table-engine" }
+file-engine = { path = "src/file-engine" }
 frontend = { path = "src/frontend" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }

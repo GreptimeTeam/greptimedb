@@ -15,9 +15,11 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use axum::extract::{Json, Query, RawBody, State};
+use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContext;
 
 use crate::http::{ApiState, JsonResponse};
 
@@ -51,6 +53,9 @@ pub async fn scripts(
     RawBody(body): RawBody,
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
+        let catalog = params
+            .catalog
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
         let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
@@ -67,8 +72,10 @@ pub async fn scripts(
 
         let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
 
+        // Safety: schema and name are already checked above.
+        let query_ctx = QueryContext::with(&catalog, schema.unwrap());
         let body = match script_handler
-            .insert_script(schema.unwrap(), name.unwrap(), &script)
+            .insert_script(query_ctx, name.unwrap(), &script)
             .await
         {
             Ok(()) => JsonResponse::with_output(None),
@@ -83,6 +90,7 @@ pub async fn scripts(
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct ScriptQuery {
+    pub catalog: Option<String>,
     pub db: Option<String>,
     pub name: Option<String>,
     #[serde(flatten)]
@@ -96,6 +104,9 @@ pub async fn run_script(
     Query(params): Query<ScriptQuery>,
 ) -> Json<JsonResponse> {
     if let Some(script_handler) = &state.script_handler {
+        let catalog = params
+            .catalog
+            .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string());
         let start = Instant::now();
         let schema = params.db.as_ref();
 
@@ -109,10 +120,10 @@ pub async fn run_script(
             json_err!("invalid name");
         }
 
-        // TODO(sunng87): query_context and db name resolution
-
+        // Safety: schema and name are already checked above.
+        let query_ctx = QueryContext::with(&catalog, schema.unwrap());
         let output = script_handler
-            .execute_script(schema.unwrap(), name.unwrap(), params.params)
+            .execute_script(query_ctx, name.unwrap(), params.params)
             .await;
         let resp = JsonResponse::from_output(vec![output]).await;
 

@@ -130,6 +130,7 @@ impl CreateTableProcedure {
                         is_nullable: c.is_nullable,
                         default_constraint: c.default_constraint.clone(),
                         semantic_type: semantic_type as i32,
+                        comment: String::new(),
                     }),
                     column_id: i as u32,
                 }

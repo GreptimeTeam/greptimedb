@@ -17,7 +17,7 @@ use std::vec;
 use api::v1::alter_expr::Kind;
 use api::v1::region::{
     alter_request, region_request, AddColumn, AddColumns, AlterRequest, DropColumn, DropColumns,
-    RegionColumnDef, RegionRequest,
+    RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
 use api::v1::{AlterExpr, RenameTable};
 use async_trait::async_trait;
@@ -201,7 +201,10 @@ impl AlterTableProcedure {
                     let region_id = RegionId::new(table_id, region);
                     let request = self.create_alter_region_request(region_id)?;
                     let request = RegionRequest {
-                        header: None,
+                        header: Some(RegionRequestHeader {
+                            trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                            ..Default::default()
+                        }),
                         body: Some(region_request::Body::Alter(request)),
                     };
                     debug!("Submitting {request:?} to {datanode}");

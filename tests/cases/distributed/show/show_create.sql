@@ -2,13 +2,12 @@ CREATE TABLE system_metrics (
   id INT UNSIGNED,
   host STRING,
   cpu DOUBLE,
-  disk FLOAT,
-  n INT COMMENT 'range key',
+  disk FLOAT COMMENT 'comment',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (n) (
+PARTITION BY RANGE COLUMNS (id) (
     PARTITION r0 VALUES LESS THAN (5),
     PARTITION r1 VALUES LESS THAN (9),
     PARTITION r2 VALUES LESS THAN (MAXVALUE),
@@ -36,12 +35,11 @@ CREATE TABLE not_supported_table_options_keys (
   host STRING,
   cpu DOUBLE,
   disk FLOAT,
-  n INT COMMENT 'range key',
   ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
   TIME INDEX (ts),
   PRIMARY KEY (id, host)
 )
-PARTITION BY RANGE COLUMNS (n) (
+PARTITION BY RANGE COLUMNS (id) (
     PARTITION r0 VALUES LESS THAN (5),
     PARTITION r1 VALUES LESS THAN (9),
     PARTITION r2 VALUES LESS THAN (MAXVALUE),

@@ -22,7 +22,7 @@ use store_api::storage::RegionNumber;
 use crate::error::{self, Result};
 use crate::partition::{PartitionBound, PartitionExpr, PartitionRule};
 
-/// A [RangeColumnsPartitionRule] is very similar to [RangePartitionRule] except that it allows
+/// A [RangeColumnsPartitionRule] is very similar to [RangePartitionRule](crate::range::RangePartitionRule) except that it allows
 /// partitioning by multiple columns.
 ///
 /// This rule is generated from create table request, using MySQL's syntax:

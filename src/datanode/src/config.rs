@@ -20,6 +20,7 @@ use common_base::readable_size::ReadableSize;
 use common_config::WalConfig;
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
@@ -212,7 +213,7 @@ impl Default for ObjectStoreConfig {
 #[serde(default)]
 pub struct RegionManifestConfig {
     /// Region manifest checkpoint actions margin.
-    /// Manifest service create a checkpoint every [checkpoint_margin] actions.
+    /// Manifest service create a checkpoint every `checkpoint_margin` actions.
     pub checkpoint_margin: Option<u16>,
     /// Region manifest logs and checkpoints gc task execution duration.
     #[serde(with = "humantime_serde")]
@@ -319,12 +320,13 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
 pub struct DatanodeOptions {
     pub mode: Mode,
     pub node_id: Option<u64>,
+    pub require_lease_before_startup: bool,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
     pub heartbeat: HeartbeatOptions,
-    pub http_opts: HttpOptions,
-    pub meta_client_options: Option<MetaClientOptions>,
+    pub http: HttpOptions,
+    pub meta_client: Option<MetaClientOptions>,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     /// Options for different store engines.
@@ -338,16 +340,20 @@ impl Default for DatanodeOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
+            require_lease_before_startup: false,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
-            http_opts: HttpOptions::default(),
-            meta_client_options: None,
+            http: HttpOptions::default(),
+            meta_client: None,
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig::default()),
+                RegionEngineConfig::File(FileEngineConfig::default()),
+            ],
             logging: LoggingOptions::default(),
-            heartbeat: HeartbeatOptions::default(),
+            heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
         }
     }
@@ -355,7 +361,7 @@ impl Default for DatanodeOptions {
 
 impl DatanodeOptions {
     pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client_options.metasrv_addrs"])
+        Some(&["meta_client.metasrv_addrs"])
     }
 
     pub fn to_toml_string(&self) -> String {
@@ -367,6 +373,8 @@ impl DatanodeOptions {
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),
+    #[serde(rename = "file")]
+    File(FileEngineConfig),
 }
 
 #[cfg(test)]

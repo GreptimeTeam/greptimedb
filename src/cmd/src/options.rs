@@ -136,7 +136,7 @@ mod tests {
             mysql_addr = "127.0.0.1:4406"
             mysql_runtime_size = 2
 
-            [meta_client_options]
+            [meta_client]
             timeout_millis = 3000
             connect_timeout_millis = 5000
             tcp_nodelay = true
@@ -217,10 +217,10 @@ mod tests {
                     Some("/other/wal/dir"),
                 ),
                 (
-                    // meta_client_options.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
+                    // meta_client.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
                     [
                         env_prefix.to_string(),
-                        "meta_client_options".to_uppercase(),
+                        "meta_client".to_uppercase(),
                         "metasrv_addrs".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -248,7 +248,7 @@ mod tests {
                     Some(Duration::from_secs(42))
                 );
                 assert_eq!(
-                    opts.meta_client_options.unwrap().metasrv_addrs,
+                    opts.meta_client.unwrap().metasrv_addrs,
                     vec![
                         "127.0.0.1:3001".to_string(),
                         "127.0.0.1:3002".to_string(),

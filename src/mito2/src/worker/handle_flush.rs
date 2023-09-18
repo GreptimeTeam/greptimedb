@@ -14,12 +14,12 @@
 
 //! Handling flush related requests.
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::error::{RegionTruncatingSnafu, Result};
+use crate::error::{RegionTruncatedSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::MitoRegionRef;
@@ -39,7 +39,10 @@ impl<S> RegionWorkerLoop<S> {
 
         let mut task = self.new_flush_task(&region, FlushReason::Manual);
         task.push_sender(sender);
-        if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
+        if let Err(e) =
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)
+        {
             error!(e; "Failed to schedule flush task for region {}", region.region_id);
         }
     }
@@ -90,7 +93,11 @@ impl<S> RegionWorkerLoop<S> {
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
                 let task = self.new_flush_task(region, FlushReason::EngineFull);
-                self.flush_scheduler.schedule_flush(region, task)?;
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
             }
         }
 
@@ -99,7 +106,11 @@ impl<S> RegionWorkerLoop<S> {
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(region, FlushReason::EngineFull);
-                self.flush_scheduler.schedule_flush(region, task)?;
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
             }
         }
 
@@ -141,7 +152,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let version_data = region.version_control.current();
         if let Some(truncated_entry_id) = version_data.version.truncated_entry_id {
             if truncated_entry_id >= request.flushed_entry_id {
-                request.on_failure(RegionTruncatingSnafu { region_id }.build());
+                request.on_failure(RegionTruncatedSnafu { region_id }.build());
                 return;
             }
         }
@@ -197,6 +208,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let stalled = std::mem::take(&mut self.stalled_requests);
         // We already stalled these requests, don't stall them again.
         self.handle_write_requests(stalled.requests, false).await;
+
+        // Schedules compaction.
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(
+            region.region_id,
+            &region.version_control,
+            &region.access_layer,
+            &region.file_purger,
+            OptionOutputTx::none(),
+        ) {
+            warn!(
+                "Failed to schedule compaction after flush, region: {}, err: {}",
+                region.region_id, e
+            );
+        }
 
         self.listener.on_flush_success(region_id);
     }

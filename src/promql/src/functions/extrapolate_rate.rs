@@ -48,7 +48,7 @@ pub type Rate = ExtrapolatedRate<true, true>;
 pub type Increase = ExtrapolatedRate<true, false>;
 
 /// Part of the `extrapolatedRate` in Promql,
-/// from https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L66
+/// from <https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L66>
 #[derive(Debug)]
 pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
     /// Range duration in millisecond
@@ -56,7 +56,7 @@ pub struct ExtrapolatedRate<const IS_COUNTER: bool, const IS_RATE: bool> {
 }
 
 impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, IS_RATE> {
-    /// Constructor. Other public usage should use [`scalar_udf`] instead.
+    /// Constructor. Other public usage should use [scalar_udf()](ExtrapolatedRate::scalar_udf()) instead.
     fn new(range_length: i64) -> Self {
         Self { range_length }
     }

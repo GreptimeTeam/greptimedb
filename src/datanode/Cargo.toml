@@ -4,9 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-testing = ["meta-srv/mock"]
-
 [dependencies]
 api = { workspace = true }
 arrow-flight.workspace = true
@@ -38,17 +35,14 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }
-file-table-engine = { workspace = true }
+file-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
-key-lock = "0.1"
 log-store = { workspace = true }
 meta-client = { workspace = true }
-meta-srv = { workspace = true }
 metrics.workspace = true
-mito = { workspace = true }
 mito2 = { workspace = true }
 object-store = { workspace = true }
 pin-project = "1.0"
@@ -81,6 +75,4 @@ client = { workspace = true }
 common-query = { workspace = true }
 common-test-util = { workspace = true }
 datafusion-common.workspace = true
-meta-srv = { workspace = true, features = ["mock"] }
-mito = { workspace = true, features = ["test"] }
 session = { workspace = true }

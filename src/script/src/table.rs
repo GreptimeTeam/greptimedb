@@ -13,49 +13,68 @@
 // limitations under the License.
 
 //! Scripts table
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::helper::ColumnDataTypeWrapper;
+use api::v1::greptime_request::Request;
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnSchema as PbColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows,
+    SemanticType,
+};
 use catalog::error::CompileScriptInternalSnafu;
-use catalog::CatalogManagerRef;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::format_full_table_name;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use common_recordbatch::{util as record_util, RecordBatch, SendableRecordBatchStream};
 use common_telemetry::logging;
 use common_time::util;
 use datafusion::datasource::DefaultTableSource;
+use datafusion::logical_expr::{and, col, lit};
 use datafusion_common::TableReference;
 use datafusion_expr::LogicalPlanBuilder;
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
+use datatypes::prelude::ScalarVector;
 use datatypes::schema::{ColumnSchema, RawSchema};
-use datatypes::vectors::{StringVector, TimestampMillisecondVector, Vector, VectorRef};
-use query::parser::QueryLanguageParser;
+use datatypes::vectors::{StringVector, Vector};
 use query::plan::LogicalPlan;
 use query::QueryEngineRef;
-use session::context::QueryContextBuilder;
+use servers::query_handler::grpc::GrpcQueryHandlerRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{ensure, OptionExt, ResultExt};
-use table::requests::InsertRequest;
+use table::metadata::TableInfo;
 use table::table::adapter::DfTableProviderAdapter;
 use table::TableRef;
 
 use crate::error::{
     BuildDfLogicalPlanSnafu, CastTypeSnafu, CollectRecordsSnafu, ExecuteInternalStatementSnafu,
-    FindColumnInScriptsTableSnafu, FindScriptSnafu, FindScriptsTableSnafu, InsertScriptSnafu,
-    Result, ScriptNotFoundSnafu, ScriptsTableNotFoundSnafu,
+    FindColumnInScriptsTableSnafu, InsertScriptSnafu, Result, ScriptNotFoundSnafu,
 };
 use crate::python::PyScript;
 
 pub const SCRIPTS_TABLE_NAME: &str = "scripts";
 
-pub struct ScriptsTable {
-    catalog_manager: CatalogManagerRef,
+pub type ScriptsTableRef<E> = Arc<ScriptsTable<E>>;
+
+/// The scripts table that keeps the script content etc.
+pub struct ScriptsTable<E: ErrorExt + Send + Sync + 'static> {
+    table: TableRef,
+    grpc_handler: GrpcQueryHandlerRef<E>,
     query_engine: QueryEngineRef,
-    name: String,
 }
 
-impl ScriptsTable {
+impl<E: ErrorExt + Send + Sync + 'static> ScriptsTable<E> {
+    /// Create a new `[ScriptsTable]` based on the table.
+    pub fn new(
+        table: TableRef,
+        grpc_handler: GrpcQueryHandlerRef<E>,
+        query_engine: QueryEngineRef,
+    ) -> Self {
+        Self {
+            table,
+            grpc_handler,
+            query_engine,
+        }
+    }
+
     fn get_str_col_by_name<'a>(record: &'a RecordBatch, name: &str) -> Result<&'a StringVector> {
         let column = record
             .column_by_name(name)
@@ -79,6 +98,8 @@ impl ScriptsTable {
         table: TableRef,
         query_engine: QueryEngineRef,
     ) -> catalog::error::Result<()> {
+        let table_info = table.table_info();
+
         let rbs = Self::table_full_scan(table, &query_engine)
             .await
             .map_err(BoxedError::new)
@@ -108,6 +129,12 @@ impl ScriptsTable {
             script_list.extend(part_of_scripts_list);
         }
 
+        logging::info!(
+            "Found {} scripts in {}",
+            script_list.len(),
+            table_info.full_table_name()
+        );
+
         for (name, script) in script_list {
             match PyScript::from_script(&script, query_engine.clone()) {
                 Ok(script) => {
@@ -129,123 +156,86 @@ impl ScriptsTable {
         Ok(())
     }
 
-    pub fn new_empty(
-        catalog_manager: CatalogManagerRef,
-        query_engine: QueryEngineRef,
-    ) -> Result<Self> {
-        Ok(Self {
-            catalog_manager,
-            query_engine,
-            name: format_full_table_name(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                SCRIPTS_TABLE_NAME,
-            ),
-        })
-    }
-
-    pub async fn new(
-        catalog_manager: CatalogManagerRef,
-        query_engine: QueryEngineRef,
-    ) -> Result<Self> {
-        Ok(Self {
-            catalog_manager,
-            query_engine,
-            name: format_full_table_name(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                SCRIPTS_TABLE_NAME,
-            ),
-        })
-    }
-
     pub async fn insert(&self, schema: &str, name: &str, script: &str) -> Result<()> {
         let now = util::current_time_millis();
-        let columns_values: HashMap<String, VectorRef> = HashMap::from([
-            (
-                "schema".to_string(),
-                Arc::new(StringVector::from(vec![schema])) as VectorRef,
-            ),
-            ("name".to_string(), Arc::new(StringVector::from(vec![name]))),
-            (
-                "script".to_string(),
-                Arc::new(StringVector::from(vec![script])) as VectorRef,
-            ),
-            (
-                "engine".to_string(),
-                // TODO(dennis): we only supports python right now.
-                Arc::new(StringVector::from(vec!["python"])) as VectorRef,
-            ),
-            (
-                "timestamp".to_string(),
-                // Timestamp in key part is intentionally left to 0
-                Arc::new(TimestampMillisecondVector::from_slice([0])) as VectorRef,
-            ),
-            (
-                "gmt_created".to_string(),
-                Arc::new(TimestampMillisecondVector::from_slice([now])) as VectorRef,
-            ),
-            (
-                "gmt_modified".to_string(),
-                Arc::new(TimestampMillisecondVector::from_slice([now])) as VectorRef,
-            ),
-        ]);
-        let table = self
-            .catalog_manager
-            .table(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-                SCRIPTS_TABLE_NAME,
-            )
-            .await
-            .context(FindScriptsTableSnafu)?
-            .context(ScriptsTableNotFoundSnafu)?;
 
-        let _ = table
-            .insert(InsertRequest {
-                catalog_name: DEFAULT_CATALOG_NAME.to_string(),
-                schema_name: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: SCRIPTS_TABLE_NAME.to_string(),
-                columns_values,
-                region_number: 0,
-            })
+        let table_info = self.table.table_info();
+
+        let insert = RowInsertRequest {
+            table_name: SCRIPTS_TABLE_NAME.to_string(),
+            rows: Some(Rows {
+                schema: build_insert_column_schemas(),
+                rows: vec![Row {
+                    values: vec![
+                        ValueData::StringValue(schema.to_string()).into(),
+                        ValueData::StringValue(name.to_string()).into(),
+                        // TODO(dennis): we only supports python right now.
+                        ValueData::StringValue("python".to_string()).into(),
+                        ValueData::StringValue(script.to_string()).into(),
+                        // Timestamp in key part is intentionally left to 0
+                        ValueData::TimestampMillisecondValue(0).into(),
+                        ValueData::TimestampMillisecondValue(now).into(),
+                    ],
+                }],
+            }),
+        };
+
+        let requests = RowInsertRequests {
+            inserts: vec![insert],
+        };
+
+        let output = self
+            .grpc_handler
+            .do_query(Request::RowInserts(requests), query_ctx(&table_info))
             .await
+            .map_err(BoxedError::new)
             .context(InsertScriptSnafu { name })?;
 
-        logging::info!("Inserted script: name={} into scripts table.", name);
+        logging::info!(
+            "Inserted script: {} into scripts table: {}, output: {:?}.",
+            name,
+            table_info.full_table_name(),
+            output
+        );
 
         Ok(())
     }
 
     pub async fn find_script_by_name(&self, schema: &str, name: &str) -> Result<String> {
-        // FIXME(dennis): SQL injection
-        // TODO(dennis): we use sql to find the script, the better way is use a function
-        //               such as `find_record_by_primary_key` in table_engine.
-        let sql = format!(
-            "select script from {} where schema='{}' and name='{}'",
-            self.name(),
-            schema,
-            name
+        let table_info = self.table.table_info();
+
+        let table_name = TableReference::full(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            table_info.name.clone(),
         );
-        let stmt = QueryLanguageParser::parse_sql(&sql).unwrap();
-        let ctx = QueryContextBuilder::default().build();
 
-        let plan = self
-            .query_engine
-            .planner()
-            .plan(stmt, ctx.clone())
-            .await
-            .unwrap();
+        let table_provider = Arc::new(DfTableProviderAdapter::new(self.table.clone()));
+        let table_source = Arc::new(DefaultTableSource::new(table_provider));
 
-        let stream = match self
+        let plan = LogicalPlanBuilder::scan(table_name, table_source, None)
+            .context(BuildDfLogicalPlanSnafu)?
+            .filter(and(
+                col("schema").eq(lit(schema)),
+                col("name").eq(lit(name)),
+            ))
+            .context(BuildDfLogicalPlanSnafu)?
+            .project(vec![col("script")])
+            .context(BuildDfLogicalPlanSnafu)?
+            .build()
+            .context(BuildDfLogicalPlanSnafu)?;
+
+        let output = self
             .query_engine
-            .execute(plan, ctx)
+            .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
-            .context(FindScriptSnafu { name })?
-        {
+            .context(ExecuteInternalStatementSnafu)?;
+        let stream = match output {
             Output::Stream(stream) => stream,
+            Output::RecordBatches(record_batches) => record_batches.as_stream(),
             _ => unreachable!(),
         };
+
         let records = record_util::collect(stream)
             .await
             .context(CollectRecordsSnafu)?;
@@ -267,12 +257,9 @@ impl ScriptsTable {
             })?;
 
         assert_eq!(script_column.len(), 1);
-        Ok(script_column.get_data(0).unwrap().to_string())
-    }
 
-    #[inline]
-    pub fn name(&self) -> &str {
-        &self.name
+        // Safety: asserted above
+        Ok(script_column.get_data(0).unwrap().to_string())
     }
 
     async fn table_full_scan(
@@ -295,10 +282,7 @@ impl ScriptsTable {
             .context(BuildDfLogicalPlanSnafu)?;
 
         let output = query_engine
-            .execute(
-                LogicalPlan::DfPlan(plan),
-                QueryContextBuilder::default().build(),
-            )
+            .execute(LogicalPlan::DfPlan(plan), query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
         let stream = match output {
@@ -310,46 +294,80 @@ impl ScriptsTable {
     }
 }
 
+/// Build the inserted column schemas
+fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
+    vec![
+        // The schema that script belongs to.
+        PbColumnSchema {
+            column_name: "schema".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+        },
+        PbColumnSchema {
+            column_name: "name".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+        },
+        PbColumnSchema {
+            column_name: "engine".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Tag.into(),
+        },
+        PbColumnSchema {
+            column_name: "script".to_string(),
+            datatype: ColumnDataType::String.into(),
+            semantic_type: SemanticType::Field.into(),
+        },
+        PbColumnSchema {
+            column_name: "greptime_timestamp".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond.into(),
+            semantic_type: SemanticType::Timestamp.into(),
+        },
+        PbColumnSchema {
+            column_name: "gmt_modified".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond.into(),
+            semantic_type: SemanticType::Field.into(),
+        },
+    ]
+}
+
+fn query_ctx(table_info: &TableInfo) -> QueryContextRef {
+    QueryContextBuilder::default()
+        .current_catalog(table_info.catalog_name.to_string())
+        .current_schema(table_info.schema_name.to_string())
+        .build()
+}
+
+/// Returns the scripts schema's primary key indices
+pub fn get_primary_key_indices() -> Vec<usize> {
+    let mut indices = vec![];
+    for (index, c) in build_insert_column_schemas().into_iter().enumerate() {
+        if c.semantic_type == (SemanticType::Tag as i32) {
+            indices.push(index);
+        }
+    }
+
+    indices
+}
+
 /// Build scripts table
 pub fn build_scripts_schema() -> RawSchema {
-    let cols = vec![
-        ColumnSchema::new(
-            "schema".to_string(),
-            ConcreteDataType::string_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "name".to_string(),
-            ConcreteDataType::string_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "script".to_string(),
-            ConcreteDataType::string_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "engine".to_string(),
-            ConcreteDataType::string_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "timestamp".to_string(),
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        )
-        .with_time_index(true),
-        ColumnSchema::new(
-            "gmt_created".to_string(),
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        ),
-        ColumnSchema::new(
-            "gmt_modified".to_string(),
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        ),
-    ];
+    let cols = build_insert_column_schemas()
+        .into_iter()
+        .map(|c| {
+            let cs = ColumnSchema::new(
+                c.column_name,
+                // Safety: the type always exists
+                ColumnDataTypeWrapper::try_new(c.datatype).unwrap().into(),
+                false,
+            );
+            if c.semantic_type == SemanticType::Timestamp as i32 {
+                cs.with_time_index(true)
+            } else {
+                cs
+            }
+        })
+        .collect();
 
     RawSchema::new(cols)
 }
