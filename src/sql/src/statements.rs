@@ -38,7 +38,8 @@ use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
-use datatypes::types::TimestampType;
+use datatypes::types::cast::CastOption;
+use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -50,7 +51,7 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
+    ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
 
@@ -186,7 +187,7 @@ pub fn sql_value_to_value(
     data_type: &ConcreteDataType,
     sql_val: &SqlValue,
 ) -> Result<Value> {
-    Ok(match sql_val {
+    let value = match sql_val {
         SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
         SqlValue::Null => Value::Null,
         SqlValue::Boolean(b) => {
@@ -215,7 +216,17 @@ pub fn sql_value_to_value(
             }
             .fail()
         }
-    })
+    };
+    if value.data_type() != *data_type {
+        cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
+            InvalidCastSnafu {
+                sql_value: sql_val.clone(),
+                datatype: data_type,
+            }
+        })
+    } else {
+        Ok(value)
+    }
 }
 
 pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
