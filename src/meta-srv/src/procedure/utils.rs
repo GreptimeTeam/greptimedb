@@ -100,7 +100,6 @@ pub mod mock {
 
 #[cfg(test)]
 pub mod test_data {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use chrono::DateTime;
@@ -178,7 +177,6 @@ pub mod test_data {
                 engine: MITO2_ENGINE.to_string(),
                 next_column_id: 3,
                 region_numbers: vec![1, 2, 3],
-                engine_options: HashMap::new(),
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
                 partition_key_indices: vec![],

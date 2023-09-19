@@ -209,6 +209,7 @@ pub struct CreateRequestBuilder {
     tag_num: usize,
     field_num: usize,
     create_if_not_exists: bool,
+    options: HashMap<String, String>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -218,6 +219,7 @@ impl Default for CreateRequestBuilder {
             tag_num: 1,
             field_num: 1,
             create_if_not_exists: false,
+            options: HashMap::new(),
         }
     }
 }
@@ -244,6 +246,11 @@ impl CreateRequestBuilder {
 
     pub fn create_if_not_exists(mut self, value: bool) -> Self {
         self.create_if_not_exists = value;
+        self
+    }
+
+    pub fn insert_option(mut self, key: &str, value: &str) -> Self {
+        self.options.insert(key.to_string(), value.to_string());
         self
     }
 
@@ -292,7 +299,7 @@ impl CreateRequestBuilder {
             column_metadatas,
             primary_key,
             create_if_not_exists: self.create_if_not_exists,
-            options: HashMap::default(),
+            options: self.options.clone(),
             region_dir: self.region_dir.clone(),
         }
     }

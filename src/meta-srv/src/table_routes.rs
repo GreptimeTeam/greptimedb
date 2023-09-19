@@ -70,8 +70,6 @@ pub(crate) async fn fetch_tables(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::collections::HashMap;
-
     use chrono::DateTime;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
     use common_meta::key::TableMetadataManagerRef;
@@ -103,7 +101,6 @@ pub(crate) mod tests {
                 engine: MITO_ENGINE.to_string(),
                 next_column_id: 1,
                 region_numbers: vec![1, 2, 3, 4],
-                engine_options: HashMap::new(),
                 options: TableOptions::default(),
                 created_on: DateTime::default(),
                 partition_key_indices: vec![],

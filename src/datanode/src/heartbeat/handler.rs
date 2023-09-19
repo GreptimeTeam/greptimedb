@@ -19,11 +19,12 @@ use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::RegionIdent;
 use common_query::Output;
 use common_telemetry::error;
 use snafu::OptionExt;
+use store_api::path_utils::region_dir;
 use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -43,11 +44,14 @@ impl RegionHeartbeatResponseHandler {
 
     fn instruction_to_request(instruction: Instruction) -> MetaResult<(RegionId, RegionRequest)> {
         match instruction {
-            Instruction::OpenRegion(region_ident) => {
+            Instruction::OpenRegion(OpenRegion {
+                region_ident,
+                region_storage_path,
+            }) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
                     engine: region_ident.engine,
-                    region_dir: "".to_string(),
+                    region_dir: region_dir(&region_storage_path, region_id),
                     options: HashMap::new(),
                 });
                 Ok((region_id, open_region_req))
