@@ -269,6 +269,7 @@ impl TableMeta {
                     column_name: col_to_add.column_schema.name.to_string()
                 },
             );
+
             ensure!(
                 col_to_add.column_schema.is_nullable()
                     || col_to_add.column_schema.default_constraint().is_some(),
