@@ -476,7 +476,6 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 | Tables  |
 +---------+
 | numbers |
-| scripts |
 +---------+\
 ";
     let output = execute_sql(&instance, "show tables").await;
@@ -494,7 +493,6 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
 +---------+
 | demo    |
 | numbers |
-| scripts |
 +---------+\
 ";
     check_unordered_output_stream(output, expected).await;
@@ -1743,7 +1741,6 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 +---------------+--------------------+------------+-----------------+----------+-------------+
 | greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
 | greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
-| greptime      | public             | scripts    | BASE TABLE      | 1024     | mito        |
 | greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
 +---------------+--------------------+------------+-----------------+----------+-------------+";
 
@@ -1754,7 +1751,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 +-----------------+--------------------+---------------+-----------------+----------+--------+
 | table_catalog   | table_schema       | table_name    | table_type      | table_id | engine |
 +-----------------+--------------------+---------------+-----------------+----------+--------+
-| another_catalog | another_schema     | another_table | BASE TABLE      | 1025     | mito   |
+| another_catalog | another_schema     | another_table | BASE TABLE      | 1024     | mito   |
 | another_catalog | information_schema | columns       | LOCAL TEMPORARY | 4        |        |
 | another_catalog | information_schema | tables        | LOCAL TEMPORARY | 3        |        |
 +-----------------+--------------------+---------------+-----------------+----------+--------+";
@@ -1776,30 +1773,23 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(&instance, sql).await;
     let expected = "\
-+---------------+--------------------+------------+---------------+----------------------+---------------+
-| table_catalog | table_schema       | table_name | column_name   | data_type            | semantic_type |
-+---------------+--------------------+------------+---------------+----------------------+---------------+
-| greptime      | information_schema | columns    | table_catalog | String               | FIELD         |
-| greptime      | information_schema | columns    | table_schema  | String               | FIELD         |
-| greptime      | information_schema | columns    | table_name    | String               | FIELD         |
-| greptime      | information_schema | columns    | column_name   | String               | FIELD         |
-| greptime      | information_schema | columns    | data_type     | String               | FIELD         |
-| greptime      | information_schema | columns    | semantic_type | String               | FIELD         |
-| greptime      | public             | numbers    | number        | UInt32               | TAG           |
-| greptime      | public             | scripts    | schema        | String               | TAG           |
-| greptime      | public             | scripts    | name          | String               | TAG           |
-| greptime      | public             | scripts    | script        | String               | FIELD         |
-| greptime      | public             | scripts    | engine        | String               | FIELD         |
-| greptime      | public             | scripts    | timestamp     | TimestampMillisecond | TIMESTAMP     |
-| greptime      | public             | scripts    | gmt_created   | TimestampMillisecond | FIELD         |
-| greptime      | public             | scripts    | gmt_modified  | TimestampMillisecond | FIELD         |
-| greptime      | information_schema | tables     | table_catalog | String               | FIELD         |
-| greptime      | information_schema | tables     | table_schema  | String               | FIELD         |
-| greptime      | information_schema | tables     | table_name    | String               | FIELD         |
-| greptime      | information_schema | tables     | table_type    | String               | FIELD         |
-| greptime      | information_schema | tables     | table_id      | UInt32               | FIELD         |
-| greptime      | information_schema | tables     | engine        | String               | FIELD         |
-+---------------+--------------------+------------+---------------+----------------------+---------------+";
++---------------+--------------------+------------+---------------+-----------+---------------+
+| table_catalog | table_schema       | table_name | column_name   | data_type | semantic_type |
++---------------+--------------------+------------+---------------+-----------+---------------+
+| greptime      | information_schema | columns    | table_catalog | String    | FIELD         |
+| greptime      | information_schema | columns    | table_schema  | String    | FIELD         |
+| greptime      | information_schema | columns    | table_name    | String    | FIELD         |
+| greptime      | information_schema | columns    | column_name   | String    | FIELD         |
+| greptime      | information_schema | columns    | data_type     | String    | FIELD         |
+| greptime      | information_schema | columns    | semantic_type | String    | FIELD         |
+| greptime      | public             | numbers    | number        | UInt32    | TAG           |
+| greptime      | information_schema | tables     | table_catalog | String    | FIELD         |
+| greptime      | information_schema | tables     | table_schema  | String    | FIELD         |
+| greptime      | information_schema | tables     | table_name    | String    | FIELD         |
+| greptime      | information_schema | tables     | table_type    | String    | FIELD         |
+| greptime      | information_schema | tables     | table_id      | UInt32    | FIELD         |
+| greptime      | information_schema | tables     | engine        | String    | FIELD         |
++---------------+--------------------+------------+---------------+-----------+---------------+";
 
     check_output_stream(output, expected).await;
 
