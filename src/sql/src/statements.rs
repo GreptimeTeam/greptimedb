@@ -548,8 +548,11 @@ mod tests {
         .unwrap();
         assert_eq!(Value::Timestamp(Timestamp::new_nanosecond(1073741821)), v);
 
-        let v =
-            sql_number_to_value(&ConcreteDataType::timestamp_millisecond_datatype(), "999999").unwrap();
+        let v = sql_number_to_value(
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            "999999",
+        )
+        .unwrap();
         assert_eq!(Value::Timestamp(Timestamp::new_millisecond(999999)), v);
 
         let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
