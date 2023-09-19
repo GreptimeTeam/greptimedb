@@ -267,7 +267,7 @@ pub(crate) fn check_recovered_region(
                 recovered.region_id
             ),
         }
-        .fail()?;
+        .fail();
     }
     if recovered.column_metadatas != column_metadatas {
         error!(
@@ -279,7 +279,7 @@ pub(crate) fn check_recovered_region(
             region_id,
             reason: "recovered metadata has different schema",
         }
-        .fail()?;
+        .fail();
     }
     if recovered.primary_key != primary_key {
         error!(
@@ -291,7 +291,7 @@ pub(crate) fn check_recovered_region(
             region_id,
             reason: "recovered metadata has different primary key",
         }
-        .fail()?;
+        .fail();
     }
 
     Ok(())
