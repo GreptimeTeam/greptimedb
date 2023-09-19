@@ -122,6 +122,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid alter table({}) request: {}", table, err))]
+    InvalidAlterRequest {
+        table: String,
+        location: Location,
+        err: String,
+    },
+
     #[snafu(display("Invalid table state: {}", table_id))]
     InvalidTable {
         table_id: TableId,
@@ -141,9 +148,9 @@ impl ErrorExt for Error {
             Error::Datafusion { .. }
             | Error::SchemaConversion { .. }
             | Error::TableProjection { .. } => StatusCode::EngineExecuteQuery,
-            Error::RemoveColumnInIndex { .. } | Error::BuildColumnDescriptor { .. } => {
-                StatusCode::InvalidArguments
-            }
+            Error::RemoveColumnInIndex { .. }
+            | Error::BuildColumnDescriptor { .. }
+            | Error::InvalidAlterRequest { .. } => StatusCode::InvalidArguments,
             Error::TablesRecordBatch { .. } | Error::DuplicatedExecuteCall { .. } => {
                 StatusCode::Unexpected
             }
