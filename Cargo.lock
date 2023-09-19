@@ -1257,7 +1257,6 @@ dependencies = [
  "log-store",
  "meta-client",
  "metrics",
- "mito",
  "moka 0.11.3",
  "object-store",
  "parking_lot",
@@ -4689,15 +4688,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "key-lock"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "792fd2ded02f283f704cda2c8127e256a012beb48e87c9f09bf459e3db051873"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "lalrpop"
 version = "0.19.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5419,43 +5409,6 @@ dependencies = [
  "log",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "mito"
-version = "0.4.0-nightly"
-dependencies = [
- "anymap",
- "arc-swap",
- "async-stream",
- "async-trait",
- "chrono",
- "common-catalog",
- "common-datasource",
- "common-error",
- "common-procedure",
- "common-procedure-test",
- "common-query",
- "common-recordbatch",
- "common-telemetry",
- "common-test-util",
- "common-time",
- "dashmap",
- "datafusion",
- "datafusion-common",
- "datatypes",
- "futures",
- "key-lock",
- "log-store",
- "metrics",
- "object-store",
- "serde",
- "serde_json",
- "snafu",
- "storage",
- "store-api",
- "table",
- "tokio",
 ]
 
 [[package]]
@@ -8459,7 +8412,6 @@ dependencies = [
  "futures",
  "futures-util",
  "log-store",
- "mito",
  "once_cell",
  "operator",
  "paste",

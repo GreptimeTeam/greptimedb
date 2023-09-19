@@ -35,7 +35,6 @@ members = [
     "src/log-store",
     "src/meta-client",
     "src/meta-srv",
-    "src/mito",
     "src/mito2",
     "src/object-store",
     "src/operator",
