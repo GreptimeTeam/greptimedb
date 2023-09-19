@@ -257,6 +257,12 @@ pub enum Error {
 
     #[snafu(display("Column schema has no default value, column: {}", column))]
     ColumnSchemaNoDefault { column: String, location: Location },
+
+    #[snafu(display("Region query error, source: {}", source))]
+    RegionQuery {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -303,6 +309,7 @@ impl ErrorExt for Error {
             RemoteRequest { source, .. } => source.status_code(),
             UnexpectedOutputKind { .. } => StatusCode::Unexpected,
             CreateSchema { source, .. } => source.status_code(),
+            RegionQuery { source, .. } => source.status_code(),
         }
     }
 

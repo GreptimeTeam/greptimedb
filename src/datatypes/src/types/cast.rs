@@ -58,7 +58,7 @@ pub fn cast_with_opt(
     match new_value {
         Some(v) => Ok(v),
         None => {
-            if cast_option.strict {
+            if cast_option.strict && !src_value.is_null() {
                 Err(invalid_type_cast(&src_value, dest_type))
             } else {
                 Ok(Value::Null)
@@ -83,6 +83,7 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
     match (src_type, dest_type) {
         // null type cast
         (_, Null(_)) => true,
+        (Null(_), _) => true,
 
         // boolean type cast
         (_, Boolean(_)) => src_type.is_numeric() || src_type.is_string(),
@@ -102,18 +103,22 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         // Date type
         (Date(_), Int32(_) | Timestamp(_) | String(_)) => true,
         (Int32(_) | String(_) | Timestamp(_), Date(_)) => true,
+        (Date(_), Date(_)) => true,
         // DateTime type
         (DateTime(_), Int64(_) | Timestamp(_) | String(_)) => true,
         (Int64(_) | Timestamp(_) | String(_), DateTime(_)) => true,
+        (DateTime(_), DateTime(_)) => true,
         // Timestamp type
         (Timestamp(_), Int64(_) | String(_)) => true,
         (Int64(_) | String(_), Timestamp(_)) => true,
+        (Timestamp(_), Timestamp(_)) => true,
         // Time type
         (Time(_), String(_)) => true,
         (Time(Second(_)), Int32(_)) => true,
         (Time(Millisecond(_)), Int32(_)) => true,
         (Time(Microsecond(_)), Int64(_)) => true,
         (Time(Nanosecond(_)), Int64(_)) => true,
+        (Time(_), Time(_)) => true,
         // TODO(QuenKar): interval type cast
         (Interval(_), String(_)) => true,
         (Duration(_), String(_)) => true,

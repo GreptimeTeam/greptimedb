@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 ahash = { version = "0.8", features = ["compile-time-rng"] }
+api.workspace = true
 arc-swap = "1.0"
 arrow-schema.workspace = true
 arrow.workspace = true

@@ -29,6 +29,7 @@ SHOW CREATE TABLE system_metrics;
 |                |   TIME INDEX ("ts"),                                      |
 |                |   PRIMARY KEY ("id", "host")                              |
 |                | )                                                         |
+|                |                                                           |
 |                | ENGINE=mito                                               |
 |                | WITH(                                                     |
 |                |   regions = 1,                                            |

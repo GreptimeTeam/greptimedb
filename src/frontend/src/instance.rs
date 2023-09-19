@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod distributed;
 mod grpc;
 mod influxdb;
 mod opentsdb;
 mod otlp;
 mod prom_store;
+mod region_query;
 mod script;
 mod standalone;
 use std::collections::HashMap;
@@ -82,7 +82,7 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::distributed::DistRegionRequestHandler;
+use self::region_query::FrontendRegionQueryHandler;
 use self::standalone::StandaloneTableMetadataCreator;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
@@ -158,14 +158,14 @@ impl Instance {
         );
         let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
 
-        let region_request_handler = DistRegionRequestHandler::arc(
+        let region_query_handler = FrontendRegionQueryHandler::arc(
             partition_manager.clone(),
             catalog_manager.datanode_manager().clone(),
         );
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
-            Some(region_request_handler.clone()),
+            Some(region_query_handler.clone()),
             true,
             plugins.clone(),
         )
@@ -298,12 +298,12 @@ impl Instance {
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
         let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
 
-        let region_request_handler =
-            DistRegionRequestHandler::arc(partition_manager.clone(), datanode_manager.clone());
+        let region_query_handler =
+            FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
-            Some(region_request_handler),
+            Some(region_query_handler),
             true,
             plugins.clone(),
         )

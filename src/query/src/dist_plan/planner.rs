@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use client::region_handler::RegionRequestHandlerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::table_name::TableName;
 use datafusion::common::Result;
@@ -39,20 +38,21 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::error;
 use crate::error::{CatalogSnafu, TableNotFoundSnafu};
+use crate::region_query::RegionQueryHandlerRef;
 
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
-    request_handler: RegionRequestHandlerRef,
+    region_query_handler: RegionQueryHandlerRef,
 }
 
 impl DistExtensionPlanner {
     pub fn new(
         catalog_manager: CatalogManagerRef,
-        request_handler: RegionRequestHandlerRef,
+        region_query_handler: RegionQueryHandlerRef,
     ) -> Self {
         Self {
             catalog_manager,
-            request_handler,
+            region_query_handler,
         }
     }
 }
@@ -108,7 +108,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             regions,
             substrait_plan,
             &schema,
-            self.request_handler.clone(),
+            self.region_query_handler.clone(),
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }

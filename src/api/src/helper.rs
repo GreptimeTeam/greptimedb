@@ -893,11 +893,24 @@ pub fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataTyp
         ConcreteDataType::Time(TimeType::Millisecond(_)) => ColumnDataType::TimeMillisecond,
         ConcreteDataType::Time(TimeType::Microsecond(_)) => ColumnDataType::TimeMicrosecond,
         ConcreteDataType::Time(TimeType::Nanosecond(_)) => ColumnDataType::TimeNanosecond,
-        ConcreteDataType::Null(_)
-        | ConcreteDataType::Duration(_)
-        | ConcreteDataType::Interval(_)
-        | ConcreteDataType::List(_)
-        | ConcreteDataType::Dictionary(_) => return None,
+        ConcreteDataType::Duration(DurationType::Second(_)) => ColumnDataType::DurationSecond,
+        ConcreteDataType::Duration(DurationType::Millisecond(_)) => {
+            ColumnDataType::DurationMillisecond
+        }
+        ConcreteDataType::Duration(DurationType::Microsecond(_)) => {
+            ColumnDataType::DurationMicrosecond
+        }
+        ConcreteDataType::Duration(DurationType::Nanosecond(_)) => {
+            ColumnDataType::DurationNanosecond
+        }
+        ConcreteDataType::Interval(IntervalType::YearMonth(_)) => ColumnDataType::IntervalYearMonth,
+        ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => {
+            ColumnDataType::IntervalMonthDayNano
+        }
+        ConcreteDataType::Interval(IntervalType::DayTime(_)) => ColumnDataType::IntervalDayTime,
+        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+            return None
+        }
     };
 
     Some(column_data_type)

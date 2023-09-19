@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
@@ -39,6 +38,7 @@ use crate::plan::LogicalPlan;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
+use crate::region_query::RegionQueryHandlerRef;
 
 pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
 
@@ -87,12 +87,12 @@ pub struct QueryEngineFactory {
 impl QueryEngineFactory {
     pub fn new(
         catalog_manager: CatalogManagerRef,
-        request_handler: Option<RegionRequestHandlerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
         with_dist_planner: bool,
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
-            request_handler,
+            region_query_handler,
             with_dist_planner,
             Default::default(),
         )
@@ -100,13 +100,13 @@ impl QueryEngineFactory {
 
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
-        request_handler: Option<RegionRequestHandlerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
         with_dist_planner: bool,
         plugins: Arc<Plugins>,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
-            request_handler,
+            region_query_handler,
             with_dist_planner,
             plugins.clone(),
         ));

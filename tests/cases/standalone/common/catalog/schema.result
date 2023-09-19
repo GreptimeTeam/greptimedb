@@ -57,7 +57,6 @@ SHOW TABLES FROM public;
 | Tables  |
 +---------+
 | numbers |
-| scripts |
 +---------+
 
 INSERT INTO hello VALUES (2), (3), (4);
@@ -103,7 +102,6 @@ SHOW TABLES FROM public;
 | Tables  |
 +---------+
 | numbers |
-| scripts |
 +---------+
 
 SHOW TABLES FROM public WHERE Tables='numbers';
