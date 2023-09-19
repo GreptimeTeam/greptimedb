@@ -74,33 +74,33 @@ jobs:
       - name: Run taplo
         run: taplo format --check
 
-  # sqlness:
-  #   name: Sqlness Test
-  #   if: github.event.pull_request.draft == false
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       os: [ ubuntu-latest-8-cores, windows-latest-8-cores ]
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #     - uses: arduino/setup-protoc@v1
-  #       with:
-  #         repo-token: ${{ secrets.GITHUB_TOKEN }}
-  #     - uses: dtolnay/rust-toolchain@master
-  #       with:
-  #         toolchain: ${{ env.RUST_TOOLCHAIN }}
-  #     - name: Rust Cache
-  #       uses: Swatinem/rust-cache@v2
-  #     - name: Run sqlness
-  #       run: cargo sqlness
-  #     - name: Upload sqlness logs
-  #       if: always()
-  #       uses: actions/upload-artifact@v3
-  #       with:
-  #         name: sqlness-logs
-  #         path: ${{ runner.temp }}/greptime-*.log
-  #         retention-days: 3
+  sqlness:
+    name: Sqlness Test
+    if: github.event.pull_request.draft == false
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest-8-cores, windows-latest-8-cores ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Run sqlness
+        run: cargo sqlness
+      - name: Upload sqlness logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: ${{ runner.temp }}/greptime-*.log
+          retention-days: 3
 
   fmt:
     name: Rustfmt
