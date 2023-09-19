@@ -64,8 +64,16 @@ impl ActivateRegion {
         let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
-        let instruction =
-            Instruction::OpenRegion(OpenRegion::new(failed_region.clone(), &region_storage_path));
+        let candidate_ident = RegionIdent {
+            datanode_id: self.candidate.id,
+            ..failed_region.clone()
+        };
+        info!("Activating region: {candidate_ident:?}");
+
+        let instruction = Instruction::OpenRegion(OpenRegion::new(
+            candidate_ident.clone(),
+            &region_storage_path,
+        ));
 
         let msg = MailboxMessage::json_message(
             "Activate Region",
@@ -88,12 +96,8 @@ impl ActivateRegion {
         // command in time, it was considered an inactive node by metasrv, then it replied, and the
         // current region failed over again, and the node was selected as a candidate, so it needs
         // to clear its previous state first.
-        let candidate = RegionIdent {
-            datanode_id: self.candidate.id,
-            ..failed_region.clone()
-        };
         InactiveRegionManager::new(&ctx.in_memory)
-            .deregister_inactive_region(&candidate)
+            .deregister_inactive_region(&candidate_ident)
             .await?;
 
         let ch = Channel::Datanode(self.candidate.id);
@@ -151,7 +155,6 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        info!("Activating region: {failed_region:?}");
         let mailbox_receiver = self
             .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;
