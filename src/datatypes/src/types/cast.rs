@@ -108,6 +108,7 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
         // Timestamp type
         (Timestamp(_), Int64(_) | String(_)) => true,
         (Int64(_) | String(_), Timestamp(_)) => true,
+        (Timestamp(_), Timestamp(_)) => true,
         // Time type
         (Time(_), String(_)) => true,
         (Time(Second(_)), Int32(_)) => true,

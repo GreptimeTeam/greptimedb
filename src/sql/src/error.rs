@@ -103,6 +103,14 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Failed to cast SQL value {} to datatype {}", sql_value, datatype))]
+    InvalidCast {
+        sql_value: sqlparser::ast::Value,
+        datatype: ConcreteDataType,
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Invalid table option key: {}", key))]
     InvalidTableOption { key: String, location: Location },
 
@@ -172,7 +180,8 @@ impl ErrorExt for Error {
             | InvalidTableName { .. }
             | InvalidSqlValue { .. }
             | TimestampOverflow { .. }
-            | InvalidTableOption { .. } => StatusCode::InvalidArguments,
+            | InvalidTableOption { .. }
+            | InvalidCast { .. } => StatusCode::InvalidArguments,
 
             SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
             ConvertToGrpcDataType { source, .. } => source.status_code(),
