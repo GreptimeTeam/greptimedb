@@ -106,7 +106,6 @@ async fn test_alter_region() {
         assert_eq!(1, version_data.last_entry_id);
         assert_eq!(3, version_data.committed_sequence);
         assert_eq!(1, version_data.version.flushed_entry_id);
-        assert_eq!(1, version_data.version.flushed_entry_id);
         assert_eq!(3, version_data.version.flushed_sequence);
     };
     check_region(&engine);
@@ -244,4 +243,54 @@ async fn test_put_after_alter() {
     let stream = engine.handle_query(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_alter_region_retry() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = add_tag1();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(request))
+        .await
+        .unwrap();
+    // Retries request.
+    let request = add_tag1();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(request))
+        .await
+        .unwrap();
+
+    let expected = "\
++-------+-------+---------+---------------------+
+| tag_1 | tag_0 | field_0 | ts                  |
++-------+-------+---------+---------------------+
+|       | a     | 0.0     | 1970-01-01T00:00:00 |
+|       | a     | 1.0     | 1970-01-01T00:00:01 |
++-------+-------+---------+---------------------+";
+    scan_check_after_alter(&engine, region_id, expected).await;
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    assert_eq!(1, version_data.last_entry_id);
+    assert_eq!(2, version_data.committed_sequence);
+    assert_eq!(1, version_data.version.flushed_entry_id);
+    assert_eq!(2, version_data.version.flushed_sequence);
 }

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, info, warn};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -48,15 +48,30 @@ impl<S> RegionWorkerLoop<S> {
         // Get the version before alter.
         let version = region.version();
         if version.metadata.schema_version > request.schema_version {
+            // This is possible if we retry the request.
             warn!(
-                "Ignored alert request, region id:{}, region schema version {} is greater than request schema version {}",
+                "Ignores alter request, region id:{}, region schema version {} is greater than request schema version {}",
                 region_id, version.metadata.schema_version, request.schema_version
             );
             // Returns if it altered.
             sender.send(Ok(Output::AffectedRows(0)));
             return;
         }
-        // TODO(yingwen): validate req here
+        // Validate request.
+        if let Err(e) = request.validate(&version.metadata) {
+            // Invalid request.
+            sender.send(Err(e).context(InvalidRegionRequestSnafu));
+            return;
+        }
+        // Checks whether we need to alter the region.
+        if !request.need_alter(&version.metadata) {
+            debug!(
+                "Ignores alter request as it alters nothing, region_id: {}, request: {:?}",
+                region_id, request
+            );
+            sender.send(Ok(Output::AffectedRows(0)));
+            return;
+        }
 
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
@@ -134,11 +149,6 @@ fn metadata_after_alteration(
     metadata: &RegionMetadata,
     request: RegionAlterRequest,
 ) -> Result<RegionMetadataRef> {
-    // Validates request.
-    request
-        .validate(metadata)
-        .context(InvalidRegionRequestSnafu)?;
-
     let mut builder = RegionMetadataBuilder::from_existing(metadata.clone());
     builder
         .alter(request.kind)
