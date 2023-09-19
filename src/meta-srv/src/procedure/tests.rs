@@ -362,7 +362,7 @@ async fn test_submit_alter_region_requests() {
         .await
         .unwrap();
 
-    let procedure = AlterTableProcedure::new(
+    let mut procedure = AlterTableProcedure::new(
         1,
         alter_table_task,
         TableInfoValue::new(table_info),
@@ -393,7 +393,7 @@ async fn test_submit_alter_region_requests() {
     });
 
     let status = procedure.submit_alter_region_requests().await.unwrap();
-    assert!(matches!(status, Status::Done));
+    assert!(matches!(status, Status::Executing { persist: true }));
 
     handle.await.unwrap();
 
