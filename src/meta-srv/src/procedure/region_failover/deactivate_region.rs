@@ -97,7 +97,7 @@ impl DeactivateRegion {
                         .deregister_inactive_region(failed_region)
                         .await?;
 
-                    Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
+                    Ok(Box::new(ActivateRegion::new(self.candidate.clone(), false)))
                 } else {
                     // Under rare circumstances would a Datanode fail to close a Region.
                     // So simply retry.
@@ -113,7 +113,7 @@ impl DeactivateRegion {
                 // the call and have disabled region lease renewal. Therefore, if a timeout error
                 // occurs, it can be concluded that the region has been closed. With this information,
                 // we can proceed confidently to the next step.
-                Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
+                Ok(Box::new(ActivateRegion::new(self.candidate.clone(), true)))
             }
             Err(e) => Err(e),
         }
@@ -146,7 +146,7 @@ impl State for DeactivateRegion {
                 );
                 // See the mailbox received timeout situation comments above.
                 self.wait_for_region_lease_expiry(ctx).await;
-                return Ok(Box::new(ActivateRegion::new(self.candidate.clone())));
+                return Ok(Box::new(ActivateRegion::new(self.candidate.clone(), true)));
             }
             Err(e) => return Err(e),
         };
@@ -226,7 +226,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, region_storage_path: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None }"#
         );
     }
 
@@ -268,7 +268,7 @@ mod tests {
         // Timeout or not, proceed to `ActivateRegion`.
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, region_storage_path: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: true, region_storage_path: None }"#
         );
     }
 }
