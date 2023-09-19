@@ -64,7 +64,7 @@ pub enum Error {
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to request RegionServer, code: {}, source: {}", code, source))]
+    #[snafu(display("Failed to request RegionServer, code: {}", code))]
     RegionServer { code: Code, source: BoxedError },
 
     // Server error carried in Tonic Status's metadata.

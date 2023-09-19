@@ -455,22 +455,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to prepare file table: {}", source))]
+    #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to infer file table schema: {}", source))]
+    #[snafu(display("Failed to infer file table schema"))]
     InferFileTableSchema {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display(
-        "The schema of the file table is incompatible with the table schema: {}",
-        source
-    ))]
+    #[snafu(display("The schema of the file table is incompatible with the table schema"))]
     SchemaIncompatible {
         #[snafu(backtrace)]
         source: query::error::Error,
