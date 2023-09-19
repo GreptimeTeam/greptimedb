@@ -252,7 +252,7 @@ impl TableMeta {
 
         for col_to_add in requests {
             ensure!(
-                !names.contains(&col_to_add.column_schema.name),
+                names.insert(&col_to_add.column_schema.name),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
@@ -261,7 +261,6 @@ impl TableMeta {
                     ),
                 }
             );
-            names.insert(&col_to_add.column_schema.name);
 
             ensure!(
                 !table_schema.contains_column(&col_to_add.column_schema.name),
