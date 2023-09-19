@@ -63,11 +63,11 @@ SELECT * FROM new_table;
 
 ALTER TABLE new_table RENAME new_table;
 
-Error: 4000(TableAlreadyExists), Table already exists: greptime.public.new_table
+Error: 4000(TableAlreadyExists), Table already exists, table: greptime.public.new_table
 
 ALTER TABLE new_table RENAME t;
 
-Error: 4000(TableAlreadyExists), Table already exists: greptime.public.t
+Error: 4000(TableAlreadyExists), Table already exists, table: greptime.public.t
 
 DROP TABLE t;
 

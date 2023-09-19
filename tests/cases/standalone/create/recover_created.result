@@ -21,7 +21,6 @@ show tables;
 | Tables  |
 +---------+
 | numbers |
-| scripts |
 +---------+
 
 create table t3 (c timestamp time index);
