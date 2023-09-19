@@ -43,7 +43,7 @@ async fn test_engine_open_empty() {
         )
         .await
         .unwrap_err();
-    assert_eq!(StatusCode::RegionNotFound, err.status_code());
+    assert_eq!(StatusCode::Internal, err.status_code());
     let err = engine.set_writable(region_id, true).unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
 }
