@@ -96,6 +96,7 @@ mod tests {
             mut heartbeat_receivers,
             context,
             pushers,
+            ..
         } = env;
 
         for frontend_id in 4..=7 {

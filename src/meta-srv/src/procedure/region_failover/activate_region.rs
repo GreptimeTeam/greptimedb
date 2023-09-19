@@ -16,17 +16,18 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::ddl::utils::region_storage_path;
+use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
 use crate::error::{
-    Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
+    self, Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
 use crate::inactive_region_manager::InactiveRegionManager;
@@ -49,7 +50,22 @@ impl ActivateRegion {
         failed_region: &RegionIdent,
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
-        let instruction = Instruction::OpenRegion(failed_region.clone());
+        let table_id = failed_region.table_id;
+        // TODO(weny): considers fetching table info only once.
+        let table_info = ctx
+            .table_metadata_manager
+            .table_info_manager()
+            .get(table_id)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .context(error::TableInfoNotFoundSnafu { table_id })?
+            .table_info;
+
+        let region_storage_path =
+            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+
+        let instruction =
+            Instruction::OpenRegion(OpenRegion::new(failed_region.clone(), &region_storage_path));
 
         let msg = MailboxMessage::json_message(
             "Activate Region",
@@ -179,7 +195,11 @@ mod tests {
         assert_eq!(
             received.payload,
             Some(Payload::Json(
-                serde_json::to_string(&Instruction::OpenRegion(failed_region.clone())).unwrap(),
+                serde_json::to_string(&Instruction::OpenRegion(OpenRegion::new(
+                    failed_region.clone(),
+                    &env.path
+                )))
+                .unwrap(),
             ))
         );
 
@@ -241,7 +261,11 @@ mod tests {
         assert_eq!(
             received.payload,
             Some(Payload::Json(
-                serde_json::to_string(&Instruction::OpenRegion(failed_region.clone())).unwrap()
+                serde_json::to_string(&Instruction::OpenRegion(OpenRegion::new(
+                    failed_region.clone(),
+                    &env.path
+                )))
+                .unwrap(),
             ))
         );
 

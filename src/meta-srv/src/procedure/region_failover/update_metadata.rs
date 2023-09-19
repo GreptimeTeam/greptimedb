@@ -79,7 +79,7 @@ impl UpdateRegionMetadata {
             .context(error::TableMetadataManagerSnafu)?
             .context(TableInfoNotFoundSnafu { table_id })?
             .table_info;
-        let region_storage_patch =
+        let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
         let mut new_region_routes = table_route_value.region_routes.clone();
@@ -101,7 +101,7 @@ impl UpdateRegionMetadata {
             .update_table_route(
                 table_id,
                 engine,
-                &region_storage_patch,
+                &region_storage_path,
                 table_route_value,
                 new_region_routes,
             )
