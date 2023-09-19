@@ -141,10 +141,15 @@ macro_rules! parse_number_to_value {
                     Ok(Value::$Type($Target::from(n)))
                 },
             )+
-                _ => ParseSqlValueSnafu {
-                    msg: format!("Fail to parse number {}, invalid column type: {:?}",
-                                 $n, $data_type
-                    )}.fail(),
+            ConcreteDataType::Timestamp(t) => {
+                let n  = parse_sql_number::<i64>($n)?;
+                Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
+            },
+
+            _ => ParseSqlValueSnafu {
+                msg: format!("Fail to parse number {}, invalid column type: {:?}",
+                                $n, $data_type
+                )}.fail(),
         }
     }
 }
@@ -163,8 +168,7 @@ pub fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Valu
         (Int32, i32, i32),
         (Int64, i64, i64),
         (Float64, f64, OrderedF64),
-        (Float32, f32, OrderedF32),
-        (Timestamp, i64, Timestamp)
+        (Float32, f32, OrderedF32)
     )
     // TODO(hl): also Date/DateTime
 }
@@ -547,6 +551,20 @@ mod tests {
 
         let v = sql_number_to_value(&ConcreteDataType::int32_datatype(), "999").unwrap();
         assert_eq!(Value::Int32(999), v);
+
+        let v = sql_number_to_value(
+            &ConcreteDataType::timestamp_nanosecond_datatype(),
+            "1073741821",
+        )
+        .unwrap();
+        assert_eq!(Value::Timestamp(Timestamp::new_nanosecond(1073741821)), v);
+
+        let v = sql_number_to_value(
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            "999999",
+        )
+        .unwrap();
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(999999)), v);
 
         let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
         assert!(v.is_err(), "parse value error is: {v:?}");
