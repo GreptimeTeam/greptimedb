@@ -217,12 +217,16 @@ pub fn sql_value_to_value(
             .fail()
         }
     };
-    cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
-        InvalidCastSnafu {
-            sql_value: sql_val.to_owned(),
-            datatype: data_type,
-        }
-    })
+    if value.data_type() != *data_type {
+        cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
+            InvalidCastSnafu {
+                sql_value: sql_val.clone(),
+                datatype: data_type,
+            }
+        })
+    } else {
+        Ok(value)
+    }
 }
 
 pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
