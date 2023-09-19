@@ -34,7 +34,6 @@ pub mod information_schema;
 pub mod kvbackend;
 pub mod memory;
 mod metrics;
-pub mod system;
 pub mod table_source;
 
 #[async_trait::async_trait]

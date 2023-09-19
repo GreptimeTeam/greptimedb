@@ -47,7 +47,6 @@ catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 common-test-util = { workspace = true }
 log-store = { workspace = true }
-mito = { workspace = true, features = ["test"] }
 object-store = { workspace = true }
 storage = { workspace = true }
 tokio.workspace = true
