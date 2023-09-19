@@ -353,7 +353,6 @@ impl RegionMetadata {
 
     /// Checks whether it is a valid column.
     fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
-        // TODO(yingwen): Ensure column name is not internal columns.
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata
@@ -460,11 +459,23 @@ impl RegionMetadataBuilder {
         Ok(meta)
     }
 
-    /// Adds columns to the metadata.
+    /// Adds columns to the metadata if not exist.
     fn add_columns(&mut self, columns: Vec<AddColumn>) -> Result<()> {
+        let mut names: HashSet<_> = self
+            .column_metadatas
+            .iter()
+            .map(|col| col.column_schema.name.clone())
+            .collect();
+
         for add_column in columns {
+            if names.contains(&add_column.column_metadata.column_schema.name) {
+                // Column already exists.
+                continue;
+            }
+
             let column_id = add_column.column_metadata.column_id;
             let semantic_type = add_column.column_metadata.semantic_type;
+            let column_name = add_column.column_metadata.column_schema.name.clone();
             match add_column.location {
                 None => {
                     self.column_metadatas.push(add_column.column_metadata);
@@ -489,6 +500,7 @@ impl RegionMetadataBuilder {
                         .insert(pos + 1, add_column.column_metadata);
                 }
             }
+            names.insert(column_name);
             if semantic_type == SemanticType::Tag {
                 // For a new tag, we extend the primary key.
                 self.primary_key.push(column_id);
@@ -498,7 +510,7 @@ impl RegionMetadataBuilder {
         Ok(())
     }
 
-    /// Drops columns from the metadata.
+    /// Drops columns from the metadata if exist.
     fn drop_columns(&mut self, names: &[String]) {
         let name_set: HashSet<_> = names.iter().collect();
         self.column_metadatas
