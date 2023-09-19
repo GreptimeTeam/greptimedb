@@ -58,7 +58,7 @@ pub fn cast_with_opt(
     match new_value {
         Some(v) => Ok(v),
         None => {
-            if cast_option.strict {
+            if cast_option.strict && !src_value.is_null() {
                 Err(invalid_type_cast(&src_value, dest_type))
             } else {
                 Ok(Value::Null)
@@ -83,6 +83,7 @@ pub fn can_cast_type(src_value: &Value, dest_type: &ConcreteDataType) -> bool {
     match (src_type, dest_type) {
         // null type cast
         (_, Null(_)) => true,
+        (Null(_), _) => true,
 
         // boolean type cast
         (_, Boolean(_)) => src_type.is_numeric() || src_type.is_string(),
