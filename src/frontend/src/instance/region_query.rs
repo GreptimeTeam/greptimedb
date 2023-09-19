@@ -16,23 +16,23 @@ use std::sync::Arc;
 
 use api::v1::region::QueryRequest;
 use async_trait::async_trait;
-use client::error::{HandleRequestSnafu, Result as ClientResult};
-use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
+use query::error::{RegionQuerySnafu, Result as QueryResult};
+use query::region_query::RegionQueryHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
 
-pub(crate) struct DistRegionRequestHandler {
+pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
 }
 
-impl DistRegionRequestHandler {
+impl FrontendRegionQueryHandler {
     pub fn arc(
         partition_manager: PartitionRuleManagerRef,
         datanode_manager: DatanodeManagerRef,
@@ -45,16 +45,16 @@ impl DistRegionRequestHandler {
 }
 
 #[async_trait]
-impl RegionRequestHandler for DistRegionRequestHandler {
-    async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
+impl RegionQueryHandler for FrontendRegionQueryHandler {
+    async fn do_get(&self, request: QueryRequest) -> QueryResult<SendableRecordBatchStream> {
         self.do_get_inner(request)
             .await
             .map_err(BoxedError::new)
-            .context(HandleRequestSnafu)
+            .context(RegionQuerySnafu)
     }
 }
 
-impl DistRegionRequestHandler {
+impl FrontendRegionQueryHandler {
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 

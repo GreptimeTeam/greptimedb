@@ -19,7 +19,6 @@ pub mod error;
 pub mod load_balance;
 mod metrics;
 pub mod region;
-pub mod region_handler;
 mod stream_insert;
 
 pub use api;
