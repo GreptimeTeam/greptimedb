@@ -56,6 +56,8 @@ impl<S> RegionWorkerLoop<S> {
             sender.send(Ok(Output::AffectedRows(0)));
             return;
         }
+        // TODO(yingwen): validate req here
+
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
             // If memtable is not empty, we can't alter it directly and need to flush
