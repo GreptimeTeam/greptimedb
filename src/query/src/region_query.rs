@@ -21,9 +21,9 @@ use common_recordbatch::SendableRecordBatchStream;
 use crate::error::Result;
 
 #[async_trait]
-pub trait RegionRequestHandler: Send + Sync {
+pub trait RegionQueryHandler: Send + Sync {
     // TODO(ruihang): add trace id and span id in the request.
     async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
 }
 
-pub type RegionRequestHandlerRef = Arc<dyn RegionRequestHandler>;
+pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;

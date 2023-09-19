@@ -7221,6 +7221,7 @@ name = "query"
 version = "0.4.0-nightly"
 dependencies = [
  "ahash 0.8.3",
+ "api",
  "approx_eq",
  "arc-swap",
  "arrow",
