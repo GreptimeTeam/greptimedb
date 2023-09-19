@@ -26,6 +26,7 @@ use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
+use crate::manifest::manager::RegionManifestOptions;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
@@ -453,6 +454,18 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to open region {} with options: {:?}, location: {}",
+        region_id,
+        options,
+        location
+    ))]
+    OpenRegion {
+        region_id: RegionId,
+        options: RegionManifestOptions,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -495,7 +508,8 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | OpenRegion { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

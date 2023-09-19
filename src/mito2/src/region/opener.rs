@@ -29,7 +29,7 @@ use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayer;
 use crate::config::MitoConfig;
-use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{OpenRegionSnafu, RegionCorruptedSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -130,12 +130,12 @@ impl RegionOpener {
             compress_type: config.manifest_compress_type,
             checkpoint_distance: config.manifest_checkpoint_distance,
         };
-        let manifest_manager =
-            RegionManifestManager::open(options)
-                .await?
-                .context(RegionNotFoundSnafu {
-                    region_id: self.region_id,
-                })?;
+        let manifest_manager = RegionManifestManager::open(options.clone())
+            .await?
+            .context(OpenRegionSnafu {
+                region_id: self.region_id,
+                options,
+            })?;
 
         let manifest = manifest_manager.manifest().await;
         let metadata = manifest.metadata.clone();
