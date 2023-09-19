@@ -151,6 +151,7 @@ pub struct RegionCreateRequest {
     /// Columns in the primary key.
     pub primary_key: Vec<ColumnId>,
     /// Create region if not exists.
+    // TODO(yingwen): Remove this.
     pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: HashMap<String, String>,

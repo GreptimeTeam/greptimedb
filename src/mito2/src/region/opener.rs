@@ -18,19 +18,19 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
-use common_telemetry::info;
+use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
 use object_store::util::join_dir;
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
-use store_api::metadata::RegionMetadata;
-use store_api::storage::RegionId;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
 use crate::config::MitoConfig;
-use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{EmptyRegionDirSnafu, RegionCorruptedSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
 use crate::region::options::RegionOptions;
@@ -90,22 +90,50 @@ impl RegionOpener {
         self
     }
 
-    /// Writes region manifest and creates a new region.
+    /// Writes region manifest and creates a new region if it does not exist.
+    /// Opens the region if it already exists.
     ///
     /// # Panics
     /// Panics if metadata is not set.
-    pub(crate) async fn create(self, config: &MitoConfig) -> Result<MitoRegion> {
+    pub(crate) async fn create_or_open<S: LogStore>(
+        self,
+        config: &MitoConfig,
+        wal: &Wal<S>,
+    ) -> Result<MitoRegion> {
         let region_id = self.region_id;
-        let metadata = Arc::new(self.metadata.unwrap());
+        let options = self.manifest_options(config);
 
-        // Create a manifest manager for this region.
-        let options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&self.region_dir),
-            object_store: self.object_store.clone(),
-            compress_type: config.manifest_compress_type,
-            checkpoint_distance: config.manifest_checkpoint_distance,
-        };
-        // Writes regions to the manifest file.
+        // Tries to open the region.
+        match self.maybe_open(config, wal).await {
+            Ok(Some(region)) => {
+                let recovered = region.metadata();
+                // Checks the schema of the region.
+                let expect = self.metadata.as_ref().unwrap();
+                check_recovered_region(
+                    &recovered,
+                    expect.region_id,
+                    &expect.column_metadatas,
+                    &expect.primary_key,
+                )?;
+
+                return Ok(region);
+            }
+            Ok(None) => {
+                debug!(
+                    "No data under directory {}, region_id: {}",
+                    self.region_dir, self.region_id
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to open region {} before creating it, region_dir: {}, err: {}",
+                    self.region_id, self.region_dir, e
+                );
+            }
+        }
+
+        let metadata = Arc::new(self.metadata.unwrap());
+        // Create a manifest manager for this region and writes regions to the manifest file.
         let manifest_manager = RegionManifestManager::new(metadata.clone(), options).await?;
 
         let mutable = self.memtable_builder.build(&metadata);
@@ -137,33 +165,52 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
-        let options = RegionManifestOptions {
-            manifest_dir: new_manifest_dir(&self.region_dir),
-            object_store: self.object_store.clone(),
-            compress_type: config.manifest_compress_type,
-            checkpoint_distance: config.manifest_checkpoint_distance,
+        let region_id = self.region_id;
+        let region = self
+            .maybe_open(config, wal)
+            .await?
+            .context(EmptyRegionDirSnafu {
+                region_id,
+                region_dir: self.region_dir,
+            })?;
+
+        ensure!(
+            region.region_id == self.region_id,
+            RegionCorruptedSnafu {
+                region_id: self.region_id,
+                reason: format!(
+                    "recovered region has different region id {}",
+                    region.region_id
+                ),
+            }
+        );
+
+        Ok(region)
+    }
+
+    /// Tries to open the region and returns `None` if the region directory is empty.
+    async fn maybe_open<S: LogStore>(
+        &self,
+        config: &MitoConfig,
+        wal: &Wal<S>,
+    ) -> Result<Option<MitoRegion>> {
+        let options = self.manifest_options(config);
+        let Some(manifest_manager) = RegionManifestManager::open(options).await? else {
+            return Ok(None);
         };
-        let manifest_manager =
-            RegionManifestManager::open(options)
-                .await?
-                .context(RegionNotFoundSnafu {
-                    region_id: self.region_id,
-                })?;
 
         let manifest = manifest_manager.manifest().await;
         let metadata = manifest.metadata.clone();
 
-        ensure!(
-            metadata.region_id == self.region_id,
-            RegionCorruptedSnafu {
-                region_id: self.region_id,
-                reason: format!("region id in metadata is {}", metadata.region_id),
-            }
-        );
-
-        let region_id = metadata.region_id;
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
-        let file_purger = Arc::new(LocalFilePurger::new(self.scheduler, access_layer.clone()));
+        let region_id = self.region_id;
+        let access_layer = Arc::new(AccessLayer::new(
+            self.region_dir.clone(),
+            self.object_store.clone(),
+        ));
+        let file_purger = Arc::new(LocalFilePurger::new(
+            self.scheduler.clone(),
+            access_layer.clone(),
+        ));
         let mutable = self.memtable_builder.build(&metadata);
         let options = RegionOptions::try_from(&self.options)?;
         let version = VersionBuilder::new(metadata, mutable)
@@ -187,8 +234,67 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
         };
-        Ok(region)
+        Ok(Some(region))
     }
+
+    /// Returns a new manifest options.
+    fn manifest_options(&self, config: &MitoConfig) -> RegionManifestOptions {
+        RegionManifestOptions {
+            manifest_dir: new_manifest_dir(&self.region_dir),
+            object_store: self.object_store.clone(),
+            compress_type: config.manifest_compress_type,
+            checkpoint_distance: config.manifest_checkpoint_distance,
+        }
+    }
+}
+
+/// Checks whether the recovered region has the same schema as region to create.
+pub(crate) fn check_recovered_region(
+    recovered: &RegionMetadata,
+    region_id: RegionId,
+    column_metadatas: &[ColumnMetadata],
+    primary_key: &[ColumnId],
+) -> Result<()> {
+    if recovered.region_id != region_id {
+        error!(
+            "Recovered region {}, expect region {}",
+            recovered.region_id, region_id
+        );
+        return RegionCorruptedSnafu {
+            region_id,
+            reason: format!(
+                "recovered metadata has different region id {}",
+                recovered.region_id
+            ),
+        }
+        .fail()?;
+    }
+    if recovered.column_metadatas != column_metadatas {
+        error!(
+            "Unexpected schema in recovered region {}, recovered: {:?}, expect: {:?}",
+            recovered.region_id, recovered.column_metadatas, column_metadatas
+        );
+
+        return RegionCorruptedSnafu {
+            region_id,
+            reason: "recovered metadata has different schema",
+        }
+        .fail()?;
+    }
+    if recovered.primary_key != primary_key {
+        error!(
+            "Unexpected primary key in recovered region {}, recovered: {:?}, expect: {:?}",
+            recovered.region_id, recovered.primary_key, primary_key
+        );
+
+        return RegionCorruptedSnafu {
+            region_id,
+            reason: "recovered metadata has different primary key",
+        }
+        .fail()?;
+    }
+
+    Ok(())
 }
 
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
