@@ -18,7 +18,6 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use client::region_handler::RegionRequestHandlerRef;
 use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
@@ -48,6 +47,7 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
+use crate::region_query::RegionQueryHandlerRef;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -72,7 +72,7 @@ impl fmt::Debug for QueryEngineState {
 impl QueryEngineState {
     pub fn new(
         catalog_list: CatalogManagerRef,
-        request_handler: Option<RegionRequestHandlerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
         with_dist_planner: bool,
         plugins: Arc<Plugins>,
     ) -> Self {
@@ -113,7 +113,7 @@ impl QueryEngineState {
         .with_analyzer_rules(analyzer.rules)
         .with_query_planner(Arc::new(DfQueryPlanner::new(
             catalog_list.clone(),
-            request_handler,
+            region_query_handler,
         )))
         .with_optimizer_rules(optimizer.rules)
         .with_physical_optimizer_rules(physical_optimizers);
@@ -221,14 +221,14 @@ impl QueryPlanner for DfQueryPlanner {
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
-        request_handler: Option<RegionRequestHandlerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
             vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
-        if let Some(request_handler) = request_handler {
+        if let Some(region_query_handler) = region_query_handler {
             planners.push(Arc::new(DistExtensionPlanner::new(
                 catalog_manager,
-                request_handler,
+                region_query_handler,
             )));
         }
         Self {

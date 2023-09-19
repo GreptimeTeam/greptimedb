@@ -17,9 +17,7 @@ use std::sync::Arc;
 use api::v1::meta::Partition;
 use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
 use async_trait::async_trait;
-use client::error::{HandleRequestSnafu, Result as ClientResult};
 use client::region::check_response_header;
-use client::region_handler::RegionRequestHandler;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
 use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
@@ -39,11 +37,21 @@ use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
 const TABLE_ID_SEQ: &str = "table_id";
 
-pub(crate) struct StandaloneRegionRequestHandler {
+pub struct StandaloneDatanodeManager(pub RegionServer);
+
+#[async_trait]
+impl DatanodeManager for StandaloneDatanodeManager {
+    async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+        RegionInvoker::arc(self.0.clone())
+    }
+}
+
+/// Relative to [client::region::RegionRequester]
+pub(crate) struct RegionInvoker {
     region_server: RegionServer,
 }
 
-impl StandaloneRegionRequestHandler {
+impl RegionInvoker {
     pub fn arc(region_server: RegionServer) -> Arc<Self> {
         Arc::new(Self { region_server })
     }
@@ -61,18 +69,7 @@ impl StandaloneRegionRequestHandler {
 }
 
 #[async_trait]
-impl RegionRequestHandler for StandaloneRegionRequestHandler {
-    async fn do_get(&self, request: QueryRequest) -> ClientResult<SendableRecordBatchStream> {
-        self.region_server
-            .handle_read(request)
-            .await
-            .map_err(BoxedError::new)
-            .context(HandleRequestSnafu)
-    }
-}
-
-#[async_trait]
-impl Datanode for StandaloneRegionRequestHandler {
+impl Datanode for RegionInvoker {
     async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         let response = self
             .handle_inner(request)
@@ -91,15 +88,6 @@ impl Datanode for StandaloneRegionRequestHandler {
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
-    }
-}
-
-pub struct StandaloneDatanodeManager(pub RegionServer);
-
-#[async_trait]
-impl DatanodeManager for StandaloneDatanodeManager {
-    async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
-        StandaloneRegionRequestHandler::arc(self.0.clone())
     }
 }
 

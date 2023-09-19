@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
-use client::region_handler::RegionRequestHandlerRef;
 use common_base::bytes::Bytes;
 use common_error::ext::BoxedError;
 use common_meta::table_name::TableName;
@@ -41,6 +40,7 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::ConvertSchemaSnafu;
+use crate::region_query::RegionQueryHandlerRef;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
@@ -113,7 +113,7 @@ pub struct MergeScanExec {
     substrait_plan: Bytes,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
-    request_handler: RegionRequestHandlerRef,
+    region_query_handler: RegionQueryHandlerRef,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -133,7 +133,7 @@ impl MergeScanExec {
         regions: Vec<RegionId>,
         substrait_plan: Bytes,
         arrow_schema: &ArrowSchema,
-        request_handler: RegionRequestHandlerRef,
+        region_query_handler: RegionQueryHandlerRef,
     ) -> Result<Self> {
         let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
         let schema_without_metadata =
@@ -144,7 +144,7 @@ impl MergeScanExec {
             substrait_plan,
             schema: schema_without_metadata,
             arrow_schema: arrow_schema_without_metadata,
-            request_handler,
+            region_query_handler,
             metric: ExecutionPlanMetricsSet::new(),
         })
     }
@@ -152,7 +152,7 @@ impl MergeScanExec {
     pub fn to_stream(&self, _context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
-        let request_handler = self.request_handler.clone();
+        let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
 
         let stream = Box::pin(stream!({
@@ -166,7 +166,7 @@ impl MergeScanExec {
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),
                 };
-                let mut stream = request_handler
+                let mut stream = region_query_handler
                     .do_get(request)
                     .await
                     .map_err(BoxedError::new)
