@@ -32,7 +32,7 @@ use object_store::util::normalize_dir;
 use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::datanode::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::config::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
 pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectStore> {

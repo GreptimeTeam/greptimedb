@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use catalog::local::MemoryCatalogManager;
+use catalog::memory::MemoryCatalogManager;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use session::context::QueryContext;

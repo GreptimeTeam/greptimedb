@@ -25,11 +25,12 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
-use crate::error::{Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, Result};
+use crate::error::{
+    Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+};
 use crate::memtable::MemtableBuilderRef;
 use crate::read::Source;
-use crate::region::version::{VersionControlData, VersionRef};
-use crate::region::MitoRegionRef;
+use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
     BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderDdlRequest,
     SenderWriteRequest, WorkerRequest,
@@ -38,6 +39,7 @@ use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
+use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
 ///
@@ -185,6 +187,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) access_layer: AccessLayerRef,
     pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
+    pub(crate) listener: WorkerListener,
 }
 
 impl RegionFlushTask {
@@ -214,10 +217,10 @@ impl RegionFlushTask {
     /// Converts the flush task into a background job.
     ///
     /// We must call this in the region worker.
-    fn into_flush_job(mut self, region: &MitoRegionRef) -> Job {
+    fn into_flush_job(mut self, version_control: &VersionControlRef) -> Job {
         // Get a version of this region before creating a job to get current
         // wal entry id, sequence and immutable memtables.
-        let version_data = region.version_control.current();
+        let version_data = version_control.current();
 
         Box::pin(async move {
             self.do_flush(version_data).await;
@@ -226,6 +229,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
+        self.listener.on_flush_begin(self.region_id).await;
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
                 let memtables_to_remove = version_data
@@ -348,14 +352,15 @@ impl FlushScheduler {
     /// Schedules a flush `task` for specific `region`.
     pub(crate) fn schedule_flush(
         &mut self,
-        region: &MitoRegionRef,
+        region_id: RegionId,
+        version_control: &VersionControlRef,
         task: RegionFlushTask,
     ) -> Result<()> {
-        debug_assert_eq!(region.region_id, task.region_id);
+        debug_assert_eq!(region_id, task.region_id);
 
-        let version = region.version_control.current().version;
+        let version = version_control.current().version;
         if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
-            debug_assert!(!self.region_status.contains_key(&region.region_id));
+            debug_assert!(!self.region_status.contains_key(&region_id));
             // The region has nothing to flush.
             task.on_success();
             return Ok(());
@@ -364,8 +369,8 @@ impl FlushScheduler {
         // Add this region to status map.
         let flush_status = self
             .region_status
-            .entry(region.region_id)
-            .or_insert_with(|| FlushStatus::new(region.clone()));
+            .entry(region_id)
+            .or_insert_with(|| FlushStatus::new(region_id, version_control.clone()));
         // Checks whether we can flush the region now.
         if flush_status.flushing {
             // There is already a flush job running.
@@ -373,6 +378,7 @@ impl FlushScheduler {
             return Ok(());
         }
 
+        // TODO(yingwen): We can merge with pending and execute directly.
         // If there are pending tasks, then we should push it to pending list.
         if flush_status.pending_task.is_some() {
             flush_status.merge_task(task);
@@ -380,18 +386,16 @@ impl FlushScheduler {
         }
 
         // Now we can flush the region directly.
-        region
-            .version_control
-            .freeze_mutable(&task.memtable_builder);
+        version_control.freeze_mutable(&task.memtable_builder);
         // Submit a flush job.
-        let job = task.into_flush_job(region);
+        let job = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
             // If scheduler returns error, senders in the job will be dropped and waiters
             // can get recv errors.
-            error!(e; "Failed to schedule flush job for region {}", region.region_id);
+            error!(e; "Failed to schedule flush job for region {}", region_id);
 
             // Remove from region status if we can't submit the task.
-            self.region_status.remove(&region.region_id);
+            self.region_status.remove(&region_id);
             return Err(e);
         }
         flush_status.flushing = true;
@@ -430,7 +434,7 @@ impl FlushScheduler {
         pending_requests
     }
 
-    /// Notifies the scheduler that the flush job is finished.
+    /// Notifies the scheduler that the flush job is failed.
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
 
@@ -450,24 +454,33 @@ impl FlushScheduler {
 
     /// Notifies the scheduler that the region is dropped.
     pub(crate) fn on_region_dropped(&mut self, region_id: RegionId) {
-        // Remove this region.
-        let Some(flush_status) = self.region_status.remove(&region_id) else {
-            return;
-        };
-
-        // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionDroppedSnafu { region_id }.build()));
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionDroppedSnafu { region_id }.build()),
+        );
     }
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+    }
+
+    /// Notifies the scheduler that the region is truncated.
+    pub(crate) fn on_region_truncated(&mut self, region_id: RegionId) {
+        self.remove_region_on_failure(
+            region_id,
+            Arc::new(RegionTruncatedSnafu { region_id }.build()),
+        );
+    }
+
+    fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
             return;
         };
 
         // Notifies all pending tasks.
-        flush_status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+        flush_status.on_failure(err);
     }
 
     /// Add ddl request to pending queue.
@@ -504,7 +517,7 @@ impl FlushScheduler {
         debug_assert!(self
             .region_status
             .values()
-            .all(|status| !status.flushing && status.pending_task.is_some()));
+            .all(|status| status.flushing || status.pending_task.is_some()));
 
         // Get the first region from status map.
         let Some(flush_status) = self
@@ -516,9 +529,10 @@ impl FlushScheduler {
         };
         debug_assert!(!flush_status.flushing);
         let task = flush_status.pending_task.take().unwrap();
-        let region = flush_status.region.clone();
+        let region_id = flush_status.region_id;
+        let version_control = flush_status.version_control.clone();
 
-        self.schedule_flush(&region, task)
+        self.schedule_flush(region_id, &version_control, task)
     }
 }
 
@@ -536,8 +550,13 @@ impl Drop for FlushScheduler {
 /// Tracks running and pending flush tasks and all pending requests of a region.
 struct FlushStatus {
     /// Current region.
-    region: MitoRegionRef,
+    region_id: RegionId,
+    /// Version control of the region.
+    version_control: VersionControlRef,
     /// There is a flush task running.
+    ///
+    /// It is possible that a region is not flushing but has pending task if the scheduler
+    /// doesn't schedules this region.
     flushing: bool,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
@@ -548,9 +567,10 @@ struct FlushStatus {
 }
 
 impl FlushStatus {
-    fn new(region: MitoRegionRef) -> FlushStatus {
+    fn new(region_id: RegionId, version_control: VersionControlRef) -> FlushStatus {
         FlushStatus {
-            region,
+            region_id,
+            version_control,
             flushing: false,
             pending_task: None,
             pending_ddls: Vec::new(),
@@ -573,14 +593,14 @@ impl FlushStatus {
         }
         for ddl in self.pending_ddls {
             ddl.sender.send(Err(err.clone()).context(FlushRegionSnafu {
-                region_id: self.region.region_id,
+                region_id: self.region_id,
             }));
         }
         for write_req in self.pending_writes {
             write_req
                 .sender
                 .send(Err(err.clone()).context(FlushRegionSnafu {
-                    region_id: self.region.region_id,
+                    region_id: self.region_id,
                 }));
         }
     }
@@ -588,7 +608,11 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::oneshot;
+
     use super::*;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_get_mutable_limit() {
@@ -641,5 +665,34 @@ mod tests {
         assert!(manager.should_flush_engine());
         manager.reserve_mem(100);
         assert!(manager.should_flush_engine());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_empty() {
+        let env = SchedulerEnv::new();
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let builder = VersionControlBuilder::new();
+
+        let version_control = Arc::new(builder.build());
+        let (output_tx, output_rx) = oneshot::channel();
+        let mut task = RegionFlushTask {
+            region_id: builder.region_id(),
+            reason: FlushReason::Others,
+            senders: Vec::new(),
+            request_sender: tx,
+            access_layer: env.access_layer.clone(),
+            memtable_builder: builder.memtable_builder(),
+            file_purger: builder.file_purger(),
+            listener: WorkerListener::default(),
+        };
+        task.push_sender(OptionOutputTx::from(output_tx));
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+        assert!(scheduler.region_status.is_empty());
+        let output = output_rx.await.unwrap().unwrap();
+        assert!(matches!(output, Output::AffectedRows(0)));
+        assert!(scheduler.region_status.is_empty());
     }
 }

@@ -88,4 +88,8 @@ impl DataType for DictionaryType {
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
+
+    fn try_cast(&self, _: Value) -> Option<Value> {
+        None
+    }
 }

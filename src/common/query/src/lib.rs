@@ -26,6 +26,7 @@ pub mod logical_plan;
 pub mod physical_plan;
 pub mod prelude;
 mod signature;
+use sqlparser_derive::{Visit, VisitMut};
 
 // sql output
 pub enum Output {
@@ -48,7 +49,7 @@ impl Debug for Output {
 
 pub use datafusion::physical_plan::ExecutionPlan as DfPhysicalPlan;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
 pub enum AddColumnLocation {
     First,
     After { column_name: String },

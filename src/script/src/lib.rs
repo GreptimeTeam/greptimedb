@@ -22,3 +22,5 @@ pub mod manager;
 #[cfg(feature = "python")]
 pub mod python;
 pub mod table;
+#[cfg(test)]
+mod test;

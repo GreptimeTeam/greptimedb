@@ -12,30 +12,79 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use common_query::Output;
+use common_recordbatch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::{StringVector, VectorRef};
 use servers::error::Result;
 use servers::query_handler::sql::SqlQueryHandler;
 use servers::query_handler::ScriptHandler;
-use session::context::QueryContext;
+use session::context::QueryContextBuilder;
 use table::test_util::MemTable;
 
 use crate::create_testing_instance;
 
 #[tokio::test]
 async fn test_insert_py_udf_and_query() -> Result<()> {
-    let query_ctx = QueryContext::arc();
-    let table = MemTable::default_numbers_table();
+    let catalog = "greptime";
+    let schema = "test";
+    let name = "hello";
+    let script = r#"
+@copr(returns=['n'])
+def hello() -> vector[str]:
+    return 'hello';
+"#;
+
+    let column_schemas = vec![
+        ColumnSchema::new("script", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("schema", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("name", ConcreteDataType::string_datatype(), false),
+    ];
+
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(StringVector::from(vec![script])),
+        Arc::new(StringVector::from(vec![schema])),
+        Arc::new(StringVector::from(vec![name])),
+    ];
+
+    let raw_schema = Arc::new(Schema::new(column_schemas));
+    let recordbatch = RecordBatch::new(raw_schema, columns).unwrap();
+
+    let table = MemTable::table("scripts", recordbatch);
+
+    let query_ctx = QueryContextBuilder::default()
+        .current_catalog(catalog.to_string())
+        .current_schema(schema.to_string())
+        .build();
 
     let instance = create_testing_instance(table);
-    let src = r#"
-@coprocessor(args=["uint32s"], returns = ["ret"])
-def double_that(col) -> vector[u32]:
-    return col*2
-    "#;
     instance
-        .insert_script("schema_test", "double_that", src)
+        .insert_script(query_ctx.clone(), name, script)
         .await?;
+
+    let output = instance
+        .execute_script(query_ctx.clone(), name, HashMap::new())
+        .await?;
+
+    match output {
+        Output::RecordBatches(batches) => {
+            let expected = "\
++-------+
+| n     |
++-------+
+| hello |
++-------+";
+            assert_eq!(expected, batches.pretty_print().unwrap());
+        }
+        _ => unreachable!(),
+    }
+
     let res = instance
-        .do_query("select double_that(uint32s) from numbers", query_ctx)
+        .do_query("select hello()", query_ctx)
         .await
         .remove(0)
         .unwrap();
@@ -46,12 +95,16 @@ def double_that(col) -> vector[u32]:
         }
         common_query::Output::Stream(s) => {
             let batches = common_recordbatch::util::collect_batches(s).await.unwrap();
-            assert_eq!(batches.iter().count(), 1);
-            let first = batches.iter().next().unwrap();
-            let col = first.column(0);
-            let val = col.get(1);
-            assert_eq!(val, datatypes::value::Value::UInt32(2));
+            let expected = "\
++---------+
+| hello() |
++---------+
+| hello   |
++---------+";
+
+            assert_eq!(expected, batches.pretty_print().unwrap());
         }
     }
+
     Ok(())
 }

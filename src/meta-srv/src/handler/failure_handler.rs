@@ -18,8 +18,7 @@ use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
-use common_catalog::consts::MITO_ENGINE;
-use common_meta::ident::TableIdent;
+use common_catalog::consts::default_engine;
 use common_meta::RegionIdent;
 use store_api::storage::RegionId;
 
@@ -86,13 +85,10 @@ impl HeartbeatHandler for RegionFailureHandler {
                     RegionIdent {
                         cluster_id: stat.cluster_id,
                         datanode_id: stat.id,
-                        table_ident: TableIdent {
-                            table_id: region_id.table_id(),
-                            // TODO(#1583): Use the actual table engine.
-                            engine: MITO_ENGINE.to_string(),
-                            ..Default::default()
-                        },
+                        table_id: region_id.table_id(),
                         region_number: region_id.region_number(),
+                        // TODO(LFC): Use the actual table engine (maybe retrieve from heartbeat).
+                        engine: default_engine().to_string(),
                     }
                 })
                 .collect(),

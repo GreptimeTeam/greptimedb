@@ -59,6 +59,7 @@ use crate::error::{
     GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
     RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
 };
+use crate::event_listener::RegionServerEventListenerRef;
 
 #[derive(Clone)]
 pub struct RegionServer {
@@ -66,9 +67,17 @@ pub struct RegionServer {
 }
 
 impl RegionServer {
-    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        runtime: Arc<Runtime>,
+        event_listener: RegionServerEventListenerRef,
+    ) -> Self {
         Self {
-            inner: Arc::new(RegionServerInner::new(query_engine, runtime)),
+            inner: Arc::new(RegionServerInner::new(
+                query_engine,
+                runtime,
+                event_listener,
+            )),
         }
     }
 
@@ -96,6 +105,17 @@ impl RegionServer {
             .collect()
     }
 
+    pub fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_writable(region_id, writable)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     pub fn runtime(&self) -> Arc<Runtime> {
         self.inner.runtime.clone()
     }
@@ -115,23 +135,19 @@ impl RegionServerHandler for RegionServer {
             .context(ExecuteGrpcRequestSnafu)?;
         let join_tasks = requests.into_iter().map(|(region_id, req)| {
             let self_to_move = self.clone();
-            self.inner
-                .runtime
-                .spawn(async move { self_to_move.handle_request(region_id, req).await })
+            async move { self_to_move.handle_request(region_id, req).await }
         });
 
         let results = try_join_all(join_tasks)
             .await
-            .context(servers_error::JoinTaskSnafu)?;
+            .map_err(BoxedError::new)
+            .context(ExecuteGrpcRequestSnafu)?;
 
         // merge results by simply sum up affected rows.
         // only insert/delete will have multiple results.
         let mut affected_rows = 0;
         for result in results {
-            match result
-                .map_err(BoxedError::new)
-                .context(ExecuteGrpcRequestSnafu)?
-            {
+            match result {
                 Output::AffectedRows(rows) => affected_rows += rows,
                 Output::Stream(_) | Output::RecordBatches(_) => {
                     // TODO: change the output type to only contains `affected_rows`
@@ -161,10 +177,15 @@ impl FlightCraft for RegionServer {
         let ticket = request.into_inner().ticket;
         let request = QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
+        let trace_id = request
+            .header
+            .as_ref()
+            .map(|h| h.trace_id)
+            .unwrap_or_default();
 
         let result = self.handle_read(request).await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result));
+        let stream = Box::pin(FlightRecordBatchStream::new(result, trace_id));
         Ok(Response::new(stream))
     }
 }
@@ -174,15 +195,21 @@ struct RegionServerInner {
     region_map: DashMap<RegionId, RegionEngineRef>,
     query_engine: QueryEngineRef,
     runtime: Arc<Runtime>,
+    event_listener: RegionServerEventListenerRef,
 }
 
 impl RegionServerInner {
-    pub fn new(query_engine: QueryEngineRef, runtime: Arc<Runtime>) -> Self {
+    pub fn new(
+        query_engine: QueryEngineRef,
+        runtime: Arc<Runtime>,
+        event_listener: RegionServerEventListenerRef,
+    ) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
             region_map: DashMap::new(),
             query_engine,
             runtime,
+            event_listener,
         }
     }
 
@@ -210,7 +237,8 @@ impl RegionServerInner {
             | RegionRequest::Delete(_)
             | RegionRequest::Alter(_)
             | RegionRequest::Flush(_)
-            | RegionRequest::Compact(_) => RegionChange::None,
+            | RegionRequest::Compact(_)
+            | RegionRequest::Truncate(_) => RegionChange::None,
         };
 
         let engine = match &region_change {
@@ -239,12 +267,14 @@ impl RegionServerInner {
             RegionChange::Register(_) => {
                 info!("Region {region_id} is registered to engine {engine_type}");
                 self.region_map.insert(region_id, engine);
+                self.event_listener.on_region_registered(region_id);
             }
             RegionChange::Deregisters => {
                 info!("Region {region_id} is deregistered from engine {engine_type}");
                 self.region_map
                     .remove(&region_id)
                     .map(|(id, engine)| engine.set_writable(id, false));
+                self.event_listener.on_region_deregistered(region_id);
             }
         }
 
@@ -254,7 +284,11 @@ impl RegionServerInner {
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
-        let QueryRequest { region_id, plan } = request;
+        let QueryRequest {
+            header: _,
+            region_id,
+            plan,
+        } = request;
         let region_id = RegionId::from_u64(region_id);
 
         // build dummy catalog list

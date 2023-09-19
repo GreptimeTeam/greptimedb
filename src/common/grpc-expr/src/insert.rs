@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::helper;
-use api::helper::ColumnDataTypeWrapper;
 use api::v1::column::Values;
-use api::v1::{AddColumns, Column, CreateTableExpr, InsertRequest as GrpcInsertRequest};
+use api::v1::{AddColumns, Column, CreateTableExpr};
 use common_base::BitVec;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::prelude::VectorRef;
@@ -25,12 +22,8 @@ use datatypes::schema::SchemaRef;
 use snafu::{ensure, ResultExt};
 use table::engine::TableReference;
 use table::metadata::TableId;
-use table::requests::InsertRequest;
 
-use crate::error::{
-    ColumnAlreadyExistsSnafu, ColumnDataTypeSnafu, CreateVectorSnafu, Result,
-    UnexpectedValuesLengthSnafu,
-};
+use crate::error::{CreateVectorSnafu, Result, UnexpectedValuesLengthSnafu};
 use crate::util;
 use crate::util::ColumnExpr;
 
@@ -57,47 +50,6 @@ pub fn build_create_expr_from_insertion(
         engine,
         "Created on insertion",
     )
-}
-
-pub fn to_table_insert_request(
-    catalog_name: &str,
-    schema_name: &str,
-    request: GrpcInsertRequest,
-) -> Result<InsertRequest> {
-    let table_name = &request.table_name;
-    let row_count = request.row_count as usize;
-
-    let mut columns_values = HashMap::with_capacity(request.columns.len());
-    for Column {
-        column_name,
-        values,
-        null_mask,
-        datatype,
-        ..
-    } in request.columns
-    {
-        let Some(values) = values else { continue };
-
-        let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(datatype)
-            .context(ColumnDataTypeSnafu)?
-            .into();
-        let vector = add_values_to_builder(datatype, values, row_count, null_mask)?;
-
-        ensure!(
-            columns_values.insert(column_name.clone(), vector).is_none(),
-            ColumnAlreadyExistsSnafu {
-                column: column_name
-            }
-        );
-    }
-
-    Ok(InsertRequest {
-        catalog_name: catalog_name.to_string(),
-        schema_name: schema_name.to_string(),
-        table_name: table_name.to_string(),
-        columns_values,
-        region_number: request.region_number,
-    })
 }
 
 pub(crate) fn add_values_to_builder(
@@ -150,10 +102,9 @@ mod tests {
     use common_base::BitVec;
     use common_catalog::consts::MITO_ENGINE;
     use common_time::interval::IntervalUnit;
-    use common_time::timestamp::{TimeUnit, Timestamp};
+    use common_time::timestamp::TimeUnit;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
-    use datatypes::value::Value;
     use snafu::ResultExt;
 
     use super::*;
@@ -208,8 +159,8 @@ mod tests {
         );
 
         let column_defs = create_expr.column_defs;
-        assert_eq!(column_defs[5].name, create_expr.time_index);
-        assert_eq!(6, column_defs.len());
+        assert_eq!(column_defs[6].name, create_expr.time_index);
+        assert_eq!(7, column_defs.len());
 
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -282,6 +233,20 @@ mod tests {
         );
 
         assert_eq!(
+            ConcreteDataType::duration_millisecond_datatype(),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    column_defs
+                        .iter()
+                        .find(|c| c.name == "duration")
+                        .unwrap()
+                        .data_type
+                )
+                .unwrap()
+            )
+        );
+
+        assert_eq!(
             ConcreteDataType::timestamp_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
@@ -314,7 +279,7 @@ mod tests {
 
         let add_columns = find_new_columns(&schema, &insert_batch.0).unwrap().unwrap();
 
-        assert_eq!(4, add_columns.add_columns.len());
+        assert_eq!(5, add_columns.add_columns.len());
         let host_column = &add_columns.add_columns[0];
         assert_eq!(
             ConcreteDataType::string_datatype(),
@@ -354,38 +319,18 @@ mod tests {
                 .unwrap()
             )
         );
-    }
 
-    #[test]
-    fn test_to_table_insert_request() {
-        let (columns, row_count) = mock_insert_batch();
-        let request = GrpcInsertRequest {
-            table_name: "demo".to_string(),
-            columns,
-            row_count,
-            region_number: 0,
-        };
-        let insert_req = to_table_insert_request("greptime", "public", request).unwrap();
+        let duration_column = &add_columns.add_columns[4];
 
-        assert_eq!("greptime", insert_req.catalog_name);
-        assert_eq!("public", insert_req.schema_name);
-        assert_eq!("demo", insert_req.table_name);
-
-        let host = insert_req.columns_values.get("host").unwrap();
-        assert_eq!(Value::String("host1".into()), host.get(0));
-        assert_eq!(Value::String("host2".into()), host.get(1));
-
-        let cpu = insert_req.columns_values.get("cpu").unwrap();
-        assert_eq!(Value::Float64(0.31.into()), cpu.get(0));
-        assert_eq!(Value::Null, cpu.get(1));
-
-        let memory = insert_req.columns_values.get("memory").unwrap();
-        assert_eq!(Value::Null, memory.get(0));
-        assert_eq!(Value::Float64(0.1.into()), memory.get(1));
-
-        let ts = insert_req.columns_values.get("ts").unwrap();
-        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(100)), ts.get(0));
-        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(101)), ts.get(1));
+        assert_eq!(
+            ConcreteDataType::duration_millisecond_datatype(),
+            ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(
+                    duration_column.column_def.as_ref().unwrap().data_type
+                )
+                .unwrap()
+            )
+        );
     }
 
     #[test]
@@ -475,8 +420,20 @@ mod tests {
             datatype: ColumnDataType::IntervalMonthDayNano as i32,
         };
 
+        let duration_vals = Values {
+            duration_millisecond_values: vec![100, 101],
+            ..Default::default()
+        };
+        let duration_column = Column {
+            column_name: "duration".to_string(),
+            semantic_type: SemanticType::Field as i32,
+            values: Some(duration_vals),
+            null_mask: vec![0],
+            datatype: ColumnDataType::DurationMillisecond as i32,
+        };
+
         let ts_vals = Values {
-            ts_millisecond_values: vec![100, 101],
+            timestamp_millisecond_values: vec![100, 101],
             ..Default::default()
         };
         let ts_column = Column {
@@ -494,6 +451,7 @@ mod tests {
                 mem_column,
                 time_column,
                 interval_column,
+                duration_column,
                 ts_column,
             ],
             row_count,

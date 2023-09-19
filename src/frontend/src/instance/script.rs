@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common_query::Output;
 use common_telemetry::timer;
 use servers::query_handler::ScriptHandler;
+use session::context::QueryContextRef;
 
 use crate::instance::Instance;
 use crate::metrics;
@@ -26,25 +27,25 @@ use crate::metrics;
 impl ScriptHandler for Instance {
     async fn insert_script(
         &self,
-        schema: &str,
+        query_ctx: QueryContextRef,
         name: &str,
         script: &str,
     ) -> servers::error::Result<()> {
         let _timer = timer!(metrics::METRIC_HANDLE_SCRIPTS_ELAPSED);
         self.script_executor
-            .insert_script(schema, name, script)
+            .insert_script(query_ctx, name, script)
             .await
     }
 
     async fn execute_script(
         &self,
-        schema: &str,
+        query_ctx: QueryContextRef,
         name: &str,
         params: HashMap<String, String>,
     ) -> servers::error::Result<Output> {
         let _timer = timer!(metrics::METRIC_RUN_SCRIPT_ELAPSED);
         self.script_executor
-            .execute_script(schema, name, params)
+            .execute_script(query_ctx, name, params)
             .await
     }
 }

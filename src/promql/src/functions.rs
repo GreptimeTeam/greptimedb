@@ -55,7 +55,7 @@ pub(crate) fn extract_array(columnar_value: &ColumnarValue) -> Result<ArrayRef, 
 /// that reduces the numerical error further in cases
 /// where the numbers being summed have a large difference in magnitude
 /// Prometheus's implementation:
-/// https://github.com/prometheus/prometheus/blob/f55ab2217984770aa1eecd0f2d5f54580029b1c0/promql/functions.go#L782)
+/// <https://github.com/prometheus/prometheus/blob/f55ab2217984770aa1eecd0f2d5f54580029b1c0/promql/functions.go#L782>
 pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> (f64, f64) {
     let new_sum = sum + inc;
     if sum.abs() >= inc.abs() {
@@ -68,7 +68,7 @@ pub(crate) fn compensated_sum_inc(inc: f64, sum: f64, mut compensation: f64) -> 
 
 /// linear_regression performs a least-square linear regression analysis on the
 /// times and values. It return the slope and intercept based on times and values.
-/// Prometheus's implementation: https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837
+/// Prometheus's implementation: <https://github.com/prometheus/prometheus/blob/90b2f7a540b8a70d8d81372e6692dcbb67ccbaaa/promql/functions.go#L793-L837>
 pub(crate) fn linear_regression(
     times: &TimestampMillisecondArray,
     values: &Float64Array,

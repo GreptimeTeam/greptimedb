@@ -203,7 +203,7 @@ mod tests {
                         value_data: Some(value::ValueData::StringValue(str_col.to_string())),
                     },
                     Value {
-                        value_data: Some(value::ValueData::TsMillisecondValue(*int_col)),
+                        value_data: Some(value::ValueData::TimestampMillisecondValue(*int_col)),
                     },
                 ];
                 Row { values }

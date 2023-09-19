@@ -21,12 +21,8 @@ use crate::lock::Key;
 
 pub(crate) fn table_metadata_lock_key(region: &RegionIdent) -> Key {
     format!(
-        "table_metadata_lock_({}-{}.{}.{}-{})",
-        region.cluster_id,
-        region.table_ident.catalog,
-        region.table_ident.schema,
-        region.table_ident.table,
-        region.table_ident.table_id,
+        "table_metadata_lock_({}-{})",
+        region.cluster_id, region.table_id,
     )
     .into_bytes()
 }

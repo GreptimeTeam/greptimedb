@@ -241,6 +241,22 @@ pub enum Error {
         duration: Duration,
         location: Location,
     },
+
+    #[snafu(display(
+        "Column schema incompatible, column: {}, file_type: {}, table_type: {}",
+        column,
+        file_type,
+        table_type
+    ))]
+    ColumnSchemaIncompatible {
+        column: String,
+        file_type: ConcreteDataType,
+        table_type: ConcreteDataType,
+        location: Location,
+    },
+
+    #[snafu(display("Column schema has no default value, column: {}", column))]
+    ColumnSchemaNoDefault { column: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -261,7 +277,9 @@ impl ErrorExt for Error {
             | MissingRequiredField { .. }
             | BuildRegex { .. }
             | ConvertSchema { .. }
-            | AddSystemTimeOverflow { .. } => StatusCode::InvalidArguments,
+            | AddSystemTimeOverflow { .. }
+            | ColumnSchemaIncompatible { .. }
+            | ColumnSchemaNoDefault { .. } => StatusCode::InvalidArguments,
 
             BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
             EncodeSubstraitLogicalPlan { source, .. } => source.status_code(),

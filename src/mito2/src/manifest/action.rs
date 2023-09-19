@@ -35,6 +35,8 @@ pub enum RegionMetaAction {
     Edit(RegionEdit),
     /// Remove the region.
     Remove(RegionRemove),
+    /// Truncate the region.
+    Truncate(RegionTruncate),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -57,6 +59,16 @@ pub struct RegionRemove {
     pub region_id: RegionId,
 }
 
+/// Last data truncated in the region.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RegionTruncate {
+    pub region_id: RegionId,
+    /// Last WAL entry id of truncated data.
+    pub truncated_entry_id: EntryId,
+    // Last sequence number of truncated data.
+    pub truncated_sequence: SequenceNumber,
+}
+
 /// The region manifest data.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RegionManifest {
@@ -70,6 +82,8 @@ pub struct RegionManifest {
     pub flushed_sequence: SequenceNumber,
     /// Current manifest version.
     pub manifest_version: ManifestVersion,
+    /// Last WAL entry id of truncated data.
+    pub truncated_entry_id: Option<EntryId>,
 }
 
 #[derive(Debug, Default)]
@@ -79,6 +93,7 @@ pub struct RegionManifestBuilder {
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
+    truncated_entry_id: Option<EntryId>,
 }
 
 impl RegionManifestBuilder {
@@ -91,6 +106,7 @@ impl RegionManifestBuilder {
                 flushed_entry_id: s.flushed_entry_id,
                 manifest_version: s.manifest_version,
                 flushed_sequence: s.flushed_sequence,
+                truncated_entry_id: s.truncated_entry_id,
             }
         } else {
             Default::default()
@@ -118,7 +134,15 @@ impl RegionManifestBuilder {
         }
     }
 
-    /// Check if the builder keeps a [RegionMetadata](crate::metadata::RegionMetadata).
+    pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
+        self.manifest_version = manifest_version;
+        self.flushed_entry_id = truncate.truncated_entry_id;
+        self.flushed_sequence = truncate.truncated_sequence;
+        self.truncated_entry_id = Some(truncate.truncated_entry_id);
+        self.files.clear();
+    }
+
+    /// Check if the builder keeps a [RegionMetadata](store_api::metadata::RegionMetadata).
     pub fn contains_metadata(&self) -> bool {
         self.metadata.is_some()
     }
@@ -131,6 +155,7 @@ impl RegionManifestBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             manifest_version: self.manifest_version,
+            truncated_entry_id: self.truncated_entry_id,
         })
     }
 }

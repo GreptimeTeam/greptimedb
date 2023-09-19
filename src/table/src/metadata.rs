@@ -448,6 +448,8 @@ pub struct TableInfo {
     /// Id and version of the table.
     #[builder(default, setter(into))]
     pub ident: TableIdent,
+
+    // TODO(LFC): Remove the catalog, schema and table names from TableInfo.
     /// Name of the table.
     #[builder(setter(into))]
     pub name: String,
@@ -476,6 +478,10 @@ impl TableInfo {
             .iter()
             .map(|id| RegionId::new(self.table_id(), *id))
             .collect()
+    }
+    /// Returns the full table name in the form of `{catalog}.{schema}.{table}`.
+    pub fn full_table_name(&self) -> String {
+        common_catalog::format_full_table_name(&self.catalog_name, &self.schema_name, &self.name)
     }
 }
 

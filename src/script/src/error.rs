@@ -14,27 +14,15 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use snafu::{Location, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to find scripts table, source: {}", source))]
-    FindScriptsTable {
-        location: Location,
-        source: catalog::error::Error,
-    },
-
     #[snafu(display("Failed to find column in scripts table, name: {}", name))]
     FindColumnInScriptsTable { name: String, location: Location },
-
-    #[snafu(display("Failed to register scripts table, source: {}", source))]
-    RegisterScriptsTable {
-        location: Location,
-        source: catalog::error::Error,
-    },
 
     #[snafu(display("Scripts table not found"))]
     ScriptsTableNotFound { location: Location },
@@ -47,7 +35,7 @@ pub enum Error {
     InsertScript {
         name: String,
         location: Location,
-        source: table::error::Error,
+        source: BoxedError,
     },
 
     #[snafu(display("Failed to compile python script, name: {}, source: {}", name, source))]
@@ -66,13 +54,6 @@ pub enum Error {
 
     #[snafu(display("Script not found, name: {}", name))]
     ScriptNotFound { location: Location, name: String },
-
-    #[snafu(display("Failed to find script by name: {}", name))]
-    FindScript {
-        name: String,
-        location: Location,
-        source: query::error::Error,
-    },
 
     #[snafu(display("Failed to collect record batch, source: {}", source))]
     CollectRecords {
@@ -104,12 +85,8 @@ impl ErrorExt for Error {
         match self {
             FindColumnInScriptsTable { .. } | CastType { .. } => StatusCode::Unexpected,
             ScriptsTableNotFound { .. } => StatusCode::TableNotFound,
-            RegisterScriptsTable { source, .. } | FindScriptsTable { source, .. } => {
-                source.status_code()
-            }
             InsertScript { source, .. } => source.status_code(),
             CompilePython { source, .. } | ExecutePython { source, .. } => source.status_code(),
-            FindScript { source, .. } => source.status_code(),
             CollectRecords { source, .. } => source.status_code(),
             ScriptNotFound { .. } => StatusCode::InvalidArguments,
             BuildDfLogicalPlan { .. } => StatusCode::Internal,

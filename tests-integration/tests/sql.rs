@@ -121,6 +121,8 @@ pub async fn test_mysql_auth(store_type: StorageType) {
 }
 
 pub async fn test_mysql_crud(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
     let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_crud").await;
 
     let pool = MySqlPoolOptions::new()

@@ -146,15 +146,15 @@ impl StartCommand {
         }
 
         if let Some(http_addr) = &self.http_addr {
-            opts.http_opts.addr = http_addr.clone();
+            opts.http.addr = http_addr.clone();
         }
 
         if let Some(http_timeout) = self.http_timeout {
-            opts.http_opts.timeout = Duration::from_secs(http_timeout);
+            opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
         // Disable dashboard in metasrv.
-        opts.http_opts.disable_dashboard = true;
+        opts.http.disable_dashboard = true;
 
         Ok(Options::Metasrv(Box::new(opts)))
     }
@@ -211,7 +211,6 @@ mod tests {
             bind_addr = "127.0.0.1:3002"
             server_addr = "127.0.0.1:3002"
             store_addr = "127.0.0.1:2379"
-            datanode_lease_secs = 15
             selector = "LeaseBased"
             use_memory_store = false
 
@@ -233,7 +232,6 @@ mod tests {
         assert_eq!("127.0.0.1:3002".to_string(), options.bind_addr);
         assert_eq!("127.0.0.1:3002".to_string(), options.server_addr);
         assert_eq!("127.0.0.1:2379".to_string(), options.store_addr);
-        assert_eq!(15, options.datanode_lease_secs);
         assert_eq!(SelectorType::LeaseBased, options.selector);
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
@@ -270,7 +268,7 @@ mod tests {
             selector = "LeaseBased"
             use_memory_store = false
 
-            [http_options]
+            [http]
             addr = "127.0.0.1:4000"
 
             [logging]
@@ -293,10 +291,10 @@ mod tests {
                     Some("127.0.0.1:13002"),
                 ),
                 (
-                    // http_options.addr = 127.0.0.1:24000
+                    // http.addr = 127.0.0.1:24000
                     [
                         env_prefix.to_string(),
-                        "http_options".to_uppercase(),
+                        "http".to_uppercase(),
                         "addr".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -324,7 +322,7 @@ mod tests {
                 assert_eq!(opts.server_addr, "127.0.0.1:3002");
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.http_opts.addr, "127.0.0.1:14000");
+                assert_eq!(opts.http.addr, "127.0.0.1:14000");
 
                 // Should be default value.
                 assert_eq!(opts.store_addr, "127.0.0.1:2379");

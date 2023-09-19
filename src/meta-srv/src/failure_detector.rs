@@ -16,10 +16,10 @@ use std::collections::VecDeque;
 
 /// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/main/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
 /// You can find it's document here:
-/// https://doc.akka.io/docs/akka/current/typed/failure-detector.html
+/// <https://doc.akka.io/docs/akka/current/typed/failure-detector.html>
 ///
 /// Implementation of 'The Phi Accrual Failure Detector' by Hayashibara et al. as defined in their
-/// paper: [https://oneofus.la/have-emacs-will-hack/files/HDY04.pdf]
+/// paper: <https://oneofus.la/have-emacs-will-hack/files/HDY04.pdf>
 ///
 /// The suspicion level of failure is given by a value called φ (phi).
 /// The basic idea of the φ failure detector is to express the value of φ on a scale that

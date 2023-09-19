@@ -20,6 +20,7 @@ use common_error::status_code::StatusCode;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
+use table::metadata::TableId;
 use tokio::task::JoinError;
 
 #[derive(Debug, Snafu)]
@@ -140,9 +141,9 @@ pub enum Error {
     #[snafu(display("Operation {} not supported", op))]
     NotSupported { op: String, location: Location },
 
-    #[snafu(display("Failed to open table, table info: {}, source: {}", table_info, source))]
+    #[snafu(display("Failed to open table {table_id}, source: {source}, at {location}"))]
     OpenTable {
-        table_info: String,
+        table_id: TableId,
         location: Location,
         source: table::error::Error,
     },

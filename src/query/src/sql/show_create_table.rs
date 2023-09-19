@@ -28,7 +28,7 @@ use sql::parser::ParserContext;
 use sql::statements::create::{CreateTable, TIME_INDEX};
 use sql::statements::{self};
 use table::metadata::{TableInfoRef, TableMeta};
-use table::requests::IMMUTABLE_TABLE_META_KEY;
+use table::requests::FILE_TABLE_META_KEY;
 
 use crate::error::{ConvertSqlTypeSnafu, ConvertSqlValueSnafu, Result, SqlSnafu};
 
@@ -77,7 +77,7 @@ fn create_sql_options(table_meta: &TableMeta) -> Vec<SqlOption> {
     for (k, v) in table_opts
         .extra_options
         .iter()
-        .filter(|(k, _)| k != &IMMUTABLE_TABLE_META_KEY)
+        .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
         options.push(sql_option(k, string_value(v)));
     }
@@ -193,8 +193,7 @@ mod tests {
     use datatypes::schema::{Schema, SchemaRef};
     use table::metadata::*;
     use table::requests::{
-        TableOptions, IMMUTABLE_TABLE_FORMAT_KEY, IMMUTABLE_TABLE_LOCATION_KEY,
-        IMMUTABLE_TABLE_META_KEY,
+        TableOptions, FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY,
     };
 
     use super::*;
@@ -283,17 +282,16 @@ WITH(
         let schema_name = "public".to_string();
         let catalog_name = "greptime".to_string();
         let mut options: TableOptions = Default::default();
+        let _ = options
+            .extra_options
+            .insert(FILE_TABLE_LOCATION_KEY.to_string(), "foo.csv".to_string());
         let _ = options.extra_options.insert(
-            IMMUTABLE_TABLE_LOCATION_KEY.to_string(),
-            "foo.csv".to_string(),
-        );
-        let _ = options.extra_options.insert(
-            IMMUTABLE_TABLE_META_KEY.to_string(),
+            FILE_TABLE_META_KEY.to_string(),
             "{{\"files\":[\"foo.csv\"]}}".to_string(),
         );
         let _ = options
             .extra_options
-            .insert(IMMUTABLE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
+            .insert(FILE_TABLE_FORMAT_KEY.to_string(), "csv".to_string());
         let meta = TableMetaBuilder::default()
             .schema(table_schema)
             .primary_key_indices(vec![])

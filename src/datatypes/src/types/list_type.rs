@@ -79,6 +79,13 @@ impl DataType for ListType {
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
+
+    fn try_cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::List(v) => Some(Value::List(v)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

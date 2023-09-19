@@ -32,10 +32,10 @@ use crate::error;
 use crate::error::ParseTableOptionSnafu;
 use crate::metadata::{TableId, TableVersion};
 
-pub const IMMUTABLE_TABLE_META_KEY: &str = "__private.immutable_table_meta";
-pub const IMMUTABLE_TABLE_LOCATION_KEY: &str = "location";
-pub const IMMUTABLE_TABLE_PATTERN_KEY: &str = "pattern";
-pub const IMMUTABLE_TABLE_FORMAT_KEY: &str = "format";
+pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
+pub const FILE_TABLE_LOCATION_KEY: &str = "location";
+pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
+pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
 #[derive(Debug, Clone)]
 pub struct CreateDatabaseRequest {
@@ -336,9 +336,9 @@ macro_rules! meter_insert_request {
 pub fn valid_table_option(key: &str) -> bool {
     matches!(
         key,
-        IMMUTABLE_TABLE_LOCATION_KEY
-            | IMMUTABLE_TABLE_FORMAT_KEY
-            | IMMUTABLE_TABLE_PATTERN_KEY
+        FILE_TABLE_LOCATION_KEY
+            | FILE_TABLE_FORMAT_KEY
+            | FILE_TABLE_PATTERN_KEY
             | WRITE_BUFFER_SIZE_KEY
             | TTL_KEY
             | REGIONS_KEY
@@ -361,9 +361,9 @@ mod tests {
 
     #[test]
     fn test_validate_table_option() {
-        assert!(valid_table_option(IMMUTABLE_TABLE_LOCATION_KEY));
-        assert!(valid_table_option(IMMUTABLE_TABLE_FORMAT_KEY));
-        assert!(valid_table_option(IMMUTABLE_TABLE_PATTERN_KEY));
+        assert!(valid_table_option(FILE_TABLE_LOCATION_KEY));
+        assert!(valid_table_option(FILE_TABLE_FORMAT_KEY));
+        assert!(valid_table_option(FILE_TABLE_PATTERN_KEY));
         assert!(valid_table_option(TTL_KEY));
         assert!(valid_table_option(REGIONS_KEY));
         assert!(valid_table_option(WRITE_BUFFER_SIZE_KEY));

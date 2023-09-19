@@ -20,7 +20,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use crate::error::Result;
 use crate::query_engine::QueryEngineContext;
 
-/// Executor to run [ExecutionPlan].
+/// Executor to run [PhysicalPlan].
 pub trait QueryExecutor {
     fn execute_stream(
         &self,

@@ -57,7 +57,7 @@ tokio.workspace = true
 approx_eq = "0.1"
 arrow.workspace = true
 catalog = { workspace = true, features = ["testing"] }
-common-function-macro.workspace = true
+common-macro.workspace = true
 format_num = "0.1"
 num = "0.4"
 num-traits = "0.2"

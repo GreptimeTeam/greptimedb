@@ -13,12 +13,17 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use common_query::Output;
 use query::QueryEngineRef;
+use servers::query_handler::grpc::GrpcQueryHandler;
+use session::context::QueryContextRef;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+type FrontendGrpcQueryHandlerRef = Arc<dyn GrpcQueryHandler<Error = Error> + Send + Sync>;
 
 #[cfg(not(feature = "python"))]
 mod dummy {
@@ -34,13 +39,13 @@ mod dummy {
             Ok(Self {})
         }
 
-        pub async fn start(&self) -> Result<()> {
+        pub fn start(&self, instance: &Instance) -> Result<()> {
             Ok(())
         }
 
         pub async fn insert_script(
             &self,
-            _schema: &str,
+            _query_ctx: QueryContextRef,
             _name: &str,
             _script: &str,
         ) -> servers::error::Result<()> {
@@ -49,7 +54,7 @@ mod dummy {
 
         pub async fn execute_script(
             &self,
-            _schema: &str,
+            _query_ctx: QueryContextRef,
             _name: &str,
             _params: HashMap<String, String>,
         ) -> servers::error::Result<Output> {
@@ -63,10 +68,12 @@ mod python {
     use api::v1::ddl_request::Expr;
     use api::v1::greptime_request::Request;
     use api::v1::{CreateTableExpr, DdlRequest};
+    use arc_swap::ArcSwap;
     use catalog::RegisterSystemTableRequest;
     use common_error::ext::BoxedError;
     use common_meta::table_name::TableName;
-    use common_telemetry::logging::error;
+    use common_telemetry::{error, info};
+    use operator::expr_factory;
     use script::manager::ScriptManager;
     use servers::query_handler::grpc::GrpcQueryHandler;
     use session::context::QueryContext;
@@ -75,11 +82,35 @@ mod python {
 
     use super::*;
     use crate::error::{CatalogSnafu, InvalidSystemTableDefSnafu, TableNotFoundSnafu};
-    use crate::expr_factory;
     use crate::instance::Instance;
 
+    /// A placeholder for the real gRPC handler.
+    /// It is temporary and will be replaced soon.
+    struct DummyHandler;
+
+    impl DummyHandler {
+        fn arc() -> Arc<Self> {
+            Arc::new(Self {})
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandler for DummyHandler {
+        type Error = Error;
+
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, Self::Error> {
+            unreachable!();
+        }
+    }
+
     pub struct ScriptExecutor {
-        script_manager: ScriptManager,
+        script_manager: ScriptManager<Error>,
+        grpc_handler: ArcSwap<FrontendGrpcQueryHandlerRef>,
+        catalog_manager: CatalogManagerRef,
     }
 
     impl ScriptExecutor {
@@ -87,21 +118,42 @@ mod python {
             catalog_manager: CatalogManagerRef,
             query_engine: QueryEngineRef,
         ) -> Result<Self> {
+            let grpc_handler = DummyHandler::arc();
             Ok(Self {
-                script_manager: ScriptManager::new(catalog_manager, query_engine)
+                grpc_handler: ArcSwap::new(Arc::new(grpc_handler.clone() as _)),
+                script_manager: ScriptManager::new(grpc_handler as _, query_engine)
                     .await
                     .context(crate::error::StartScriptManagerSnafu)?,
+                catalog_manager,
             })
         }
 
-        pub async fn start(&self, instance: &Instance) -> Result<()> {
+        pub fn start(&self, instance: &Instance) -> Result<()> {
+            let handler = Arc::new(instance.clone());
+            self.grpc_handler.store(Arc::new(handler.clone() as _));
+            self.script_manager
+                .start(handler)
+                .context(crate::error::StartScriptManagerSnafu)?;
+
+            Ok(())
+        }
+
+        /// Create scripts table for the specific catalog if it's not exists.
+        /// The function is idempotent and safe to be called more than once for the same catalog
+        async fn create_scripts_table_if_need(&self, catalog: &str) -> Result<()> {
+            let scripts_table = self.script_manager.get_scripts_table(catalog);
+
+            if scripts_table.is_some() {
+                return Ok(());
+            }
+
             let RegisterSystemTableRequest {
                 create_table_request: request,
                 open_hook,
-            } = self.script_manager.create_table_request();
+            } = self.script_manager.create_table_request(catalog);
 
-            if let Some(table) = instance
-                .catalog_manager()
+            if let Some(table) = self
+                .catalog_manager
                 .table(
                     &request.catalog_name,
                     &request.schema_name,
@@ -111,8 +163,10 @@ mod python {
                 .context(CatalogSnafu)?
             {
                 if let Some(open_hook) = open_hook {
-                    (open_hook)(table).await.context(CatalogSnafu)?;
+                    (open_hook)(table.clone()).await.context(CatalogSnafu)?;
                 }
+
+                self.script_manager.insert_scripts_table(catalog, table);
 
                 return Ok(());
             }
@@ -125,7 +179,9 @@ mod python {
 
             let expr = Self::create_table_expr(request)?;
 
-            let _ = instance
+            let _ = self
+                .grpc_handler
+                .load()
                 .do_query(
                     Request::Ddl(DdlRequest {
                         expr: Some(Expr::CreateTable(expr)),
@@ -134,8 +190,8 @@ mod python {
                 )
                 .await?;
 
-            let table = instance
-                .catalog_manager()
+            let table = self
+                .catalog_manager
                 .table(
                     &table_name.catalog_name,
                     &table_name.schema_name,
@@ -148,8 +204,15 @@ mod python {
                 })?;
 
             if let Some(open_hook) = open_hook {
-                (open_hook)(table).await.context(CatalogSnafu)?;
+                (open_hook)(table.clone()).await.context(CatalogSnafu)?;
             }
+
+            info!(
+                "Created scripts table {}.",
+                table.table_info().full_table_name()
+            );
+
+            self.script_manager.insert_scripts_table(catalog, table);
 
             Ok(())
         }
@@ -190,23 +253,37 @@ mod python {
                 create_if_not_exists: request.create_if_not_exists,
                 table_options: (&request.table_options).into(),
                 table_id: None, // Should and will be assigned by Meta.
-                region_numbers: vec![0],
                 engine: request.engine,
             })
         }
 
         pub async fn insert_script(
             &self,
-            schema: &str,
+            query_ctx: QueryContextRef,
             name: &str,
             script: &str,
         ) -> servers::error::Result<()> {
-            let _s = self
-                .script_manager
-                .insert_and_compile(schema, name, script)
+            self.create_scripts_table_if_need(query_ctx.current_catalog())
                 .await
                 .map_err(|e| {
-                    error!(e; "Instance failed to insert script");
+                    error!(e; "Failed to create scripts table");
+                    servers::error::InternalSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
+
+            let _s = self
+                .script_manager
+                .insert_and_compile(
+                    query_ctx.current_catalog(),
+                    query_ctx.current_schema(),
+                    name,
+                    script,
+                )
+                .await
+                .map_err(|e| {
+                    error!(e; "Failed to insert script");
                     BoxedError::new(e)
                 })
                 .context(servers::error::InsertScriptSnafu { name })?;
@@ -216,15 +293,30 @@ mod python {
 
         pub async fn execute_script(
             &self,
-            schema: &str,
+            query_ctx: QueryContextRef,
             name: &str,
             params: HashMap<String, String>,
         ) -> servers::error::Result<Output> {
-            self.script_manager
-                .execute(schema, name, params)
+            self.create_scripts_table_if_need(query_ctx.current_catalog())
                 .await
                 .map_err(|e| {
-                    error!(e; "Instance failed to execute script");
+                    error!(e; "Failed to create scripts table");
+                    servers::error::InternalSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?;
+
+            self.script_manager
+                .execute(
+                    query_ctx.current_catalog(),
+                    query_ctx.current_schema(),
+                    name,
+                    params,
+                )
+                .await
+                .map_err(|e| {
+                    error!(e; "Failed to execute script");
                     BoxedError::new(e)
                 })
                 .context(servers::error::ExecuteScriptSnafu { name })

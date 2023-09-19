@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
@@ -38,6 +39,7 @@ pub enum RegionRequest {
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
+    Truncate(RegionTruncateRequest),
 }
 
 impl RegionRequest {
@@ -70,7 +72,7 @@ impl RegionRequest {
                     .map(ColumnMetadata::try_from_column_def)
                     .collect::<Result<Vec<_>>>()?;
                 let region_id = create.region_id.into();
-                let region_dir = region_dir(&create.catalog, &create.schema, region_id);
+                let region_dir = region_dir(&create.path, region_id);
                 Ok(vec![(
                     region_id,
                     Self::Create(RegionCreateRequest {
@@ -89,7 +91,7 @@ impl RegionRequest {
             )]),
             region_request::Body::Open(open) => {
                 let region_id = open.region_id.into();
-                let region_dir = region_dir(&open.catalog, &open.schema, region_id);
+                let region_dir = region_dir(&open.path, region_id);
                 Ok(vec![(
                     region_id,
                     Self::Open(RegionOpenRequest {
@@ -140,7 +142,7 @@ pub struct RegionDeleteRequest {
     pub rows: Rows,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegionCreateRequest {
     /// Region engine name
     pub engine: String,
@@ -412,6 +414,26 @@ pub struct RegionFlushRequest {}
 #[derive(Debug)]
 pub struct RegionCompactRequest {}
 
+#[derive(Debug)]
+pub struct RegionTruncateRequest {}
+
+impl fmt::Display for RegionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegionRequest::Put(_) => write!(f, "Put"),
+            RegionRequest::Delete(_) => write!(f, "Delete"),
+            RegionRequest::Create(_) => write!(f, "Create"),
+            RegionRequest::Drop(_) => write!(f, "Drop"),
+            RegionRequest::Open(_) => write!(f, "Open"),
+            RegionRequest::Close(_) => write!(f, "Close"),
+            RegionRequest::Alter(_) => write!(f, "Alter"),
+            RegionRequest::Flush(_) => write!(f, "Flush"),
+            RegionRequest::Compact(_) => write!(f, "Compact"),
+            RegionRequest::Truncate(_) => write!(f, "Truncate"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use api::v1::region::RegionColumnDef;
@@ -480,6 +502,7 @@ mod tests {
                             is_nullable: true,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
+                            comment: String::new(),
                         }),
                         column_id: 1,
                     }),

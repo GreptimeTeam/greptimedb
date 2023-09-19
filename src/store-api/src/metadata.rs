@@ -33,6 +33,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{ensure, Location, OptionExt, ResultExt, Snafu};
 
 use crate::region_request::{AddColumn, AddColumnLocation, AlterKind};
+use crate::storage::consts::is_internal_column;
 use crate::storage::{ColumnId, RegionId};
 
 pub type Result<T> = std::result::Result<T, MetadataError>;
@@ -49,7 +50,7 @@ pub struct ColumnMetadata {
 }
 
 impl ColumnMetadata {
-    /// Construct `Self` from protobuf struct [ColumnDef]
+    /// Construct `Self` from protobuf struct [RegionColumnDef]
     pub fn try_from_column_def(column_def: RegionColumnDef) -> Result<Self> {
         let column_id = column_def.column_id;
 
@@ -367,6 +368,16 @@ impl RegionMetadata {
                 }
             );
         }
+
+        ensure!(
+            !is_internal_column(&column_metadata.column_schema.name),
+            InvalidMetaSnafu {
+                reason: format!(
+                    "{} is internal column name that can not be used",
+                    column_metadata.column_schema.name
+                ),
+            }
+        );
 
         Ok(())
     }
@@ -997,5 +1008,25 @@ mod test {
         // Build returns error as the primary key has more columns.
         let err = builder.build().unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_invalid_column_name() {
+        let mut builder = create_builder();
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "__sequence",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        });
+        let err = builder.build().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("internal column name that can not be used"),
+            "unexpected err: {err}",
+        );
     }
 }

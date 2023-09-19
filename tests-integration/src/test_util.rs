@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
@@ -21,19 +20,17 @@ use std::time::Duration;
 
 use auth::UserProviderRef;
 use axum::Router;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::kvbackend::KvBackendCatalogManager;
+use common_meta::key::catalog_name::CatalogNameKey;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
 use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
-use datanode::datanode::{
+use datanode::config::{
     AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
     StorageConfig,
-};
-use datatypes::scalars::ScalarVectorBuilder;
-use datatypes::vectors::{
-    Float64VectorBuilder, MutableVector, StringVectorBuilder, TimestampMillisecondVectorBuilder,
 };
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
@@ -52,7 +49,6 @@ use servers::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler}
 use servers::server::Server;
 use servers::Mode;
 use session::context::QueryContext;
-use table::requests::InsertRequest;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
@@ -295,6 +291,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 
 pub(crate) fn create_datanode_opts(store: ObjectStoreConfig, home_dir: String) -> DatanodeOptions {
     DatanodeOptions {
+        node_id: Some(0),
         storage: StorageConfig {
             data_home: home_dir,
             store,
@@ -312,26 +309,23 @@ CREATE TABLE IF NOT EXISTS {table_name} (
     host String NOT NULL PRIMARY KEY,
     cpu DOUBLE NULL,
     memory DOUBLE NULL,
-    ts TIMESTAMP NULL TIME INDEX
+    ts TIMESTAMP NOT NULL TIME INDEX,
 )
 "#
     );
 
-    let _ = instance.do_query(&sql, QueryContext::arc()).await;
+    let result = instance.do_query(&sql, QueryContext::arc()).await;
+    let _ = result.first().unwrap().as_ref().unwrap();
 }
 
 async fn setup_standalone_instance(
     test_name: &str,
     store_type: StorageType,
 ) -> GreptimeDbStandalone {
-    let instance = GreptimeDbStandaloneBuilder::new(test_name)
+    GreptimeDbStandaloneBuilder::new(test_name)
         .with_store_type(store_type)
         .build()
-        .await;
-
-    create_test_table(instance.instance.as_ref(), "demo").await;
-
-    instance
+        .await
 }
 
 pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router, TestGuard) {
@@ -366,6 +360,8 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
 ) -> (Router, TestGuard) {
     let instance = setup_standalone_instance(name, store_type).await;
 
+    create_test_table(instance.instance.as_ref(), "demo").await;
+
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
@@ -391,39 +387,6 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     (app, instance.guard)
 }
 
-fn mock_insert_request(host: &str, cpu: f64, memory: f64, ts: i64) -> InsertRequest {
-    let mut builder = StringVectorBuilder::with_capacity(1);
-    builder.push(Some(host));
-    let host = builder.to_vector();
-
-    let mut builder = Float64VectorBuilder::with_capacity(1);
-    builder.push(Some(cpu));
-    let cpu = builder.to_vector();
-
-    let mut builder = Float64VectorBuilder::with_capacity(1);
-    builder.push(Some(memory));
-    let memory = builder.to_vector();
-
-    let mut builder = TimestampMillisecondVectorBuilder::with_capacity(1);
-    builder.push(Some(ts.into()));
-    let ts = builder.to_vector();
-
-    let columns_values = HashMap::from([
-        ("host".to_string(), host),
-        ("cpu".to_string(), cpu),
-        ("memory".to_string(), memory),
-        ("ts".to_string(), ts),
-    ]);
-
-    InsertRequest {
-        catalog_name: common_catalog::consts::DEFAULT_CATALOG_NAME.to_string(),
-        schema_name: common_catalog::consts::DEFAULT_SCHEMA_NAME.to_string(),
-        table_name: "demo".to_string(),
-        columns_values,
-        region_number: 0,
-    }
-}
-
 pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
@@ -432,22 +395,11 @@ pub async fn setup_test_prom_app_with_frontend(
 
     let instance = setup_standalone_instance(name, store_type).await;
 
-    let demo = instance
-        .instance
-        .catalog_manager()
-        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "demo")
-        .await
-        .unwrap()
-        .unwrap();
+    create_test_table(instance.instance.as_ref(), "demo").await;
 
-    let _ = demo
-        .insert(mock_insert_request("host1", 1.1, 2.2, 0))
-        .await
-        .unwrap();
-    let _ = demo
-        .insert(mock_insert_request("host2", 2.1, 4.3, 600000))
-        .await
-        .unwrap();
+    let sql = "INSERT INTO demo VALUES ('host1', 1.1, 2.2, 0), ('host2', 2.1, 4.3, 600000)";
+    let result = instance.instance.do_query(sql, QueryContext::arc()).await;
+    let _ = result.first().unwrap().as_ref().unwrap();
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -626,4 +578,28 @@ pub async fn setup_pg_server_with_user_provider(
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     (fe_pg_addr, instance.guard, fe_pg_server)
+}
+
+pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
+    let catalog_manager = instance
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<KvBackendCatalogManager>()
+        .unwrap();
+
+    let table_metadata_manager = catalog_manager.table_metadata_manager_ref();
+    table_metadata_manager
+        .catalog_manager()
+        .create(CatalogNameKey::new("another_catalog"), true)
+        .await
+        .unwrap();
+    table_metadata_manager
+        .schema_manager()
+        .create(
+            SchemaNameKey::new("another_catalog", "another_schema"),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
 }

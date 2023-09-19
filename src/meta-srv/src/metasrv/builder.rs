@@ -20,6 +20,7 @@ use client::client_manager::DatanodeClients;
 use common_base::{Plugins, PluginsRef};
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
+use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::sequence::{Sequence, SequenceRef};
 use common_meta::state_store::KvStateStore;
@@ -167,14 +168,12 @@ impl MetaSrvBuilder {
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
-        let ctx = SelectorContext {
-            datanode_lease_secs: options.datanode_lease_secs,
+        let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
+            datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
             kv_store: kv_store.clone(),
             meta_peer_client: meta_peer_client.clone(),
-            catalog: None,
-            schema: None,
-            table: None,
+            table_id: None,
         };
         let ddl_manager = build_ddl_manager(
             &options,
@@ -182,7 +181,7 @@ impl MetaSrvBuilder {
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            (&selector, &ctx),
+            (&selector, &selector_ctx),
             &table_id_sequence,
         );
         let _ = ddl_manager.try_start();
@@ -191,21 +190,12 @@ impl MetaSrvBuilder {
             Some(handler_group) => handler_group,
             None => {
                 let region_failover_handler = if options.enable_region_failover {
-                    let selector_ctx = SelectorContext {
-                        server_addr: options.server_addr.clone(),
-                        datanode_lease_secs: options.datanode_lease_secs,
-                        kv_store: kv_store.clone(),
-                        meta_peer_client: meta_peer_client.clone(),
-                        catalog: None,
-                        schema: None,
-                        table: None,
-                    };
                     let region_failover_manager = Arc::new(RegionFailoverManager::new(
-                        options.region_lease_secs,
+                        distributed_time_constants::REGION_LEASE_SECS,
                         in_memory.clone(),
                         mailbox.clone(),
                         procedure_manager.clone(),
-                        (selector.clone(), selector_ctx),
+                        (selector.clone(), selector_ctx.clone()),
                         lock.clone(),
                         table_metadata_manager.clone(),
                     ));
@@ -222,7 +212,8 @@ impl MetaSrvBuilder {
                     .and_then(|plugins| plugins.get::<PublishRef>())
                     .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
-                let region_lease_handler = RegionLeaseHandler::new(options.region_lease_secs);
+                let region_lease_handler =
+                    RegionLeaseHandler::new(distributed_time_constants::REGION_LEASE_SECS);
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;

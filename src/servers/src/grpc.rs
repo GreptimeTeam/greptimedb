@@ -69,11 +69,11 @@ pub struct GrpcServer {
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
 
     // handlers
-    /// Handler for [GreptimeDatabase] service.
+    /// Handler for [DatabaseService] service.
     database_handler: Option<GreptimeRequestHandler>,
     /// Handler for Prometheus-compatible PromQL queries ([PrometheusGateway]). Only present for frontend server.
     prometheus_handler: Option<PrometheusHandlerRef>,
-    /// Handler for [FlightService].
+    /// Handler for [FlightService](arrow_flight::flight_service_server::FlightService).
     flight_handler: Option<FlightCraftRef>,
     /// Handler for [RegionServer].
     region_server_handler: Option<RegionServerRequestHandler>,

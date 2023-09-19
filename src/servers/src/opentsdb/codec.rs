@@ -129,7 +129,7 @@ impl DataPoint {
         let ts_column = Column {
             column_name: OPENTSDB_TIMESTAMP_COLUMN_NAME.to_string(),
             values: Some(column::Values {
-                ts_millisecond_values: vec![self.ts_millis],
+                timestamp_millisecond_values: vec![self.ts_millis],
                 ..Default::default()
             }),
             semantic_type: SemanticType::Timestamp as i32,
@@ -165,7 +165,6 @@ impl DataPoint {
 
         GrpcInsertRequest {
             table_name: self.metric.clone(),
-            region_number: 0,
             columns,
             row_count: 1,
         }
@@ -268,7 +267,11 @@ mod test {
 
         assert_eq!(columns[0].column_name, OPENTSDB_TIMESTAMP_COLUMN_NAME);
         assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
+            columns[0]
+                .values
+                .as_ref()
+                .unwrap()
+                .timestamp_millisecond_values,
             vec![1000]
         );
 

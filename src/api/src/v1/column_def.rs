@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
+use std::collections::HashMap;
+
+use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -34,9 +36,17 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         )
     };
 
-    ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
-        .with_default_constraint(constraint)
-        .context(error::InvalidColumnDefaultConstraintSnafu {
-            column: &column_def.name,
-        })
+    let mut metadata = HashMap::new();
+    if !column_def.comment.is_empty() {
+        metadata.insert(COMMENT_KEY.to_string(), column_def.comment.clone());
+    }
+
+    Ok(
+        ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
+            .with_default_constraint(constraint)
+            .context(error::InvalidColumnDefaultConstraintSnafu {
+                column: &column_def.name,
+            })?
+            .with_metadata(metadata),
+    )
 }

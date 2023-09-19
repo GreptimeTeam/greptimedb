@@ -24,7 +24,7 @@ use datatypes::vectors::{Float64Vector, Vector, VectorRef};
 use datatypes::with_match_primitive_type_id;
 use snafu::{ensure, ResultExt};
 
-/* search the biggest number that smaller than x in xp */
+/// search the biggest number that smaller than x in xp
 fn linear_search_ascending_vector(x: Value, xp: &Float64Vector) -> usize {
     for i in 0..xp.len() {
         if x < xp.get(i) {
@@ -34,7 +34,7 @@ fn linear_search_ascending_vector(x: Value, xp: &Float64Vector) -> usize {
     xp.len() - 1
 }
 
-/* search the biggest number that smaller than x in xp */
+/// search the biggest number that smaller than x in xp
 fn binary_search_ascending_vector(key: Value, xp: &Float64Vector) -> usize {
     let mut left = 0;
     let mut right = xp.len();
@@ -67,7 +67,8 @@ fn concrete_type_to_primitive_vector(arg: &VectorRef) -> Result<Float64Vector> {
     })
 }
 
-/// https://github.com/numpy/numpy/blob/b101756ac02e390d605b2febcded30a1da50cc2c/numpy/core/src/multiarray/compiled_base.c#L491
+/// One-dimensional linear interpolation for monotonically increasing sample points. Refers to
+/// <https://github.com/numpy/numpy/blob/b101756ac02e390d605b2febcded30a1da50cc2c/numpy/core/src/multiarray/compiled_base.c#L491>
 #[allow(unused)]
 pub fn interp(args: &[VectorRef]) -> Result<VectorRef> {
     let mut left = None;

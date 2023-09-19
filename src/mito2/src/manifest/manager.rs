@@ -279,6 +279,9 @@ impl RegionManifestManagerInner {
                             options.manifest_dir, action
                         );
                     }
+                    RegionMetaAction::Truncate(action) => {
+                        manifest_builder.apply_truncate(manifest_version, action);
+                    }
                 }
             }
         }
@@ -328,6 +331,9 @@ impl RegionManifestManagerInner {
                         "Unhandled action for region {}, action: {:?}",
                         self.manifest.metadata.region_id, action
                     );
+                }
+                RegionMetaAction::Truncate(action) => {
+                    manifest_builder.apply_truncate(version, action);
                 }
             }
         }
@@ -399,6 +405,9 @@ impl RegionManifestManagerInner {
                             "Unhandled action for region {}, action: {:?}",
                             self.manifest.metadata.region_id, action
                         );
+                    }
+                    RegionMetaAction::Truncate(action) => {
+                        manifest_builder.apply_truncate(version, action);
                     }
                 }
             }

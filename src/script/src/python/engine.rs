@@ -75,6 +75,7 @@ impl PyUDF {
     fn register_as_udf(zelf: Arc<Self>) {
         FUNCTION_REGISTRY.register(zelf)
     }
+
     fn register_to_query_engine(zelf: Arc<Self>, engine: QueryEngineRef) {
         engine.register_function(zelf)
     }
@@ -138,10 +139,12 @@ impl Function for PyUDF {
                 }
             }
         }
+
+        // The Volatility should be volatile, the return value from evaluation may be changed.
         if know_all_types {
-            Signature::variadic(arg_types, Volatility::Immutable)
+            Signature::variadic(arg_types, Volatility::Volatile)
         } else {
-            Signature::any(self.copr.arg_types.len(), Volatility::Immutable)
+            Signature::any(self.copr.arg_types.len(), Volatility::Volatile)
         }
     }
 
@@ -358,7 +361,7 @@ pub(crate) use tests::sample_script_engine;
 
 #[cfg(test)]
 mod tests {
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::NUMBERS_TABLE_ID;
     use common_recordbatch::util;
     use datatypes::prelude::ScalarVector;

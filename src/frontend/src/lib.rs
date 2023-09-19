@@ -15,21 +15,11 @@
 #![feature(assert_matches)]
 #![feature(trait_upcasting)]
 
-pub mod catalog;
-pub(crate) mod delete;
 pub mod error;
-pub mod expr_factory;
 pub mod frontend;
 pub mod heartbeat;
-pub(crate) mod insert;
 pub mod instance;
 pub(crate) mod metrics;
-pub(crate) mod region_req_factory;
-pub(crate) mod req_convert;
 mod script;
 mod server;
 pub mod service_config;
-pub mod statement;
-pub mod table;
-
-pub const MAX_VALUE: &str = "MAXVALUE";

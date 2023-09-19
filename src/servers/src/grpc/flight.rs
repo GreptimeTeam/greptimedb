@@ -150,23 +150,28 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
+        let trace_id = request
+            .header
+            .as_ref()
+            .map(|h| h.trace_id)
+            .unwrap_or_default();
 
         let output = self.handle_request(request).await?;
 
         let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
-            to_flight_data_stream(output);
+            to_flight_data_stream(output, trace_id);
         Ok(Response::new(stream))
     }
 }
 
-fn to_flight_data_stream(output: Output) -> TonicStream<FlightData> {
+fn to_flight_data_stream(output: Output, trace_id: u64) -> TonicStream<FlightData> {
     match output {
         Output::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(stream);
+            let stream = FlightRecordBatchStream::new(stream, trace_id);
             Box::pin(stream) as _
         }
         Output::RecordBatches(x) => {
-            let stream = FlightRecordBatchStream::new(x.as_stream());
+            let stream = FlightRecordBatchStream::new(x.as_stream(), trace_id);
             Box::pin(stream) as _
         }
         Output::AffectedRows(rows) => {

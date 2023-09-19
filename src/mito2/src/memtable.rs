@@ -20,7 +20,7 @@ pub mod key_values;
 pub(crate) mod version;
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_query::logical_plan::Expr;
@@ -88,45 +88,6 @@ pub trait MemtableBuilder: Send + Sync + fmt::Debug {
 }
 
 pub type MemtableBuilderRef = Arc<dyn MemtableBuilder>;
-
-// TODO(yingwen): Remove it once we port the memtable.
-/// Empty memtable for test.
-#[derive(Debug, Default)]
-pub(crate) struct EmptyMemtable {
-    /// Id of this memtable.
-    id: MemtableId,
-}
-
-impl EmptyMemtable {
-    /// Returns a new memtable with specific `id`.
-    pub(crate) fn new(id: MemtableId) -> EmptyMemtable {
-        EmptyMemtable { id }
-    }
-}
-
-impl Memtable for EmptyMemtable {
-    fn id(&self) -> MemtableId {
-        self.id
-    }
-
-    fn write(&self, _kvs: &KeyValues) -> Result<()> {
-        Ok(())
-    }
-
-    fn iter(&self, _projection: Option<&[ColumnId]>, _filters: &[Expr]) -> BoxedBatchIterator {
-        Box::new(std::iter::empty())
-    }
-
-    fn is_empty(&self) -> bool {
-        true
-    }
-
-    fn mark_immutable(&self) {}
-
-    fn stats(&self) -> MemtableStats {
-        MemtableStats::default()
-    }
-}
 
 /// Memtable memory allocation tracker.
 #[derive(Default)]
@@ -202,21 +163,6 @@ impl Drop for AllocTracker {
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.free_mem(bytes_allocated);
         }
-    }
-}
-
-/// Default memtable builder.
-#[derive(Debug, Default)]
-pub(crate) struct DefaultMemtableBuilder {
-    /// Next memtable id.
-    next_id: AtomicU32,
-}
-
-impl MemtableBuilder for DefaultMemtableBuilder {
-    fn build(&self, _metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(EmptyMemtable::new(
-            self.next_id.fetch_add(1, Ordering::Relaxed),
-        ))
     }
 }
 

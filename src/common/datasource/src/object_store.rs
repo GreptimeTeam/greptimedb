@@ -27,7 +27,7 @@ use crate::error::{self, Result};
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
 
-/// Returns (schema, Option<host>, path)
+/// Returns `(schema, Option<host>, path)`
 pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
     let parsed_url = Url::parse(url);
     match parsed_url {

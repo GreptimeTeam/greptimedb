@@ -62,15 +62,20 @@ where
 
 /// Get the dir of test cases. This function only works when the runner is run
 /// under the project's dir because it depends on some envs set by cargo.
-pub fn get_case_dir() -> String {
-    // retrieve the manifest runner (./tests/runner)
-    let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+pub fn get_case_dir(case_dir: Option<PathBuf>) -> String {
+    let runner_path = match case_dir {
+        Some(path) => path,
+        None => {
+            // retrieve the manifest runner (./tests/runner)
+            let mut runner_crate_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            // change directory to cases' dir from runner's (should be runner/../cases)
+            let _ = runner_crate_path.pop();
+            runner_crate_path.push("cases");
+            runner_crate_path
+        }
+    };
 
-    // change directory to cases' dir from runner's (should be runner/../cases)
-    let _ = runner_crate_path.pop();
-    runner_crate_path.push("cases");
-
-    runner_crate_path.into_os_string().into_string().unwrap()
+    runner_path.into_os_string().into_string().unwrap()
 }
 
 /// Get the dir that contains workspace manifest (the top-level Cargo.toml).

@@ -22,8 +22,8 @@ pub struct ResponseHeaderHandler;
 
 #[async_trait::async_trait]
 impl HeartbeatHandler for ResponseHeaderHandler {
-    fn is_acceptable(&self, role: Role) -> bool {
-        role == Role::Datanode
+    fn is_acceptable(&self, _role: Role) -> bool {
+        true
     }
 
     async fn handle(

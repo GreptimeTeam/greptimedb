@@ -76,3 +76,9 @@ impl From<PbTableName> for TableName {
         }
     }
 }
+
+impl From<TableReference<'_>> for TableName {
+    fn from(table_ref: TableReference) -> Self {
+        Self::new(table_ref.catalog, table_ref.schema, table_ref.table)
+    }
+}

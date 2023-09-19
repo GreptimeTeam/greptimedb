@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
+use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
     self, BadAccumulatorImplSnafu, CreateAccumulatorSnafu, DowncastVectorSnafu,
     FromScalarValueSnafu, GenerateFunctionSnafu, InvalidInputColSnafu, Result,

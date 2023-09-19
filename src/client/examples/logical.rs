@@ -45,6 +45,7 @@ async fn run() {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "key".to_string(),
@@ -52,6 +53,7 @@ async fn run() {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
+                comment: String::new(),
             },
             ColumnDef {
                 name: "value".to_string(),
@@ -59,6 +61,7 @@ async fn run() {
                 is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
+                comment: String::new(),
             },
         ],
         time_index: "timestamp".to_string(),
@@ -66,7 +69,6 @@ async fn run() {
         create_if_not_exists: false,
         table_options: Default::default(),
         table_id: Some(TableId { id: 1024 }),
-        region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     };
 

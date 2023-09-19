@@ -14,8 +14,9 @@
 
 use common_query::AddColumnLocation;
 use sqlparser::ast::{ColumnDef, Ident, ObjectName, TableConstraint};
+use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
     table_name: ObjectName,
     alter_operation: AlterTableOperation,
@@ -38,7 +39,7 @@ impl AlterTable {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum AlterTableOperation {
     /// `ADD <table_constraint>`
     AddConstraint(TableConstraint),

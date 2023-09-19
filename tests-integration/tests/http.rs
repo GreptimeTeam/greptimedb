@@ -117,7 +117,6 @@ pub async fn test_http_auth(store_type: StorageType) {
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
     let res = client.get("/v1/sql").send().await;
@@ -305,7 +304,7 @@ pub async fn test_sql_api(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = serde_json::from_str::<JsonResponse>(&res.text().await).unwrap();
-    assert_eq!(body.code(), ErrorCode::Internal as u32);
+    assert_eq!(body.code(), ErrorCode::DatabaseNotFound as u32);
 
     // test invalid schema
     let res = client
@@ -320,7 +319,6 @@ pub async fn test_sql_api(store_type: StorageType) {
 }
 
 pub async fn test_prometheus_promql_api(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "sql_api").await;
     let client = TestClient::new(app);
 
@@ -606,62 +604,72 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
     let expected_toml_str = format!(
-        r#"
-    mode = "standalone"
-    enable_memory_catalog = false
-    rpc_addr = "127.0.0.1:3001"
-    rpc_runtime_size = 8
-    enable_telemetry = true
+        r#"mode = "standalone"
+node_id = 0
+coordination = false
+rpc_addr = "127.0.0.1:3001"
+rpc_runtime_size = 8
+enable_telemetry = true
 
-    [heartbeat]
-    interval_millis = 5000
-    retry_interval_millis = 5000
+[heartbeat]
+interval_millis = 3000
+retry_interval_millis = 3000
 
-    [http_opts]
-    addr = "127.0.0.1:4000"
-    timeout = "30s"
-    body_limit = "64MiB"
+[http]
+addr = "127.0.0.1:4000"
+timeout = "30s"
+body_limit = "64MiB"
 
-    [wal]
-    file_size = "256MiB"
-    purge_threshold = "4GiB"
-    purge_interval = "10m"
-    read_batch_size = 128
-    sync_write = false
+[wal]
+file_size = "256MiB"
+purge_threshold = "4GiB"
+purge_interval = "10m"
+read_batch_size = 128
+sync_write = false
 
-    [storage]
-    type = "{}"
+[storage]
+type = "{}"
 
-    [storage.compaction]
-    max_inflight_tasks = 4
-    max_files_in_level0 = 8
-    max_purge_tasks = 32
-    sst_write_buffer_size = "8MiB"
+[storage.compaction]
+max_inflight_tasks = 4
+max_files_in_level0 = 8
+max_purge_tasks = 32
+sst_write_buffer_size = "8MiB"
 
-    [storage.manifest]
-    checkpoint_margin = 10
-    gc_duration = "10m"
-    compress = false
+[storage.manifest]
+checkpoint_margin = 10
+gc_duration = "10m"
+compress = false
 
-    [storage.flush]
-    max_flush_tasks = 8
-    region_write_buffer_size = "32MiB"
-    picker_schedule_interval = "5m"
-    auto_flush_interval = "1h"
+[storage.flush]
+max_flush_tasks = 8
+region_write_buffer_size = "32MiB"
+picker_schedule_interval = "5m"
+auto_flush_interval = "1h"
 
-    [procedure]
-    max_retry_times = 3
-    retry_delay = "500ms"
+[[region_engine]]
 
-    [logging]
-    enable_jaeger_tracing = false"#,
+[region_engine.mito]
+num_workers = 1
+worker_channel_size = 128
+worker_request_batch_size = 64
+manifest_checkpoint_distance = 10
+manifest_compress_type = "Uncompressed"
+max_background_jobs = 4
+auto_flush_interval = "30m"
+global_write_buffer_size = "1GiB"
+global_write_buffer_reject_size = "2GiB"
+
+[[region_engine]]
+
+[region_engine.file]
+
+[logging]
+enable_jaeger_tracing = false"#,
         store_type
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-    assert_eq!(
-        normalize_str(body_text.as_str()),
-        normalize_str(&expected_toml_str)
-    );
+    assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
@@ -682,10 +690,6 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         })
         .collect::<Vec<&str>>()
         .join("\n")
-}
-
-fn normalize_str(s: &str) -> String {
-    s.replace([' ', '\n'], "")
 }
 
 #[cfg(feature = "dashboard")]

@@ -87,6 +87,11 @@ impl Duration {
         let nsec = u32::try_from(sec_mod * nsec_mul).unwrap();
         (sec_div, nsec)
     }
+
+    /// Convert to std::time::Duration.
+    pub fn to_std_duration(self) -> std::time::Duration {
+        self.into()
+    }
 }
 
 /// Convert i64 to Duration Type.

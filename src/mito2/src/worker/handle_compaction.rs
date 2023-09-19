@@ -16,9 +16,7 @@ use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
-use crate::compaction::CompactionRequest;
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::region::MitoRegionRef;
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
@@ -33,8 +31,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        let request = self.new_compaction_request(&region, sender);
-        if let Err(e) = self.compaction_scheduler.schedule_compaction(request) {
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(
+            region.region_id,
+            &region.version_control,
+            &region.access_layer,
+            &region.file_purger,
+            sender,
+        ) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
@@ -74,31 +77,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .version_control
             .apply_edit(edit, &[], region.file_purger.clone());
         request.on_success();
+
+        // Schedule next compaction if necessary.
+        self.compaction_scheduler.on_compaction_finished(region_id);
     }
 
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
         error!(req.err; "Failed to compact region: {}", req.region_id);
-    }
 
-    /// Creates a new compaction request.
-    fn new_compaction_request(
-        &self,
-        region: &MitoRegionRef,
-        waiter: OptionOutputTx,
-    ) -> CompactionRequest {
-        let current_version = region.version_control.current().version;
-        let access_layer = region.access_layer.clone();
-        let file_purger = region.file_purger.clone();
-
-        CompactionRequest {
-            current_version,
-            access_layer,
-            ttl: None,                    // TODO(hl): get TTL info from region metadata
-            compaction_time_window: None, // TODO(hl): get persisted region compaction time window
-            request_sender: self.sender.clone(),
-            waiter,
-            file_purger,
-        }
+        self.compaction_scheduler
+            .on_compaction_failed(req.region_id, req.err);
     }
 }

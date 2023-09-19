@@ -34,25 +34,31 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 
+use crate::error::{self, Result};
+use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
 use crate::region_server::RegionServer;
 
 const MAX_CLOSE_RETRY_TIMES: usize = 10;
 
-/// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
+/// [RegionAliveKeeper] manages all `CountdownTaskHandles`.
 ///
-/// [RegionAliveKeeper] starts a [CountdownTask] for each region. When deadline is reached,
+/// [RegionAliveKeeper] starts a `CountdownTask` for each region. When deadline is reached,
 /// the region will be closed.
+///
 /// The deadline is controlled by Metasrv. It works like "lease" for regions: a Datanode submits its
 /// opened regions to Metasrv, in heartbeats. If Metasrv decides some region could be resided in this
 /// Datanode, it will "extend" the region's "lease", with a deadline for [RegionAliveKeeper] to
 /// countdown.
+///
+/// On each lease extension, [RegionAliveKeeper] will reset the deadline to the corresponding time, and
+/// set region's status to "writable".
 pub struct RegionAliveKeeper {
     region_server: RegionServer,
     tasks: Arc<Mutex<HashMap<RegionId, Arc<CountdownTaskHandle>>>>,
     heartbeat_interval_millis: u64,
-    started: AtomicBool,
+    started: Arc<AtomicBool>,
 
-    /// The epoch when [RegionAliveKeepers] is created. It's used to get a monotonically non-decreasing
+    /// The epoch when [RegionAliveKeeper] is created. It's used to get a monotonically non-decreasing
     /// elapsed time when submitting heartbeats to Metasrv (because [Instant] is monotonically
     /// non-decreasing). The heartbeat request will carry the duration since this epoch, and the
     /// duration acts like an "invariant point" for region's keep alive lease.
@@ -65,7 +71,7 @@ impl RegionAliveKeeper {
             region_server,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             heartbeat_interval_millis,
-            started: AtomicBool::new(false),
+            started: Arc::new(AtomicBool::new(false)),
             epoch: Instant::now(),
         }
     }
@@ -137,17 +143,72 @@ impl RegionAliveKeeper {
         deadline
     }
 
-    pub async fn start(&self) {
+    pub async fn start(
+        self: &Arc<Self>,
+        event_receiver: Option<RegionServerEventReceiver>,
+    ) -> Result<()> {
+        self.started.store(true, Ordering::Relaxed);
+
+        if let Some(mut event_receiver) = event_receiver {
+            let keeper = self.clone();
+            // Initializers region alive keeper.
+            // It makes sure all opened regions are registered to `RegionAliveKeeper.`
+            loop {
+                match event_receiver.0.try_recv() {
+                    Ok(RegionServerEvent::Registered(region_id)) => {
+                        keeper.register_region(region_id).await;
+                    }
+                    Ok(RegionServerEvent::Deregistered(region_id)) => {
+                        keeper.deregister_region(region_id).await;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        return error::UnexpectedSnafu {
+                            violated: "RegionServerEventSender closed",
+                        }
+                        .fail()
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        break;
+                    }
+                }
+            }
+            let running = self.started.clone();
+
+            // Watches changes
+            common_runtime::spawn_bg(async move {
+                loop {
+                    if !running.load(Ordering::Relaxed) {
+                        info!("RegionAliveKeeper stopped! Quits the watch loop!");
+                        break;
+                    }
+
+                    match event_receiver.0.recv().await {
+                        Some(RegionServerEvent::Registered(region_id)) => {
+                            keeper.register_region(region_id).await;
+                        }
+                        Some(RegionServerEvent::Deregistered(region_id)) => {
+                            keeper.deregister_region(region_id).await;
+                        }
+                        None => {
+                            info!("RegionServerEventSender closed! Quits the watch loop!");
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
         let tasks = self.tasks.lock().await;
         for task in tasks.values() {
             task.start(self.heartbeat_interval_millis).await;
         }
-        self.started.store(true, Ordering::Relaxed);
 
         info!(
             "RegionAliveKeeper is started with region {:?}",
             tasks.keys().map(|x| x.to_string()).collect::<Vec<_>>(),
         );
+
+        Ok(())
     }
 
     pub fn epoch(&self) -> Instant {
@@ -313,6 +374,7 @@ impl CountdownTask {
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
+                                let _ = self.region_server.set_writable(self.region_id, true);
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:
@@ -378,14 +440,14 @@ mod test {
     #[tokio::test(flavor = "multi_thread")]
     async fn region_alive_keeper() {
         let region_server = mock_region_server();
-        let alive_keeper = RegionAliveKeeper::new(region_server, 300);
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server, 300));
         let region_id = RegionId::new(1, 2);
 
         // register a region before starting
         alive_keeper.register_region(region_id).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
 
-        alive_keeper.start().await;
+        alive_keeper.start(None).await.unwrap();
 
         // started alive keeper should assign deadline to this region
         let deadline = alive_keeper.deadline(region_id).await.unwrap();
@@ -456,8 +518,8 @@ mod test {
         // wait for countdown task to finish
         let before_await = Instant::now();
         let (finish_instant, result) = rx.await.unwrap();
-        // the mock region server cannot close the region
-        assert_eq!(result, Some(false));
+        // it returns `RegionNotFound`
+        assert_eq!(result, Some(true));
         // this task should be finished after 5 * heartbeat_interval_millis
         // we assert 4 times here
         assert!(

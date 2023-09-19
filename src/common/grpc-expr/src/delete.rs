@@ -79,7 +79,6 @@ mod tests {
     fn test_to_table_delete_request() {
         let grpc_request = GrpcDeleteRequest {
             table_name: "foo".to_string(),
-            region_number: 0,
             key_columns: vec![
                 Column {
                     column_name: "id".to_string(),

@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
-use catalog::local::MemoryCatalogManager;
+use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
@@ -116,7 +116,15 @@ impl SqlQueryHandler for DummyInstance {
 
 #[async_trait]
 impl ScriptHandler for DummyInstance {
-    async fn insert_script(&self, schema: &str, name: &str, script: &str) -> Result<()> {
+    async fn insert_script(
+        &self,
+        query_ctx: QueryContextRef,
+        name: &str,
+        script: &str,
+    ) -> Result<()> {
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
+
         let script = self
             .py_engine
             .compile(script, CompileContext::default())
@@ -127,18 +135,20 @@ impl ScriptHandler for DummyInstance {
             .scripts
             .write()
             .unwrap()
-            .insert(format!("{schema}_{name}"), Arc::new(script));
+            .insert(format!("{catalog}_{schema}_{name}"), Arc::new(script));
 
         Ok(())
     }
 
     async fn execute_script(
         &self,
-        schema: &str,
+        query_ctx: QueryContextRef,
         name: &str,
         params: HashMap<String, String>,
     ) -> Result<Output> {
-        let key = format!("{schema}_{name}");
+        let catalog = query_ctx.current_catalog();
+        let schema = query_ctx.current_schema();
+        let key = format!("{catalog}_{schema}_{name}");
 
         let py_script = self.scripts.read().unwrap().get(&key).unwrap().clone();
 

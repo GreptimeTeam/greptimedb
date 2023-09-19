@@ -18,7 +18,7 @@ use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
 
-use crate::datanode::S3Config;
+use crate::config::S3Config;
 use crate::error::{self, Result};
 use crate::store::build_http_client;
 

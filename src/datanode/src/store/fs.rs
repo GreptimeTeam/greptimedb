@@ -19,7 +19,7 @@ use object_store::services::Fs as FsBuilder;
 use object_store::ObjectStore;
 use snafu::prelude::*;
 
-use crate::datanode::FileConfig;
+use crate::config::FileConfig;
 use crate::error::{self, Result};
 use crate::store;
 

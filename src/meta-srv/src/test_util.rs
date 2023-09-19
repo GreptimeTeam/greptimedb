@@ -75,9 +75,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         server_addr: "127.0.0.1:3002".to_string(),
         kv_store: kv_store.clone(),
         meta_peer_client,
-        catalog: None,
-        schema: None,
-        table: None,
+        table_id: None,
     };
 
     Arc::new(RegionFailoverManager::new(

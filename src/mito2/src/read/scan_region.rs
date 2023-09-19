@@ -59,6 +59,13 @@ impl Scanner {
             Scanner::Seq(seq_scan) => seq_scan.num_memtables(),
         }
     }
+
+    /// Returns SST file ids to scan.
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.file_ids(),
+        }
+    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]

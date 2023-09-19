@@ -1261,6 +1261,7 @@ dependencies = [
  "moka 0.11.3",
  "object-store",
  "parking_lot",
+ "partition",
  "regex",
  "serde",
  "serde_json",
@@ -1731,7 +1732,7 @@ dependencies = [
  "arc-swap",
  "chrono-tz 0.6.3",
  "common-error",
- "common-function-macro",
+ "common-macro",
  "common-query",
  "common-time",
  "datafusion",
@@ -1745,22 +1746,6 @@ dependencies = [
  "serde",
  "snafu",
  "statrs",
-]
-
-[[package]]
-name = "common-function-macro"
-version = "0.4.0-nightly"
-dependencies = [
- "arc-swap",
- "backtrace",
- "common-query",
- "common-telemetry",
- "datatypes",
- "proc-macro2",
- "quote",
- "snafu",
- "static_assertions",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -1827,6 +1812,22 @@ dependencies = [
  "paste",
  "snafu",
  "table",
+]
+
+[[package]]
+name = "common-macro"
+version = "0.4.0-nightly"
+dependencies = [
+ "arc-swap",
+ "backtrace",
+ "common-query",
+ "common-telemetry",
+ "datatypes",
+ "proc-macro2",
+ "quote",
+ "snafu",
+ "static_assertions",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -1923,6 +1924,8 @@ dependencies = [
  "datatypes",
  "serde",
  "snafu",
+ "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "statrs",
  "tokio",
 ]
@@ -2653,17 +2656,14 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
  "hyper",
- "key-lock",
  "log-store",
  "meta-client",
- "meta-srv",
  "metrics",
- "mito",
  "mito2",
  "object-store",
  "pin-project",
@@ -3128,9 +3128,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "file-table-engine"
+name = "file-engine"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
  "async-trait",
  "common-catalog",
  "common-datasource",
@@ -3240,6 +3241,7 @@ name = "frontend"
 version = "0.4.0-nightly"
 dependencies = [
  "api",
+ "arc-swap",
  "arrow-flight",
  "async-compat",
  "async-stream",
@@ -3269,7 +3271,7 @@ dependencies = [
  "datafusion-expr",
  "datanode",
  "datatypes",
- "file-table-engine",
+ "file-engine",
  "futures",
  "futures-util",
  "humantime-serde",
@@ -3277,14 +3279,12 @@ dependencies = [
  "log-store",
  "meta-client",
  "meta-srv",
- "meter-core",
- "meter-macros",
  "metrics",
- "mito",
  "moka 0.9.9",
  "object-store",
  "openmetrics-parser",
  "opentelemetry-proto",
+ "operator",
  "partition",
  "prost",
  "query",
@@ -4104,7 +4104,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1969b5d610209ad1c2ad8e4cd3e9c3c24e40f1c2#1969b5d610209ad1c2ad8e4cd3e9c3c24e40f1c2"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9#9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9"
 dependencies = [
  "prost",
  "serde",
@@ -5462,7 +5462,6 @@ dependencies = [
  "anymap",
  "api",
  "aquamarine",
- "arc-swap",
  "async-channel",
  "async-compat",
  "async-stream",
@@ -5501,7 +5500,6 @@ dependencies = [
  "serde_json",
  "smallvec",
  "snafu",
- "storage",
  "store-api",
  "strum 0.25.0",
  "table",
@@ -6163,6 +6161,58 @@ dependencies = [
  "percent-encoding",
  "rand",
  "thiserror",
+]
+
+[[package]]
+name = "operator"
+version = "0.4.0-nightly"
+dependencies = [
+ "api",
+ "async-compat",
+ "async-trait",
+ "auth",
+ "catalog",
+ "chrono",
+ "client",
+ "common-base",
+ "common-catalog",
+ "common-datasource",
+ "common-error",
+ "common-grpc-expr",
+ "common-meta",
+ "common-query",
+ "common-recordbatch",
+ "common-runtime",
+ "common-telemetry",
+ "common-time",
+ "datafusion",
+ "datafusion-common",
+ "datafusion-expr",
+ "datatypes",
+ "file-engine",
+ "futures",
+ "futures-util",
+ "meta-client",
+ "meter-core",
+ "meter-macros",
+ "metrics",
+ "object-store",
+ "partition",
+ "query",
+ "regex",
+ "serde",
+ "serde_json",
+ "servers",
+ "session",
+ "snafu",
+ "sql",
+ "sqlparser 0.34.0",
+ "storage",
+ "store-api",
+ "substrait 0.4.0-nightly",
+ "table",
+ "tokio",
+ "tonic 0.9.2",
 ]
 
 [[package]]
@@ -6928,7 +6978,7 @@ dependencies = [
  "catalog",
  "common-catalog",
  "common-error",
- "common-function-macro",
+ "common-macro",
  "common-telemetry",
  "datafusion",
  "datatypes",
@@ -7199,7 +7249,7 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-function",
- "common-function-macro",
+ "common-macro",
  "common-meta",
  "common-query",
  "common-recordbatch",
@@ -8391,11 +8441,12 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "script"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
+ "arc-swap",
  "arrow",
  "async-trait",
  "catalog",
  "common-catalog",
- "common-config",
  "common-error",
  "common-function",
  "common-query",
@@ -8417,6 +8468,7 @@ dependencies = [
  "log-store",
  "mito",
  "once_cell",
+ "operator",
  "paste",
  "pyo3",
  "query",
@@ -8431,6 +8483,7 @@ dependencies = [
  "rustpython-stdlib",
  "rustpython-vm",
  "serde",
+ "servers",
  "session",
  "snafu",
  "sql",
@@ -8659,6 +8712,7 @@ dependencies = [
  "common-grpc",
  "common-grpc-expr",
  "common-mem-prof",
+ "common-meta",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -9009,10 +9063,12 @@ dependencies = [
  "datatypes",
  "hex",
  "itertools 0.10.5",
+ "lazy_static",
  "once_cell",
  "regex",
  "snafu",
  "sqlparser 0.34.0",
+ "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "table",
 ]
 
@@ -9036,6 +9092,7 @@ name = "sqlness-runner"
 version = "0.4.0-nightly"
 dependencies = [
  "async-trait",
+ "clap 4.4.1",
  "client",
  "common-base",
  "common-error",

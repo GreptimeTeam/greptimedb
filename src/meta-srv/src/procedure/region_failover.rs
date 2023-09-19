@@ -25,7 +25,6 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common_meta::ident::TableIdent;
 use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::{ClusterId, RegionIdent};
@@ -41,6 +40,7 @@ use failover_start::RegionFailoverStart;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
+use table::metadata::TableId;
 
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
@@ -54,7 +54,7 @@ const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(PartialEq, Eq, Hash, Clone)]
 pub(crate) struct RegionFailoverKey {
     pub(crate) cluster_id: ClusterId,
-    pub(crate) table_ident: TableIdent,
+    pub(crate) table_id: TableId,
     pub(crate) region_number: RegionNumber,
 }
 
@@ -62,7 +62,7 @@ impl From<RegionIdent> for RegionFailoverKey {
     fn from(region_ident: RegionIdent) -> Self {
         Self {
             cluster_id: region_ident.cluster_id,
-            table_ident: region_ident.table_ident,
+            table_id: region_ident.table_id,
             region_number: region_ident.region_number,
         }
     }
@@ -206,18 +206,17 @@ impl RegionFailoverManager {
     }
 
     async fn table_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
-        let table_ident = &failed_region.table_ident;
         Ok(self
             .table_metadata_manager
             .table_route_manager()
-            .get_region_distribution(table_ident.table_id)
+            .get_region_distribution(failed_region.table_id)
             .await
             .context(TableMetadataManagerSnafu)?
             .is_some())
     }
 
     async fn failed_region_exists(&self, failed_region: &RegionIdent) -> Result<bool> {
-        let table_id = failed_region.table_ident.table_id;
+        let table_id = failed_region.table_id;
         let datanode_id = failed_region.datanode_id;
 
         let value = self
@@ -372,13 +371,11 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let table_key = common_catalog::format_full_table_name(
-            &region_ident.table_ident.catalog,
-            &region_ident.table_ident.schema,
-            &region_ident.table_ident.table,
+        let region_key = format!(
+            "{}/region-{}",
+            region_ident.table_id, region_ident.region_number
         );
-        let region_key = format!("{}/region-{}", table_key, region_ident.region_number);
-        LockKey::new(vec![table_key, region_key])
+        LockKey::single(region_key)
     }
 }
 
@@ -389,8 +386,6 @@ mod tests {
 
     use api::v1::meta::mailbox_message::Payload;
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
-    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-    use common_meta::ident::TableIdent;
     use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
     use common_meta::key::TableMetadataManager;
     use common_meta::sequence::Sequence;
@@ -457,13 +452,8 @@ mod tests {
                 cluster_id: 0,
                 region_number,
                 datanode_id: failed_datanode,
-                table_ident: TableIdent {
-                    table_id: 1,
-                    engine: MITO_ENGINE.to_string(),
-                    catalog: DEFAULT_CATALOG_NAME.to_string(),
-                    schema: DEFAULT_SCHEMA_NAME.to_string(),
-                    table: "my_table".to_string(),
-                },
+                table_id: 1,
+                engine: "mito2".to_string(),
             }
         }
     }
@@ -493,6 +483,7 @@ mod tests {
                 // Safety: all required fields set at initialization
                 .unwrap();
 
+            let table_id = 1;
             let table = "my_table";
             let table_metadata_manager = Arc::new(TableMetadataManager::new(
                 KvBackendAdapter::wrap(kv_store.clone()),
@@ -543,9 +534,7 @@ mod tests {
                 server_addr: "127.0.0.1:3002".to_string(),
                 kv_store: kv_store.clone(),
                 meta_peer_client,
-                catalog: Some(DEFAULT_CATALOG_NAME.to_string()),
-                schema: Some(DEFAULT_SCHEMA_NAME.to_string()),
-                table: Some(table.to_string()),
+                table_id: Some(table_id),
             };
 
             TestingEnv {
@@ -665,7 +654,7 @@ mod tests {
 
         assert_eq!(
             procedure.dump().unwrap(),
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_ident":{"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito"},"region_number":1},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverEnd"}}"#
         );
 
         // Verifies that the failed region (region 1) is moved from failed datanode (datanode 1) to the candidate datanode.
@@ -705,12 +694,12 @@ mod tests {
         let s = procedure.dump().unwrap();
         assert_eq!(
             s,
-            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_ident":{"catalog":"greptime","schema":"public","table":"my_table","table_id":1,"engine":"mito"},"region_number":1},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
+            r#"{"failed_region":{"cluster_id":0,"datanode_id":1,"table_id":1,"region_number":1,"engine":"mito2"},"state":{"region_failover_state":"RegionFailoverStart","failover_candidate":null}}"#
         );
         let n: Node = serde_json::from_str(&s).unwrap();
         assert_eq!(
             format!("{n:?}"),
-            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_ident: TableIdent { catalog: "greptime", schema: "public", table: "my_table", table_id: 1, engine: "mito" }, region_number: 1 }, state: RegionFailoverStart { failover_candidate: None } }"#
+            r#"Node { failed_region: RegionIdent { cluster_id: 0, datanode_id: 1, table_id: 1, region_number: 1, engine: "mito2" }, state: RegionFailoverStart { failover_candidate: None } }"#
         );
     }
 

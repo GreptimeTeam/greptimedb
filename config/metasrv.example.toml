@@ -6,8 +6,6 @@ bind_addr = "127.0.0.1:3002"
 server_addr = "127.0.0.1:3002"
 # Etcd server address, "127.0.0.1:2379" by default.
 store_addr = "127.0.0.1:2379"
-# Datanode lease in seconds, 15 seconds by default.
-datanode_lease_secs = 15
 # Datanode selector type.
 # - "LeaseBased" (default value).
 # - "LoadBased"

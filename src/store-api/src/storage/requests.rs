@@ -316,6 +316,7 @@ mod tests {
                             is_nullable: false,
                             default_constraint: vec![],
                             semantic_type: SemanticType::Tag as _,
+                            comment: String::new(),
                         }),
                         column_id: 1,
                     }),
@@ -331,6 +332,7 @@ mod tests {
                                 .try_into()
                                 .unwrap(),
                             semantic_type: SemanticType::Field as _,
+                            comment: String::new(),
                         }),
                         column_id: 2,
                     }),

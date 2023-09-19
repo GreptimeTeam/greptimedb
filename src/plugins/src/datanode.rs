@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use common_base::Plugins;
-use datanode::datanode::DatanodeOptions;
+use datanode::config::DatanodeOptions;
 use datanode::error::Result;
 
 use crate::OptPlugins;

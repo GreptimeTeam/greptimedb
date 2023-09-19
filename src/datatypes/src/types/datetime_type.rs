@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use arrow::datatypes::{DataType as ArrowDataType, Date64Type};
 use common_time::DateTime;
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,15 @@ impl DataType for DateTimeType {
     fn is_timestamp_compatible(&self) -> bool {
         false
     }
+
+    fn try_cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
+            Value::Timestamp(v) => v.to_chrono_datetime().map(|d| Value::DateTime(d.into())),
+            Value::String(v) => DateTime::from_str(v.as_utf8()).map(Value::DateTime).ok(),
+            _ => None,
+        }
+    }
 }
 
 impl LogicalPrimitiveType for DateTimeType {
@@ -88,5 +99,38 @@ impl LogicalPrimitiveType for DateTimeType {
             }
             .fail(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use common_time::Timestamp;
+
+    use super::*;
+
+    #[test]
+    fn test_datetime_cast() {
+        // cast from Int64
+        let val = Value::Int64(1000);
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
+        assert_eq!(dt, Value::DateTime(DateTime::from(1000)));
+
+        // cast from String
+        std::env::set_var("TZ", "Asia/Shanghai");
+        let val = Value::String("1970-01-01 00:00:00+0800".into());
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
+        assert_eq!(
+            dt,
+            Value::DateTime(DateTime::from_str("1970-01-01 00:00:00+0800").unwrap())
+        );
+
+        // cast from Timestamp
+        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29.042+0800").unwrap());
+        let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
+        assert_eq!(
+            dt,
+            Value::DateTime(DateTime::from_str("2020-09-08 21:42:29+0800").unwrap())
+        );
     }
 }

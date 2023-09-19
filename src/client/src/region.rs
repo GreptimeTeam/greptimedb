@@ -29,7 +29,7 @@ use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
 
-use crate::error::Error::FlightGet;
+use crate::error::Error::RegionServer;
 use crate::error::{
     self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
     MissingFieldSnafu, Result, ServerSnafu,
@@ -45,7 +45,7 @@ pub struct RegionRequester {
 impl Datanode for RegionRequester {
     async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         self.handle_inner(request).await.map_err(|err| {
-            if matches!(err, FlightGet { .. }) {
+            if matches!(err, RegionServer { .. }) {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
                 }
@@ -163,7 +163,19 @@ impl RegionRequester {
         let RegionResponse {
             header,
             affected_rows,
-        } = client.handle(request).await?.into_inner();
+        } = client
+            .handle(request)
+            .await
+            .map_err(|e| {
+                let code = e.code();
+                let err: error::Error = e.into();
+                // Uses `Error::RegionServer` instead of `Error::Server`
+                error::Error::RegionServer {
+                    code,
+                    source: BoxedError::new(err),
+                }
+            })?
+            .into_inner();
 
         check_response_header(header)?;
 

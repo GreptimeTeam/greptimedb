@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::region_request::RegionAlterRequest;
@@ -47,6 +47,15 @@ impl<S> RegionWorkerLoop<S> {
 
         // Get the version before alter.
         let version = region.version();
+        if version.metadata.schema_version > request.schema_version {
+            warn!(
+                "Ignored alert request, region id:{}, region schema version {} is greater than request schema version {}",
+                region_id, version.metadata.schema_version, request.schema_version
+            );
+            // Returns if it altered.
+            sender.send(Ok(Output::AffectedRows(0)));
+            return;
+        }
         // Checks whether we can alter the region directly.
         if !version.memtables.is_empty() {
             // If memtable is not empty, we can't alter it directly and need to flush
@@ -55,7 +64,10 @@ impl<S> RegionWorkerLoop<S> {
 
             // Try to submit a flush task.
             let task = self.new_flush_task(&region, FlushReason::Alter);
-            if let Err(e) = self.flush_scheduler.schedule_flush(&region, task) {
+            if let Err(e) =
+                self.flush_scheduler
+                    .schedule_flush(region.region_id, &region.version_control, task)
+            {
                 // Unable to flush the region, send error to waiter.
                 sender.send(Err(e));
                 return;

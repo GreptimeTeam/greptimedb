@@ -3,6 +3,7 @@ mode = 'distributed'
 rpc_addr = '127.0.0.1:4100'
 rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
+require_lease_before_startup = true
 
 [wal]
 file_size = '1GB'

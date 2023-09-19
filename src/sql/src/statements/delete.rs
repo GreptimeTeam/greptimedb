@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use sqlparser::ast::Statement;
+use sqlparser_derive::{Visit, VisitMut};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct Delete {
     pub inner: Statement,
 }

@@ -21,7 +21,7 @@ use crate::memtable::KeyValues;
 use crate::metrics::MEMTABLE_WRITE_ELAPSED;
 use crate::write_batch::{Mutation, Payload};
 
-/// Wraps logic of inserting key/values in [WriteBatch] to [Memtable].
+/// Wraps logic of inserting key/values in [WriteBatch](crate::write_batch::WriteBatch) to [Memtable](crate::memtable::Memtable).
 pub struct Inserter {
     /// Sequence of the batch to be inserted.
     sequence: SequenceNumber,
@@ -39,7 +39,7 @@ impl Inserter {
 
     /// Insert write batch payload into memtable.
     ///
-    /// Won't do schema validation if not configured. Caller (mostly the [`RegionWriter`]) should ensure the
+    /// Won't do schema validation if not configured. Caller (mostly the `RegionWriter` should ensure the
     /// schemas of `memtable` are consistent with `payload`'s.
     pub fn insert_memtable(&mut self, payload: &Payload, memtable: &MemtableRef) -> Result<()> {
         let _timer = common_telemetry::timer!(MEMTABLE_WRITE_ELAPSED);

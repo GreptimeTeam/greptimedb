@@ -12,6 +12,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
 +-+-+
@@ -22,7 +23,7 @@ TQL ANALYZE (0, 10, '5s') test;
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
 |_|_PromSeriesDivideExec: tags=["k"], REDACTED
 |_|_SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST], REDACTED
-|_|_StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "i", data_type: Float64, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: "j", data_type: Timestamp(Millisecond, None), nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {"greptime:time_index": "true"} }, Field { name: "k", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }] }, REDACTED
+|_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

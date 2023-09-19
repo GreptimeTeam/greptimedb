@@ -19,7 +19,7 @@ use api::v1::region::{region_request, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_runtime::Runtime;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, TRACE_ID};
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
@@ -45,8 +45,14 @@ impl RegionServerRequestHandler {
     }
 
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
+        let trace_id = request
+            .header
+            .context(InvalidQuerySnafu {
+                reason: "Expecting non-empty region request header.",
+            })?
+            .trace_id;
         let query = request.body.context(InvalidQuerySnafu {
-            reason: "Expecting non-empty GreptimeRequest.",
+            reason: "Expecting non-empty region request body.",
         })?;
 
         let handler = self.handler.clone();
@@ -58,7 +64,7 @@ impl RegionServerRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self.runtime.spawn(async move {
+        let handle = self.runtime.spawn(TRACE_ID.scope(trace_id, async move {
             handler.handle(query).await.map_err(|e| {
                 if e.status_code().should_log_error() {
                     error!(e; "Failed to handle request");
@@ -68,7 +74,7 @@ impl RegionServerRequestHandler {
                 }
                 e
             })
-        });
+        }));
 
         handle.await.context(JoinTaskSnafu)?
     }

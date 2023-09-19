@@ -93,7 +93,7 @@ impl Validity {
         }
     }
 
-    /// The number of null slots on this [`Vector`].
+    /// The number of null slots.
     pub fn null_count(&self) -> usize {
         match self.kind {
             ValidityKind::Slots { null_count, .. } => null_count,

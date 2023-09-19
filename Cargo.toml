@@ -12,7 +12,7 @@ members = [
     "src/common/datasource",
     "src/common/error",
     "src/common/function",
-    "src/common/function-macro",
+    "src/common/macro",
     "src/common/greptimedb-telemetry",
     "src/common/grpc",
     "src/common/grpc-expr",
@@ -30,7 +30,7 @@ members = [
     "src/common/version",
     "src/datanode",
     "src/datatypes",
-    "src/file-table-engine",
+    "src/file-engine",
     "src/frontend",
     "src/log-store",
     "src/meta-client",
@@ -38,6 +38,7 @@ members = [
     "src/mito",
     "src/mito2",
     "src/object-store",
+    "src/operator",
     "src/partition",
     "src/plugins",
     "src/promql",
@@ -61,6 +62,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+aquamarine = "0.3"
 arrow = { version = "43.0" }
 arrow-array = "43.0"
 arrow-flight = "43.0"
@@ -79,7 +81,7 @@ derive_builder = "0.12"
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "1969b5d610209ad1c2ad8e4cd3e9c3c24e40f1c2" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -124,7 +126,7 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }
-common-function-macro = { path = "src/common/function-macro" }
+common-macro = { path = "src/common/macro" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
 common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
@@ -142,13 +144,14 @@ common-time = { path = "src/common/time" }
 common-version = { path = "src/common/version" }
 datanode = { path = "src/datanode" }
 datatypes = { path = "src/datatypes" }
-file-table-engine = { path = "src/file-table-engine" }
+file-engine = { path = "src/file-engine" }
 frontend = { path = "src/frontend" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
 mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
+operator = { path = "src/operator" }
 object-store = { path = "src/object-store" }
 partition = { path = "src/partition" }
 plugins = { path = "src/plugins" }

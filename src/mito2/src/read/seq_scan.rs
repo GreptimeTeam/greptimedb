@@ -156,4 +156,9 @@ impl SeqScan {
     pub(crate) fn num_files(&self) -> usize {
         self.files.len()
     }
+
+    /// Returns SST file ids to scan.
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::FileId> {
+        self.files.iter().map(|file| file.file_id()).collect()
+    }
 }

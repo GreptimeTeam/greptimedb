@@ -16,17 +16,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
-use catalog::remote::CachedMetaKvBackend;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
-use common_meta::ident::TableIdent;
-use common_meta::key::table_name::TableNameKey;
+use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
-use common_meta::RegionIdent;
+use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
 use common_telemetry::info;
-use frontend::catalog::FrontendCatalogManager;
 use frontend::error::Result as FrontendResult;
 use frontend::instance::Instance;
 use futures::TryStreamExt;
@@ -100,7 +97,7 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     let frontend = cluster.frontend.clone();
 
-    prepare_testing_table(&cluster).await;
+    let table_id = prepare_testing_table(&cluster).await;
 
     let results = write_datas(&frontend, logical_timer).await;
     logical_timer += 1000;
@@ -108,11 +105,6 @@ pub async fn test_region_failover(store_type: StorageType) {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
 
-    let table_id = get_table_id(
-        &frontend,
-        TableNameKey::new("greptime", "public", "my_table"),
-    )
-    .await;
     assert!(has_route_cache(&frontend, table_id).await);
 
     let distribution = find_region_distribution(&cluster, table_id).await;
@@ -165,28 +157,11 @@ pub async fn test_region_failover(store_type: StorageType) {
     assert!(success)
 }
 
-async fn get_table_id(instance: &Arc<Instance>, key: TableNameKey<'_>) -> TableId {
-    let catalog_manager = instance
-        .catalog_manager()
-        .as_any()
-        .downcast_ref::<FrontendCatalogManager>()
-        .unwrap();
-
-    catalog_manager
-        .table_metadata_manager_ref()
-        .table_name_manager()
-        .get(key)
-        .await
-        .unwrap()
-        .unwrap()
-        .table_id()
-}
-
 async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
     let catalog_manager = instance
         .catalog_manager()
         .as_any()
-        .downcast_ref::<FrontendCatalogManager>()
+        .downcast_ref::<KvBackendCatalogManager>()
         .unwrap();
 
     let kv_backend = catalog_manager.table_metadata_manager_ref().kv_backend();
@@ -251,7 +226,7 @@ async fn assert_writes(instance: &Arc<Instance>) {
     check_output_stream(result.unwrap(), expected).await;
 }
 
-async fn prepare_testing_table(cluster: &GreptimeDbCluster) {
+async fn prepare_testing_table(cluster: &GreptimeDbCluster) -> TableId {
     let sql = r"
 CREATE TABLE my_table (
     i INT PRIMARY KEY,
@@ -264,6 +239,15 @@ CREATE TABLE my_table (
 )";
     let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
     result.get(0).unwrap().as_ref().unwrap();
+
+    let table = cluster
+        .frontend
+        .catalog_manager()
+        .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_table")
+        .await
+        .unwrap()
+        .unwrap();
+    table.table_info().table_id()
 }
 
 async fn find_region_distribution(
@@ -324,14 +308,9 @@ fn choose_failed_region(distribution: RegionDistribution) -> RegionIdent {
     RegionIdent {
         cluster_id: 1000,
         datanode_id: failed_datanode,
-        table_ident: TableIdent {
-            table_id: 1025,
-            engine: MITO_ENGINE.to_string(),
-            catalog: DEFAULT_CATALOG_NAME.to_string(),
-            schema: DEFAULT_SCHEMA_NAME.to_string(),
-            table: "my_table".to_string(),
-        },
+        table_id: 1025,
         region_number: failed_region,
+        engine: "mito2".to_string(),
     }
 }
 
@@ -365,13 +344,11 @@ async fn run_region_failover_procedure(
             mailbox: meta_srv.mailbox().clone(),
             selector,
             selector_ctx: SelectorContext {
-                datanode_lease_secs: meta_srv.options().datanode_lease_secs,
+                datanode_lease_secs: distributed_time_constants::REGION_LEASE_SECS,
                 server_addr: meta_srv.options().server_addr.clone(),
                 kv_store: meta_srv.kv_store().clone(),
                 meta_peer_client: meta_srv.meta_peer_client().clone(),
-                catalog: None,
-                schema: None,
-                table: None,
+                table_id: None,
             },
             dist_lock: meta_srv.lock().clone(),
             table_metadata_manager: meta_srv.table_metadata_manager().clone(),

@@ -14,11 +14,13 @@
 
 use std::sync::Arc;
 
+use table::metadata::TableId;
+
 use crate::error::Result;
-use crate::ident::TableIdent;
+use crate::table_name::TableName;
 
 /// Places context of invalidating cache. e.g., span id, trace id etc.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Context {
     pub subject: Option<String>,
 }
@@ -26,7 +28,9 @@ pub struct Context {
 #[async_trait::async_trait]
 pub trait CacheInvalidator: Send + Sync {
     // Invalidates table cache
-    async fn invalidate_table(&self, ctx: &Context, table_ident: TableIdent) -> Result<()>;
+    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> Result<()>;
+
+    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> Result<()>;
 }
 
 pub type CacheInvalidatorRef = Arc<dyn CacheInvalidator>;
@@ -35,7 +39,11 @@ pub struct DummyCacheInvalidator;
 
 #[async_trait::async_trait]
 impl CacheInvalidator for DummyCacheInvalidator {
-    async fn invalidate_table(&self, _ctx: &Context, _table_ident: TableIdent) -> Result<()> {
+    async fn invalidate_table_id(&self, _ctx: &Context, _table_id: TableId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn invalidate_table_name(&self, _ctx: &Context, _table_name: TableName) -> Result<()> {
         Ok(())
     }
 }

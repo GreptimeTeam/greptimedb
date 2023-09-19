@@ -29,9 +29,9 @@ const EXPLAIN: &str = "EXPLAIN";
 use sqlparser::parser::Parser;
 
 /// TQL extension parser, including:
-/// - TQL EVAL <query>
-/// - TQL EXPLAIN <query>
-/// - TQL ANALYZE <query>
+/// - `TQL EVAL <query>`
+/// - `TQL EXPLAIN <query>`
+/// - `TQL ANALYZE <query>`
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_tql(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();

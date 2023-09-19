@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use catalog::remote::CachedMetaKvBackend;
+use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
@@ -25,7 +25,6 @@ use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
 use either::Either;
-use frontend::catalog::FrontendCatalogManager;
 use meta_client::client::MetaClientBuilder;
 use query::datafusion::DatafusionQueryEngine;
 use query::logical_optimizer::LogicalOptimizer;
@@ -253,7 +252,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let datanode_clients = Arc::new(DatanodeClients::default());
 
-    let catalog_list = FrontendCatalogManager::new(
+    let catalog_list = KvBackendCatalogManager::new(
         cached_meta_backend.clone(),
         cached_meta_backend.clone(),
         datanode_clients,

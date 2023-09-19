@@ -1,0 +1,80 @@
+CREATE TABLE data_types (
+  s string,
+  tint int8,
+  sint int16,
+  i INT32,
+  bint INT64,
+  v varchar,
+  f FLOAT32,
+  d FLOAT64,
+  b boolean,
+  vb varbinary,
+  dt date,
+  dtt datetime,
+  ts0 TimestampSecond,
+  ts3 Timestamp_MS,
+  ts6 Timestamp_US,
+  ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP TIME INDEX,
+  PRIMARY KEY(s));
+
+Affected Rows: 0
+
+SHOW CREATE TABLE data_types;
+
++------------+------------------------------------------------------------+
+| Table      | Create Table                                               |
++------------+------------------------------------------------------------+
+| data_types | CREATE TABLE IF NOT EXISTS "data_types" (                  |
+|            |   "s" STRING NULL,                                         |
+|            |   "tint" TINYINT NULL,                                     |
+|            |   "sint" SMALLINT NULL,                                    |
+|            |   "i" INT NULL,                                            |
+|            |   "bint" BIGINT NULL,                                      |
+|            |   "v" STRING NULL,                                         |
+|            |   "f" FLOAT NULL,                                          |
+|            |   "d" DOUBLE NULL,                                         |
+|            |   "b" BOOLEAN NULL,                                        |
+|            |   "vb" VARBINARY NULL,                                     |
+|            |   "dt" DATE NULL,                                          |
+|            |   "dtt" DATETIME NULL,                                     |
+|            |   "ts0" TIMESTAMP(0) NULL,                                 |
+|            |   "ts3" TIMESTAMP(3) NULL,                                 |
+|            |   "ts6" TIMESTAMP(6) NULL,                                 |
+|            |   "ts9" TIMESTAMP(9) NOT NULL DEFAULT current_timestamp(), |
+|            |   TIME INDEX ("ts9"),                                      |
+|            |   PRIMARY KEY ("s")                                        |
+|            | )                                                          |
+|            |                                                            |
+|            | ENGINE=mito                                                |
+|            | WITH(                                                      |
+|            |   regions = 1                                              |
+|            | )                                                          |
++------------+------------------------------------------------------------+
+
+DESC TABLE data_types;
+
++--------+----------------------+-----+------+---------------------+---------------+
+| Column | Type                 | Key | Null | Default             | Semantic Type |
++--------+----------------------+-----+------+---------------------+---------------+
+| s      | String               | PRI | YES  |                     | TAG           |
+| tint   | Int8                 |     | YES  |                     | FIELD         |
+| sint   | Int16                |     | YES  |                     | FIELD         |
+| i      | Int32                |     | YES  |                     | FIELD         |
+| bint   | Int64                |     | YES  |                     | FIELD         |
+| v      | String               |     | YES  |                     | FIELD         |
+| f      | Float32              |     | YES  |                     | FIELD         |
+| d      | Float64              |     | YES  |                     | FIELD         |
+| b      | Boolean              |     | YES  |                     | FIELD         |
+| vb     | Binary               |     | YES  |                     | FIELD         |
+| dt     | Date                 |     | YES  |                     | FIELD         |
+| dtt    | DateTime             |     | YES  |                     | FIELD         |
+| ts0    | TimestampSecond      |     | YES  |                     | FIELD         |
+| ts3    | TimestampMillisecond |     | YES  |                     | FIELD         |
+| ts6    | TimestampMicrosecond |     | YES  |                     | FIELD         |
+| ts9    | TimestampNanosecond  | PRI | NO   | current_timestamp() | TIMESTAMP     |
++--------+----------------------+-----+------+---------------------+---------------+
+
+DROP TABLE data_types;
+
+Affected Rows: 1
+

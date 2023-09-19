@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use api::v1::meta::Peer;
-use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManager;
 use common_meta::rpc::router::find_leaders;
 use common_telemetry::warn;
 use snafu::ResultExt;
+use table::metadata::TableId;
 
 use crate::error::{self, Result};
 use crate::keys::{LeaseKey, LeaseValue, StatKey};
@@ -32,32 +32,21 @@ pub struct LoadBasedSelector;
 
 async fn get_leader_peer_ids(
     table_metadata_manager: &TableMetadataManager,
-    catalog: &str,
-    schema: &str,
-    table: &str,
+    table_id: TableId,
 ) -> Result<Vec<u64>> {
-    let table_name = table_metadata_manager
-        .table_name_manager()
-        .get(TableNameKey::new(catalog, schema, table))
+    table_metadata_manager
+        .table_route_manager()
+        .get(table_id)
         .await
-        .context(error::TableMetadataManagerSnafu)?;
-
-    Ok(if let Some(table_name) = table_name {
-        table_metadata_manager
-            .table_route_manager()
-            .get(table_name.table_id())
-            .await
-            .context(error::TableMetadataManagerSnafu)?
-            .map(|route| {
+        .context(error::TableMetadataManagerSnafu)
+        .map(|route| {
+            route.map_or_else(Vec::new, |route| {
                 find_leaders(&route.region_routes)
                     .into_iter()
                     .map(|peer| peer.id)
                     .collect()
             })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    })
+        })
 }
 
 #[async_trait::async_trait]
@@ -76,13 +65,11 @@ impl Selector for LoadBasedSelector {
         let stat_keys: Vec<StatKey> = lease_kvs.keys().map(|k| k.into()).collect();
         let stat_kvs = ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
-        let leader_peer_ids = if let (Some(catalog), Some(schema), Some(table)) =
-            (&ctx.catalog, &ctx.schema, &ctx.table)
-        {
+        let leader_peer_ids = if let Some(table_id) = ctx.table_id {
             let table_metadata_manager =
                 TableMetadataManager::new(KvBackendAdapter::wrap(ctx.kv_store.clone()));
 
-            get_leader_peer_ids(&table_metadata_manager, catalog, schema, table).await?
+            get_leader_peer_ids(&table_metadata_manager, table_id).await?
         } else {
             Vec::new()
         };
@@ -112,8 +99,8 @@ impl Selector for LoadBasedSelector {
 
         Ok(tuples
             .into_iter()
-            .map(|(stat_key, lease_val, _)| Peer {
-                id: stat_key.node_id,
+            .map(|(lease_key, lease_val, _)| Peer {
+                id: lease_key.node_id,
                 addr: lease_val.node_addr,
             })
             .collect())

@@ -1375,7 +1375,7 @@ enum ScalarFunc {
 mod test {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;
@@ -1885,10 +1885,9 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "pure literal arithmetic is not supported yet"]
     async fn binary_op_literal_literal() {
         let query = r#"1 + 1"#;
-        let expected = String::from("");
+        let expected = String::from("EmptyMetric: range=[0..100000000], interval=[5000] [time:Timestamp(Millisecond, None), value:Float64;N]");
 
         indie_query_plan_compare(query, expected).await;
     }
@@ -1909,10 +1908,16 @@ mod test {
     }
 
     #[tokio::test]
-    #[ignore = "pure literal arithmetic is not supported yet"]
     async fn bool_with_additional_arithmetic() {
         let query = "some_metric + (1 == bool 2)";
-        let expected = String::from("");
+        let expected = String::from(
+            "Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0 + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0 + Float64(1) = Float64(2):Float64;N]\
+            \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n    PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n        Sort: some_metric.tag_0 DESC NULLS LAST, some_metric.timestamp DESC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]\
+            \n          TableScan: some_metric, unsupported_filters=[timestamp >= TimestampMillisecond(-1000, None), timestamp <= TimestampMillisecond(100001000, None)] [tag_0:Utf8, timestamp:Timestamp(Millisecond, None), field_0:Float64;N]"
+        );
 
         indie_query_plan_compare(query, expected).await;
     }

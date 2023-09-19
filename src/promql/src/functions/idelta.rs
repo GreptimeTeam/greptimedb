@@ -28,7 +28,7 @@ use crate::functions::extract_array;
 use crate::range_array::RangeArray;
 
 /// The `funcIdelta` in Promql,
-/// from https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L235
+/// from <https://github.com/prometheus/prometheus/blob/6bdecf377cea8e856509914f35234e948c4fcb80/promql/functions.go#L235>
 #[derive(Debug)]
 pub struct IDelta<const IS_RATE: bool> {}
 

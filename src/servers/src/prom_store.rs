@@ -15,13 +15,12 @@
 //! prometheus protocol supportings
 //! handles prometheus remote_write, remote_read logic
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
-use api::v1::{InsertRequest as GrpcInsertRequest, InsertRequests, RowInsertRequests};
-use common_grpc::writer::{LinesWriter, Precision};
+use api::v1::RowInsertRequests;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_time::timestamp::TimeUnit;
 use datafusion::prelude::{col, lit, regexp_match, Expr};
@@ -190,7 +189,7 @@ impl PartialOrd for TimeSeriesId {
 }
 
 /// Collect each row's timeseries id
-/// This processing is ugly, hope https://github.com/GreptimeTeam/greptimedb/issues/336 making some progress in future.
+/// This processing is ugly, hope <https://github.com/GreptimeTeam/greptimedb/issues/336> making some progress in future.
 fn collect_timeseries_ids(table_name: &str, recordbatch: &RecordBatch) -> Vec<TimeSeriesId> {
     let row_count = recordbatch.num_rows();
     let mut timeseries_ids = Vec::with_capacity(row_count);
@@ -354,71 +353,6 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
     }
 
     Ok(multi_table_data.into_row_insert_requests())
-}
-
-pub fn to_grpc_insert_requests(request: WriteRequest) -> Result<(InsertRequests, usize)> {
-    let mut writers: HashMap<String, LinesWriter> = HashMap::new();
-    for timeseries in &request.timeseries {
-        let table_name = timeseries
-            .labels
-            .iter()
-            .find(|label| {
-                // The metric name is a special label
-                label.name == METRIC_NAME_LABEL
-            })
-            .context(error::InvalidPromRemoteRequestSnafu {
-                msg: "missing '__name__' label in timeseries",
-            })?
-            .value
-            .clone();
-
-        let writer = writers
-            .entry(table_name)
-            .or_insert_with(|| LinesWriter::with_lines(16));
-        // For each sample
-        for sample in &timeseries.samples {
-            // Insert labels first.
-            for label in &timeseries.labels {
-                // The metric name is a special label
-                if label.name == METRIC_NAME_LABEL {
-                    continue;
-                }
-
-                writer
-                    .write_tag(&label.name, &label.value)
-                    .context(error::PromSeriesWriteSnafu)?;
-            }
-            // Insert sample timestamp.
-            writer
-                .write_ts(
-                    TIMESTAMP_COLUMN_NAME,
-                    (sample.timestamp, Precision::Millisecond),
-                )
-                .context(error::PromSeriesWriteSnafu)?;
-            // Insert sample value.
-            writer
-                .write_f64(FIELD_COLUMN_NAME, sample.value)
-                .context(error::PromSeriesWriteSnafu)?;
-
-            writer.commit();
-        }
-    }
-
-    let mut sample_counts = 0;
-    let inserts = writers
-        .into_iter()
-        .map(|(table_name, writer)| {
-            let (columns, row_count) = writer.finish();
-            sample_counts += row_count as usize;
-            GrpcInsertRequest {
-                table_name,
-                region_number: 0,
-                columns,
-                row_count,
-            }
-        })
-        .collect();
-    Ok((InsertRequests { inserts }, sample_counts))
 }
 
 #[inline]
@@ -655,7 +589,9 @@ mod tests {
                     value_data: Some(api::v1::value::ValueData::F64Value(value)),
                 },
                 api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        timestamp,
+                    )),
                 },
             ],
         }
@@ -674,7 +610,9 @@ mod tests {
                     value_data: Some(api::v1::value::ValueData::F64Value(value)),
                 },
                 api::v1::Value {
-                    value_data: Some(api::v1::value::ValueData::TsMillisecondValue(timestamp)),
+                    value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                        timestamp,
+                    )),
                 },
             ],
         }
@@ -753,115 +691,6 @@ mod tests {
                 make_row_with_2_labels("z002", "biz", 7.0, 3000),
             ],
             rows
-        );
-    }
-
-    #[test]
-    fn test_write_request_to_insert_exprs() {
-        let write_request = WriteRequest {
-            timeseries: mock_timeseries(),
-            ..Default::default()
-        };
-
-        let mut exprs = to_grpc_insert_requests(write_request).unwrap().0.inserts;
-        exprs.sort_unstable_by(|l, r| l.table_name.cmp(&r.table_name));
-        assert_eq!(3, exprs.len());
-        assert_eq!("metric1", exprs[0].table_name);
-        assert_eq!("metric2", exprs[1].table_name);
-        assert_eq!("metric3", exprs[2].table_name);
-
-        let expr = exprs.get_mut(0).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(2, row_count);
-        assert_eq!(columns.len(), 3);
-
-        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000]
-        );
-
-        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().f64_values,
-            vec![1.0, 2.0]
-        );
-
-        assert_eq!(columns[2].column_name, "job");
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().string_values,
-            vec!["spark", "spark"]
-        );
-
-        let expr = exprs.get_mut(1).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(2, row_count);
-        assert_eq!(columns.len(), 4);
-
-        assert_eq!(columns[0].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000]
-        );
-
-        assert_eq!(columns[1].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().f64_values,
-            vec![3.0, 4.0]
-        );
-
-        assert_eq!(columns[2].column_name, "idc");
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().string_values,
-            vec!["z001", "z001"]
-        );
-        assert_eq!(columns[3].column_name, "instance");
-        assert_eq!(
-            columns[3].values.as_ref().unwrap().string_values,
-            vec!["test_host1", "test_host1"]
-        );
-
-        let expr = exprs.get_mut(2).unwrap();
-        expr.columns
-            .sort_unstable_by(|l, r| l.column_name.cmp(&r.column_name));
-
-        let columns = &expr.columns;
-        let row_count = expr.row_count;
-
-        assert_eq!(3, row_count);
-        assert_eq!(columns.len(), 4);
-
-        assert_eq!(columns[0].column_name, "app");
-        assert_eq!(
-            columns[0].values.as_ref().unwrap().string_values,
-            vec!["biz", "biz", "biz"]
-        );
-        assert_eq!(columns[1].column_name, TIMESTAMP_COLUMN_NAME);
-        assert_eq!(
-            columns[1].values.as_ref().unwrap().ts_millisecond_values,
-            vec![1000, 2000, 3000]
-        );
-
-        assert_eq!(columns[2].column_name, FIELD_COLUMN_NAME);
-        assert_eq!(
-            columns[2].values.as_ref().unwrap().f64_values,
-            vec![5.0, 6.0, 7.0]
-        );
-
-        assert_eq!(columns[3].column_name, "idc");
-        assert_eq!(
-            columns[3].values.as_ref().unwrap().string_values,
-            vec!["z002", "z002", "z002"]
         );
     }
 

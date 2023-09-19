@@ -20,7 +20,7 @@ use crate::parser::ParserContext;
 use crate::statements::statement::Statement;
 use crate::statements::truncate::TruncateTable;
 
-/// TRUNCATE [TABLE] table_name;
+/// `TRUNCATE [TABLE] table_name;`
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_truncate(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();

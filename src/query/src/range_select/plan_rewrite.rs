@@ -325,7 +325,7 @@ fn have_range_in_exprs(exprs: &Vec<Expr>) -> bool {
 #[cfg(test)]
 mod test {
 
-    use catalog::local::MemoryCatalogManager;
+    use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datatypes::prelude::ConcreteDataType;

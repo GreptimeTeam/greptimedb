@@ -70,15 +70,13 @@ impl HeartbeatHandler for RegionLeaseHandler {
 mod test {
     use std::sync::Arc;
 
-    use common_meta::ident::TableIdent;
     use common_meta::key::TableMetadataManager;
-    use common_meta::RegionIdent;
+    use common_meta::{distributed_time_constants, RegionIdent};
     use store_api::storage::{RegionId, RegionNumber};
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::metasrv::DEFAULT_REGION_LEASE_SECS;
     use crate::service::store::kv::KvBackendAdapter;
     use crate::{table_routes, test_util};
 
@@ -131,11 +129,9 @@ mod test {
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,
-                table_ident: TableIdent {
-                    table_id: 1,
-                    ..Default::default()
-                },
+                table_id: 1,
                 region_number: 1,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();
@@ -143,16 +139,14 @@ mod test {
             .register_inactive_region(&RegionIdent {
                 cluster_id: 1,
                 datanode_id: 1,
-                table_ident: TableIdent {
-                    table_id: 1,
-                    ..Default::default()
-                },
+                table_id: 1,
                 region_number: 3,
+                engine: "mito2".to_string(),
             })
             .await
             .unwrap();
 
-        RegionLeaseHandler::new(DEFAULT_REGION_LEASE_SECS)
+        RegionLeaseHandler::new(distributed_time_constants::REGION_LEASE_SECS)
             .handle(&req, ctx, acc)
             .await
             .unwrap();
@@ -161,6 +155,9 @@ mod test {
         let lease = acc.region_lease.as_ref().unwrap();
         assert_eq!(lease.region_ids, vec![RegionId::new(table_id, 2).as_u64()]);
         assert_eq!(lease.duration_since_epoch, 1234);
-        assert_eq!(lease.lease_seconds, DEFAULT_REGION_LEASE_SECS);
+        assert_eq!(
+            lease.lease_seconds,
+            distributed_time_constants::REGION_LEASE_SECS
+        );
     }
 }

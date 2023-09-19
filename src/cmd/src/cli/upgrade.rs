@@ -17,6 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use clap::Parser;
 use client::api::v1::meta::TableRouteValue;
+use common_meta::ddl::utils::region_storage_path;
 use common_meta::error as MetaError;
 use common_meta::key::catalog_name::{CatalogNameKey, CatalogNameValue};
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
@@ -387,6 +388,10 @@ impl MigrateTableMetadata {
     async fn create_datanode_table_keys(&self, value: &TableGlobalValue) {
         let table_id = value.table_id();
         let engine = value.table_info.meta.engine.as_str();
+        let region_storage_path = region_storage_path(
+            &value.table_info.catalog_name,
+            &value.table_info.schema_name,
+        );
         let region_distribution: RegionDistribution =
             value.regions_id_map.clone().into_iter().collect();
 
@@ -397,7 +402,12 @@ impl MigrateTableMetadata {
                 info!("Creating DatanodeTableKey '{k}' => {regions:?}");
                 (
                     k,
-                    DatanodeTableValue::new(table_id, regions, engine.to_string()),
+                    DatanodeTableValue::new(
+                        table_id,
+                        regions,
+                        engine.to_string(),
+                        region_storage_path.clone(),
+                    ),
                 )
             })
             .collect::<Vec<_>>();

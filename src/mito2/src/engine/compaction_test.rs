@@ -121,10 +121,12 @@ async fn test_compaction_region() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    // Flush 5 SSTs for compaction.
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
     put_and_flush(&engine, region_id, &column_schemas, 20..30).await;
-    delete_and_flush(&engine, region_id, &column_schemas, 25..30).await;
+    delete_and_flush(&engine, region_id, &column_schemas, 15..30).await;
+    put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
 
     let output = engine
         .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
@@ -132,10 +134,14 @@ async fn test_compaction_region() {
         .unwrap();
     assert!(matches!(output, Output::AffectedRows(0)));
 
-    let stream = engine
-        .handle_query(region_id, ScanRequest::default())
-        .await
-        .unwrap();
+    let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
+    assert_eq!(
+        1,
+        scanner.num_files(),
+        "unexpected files: {:?}",
+        scanner.file_ids()
+    );
+    let stream = scanner.scan().await.unwrap();
 
     let vec = collect_stream_ts(stream).await;
     assert_eq!((0..25).map(|v| v * 1000).collect::<Vec<_>>(), vec);

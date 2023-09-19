@@ -1,0 +1,36 @@
+[package]
+name = "file-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test = ["common-test-util"]
+
+[dependencies]
+async-trait = "0.1"
+common-catalog = { workspace = true }
+common-datasource = { workspace = true }
+common-error = { workspace = true }
+common-procedure = { workspace = true }
+common-query = { workspace = true }
+common-recordbatch = { workspace = true }
+common-telemetry = { workspace = true }
+common-test-util = { workspace = true, optional = true }
+common-time = { workspace = true }
+datafusion.workspace = true
+datatypes = { workspace = true }
+futures.workspace = true
+object-store = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+snafu.workspace = true
+store-api = { workspace = true }
+table = { workspace = true }
+tokio.workspace = true
+
+[dev-dependencies]
+api = { workspace = true }
+common-procedure-test = { workspace = true }
+common-test-util = { workspace = true }

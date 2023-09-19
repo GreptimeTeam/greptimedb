@@ -52,6 +52,8 @@ impl<S> RegionWorkerLoop<S> {
         self.dropping_regions.insert_region(region.clone());
         // Notifies flush scheduler.
         self.flush_scheduler.on_region_dropped(region_id);
+        // Notifies compaction scheduler.
+        self.compaction_scheduler.on_region_dropped(region_id);
 
         // mark region version as dropped
         region.version_control.mark_dropped();

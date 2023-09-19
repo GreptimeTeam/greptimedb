@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use common_function_macro::range_fn;
+use common_macro::range_fn;
 use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
 use datafusion::common::DataFusionError;

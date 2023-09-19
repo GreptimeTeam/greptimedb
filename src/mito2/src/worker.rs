@@ -21,6 +21,7 @@ mod handle_create;
 mod handle_drop;
 mod handle_flush;
 mod handle_open;
+mod handle_truncate;
 mod handle_write;
 
 use std::collections::hash_map::DefaultHasher;
@@ -250,7 +251,7 @@ impl<S: LogStore> WorkerStarter<S> {
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
-            compaction_scheduler: CompactionScheduler::new(self.scheduler),
+            compaction_scheduler: CompactionScheduler::new(self.scheduler, sender.clone()),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
         };
@@ -503,6 +504,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     self.handle_compaction_request(ddl.region_id, ddl.sender);
                     continue;
                 }
+                DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
             };
 
             ddl.sender.send(res);
@@ -540,7 +542,7 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Wrapper that only calls event listener in tests.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct WorkerListener {
     #[cfg(test)]
     listener: Option<crate::engine::listener::EventListenerRef>,
@@ -570,6 +572,15 @@ impl WorkerListener {
         if let Some(listener) = &self.listener {
             listener.on_write_stall();
         }
+    }
+
+    pub(crate) async fn on_flush_begin(&self, region_id: RegionId) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_flush_begin(region_id).await;
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
     }
 }
 

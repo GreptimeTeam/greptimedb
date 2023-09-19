@@ -65,12 +65,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[snafu(display(
-        "Failed to execute query, source: {}, query: {}, location: {}",
-        source,
-        query,
-        location
-    ))]
+    #[snafu(display("Failed to execute query, source: {}, query: {}", source, query))]
     ExecuteQuery {
         query: String,
         location: Location,
@@ -279,7 +274,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to get param types, source: {source}, location: {location}"))]
+    #[snafu(display("Failed to get param types, source: {source}"))]
     GetPreparedStmtParams {
         source: query::error::Error,
         location: Location,

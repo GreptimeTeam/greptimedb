@@ -120,6 +120,7 @@ pub fn build_create_table_expr(
             is_nullable,
             default_constraint: vec![],
             semantic_type,
+            comment: String::new(),
         };
         column_defs.push(column_def);
     }
@@ -139,8 +140,6 @@ pub fn build_create_table_expr(
         create_if_not_exists: true,
         table_options: Default::default(),
         table_id: table_id.map(|id| api::v1::TableId { id }),
-        // TODO(hl): region number should be allocated by frontend
-        region_numbers: vec![0],
         engine: engine.to_string(),
     };
 
@@ -161,6 +160,7 @@ pub fn extract_new_columns(
                 is_nullable: true,
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
+                comment: String::new(),
             });
             AddColumn {
                 column_def,

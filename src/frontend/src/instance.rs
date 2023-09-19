@@ -27,7 +27,7 @@ use std::time::Duration;
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::remote::CachedMetaKvBackend;
+use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
@@ -50,6 +50,10 @@ use common_telemetry::{error, timer};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
+use operator::delete::{Deleter, DeleterRef};
+use operator::insert::{Inserter, InserterRef};
+use operator::statement::StatementExecutor;
+use operator::table::table_idents_to_full_name;
 use partition::manager::PartitionRuleManager;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
@@ -80,21 +84,17 @@ pub use standalone::StandaloneDatanodeManager;
 
 use self::distributed::DistRegionRequestHandler;
 use self::standalone::StandaloneTableMetadataCreator;
-use crate::catalog::FrontendCatalogManager;
-use crate::delete::{Deleter, DeleterRef};
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
+    TableOperationSnafu,
 };
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
-use crate::insert::{Inserter, InserterRef};
 use crate::metrics;
 use crate::script::ScriptExecutor;
 use crate::server::{start_server, ServerHandlers, Services};
-use crate::statement::StatementExecutor;
-use crate::table::table_idents_to_full_name;
 
 #[async_trait]
 pub trait FrontendInstance:
@@ -151,7 +151,7 @@ impl Instance {
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        let catalog_manager = FrontendCatalogManager::new(
+        let catalog_manager = KvBackendCatalogManager::new(
             meta_backend.clone(),
             meta_backend.clone(),
             datanode_clients.clone(),
@@ -224,10 +224,7 @@ impl Instance {
     }
 
     async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
-        let meta_client_options = opts
-            .meta_client_options
-            .as_ref()
-            .context(MissingMetasrvOptsSnafu)?;
+        let meta_client_options = opts.meta_client.as_ref().context(MissingMetasrvOptsSnafu)?;
         info!(
             "Creating Frontend instance in distributed mode with Meta server addr {:?}",
             meta_client_options.metasrv_addrs
@@ -245,7 +242,8 @@ impl Instance {
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
-        let mut meta_client = MetaClientBuilder::new(0, 0, Role::Frontend)
+        let cluster_id = 0; // TODO(jeremy): read from config
+        let mut meta_client = MetaClientBuilder::new(cluster_id, 0, Role::Frontend)
             .enable_router()
             .enable_store()
             .enable_heartbeat()
@@ -395,7 +393,7 @@ impl FrontendInstance for Instance {
             heartbeat_task.start().await?;
         }
 
-        self.script_executor.start(self).await?;
+        self.script_executor.start(self)?;
 
         futures::future::try_join_all(self.servers.values().map(start_server))
             .await
@@ -413,7 +411,10 @@ impl Instance {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let stmt = QueryStatement::Sql(stmt);
-        self.statement_executor.execute_stmt(stmt, query_ctx).await
+        self.statement_executor
+            .execute_stmt(stmt, query_ctx)
+            .await
+            .context(TableOperationSnafu)
     }
 }
 

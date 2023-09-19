@@ -14,6 +14,7 @@
 
 use datafusion_sql::parser::Statement as DfStatement;
 use sqlparser::ast::Statement as SpStatement;
+use sqlparser_derive::{Visit, VisitMut};
 
 use crate::error::{ConvertToDfStatementSnafu, Error};
 use crate::statements::alter::AlterTable;
@@ -30,7 +31,7 @@ use crate::statements::truncate::TruncateTable;
 
 /// Tokens parsed by `DFParser` are converted into these values.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum Statement {
     // Query
     Query(Box<Query>),

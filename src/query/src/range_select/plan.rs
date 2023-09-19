@@ -495,8 +495,8 @@ struct RangeSelectStream {
     /// key: time series's hash value
     /// value: time series's state on different align_ts
     series_map: HashMap<u64, SeriesState>,
-    /// key: (hash of by rows, align_ts)
-    /// value: [row_ids]
+    /// key: `(hash of by rows, align_ts)`
+    /// value: `[row_ids]`
     /// It is used to record the data that needs to be aggregated in each time slot during the data update process
     modify_map: HashMap<(u64, Millisecond), Vec<u32>>,
     /// The number of rows of the final output

@@ -62,8 +62,8 @@ impl<'a> ParserContext<'a> {
         let (with, connection, location) = self.parse_copy_to()?;
         Ok(CopyDatabaseArgument {
             database_name,
-            with,
-            connection,
+            with: with.into(),
+            connection: connection.into(),
             location,
         })
     }
@@ -82,8 +82,8 @@ impl<'a> ParserContext<'a> {
             let (with, connection, location) = self.parse_copy_to()?;
             Ok(CopyTable::To(CopyTableArgument {
                 table_name,
-                with,
-                connection,
+                with: with.into(),
+                connection: connection.into(),
                 location,
             }))
         } else {
@@ -308,7 +308,10 @@ mod tests {
                     if let Some(expected_pattern) = test.expected_pattern {
                         assert_eq!(copy_table.pattern().unwrap(), expected_pattern);
                     }
-                    assert_eq!(copy_table.connection.clone(), test.expected_connection);
+                    assert_eq!(
+                        copy_table.connection.clone(),
+                        test.expected_connection.into()
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -348,7 +351,10 @@ mod tests {
                 Statement::Copy(crate::statements::copy::Copy::CopyTable(CopyTable::To(
                     copy_table,
                 ))) => {
-                    assert_eq!(copy_table.connection.clone(), test.expected_connection);
+                    assert_eq!(
+                        copy_table.connection.clone(),
+                        test.expected_connection.into()
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -374,7 +380,7 @@ mod tests {
             [("format".to_string(), "parquet".to_string())]
                 .into_iter()
                 .collect::<HashMap<_, _>>(),
-            stmt.with
+            stmt.with.map
         );
 
         assert_eq!(
@@ -384,7 +390,7 @@ mod tests {
             ]
             .into_iter()
             .collect::<HashMap<_, _>>(),
-            stmt.connection
+            stmt.connection.map
         );
     }
 }

@@ -11,6 +11,7 @@ testing = []
 
 [dependencies]
 api = { workspace = true }
+arc-swap = "1.0"
 arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
@@ -39,7 +40,7 @@ datafusion-expr.workspace = true
 datafusion.workspace = true
 datanode = { workspace = true }
 datatypes = { workspace = true }
-file-table-engine = { workspace = true }
+file-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true
@@ -48,14 +49,12 @@ log-store = { workspace = true }
 meta-client = { workspace = true }
 raft-engine = { workspace = true }
 # Although it is not used, please do not delete it.
-meter-core.workspace = true
-meter-macros.workspace = true
 metrics.workspace = true
-mito = { workspace = true }
 moka = { version = "0.9", features = ["future"] }
 object-store = { workspace = true }
 openmetrics-parser = "0.4"
 opentelemetry-proto.workspace = true
+operator.workspace = true
 partition = { workspace = true }
 prost.workspace = true
 query = { workspace = true }
@@ -82,7 +81,6 @@ common-test-util = { workspace = true }
 datanode = { workspace = true }
 futures = "0.3"
 meta-srv = { workspace = true, features = ["mock"] }
-mito = { workspace = true, features = ["test"] }
 strfmt = "0.2"
 tower = "0.4"
 uuid.workspace = true

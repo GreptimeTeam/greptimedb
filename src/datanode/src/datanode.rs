@@ -12,447 +12,96 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Datanode configurations
+//! Datanode implementation.
 
-pub mod builder;
-
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
-use catalog::local::MemoryCatalogManager;
+use catalog::kvbackend::MetaKvBackend;
+use catalog::memory::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
-use common_telemetry::info;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::{error, info};
+use file_engine::engine::FileRegionEngine;
+use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
-use meta_client::MetaClientOptions;
-use mito2::config::MitoConfig;
+use meta_client::client::MetaClient;
 use mito2::engine::MitoEngine;
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
-use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
-use servers::heartbeat_options::HeartbeatOptions;
-use servers::http::HttpOptions;
 use servers::Mode;
-use snafu::ResultExt;
-use storage::config::{
-    EngineConfig as StorageEngineConfig, DEFAULT_AUTO_FLUSH_INTERVAL, DEFAULT_MAX_FLUSH_TASKS,
-    DEFAULT_PICKER_SCHEDULE_INTERVAL, DEFAULT_REGION_WRITE_BUFFER_SIZE,
-};
-use storage::scheduler::SchedulerConfig;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::path_utils::WAL_DIR;
+use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
+use store_api::region_request::{RegionOpenRequest, RegionRequest};
+use store_api::storage::RegionId;
 use tokio::fs;
+use tokio::sync::Notify;
 
+use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu,
+    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingMetaClientSnafu,
+    MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu,
 };
-use crate::heartbeat::HeartbeatTask;
+use crate::event_listener::{
+    new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
+    RegionServerEventReceiver,
+};
+use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
+use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
 use crate::region_server::RegionServer;
 use crate::server::Services;
 use crate::store;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
-/// Default data home in file storage
-const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
-
-/// Object storage config
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ObjectStoreConfig {
-    File(FileConfig),
-    S3(S3Config),
-    Oss(OssConfig),
-    Azblob(AzblobConfig),
-    Gcs(GcsConfig),
-}
-
-/// Storage engine config
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct StorageConfig {
-    /// Retention period for all tables.
-    ///
-    /// Default value is `None`, which means no TTL.
-    ///
-    /// The precedence order is: ttl in table options > global ttl.
-    #[serde(with = "humantime_serde")]
-    pub global_ttl: Option<Duration>,
-    /// The working directory of database
-    pub data_home: String,
-    #[serde(flatten)]
-    pub store: ObjectStoreConfig,
-    pub compaction: CompactionConfig,
-    pub manifest: RegionManifestConfig,
-    pub flush: FlushConfig,
-}
-
-impl Default for StorageConfig {
-    fn default() -> Self {
-        Self {
-            global_ttl: None,
-            data_home: DEFAULT_DATA_HOME.to_string(),
-            store: ObjectStoreConfig::default(),
-            compaction: CompactionConfig::default(),
-            manifest: RegionManifestConfig::default(),
-            flush: FlushConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
-#[serde(default)]
-pub struct FileConfig {}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct S3Config {
-    pub bucket: String,
-    pub root: String,
-    #[serde(skip_serializing)]
-    pub access_key_id: SecretString,
-    #[serde(skip_serializing)]
-    pub secret_access_key: SecretString,
-    pub endpoint: Option<String>,
-    pub region: Option<String>,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OssConfig {
-    pub bucket: String,
-    pub root: String,
-    #[serde(skip_serializing)]
-    pub access_key_id: SecretString,
-    #[serde(skip_serializing)]
-    pub access_key_secret: SecretString,
-    pub endpoint: String,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AzblobConfig {
-    pub container: String,
-    pub root: String,
-    #[serde(skip_serializing)]
-    pub account_name: SecretString,
-    #[serde(skip_serializing)]
-    pub account_key: SecretString,
-    pub endpoint: String,
-    pub sas_token: Option<String>,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GcsConfig {
-    pub root: String,
-    pub bucket: String,
-    pub scope: String,
-    #[serde(skip_serializing)]
-    pub credential_path: SecretString,
-    pub endpoint: String,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
-}
-
-impl Default for S3Config {
-    fn default() -> Self {
-        Self {
-            bucket: String::default(),
-            root: String::default(),
-            access_key_id: SecretString::from(String::default()),
-            secret_access_key: SecretString::from(String::default()),
-            endpoint: Option::default(),
-            region: Option::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
-        }
-    }
-}
-
-impl Default for OssConfig {
-    fn default() -> Self {
-        Self {
-            bucket: String::default(),
-            root: String::default(),
-            access_key_id: SecretString::from(String::default()),
-            access_key_secret: SecretString::from(String::default()),
-            endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
-        }
-    }
-}
-
-impl Default for AzblobConfig {
-    fn default() -> Self {
-        Self {
-            container: String::default(),
-            root: String::default(),
-            account_name: SecretString::from(String::default()),
-            account_key: SecretString::from(String::default()),
-            endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
-            sas_token: Option::default(),
-        }
-    }
-}
-
-impl Default for GcsConfig {
-    fn default() -> Self {
-        Self {
-            root: String::default(),
-            bucket: String::default(),
-            scope: String::default(),
-            credential_path: SecretString::from(String::default()),
-            endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
-        }
-    }
-}
-
-impl Default for ObjectStoreConfig {
-    fn default() -> Self {
-        ObjectStoreConfig::File(FileConfig {})
-    }
-}
-
-/// Options for region manifest
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(default)]
-pub struct RegionManifestConfig {
-    /// Region manifest checkpoint actions margin.
-    /// Manifest service create a checkpoint every [checkpoint_margin] actions.
-    pub checkpoint_margin: Option<u16>,
-    /// Region manifest logs and checkpoints gc task execution duration.
-    #[serde(with = "humantime_serde")]
-    pub gc_duration: Option<Duration>,
-    /// Whether to compress manifest and checkpoint file by gzip
-    pub compress: bool,
-}
-
-impl Default for RegionManifestConfig {
-    fn default() -> Self {
-        Self {
-            checkpoint_margin: Some(10u16),
-            gc_duration: Some(Duration::from_secs(600)),
-            compress: false,
-        }
-    }
-}
-
-/// Options for table compaction
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(default)]
-pub struct CompactionConfig {
-    /// Max task number that can concurrently run.
-    pub max_inflight_tasks: usize,
-    /// Max files in level 0 to trigger compaction.
-    pub max_files_in_level0: usize,
-    /// Max task number for SST purge task after compaction.
-    pub max_purge_tasks: usize,
-    /// Buffer threshold while writing SST files
-    pub sst_write_buffer_size: ReadableSize,
-}
-
-impl Default for CompactionConfig {
-    fn default() -> Self {
-        Self {
-            max_inflight_tasks: 4,
-            max_files_in_level0: 8,
-            max_purge_tasks: 32,
-            sst_write_buffer_size: ReadableSize::mb(8),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(default)]
-pub struct FlushConfig {
-    /// Max inflight flush tasks.
-    pub max_flush_tasks: usize,
-    /// Default write buffer size for a region.
-    pub region_write_buffer_size: ReadableSize,
-    /// Interval to schedule auto flush picker to find region to flush.
-    #[serde(with = "humantime_serde")]
-    pub picker_schedule_interval: Duration,
-    /// Interval to auto flush a region if it has not flushed yet.
-    #[serde(with = "humantime_serde")]
-    pub auto_flush_interval: Duration,
-    /// Global write buffer size for all regions.
-    pub global_write_buffer_size: Option<ReadableSize>,
-}
-
-impl Default for FlushConfig {
-    fn default() -> Self {
-        Self {
-            max_flush_tasks: DEFAULT_MAX_FLUSH_TASKS,
-            region_write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE,
-            picker_schedule_interval: Duration::from_millis(
-                DEFAULT_PICKER_SCHEDULE_INTERVAL.into(),
-            ),
-            auto_flush_interval: Duration::from_millis(DEFAULT_AUTO_FLUSH_INTERVAL.into()),
-            global_write_buffer_size: None,
-        }
-    }
-}
-
-impl From<&DatanodeOptions> for SchedulerConfig {
-    fn from(value: &DatanodeOptions) -> Self {
-        Self {
-            max_inflight_tasks: value.storage.compaction.max_inflight_tasks,
-        }
-    }
-}
-
-impl From<&DatanodeOptions> for StorageEngineConfig {
-    fn from(value: &DatanodeOptions) -> Self {
-        Self {
-            compress_manifest: value.storage.manifest.compress,
-            manifest_checkpoint_margin: value.storage.manifest.checkpoint_margin,
-            manifest_gc_duration: value.storage.manifest.gc_duration,
-            max_files_in_l0: value.storage.compaction.max_files_in_level0,
-            max_purge_tasks: value.storage.compaction.max_purge_tasks,
-            sst_write_buffer_size: value.storage.compaction.sst_write_buffer_size,
-            max_flush_tasks: value.storage.flush.max_flush_tasks,
-            region_write_buffer_size: value.storage.flush.region_write_buffer_size,
-            picker_schedule_interval: value.storage.flush.picker_schedule_interval,
-            auto_flush_interval: value.storage.flush.auto_flush_interval,
-            global_write_buffer_size: value.storage.flush.global_write_buffer_size,
-            global_ttl: value.storage.global_ttl,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DatanodeOptions {
-    pub mode: Mode,
-    pub node_id: Option<u64>,
-    pub rpc_addr: String,
-    pub rpc_hostname: Option<String>,
-    pub rpc_runtime_size: usize,
-    pub heartbeat: HeartbeatOptions,
-    pub http_opts: HttpOptions,
-    pub meta_client_options: Option<MetaClientOptions>,
-    pub wal: WalConfig,
-    pub storage: StorageConfig,
-    /// Options for different store engines.
-    pub region_engine: Vec<RegionEngineConfig>,
-    pub logging: LoggingOptions,
-    pub enable_telemetry: bool,
-}
-
-impl Default for DatanodeOptions {
-    fn default() -> Self {
-        Self {
-            mode: Mode::Standalone,
-            node_id: None,
-            rpc_addr: "127.0.0.1:3001".to_string(),
-            rpc_hostname: None,
-            rpc_runtime_size: 8,
-            http_opts: HttpOptions::default(),
-            meta_client_options: None,
-            wal: WalConfig::default(),
-            storage: StorageConfig::default(),
-            region_engine: vec![RegionEngineConfig::Mito(MitoConfig::default())],
-            logging: LoggingOptions::default(),
-            heartbeat: HeartbeatOptions::default(),
-            enable_telemetry: true,
-        }
-    }
-}
-
-impl DatanodeOptions {
-    pub fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["meta_client_options.metasrv_addrs"])
-    }
-
-    pub fn to_toml_string(&self) -> String {
-        toml::to_string(&self).unwrap()
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum RegionEngineConfig {
-    #[serde(rename = "mito")]
-    Mito(MitoConfig),
-}
-
 /// Datanode service.
 pub struct Datanode {
     opts: DatanodeOptions,
     services: Option<Services>,
     heartbeat_task: Option<HeartbeatTask>,
+    region_event_receiver: Option<RegionServerEventReceiver>,
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    leases_notifier: Option<Arc<Notify>>,
     plugins: Arc<Plugins>,
 }
 
 impl Datanode {
-    async fn new_region_server(
-        opts: &DatanodeOptions,
-        plugins: Arc<Plugins>,
-    ) -> Result<RegionServer> {
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
-            // query engine in datanode only executes plan with resolved table source.
-            MemoryCatalogManager::with_default_setup(),
-            None,
-            false,
-            plugins,
-        );
-        let query_engine = query_engine_factory.query_engine();
-
-        let runtime = Arc::new(
-            Runtime::builder()
-                .worker_threads(opts.rpc_runtime_size)
-                .thread_name("io-handlers")
-                .build()
-                .context(RuntimeResourceSnafu)?,
-        );
-
-        let mut region_server = RegionServer::new(query_engine.clone(), runtime.clone());
-        let log_store = Self::build_log_store(opts).await?;
-        let object_store = store::new_object_store(opts).await?;
-        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
-        for engine in engines {
-            region_server.register_engine(engine);
-        }
-
-        Ok(region_server)
-    }
-
     pub async fn start(&mut self) -> Result<()> {
         info!("Starting datanode instance...");
 
         self.start_heartbeat().await?;
+        self.wait_coordinated().await;
 
         let _ = self.greptimedb_telemetry_task.start();
         self.start_services().await
     }
 
-    pub async fn start_heartbeat(&self) -> Result<()> {
+    pub async fn start_heartbeat(&mut self) -> Result<()> {
         if let Some(task) = &self.heartbeat_task {
-            task.start().await?;
+            // Safety: The event_receiver must exist.
+            let receiver = self.region_event_receiver.take().unwrap();
+
+            task.start(receiver, self.leases_notifier.clone()).await?;
         }
         Ok(())
+    }
+
+    /// If `leases_notifier` exists, it waits until leases have been obtained in all regions.
+    pub async fn wait_coordinated(&mut self) {
+        if let Some(notifier) = self.leases_notifier.take() {
+            notifier.notified().await;
+        }
     }
 
     /// Start services of datanode. This method call will block until services are shutdown.
@@ -493,6 +142,218 @@ impl Datanode {
 
     pub fn plugins(&self) -> Arc<Plugins> {
         self.plugins.clone()
+    }
+}
+
+pub struct DatanodeBuilder {
+    opts: DatanodeOptions,
+    plugins: Arc<Plugins>,
+    meta_client: Option<MetaClient>,
+    kv_backend: Option<KvBackendRef>,
+}
+
+impl DatanodeBuilder {
+    /// `kv_backend` is optional. If absent, the builder will try to build one
+    /// by using the given `opts`
+    pub fn new(
+        opts: DatanodeOptions,
+        kv_backend: Option<KvBackendRef>,
+        plugins: Arc<Plugins>,
+    ) -> Self {
+        Self {
+            opts,
+            plugins,
+            meta_client: None,
+            kv_backend,
+        }
+    }
+
+    pub fn with_meta_client(self, meta_client: MetaClient) -> Self {
+        Self {
+            meta_client: Some(meta_client),
+            ..self
+        }
+    }
+
+    pub async fn build(mut self) -> Result<Datanode> {
+        let mode = &self.opts.mode;
+
+        // build meta client
+        let meta_client = match mode {
+            Mode::Distributed => {
+                let meta_client = if let Some(meta_client) = self.meta_client.take() {
+                    meta_client
+                } else {
+                    let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+
+                    let meta_config = self
+                        .opts
+                        .meta_client
+                        .as_ref()
+                        .context(MissingMetasrvOptsSnafu)?;
+
+                    new_metasrv_client(node_id, meta_config).await?
+                };
+                Some(meta_client)
+            }
+            Mode::Standalone => None,
+        };
+
+        // build kv-backend
+        let kv_backend = match mode {
+            Mode::Distributed => Arc::new(MetaKvBackend {
+                client: Arc::new(meta_client.clone().context(MissingMetaClientSnafu)?),
+            }),
+            Mode::Standalone => self.kv_backend.clone().context(MissingKvBackendSnafu)?,
+        };
+
+        // build and initialize region server
+        let log_store = Self::build_log_store(&self.opts).await?;
+        let (region_event_listener, region_event_receiver) = match mode {
+            Mode::Distributed => {
+                let (tx, rx) = new_region_server_event_channel();
+                (Box::new(tx) as RegionServerEventListenerRef, Some(rx))
+            }
+            Mode::Standalone => (
+                Box::new(NoopRegionServerEventListener) as RegionServerEventListenerRef,
+                None,
+            ),
+        };
+
+        let region_server = Self::new_region_server(
+            &self.opts,
+            self.plugins.clone(),
+            log_store,
+            region_event_listener,
+        )
+        .await?;
+        self.initialize_region_server(&region_server, kv_backend, matches!(mode, Mode::Standalone))
+            .await?;
+
+        let heartbeat_task = match mode {
+            Mode::Distributed => {
+                let meta_client = meta_client.context(MissingMetaClientSnafu)?;
+
+                let heartbeat_task =
+                    HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?;
+                Some(heartbeat_task)
+            }
+            Mode::Standalone => None,
+        };
+
+        let services = match mode {
+            Mode::Distributed => Some(Services::try_new(region_server.clone(), &self.opts).await?),
+            Mode::Standalone => None,
+        };
+
+        let greptimedb_telemetry_task = get_greptimedb_telemetry_task(
+            Some(self.opts.storage.data_home.clone()),
+            mode,
+            self.opts.enable_telemetry,
+        )
+        .await;
+
+        let leases_notifier =
+            if self.opts.require_lease_before_startup && matches!(mode, Mode::Distributed) {
+                Some(Arc::new(Notify::new()))
+            } else {
+                None
+            };
+
+        Ok(Datanode {
+            opts: self.opts,
+            services,
+            heartbeat_task,
+            region_server,
+            greptimedb_telemetry_task,
+            region_event_receiver,
+            leases_notifier,
+            plugins: self.plugins.clone(),
+        })
+    }
+
+    /// Open all regions belong to this datanode.
+    async fn initialize_region_server(
+        &self,
+        region_server: &RegionServer,
+        kv_backend: KvBackendRef,
+        open_with_writable: bool,
+    ) -> Result<()> {
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
+        let mut regions = vec![];
+        let mut table_values = datanode_table_manager.tables(node_id);
+        while let Some(table_value) = table_values.next().await {
+            let table_value = table_value.context(GetMetadataSnafu)?;
+            for region_number in table_value.regions {
+                regions.push((
+                    RegionId::new(table_value.table_id, region_number),
+                    table_value.engine.clone(),
+                    table_value.region_storage_path.clone(),
+                ));
+            }
+        }
+
+        info!("going to open {} regions", regions.len());
+
+        for (region_id, engine, store_path) in regions {
+            let region_dir = region_dir(&store_path, region_id);
+            region_server
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: engine.clone(),
+                        region_dir,
+                        options: HashMap::new(),
+                    }),
+                )
+                .await?;
+            if open_with_writable {
+                if let Err(e) = region_server.set_writable(region_id, true) {
+                    error!(
+                        e; "failed to set writable for region {region_id}"
+                    );
+                }
+            }
+        }
+
+        info!("region server is initialized");
+
+        Ok(())
+    }
+
+    async fn new_region_server(
+        opts: &DatanodeOptions,
+        plugins: Arc<Plugins>,
+        log_store: Arc<RaftEngineLogStore>,
+        event_listener: RegionServerEventListenerRef,
+    ) -> Result<RegionServer> {
+        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+            // query engine in datanode only executes plan with resolved table source.
+            MemoryCatalogManager::with_default_setup(),
+            None,
+            false,
+            plugins,
+        );
+        let query_engine = query_engine_factory.query_engine();
+
+        let runtime = Arc::new(
+            Runtime::builder()
+                .worker_threads(opts.rpc_runtime_size)
+                .thread_name("io-handlers")
+                .build()
+                .context(RuntimeResourceSnafu)?,
+        );
+
+        let mut region_server =
+            RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
+        let object_store = store::new_object_store(opts).await?;
+        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
+        for engine in engines {
+            region_server.register_engine(engine);
+        }
+
+        Ok(region_server)
     }
 
     // internal utils
@@ -535,43 +396,12 @@ impl Datanode {
                         MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
                     engines.push(Arc::new(engine) as _);
                 }
+                RegionEngineConfig::File(config) => {
+                    let engine = FileRegionEngine::new(config.clone(), object_store.clone());
+                    engines.push(Arc::new(engine) as _);
+                }
             }
         }
         Ok(engines)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use secrecy::ExposeSecret;
-
-    use super::*;
-
-    #[test]
-    fn test_toml() {
-        let opts = DatanodeOptions::default();
-        let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
-    }
-
-    #[test]
-    fn test_secstr() {
-        let toml_str = r#"
-            [storage]
-            type = "S3"
-            access_key_id = "access_key_id"
-            secret_access_key = "secret_access_key"
-        "#;
-        let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
-        match opts.storage.store {
-            ObjectStoreConfig::S3(cfg) => {
-                assert_eq!(
-                    "Secret([REDACTED alloc::string::String])".to_string(),
-                    format!("{:?}", cfg.access_key_id)
-                );
-                assert_eq!("access_key_id", cfg.access_key_id.expose_secret());
-            }
-            _ => unreachable!(),
-        }
     }
 }

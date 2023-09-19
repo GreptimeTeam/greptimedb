@@ -33,6 +33,8 @@ impl<S> RegionWorkerLoop<S> {
         self.regions.remove_region(region_id);
         // Clean flush status.
         self.flush_scheduler.on_region_closed(region_id);
+        // Clean compaction status.
+        self.compaction_scheduler.on_region_closed(region_id);
 
         info!("Region {} closed", region_id);
 

@@ -15,7 +15,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use common_function_macro::{as_aggr_func_creator, AggrFuncTypeStore};
+use common_macro::{as_aggr_func_creator, AggrFuncTypeStore};
 use common_query::error::{
     BadAccumulatorImplSnafu, CreateAccumulatorSnafu, DowncastVectorSnafu, Result,
 };

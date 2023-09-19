@@ -82,7 +82,6 @@ pub async fn test_invalid_dbname(store_type: StorageType) {
     let (expected_host_col, expected_cpu_col, expected_mem_col, expected_ts_col) = expect_data();
     let request = InsertRequest {
         table_name: "demo".to_string(),
-        region_number: 0,
         columns: vec![
             expected_host_col.clone(),
             expected_cpu_col.clone(),
@@ -218,7 +217,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
     let expected_ts_col = Column {
         column_name: "ts".to_string(),
         values: Some(column::Values {
-            ts_millisecond_values: vec![100, 101, 102, 103],
+            timestamp_millisecond_values: vec![100, 101, 102, 103],
             ..Default::default()
         }),
         semantic_type: SemanticType::Timestamp as i32,
@@ -254,6 +253,7 @@ pub async fn test_insert_and_select(store_type: StorageType) {
         is_nullable: true,
         default_constraint: vec![],
         semantic_type: SemanticType::Field as i32,
+        ..Default::default()
     };
     let kind = Kind::AddColumns(AddColumns {
         add_columns: vec![AddColumn {
@@ -283,7 +283,6 @@ async fn insert_and_assert(db: &Database) {
 
     let request = InsertRequest {
         table_name: "demo".to_string(),
-        region_number: 0,
         columns: vec![
             expected_host_col.clone(),
             expected_cpu_col.clone(),
@@ -345,6 +344,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: false,
             default_constraint: vec![],
             semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "cpu".to_string(),
@@ -352,6 +352,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: true,
             default_constraint: vec![],
             semantic_type: SemanticType::Field as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "memory".to_string(),
@@ -359,6 +360,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: true,
             default_constraint: vec![],
             semantic_type: SemanticType::Field as i32,
+            ..Default::default()
         },
         ColumnDef {
             name: "ts".to_string(),
@@ -366,6 +368,7 @@ fn testing_create_expr() -> CreateTableExpr {
             is_nullable: false,
             default_constraint: vec![],
             semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
         },
     ];
     CreateTableExpr {
@@ -381,7 +384,6 @@ fn testing_create_expr() -> CreateTableExpr {
         table_id: Some(TableId {
             id: MIN_USER_TABLE_ID,
         }),
-        region_numbers: vec![0],
         engine: MITO_ENGINE.to_string(),
     }
 }

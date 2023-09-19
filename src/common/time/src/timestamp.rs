@@ -20,7 +20,9 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
-use chrono::{DateTime, LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
+use chrono::{
+    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
+};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -250,10 +252,24 @@ impl Timestamp {
         NaiveDateTime::from_timestamp_opt(sec, nsec)
     }
 
+    /// Convert timestamp to chrono date.
+    pub fn to_chrono_date(&self) -> Option<NaiveDate> {
+        self.to_chrono_datetime().map(|ndt| ndt.date())
+    }
+
+    /// Convert timestamp to chrono time.
+    pub fn to_chrono_time(&self) -> Option<NaiveTime> {
+        self.to_chrono_datetime().map(|ndt| ndt.time())
+    }
+
     pub fn from_chrono_datetime(ndt: NaiveDateTime) -> Option<Self> {
         let sec = ndt.timestamp();
         let nsec = ndt.timestamp_subsec_nanos();
         Timestamp::from_splits(sec, nsec)
+    }
+
+    pub fn from_chrono_date(date: NaiveDate) -> Option<Self> {
+        Timestamp::from_chrono_datetime(date.and_time(NaiveTime::default()))
     }
 }
 

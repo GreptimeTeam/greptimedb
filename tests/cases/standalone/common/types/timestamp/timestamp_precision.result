@@ -29,31 +29,59 @@ Error: 1003(Internal), Execution error: Date part 'MICROSECONDS' not supported
 -- any other precision is rounded up (e.g. 1/2 -> 3, 4/5 -> 6, 7/8 -> 9)
 SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(0);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(0), None)
++---------------------------------------+
+| Utf8("2020-01-01 01:23:45.123456789") |
++---------------------------------------+
+| 2020-01-01T01:23:45                   |
++---------------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(3);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(3), None)
++---------------------------------------+
+| Utf8("2020-01-01 01:23:45.123456789") |
++---------------------------------------+
+| 2020-01-01T01:23:45.123               |
++---------------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(6);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(6), None)
++---------------------------------------+
+| Utf8("2020-01-01 01:23:45.123456789") |
++---------------------------------------+
+| 2020-01-01T01:23:45.123456            |
++---------------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.123456789'::TIMESTAMP(9);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(9), None)
++---------------------------------------+
+| Utf8("2020-01-01 01:23:45.123456789") |
++---------------------------------------+
+| 2020-01-01T01:23:45.123456789         |
++---------------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.12'::TIMESTAMP(3);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(3), None)
++--------------------------------+
+| Utf8("2020-01-01 01:23:45.12") |
++--------------------------------+
+| 2020-01-01T01:23:45.120        |
++--------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.12345'::TIMESTAMP(6);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(6), None)
++-----------------------------------+
+| Utf8("2020-01-01 01:23:45.12345") |
++-----------------------------------+
+| 2020-01-01T01:23:45.123450        |
++-----------------------------------+
 
 SELECT TIMESTAMP '2020-01-01 01:23:45.12345678'::TIMESTAMP(9);
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported SQL type Timestamp(Some(9), None)
++--------------------------------------+
+| Utf8("2020-01-01 01:23:45.12345678") |
++--------------------------------------+
+| 2020-01-01T01:23:45.123456780        |
++--------------------------------------+
 
 DROP TABLE ts_precision;
 

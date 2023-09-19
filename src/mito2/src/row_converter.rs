@@ -15,7 +15,7 @@
 use bytes::Buf;
 use common_base::bytes::Bytes;
 use common_time::time::Time;
-use common_time::{Date, Interval};
+use common_time::{Date, Duration, Interval};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::value::ValueRef;
@@ -72,6 +72,7 @@ impl SortField {
             ConcreteDataType::DateTime(_) => 9,
             ConcreteDataType::Timestamp(_) => 10,
             ConcreteDataType::Time(_) => 10,
+            ConcreteDataType::Duration(_) => 10,
             ConcreteDataType::Interval(_) => 18,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
@@ -136,7 +137,8 @@ impl SortField {
             Date, date,
             DateTime, datetime,
             Time, time,
-            Interval, interval
+            Interval, interval,
+            Duration, duration
         );
 
         Ok(())
@@ -201,7 +203,8 @@ impl SortField {
             Date, Date,
             Time, Time,
             DateTime, DateTime,
-            Interval, Interval
+            Interval, Interval,
+            Duration, Duration
         )
     }
 }
@@ -309,6 +312,20 @@ mod tests {
                 Value::Int64(43),
             ],
         );
+    }
+
+    #[test]
+    fn test_memcmp_duration() {
+        check_encode_and_decode(
+            &[
+                ConcreteDataType::duration_millisecond_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ],
+            vec![
+                Value::Duration(Duration::new_millisecond(44)),
+                Value::Int64(45),
+            ],
+        )
     }
 
     #[test]
