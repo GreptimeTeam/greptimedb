@@ -142,7 +142,7 @@ impl DropTableProcedure {
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let clients = self.context.datanode_manager.clone();
+            let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
@@ -150,28 +150,31 @@ impl DropTableProcedure {
                 .map(|region_number| RegionId::new(table_id, *region_number))
                 .collect::<Vec<_>>();
 
-            drop_region_tasks.push(async move {
-                for region_id in region_ids {
-                    debug!("Dropping region {region_id} on Datanode {datanode:?}");
+            for region_id in region_ids {
+                debug!("Dropping region {region_id} on Datanode {datanode:?}");
 
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader {
-                            trace_id: 0,
-                            span_id: 0,
-                        }),
-                        body: Some(region_request::Body::Drop(PbDropRegionRequest {
-                            region_id: region_id.as_u64(),
-                        })),
-                    };
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        trace_id: 0,
+                        span_id: 0,
+                    }),
+                    body: Some(region_request::Body::Drop(PbDropRegionRequest {
+                        region_id: region_id.as_u64(),
+                    })),
+                };
 
-                    if let Err(err) = clients.datanode(&datanode).await.handle(request).await {
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+
+                drop_region_tasks.push(async move {
+                    if let Err(err) = requester.handle(request).await {
                         if err.status_code() != StatusCode::RegionNotFound {
                             return Err(handle_operate_region_error(datanode)(err));
                         }
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
 
         join_all(drop_region_tasks)

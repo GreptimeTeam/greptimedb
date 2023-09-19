@@ -196,11 +196,9 @@ impl AlterTableProcedure {
         let leaders = find_leaders(&region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
-        let datanode_manager = self.context.datanode_manager.clone();
-
         for datanode in leaders {
+            let requester = self.context.datanode_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&region_routes, &datanode);
-            let requester = datanode_manager.datanode(&datanode).await;
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
@@ -214,12 +212,12 @@ impl AlterTableProcedure {
                 };
                 debug!("Submitting {request:?} to {datanode}");
 
-                let datanode_clone = datanode.clone();
+                let datanode = datanode.clone();
                 let requester = requester.clone();
 
                 alter_region_tasks.push(async move {
                     if let Err(e) = requester.handle(request).await {
-                        return Err(handle_operate_region_error(datanode_clone)(e));
+                        return Err(handle_operate_region_error(datanode)(e));
                     }
                     Ok(())
                 });
