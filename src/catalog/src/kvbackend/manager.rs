@@ -18,18 +18,17 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::{CacheInvalidator, Context};
+use common_meta::cache_invalidator::{
+    CacheInvalidator, Context, KvCacheInvalidatorRef, TableMetadataCacheInvalidator,
+};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::error::Result as MetaResult;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::key::table_info::TableInfoKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{TableMetaKey, TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
-use common_telemetry::debug;
 use futures_util::TryStreamExt;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use snafu::prelude::*;
@@ -43,7 +42,6 @@ use crate::error::{
     TableMetadataManagerSnafu,
 };
 use crate::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
-use crate::kvbackend::KvCacheInvalidatorRef;
 use crate::CatalogManager;
 
 /// Access all existing catalog, schema and tables.
@@ -57,6 +55,7 @@ pub struct KvBackendCatalogManager {
     // Now we use `NoopKvCacheInvalidator` for Standalone mode. In Standalone mode, the KV backend
     // is implemented by RaftEngine. Maybe we need a cache for it?
     backend_cache_invalidator: KvCacheInvalidatorRef,
+    table_metadata_cache_invalidator: TableMetadataCacheInvalidator,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     datanode_manager: DatanodeManagerRef,
@@ -66,40 +65,16 @@ pub struct KvBackendCatalogManager {
 
 #[async_trait::async_trait]
 impl CacheInvalidator for KvBackendCatalogManager {
-    async fn invalidate_table_name(&self, _ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        let key: TableNameKey = (&table_name).into();
-
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        Ok(())
+    async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
+        self.table_metadata_cache_invalidator
+            .invalidate_table_name(ctx, table_name)
+            .await
     }
 
-    async fn invalidate_table_id(&self, _ctx: &Context, table_id: TableId) -> MetaResult<()> {
-        let key = TableInfoKey::new(table_id);
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        let key = &TableRouteKey { table_id };
-        self.backend_cache_invalidator
-            .invalidate_key(&key.as_raw_key())
-            .await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
-
-        Ok(())
+    async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
+        self.table_metadata_cache_invalidator
+            .invalidate_table_id(ctx, table_id)
+            .await
     }
 }
 
@@ -110,9 +85,12 @@ impl KvBackendCatalogManager {
         datanode_manager: DatanodeManagerRef,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
-            backend_cache_invalidator,
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
+            table_metadata_cache_invalidator: TableMetadataCacheInvalidator::new(
+                backend_cache_invalidator.clone(),
+            ),
+            backend_cache_invalidator,
             datanode_manager,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
@@ -134,7 +112,7 @@ impl KvBackendCatalogManager {
 
     pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
         let key = SchemaNameKey::new(catalog, schema).as_raw_key();
-
+        // TODO(weny): refactors to `TableMetadataCacheInvalidator`
         self.backend_cache_invalidator.invalidate_key(&key).await;
     }
 }

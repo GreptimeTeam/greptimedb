@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
@@ -33,7 +34,6 @@ use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{OptionExt, ResultExt};
 
-use super::KvCacheInvalidator;
 use crate::metrics::{METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET};
 
 const CACHE_MAX_CAPACITY: u64 = 10000;
