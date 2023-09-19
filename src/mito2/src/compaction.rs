@@ -174,7 +174,6 @@ impl CompactionScheduler {
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
     fn schedule_compaction_request(&mut self, request: CompactionRequest) -> Result<()> {
-        // TODO(hl): build picker according to region options.
         let picker = compaction_options_to_picker(&request.current_version.options.compaction);
         let region_id = request.region_id();
         debug!(
