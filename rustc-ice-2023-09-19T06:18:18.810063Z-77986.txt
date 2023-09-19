@@ -1,3 +1,0 @@
-thread 'rustc' panicked at compiler/rustc_errors/src/json.rs:176:13:
-failed to print notification: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
-stack backtrace:
