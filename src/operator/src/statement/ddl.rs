@@ -446,7 +446,6 @@ fn create_table_info(
         engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
-        engine_options: HashMap::new(),
         options: table_options,
         created_on: DateTime::default(),
         partition_key_indices,

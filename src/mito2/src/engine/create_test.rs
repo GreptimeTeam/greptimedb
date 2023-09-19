@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use store_api::region_engine::RegionEngine;
@@ -75,5 +77,27 @@ async fn test_engine_create_existing_region() {
     assert!(
         matches!(err.status_code(), StatusCode::RegionAlreadyExists),
         "unexpected err: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_create_with_options() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("ttl", "10d")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    assert!(engine.is_region_exists(region_id));
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(
+        Duration::from_secs(3600 * 24 * 10),
+        region.version().options.ttl.unwrap()
     );
 }

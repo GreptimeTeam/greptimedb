@@ -14,6 +14,7 @@
 
 //! Region opener.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use crate::config::MitoConfig;
 use crate::error::{RegionCorruptedSnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
+use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::MitoRegion;
 use crate::region_write_ctx::RegionWriteCtx;
@@ -48,6 +50,7 @@ pub(crate) struct RegionOpener {
     object_store: ObjectStore,
     region_dir: String,
     scheduler: SchedulerRef,
+    options: HashMap<String, String>,
 }
 
 impl RegionOpener {
@@ -65,6 +68,7 @@ impl RegionOpener {
             object_store,
             region_dir: String::new(),
             scheduler,
+            options: HashMap::new(),
         }
     }
 
@@ -77,6 +81,12 @@ impl RegionOpener {
     /// Sets the region dir.
     pub(crate) fn region_dir(mut self, value: &str) -> Self {
         self.region_dir = value.to_string();
+        self
+    }
+
+    /// Sets options for the region.
+    pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
+        self.options = value;
         self
     }
 
@@ -100,7 +110,10 @@ impl RegionOpener {
 
         let mutable = self.memtable_builder.build(&metadata);
 
-        let version = VersionBuilder::new(metadata, mutable).build();
+        let options = RegionOptions::try_from(&self.options)?;
+        let version = VersionBuilder::new(metadata, mutable)
+            .options(options)
+            .build();
         let version_control = Arc::new(VersionControl::new(version));
         let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
 
@@ -152,11 +165,13 @@ impl RegionOpener {
         let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
         let file_purger = Arc::new(LocalFilePurger::new(self.scheduler, access_layer.clone()));
         let mutable = self.memtable_builder.build(&metadata);
+        let options = RegionOptions::try_from(&self.options)?;
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
+            .options(options)
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
