@@ -21,18 +21,18 @@ use common_meta::datanode_manager::DatanodeManagerRef;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
-use query::region_query::RegionQueryHandler as RegionQueryHandlerTrait;
+use query::region_query::RegionQueryHandler;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
 
-pub(crate) struct RegionQueryHandler {
+pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
     datanode_manager: DatanodeManagerRef,
 }
 
-impl RegionQueryHandler {
+impl FrontendRegionQueryHandler {
     pub fn arc(
         partition_manager: PartitionRuleManagerRef,
         datanode_manager: DatanodeManagerRef,
@@ -45,7 +45,7 @@ impl RegionQueryHandler {
 }
 
 #[async_trait]
-impl RegionQueryHandlerTrait for RegionQueryHandler {
+impl RegionQueryHandler for FrontendRegionQueryHandler {
     async fn do_get(&self, request: QueryRequest) -> QueryResult<SendableRecordBatchStream> {
         self.do_get_inner(request)
             .await
@@ -54,7 +54,7 @@ impl RegionQueryHandlerTrait for RegionQueryHandler {
     }
 }
 
-impl RegionQueryHandler {
+impl FrontendRegionQueryHandler {
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 

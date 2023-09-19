@@ -82,7 +82,7 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::region_query::RegionQueryHandler;
+use self::region_query::FrontendRegionQueryHandler;
 use self::standalone::StandaloneTableMetadataCreator;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
@@ -158,7 +158,7 @@ impl Instance {
         );
         let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
 
-        let region_query_handler = RegionQueryHandler::arc(
+        let region_query_handler = FrontendRegionQueryHandler::arc(
             partition_manager.clone(),
             catalog_manager.datanode_manager().clone(),
         );
@@ -299,7 +299,7 @@ impl Instance {
         let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
 
         let region_query_handler =
-            RegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
+            FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
 
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
