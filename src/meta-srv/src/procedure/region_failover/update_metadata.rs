@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::ddl::utils::region_storage_path;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
@@ -24,20 +23,22 @@ use snafu::{OptionExt, ResultExt};
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
-use crate::error::{
-    self, Result, RetryLaterSnafu, TableInfoNotFoundSnafu, TableRouteNotFoundSnafu,
-};
+use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
+    region_storage_path: String,
 }
 
 impl UpdateRegionMetadata {
-    pub(super) fn new(candidate: Peer) -> Self {
-        Self { candidate }
+    pub(super) fn new(candidate: Peer, region_storage_path: String) -> Self {
+        Self {
+            candidate,
+            region_storage_path,
+        }
     }
 
     /// Updates the metadata of the table.
@@ -71,17 +72,6 @@ impl UpdateRegionMetadata {
             .context(error::TableMetadataManagerSnafu)?
             .context(TableRouteNotFoundSnafu { table_id })?;
 
-        let table_info = ctx
-            .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)?
-            .context(TableInfoNotFoundSnafu { table_id })?
-            .table_info;
-        let region_storage_path =
-            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
-
         let mut new_region_routes = table_route_value.region_routes.clone();
 
         for region_route in new_region_routes.iter_mut() {
@@ -101,7 +91,7 @@ impl UpdateRegionMetadata {
             .update_table_route(
                 table_id,
                 engine,
-                &region_storage_path,
+                &self.region_storage_path,
                 table_route_value,
                 new_region_routes,
             )
@@ -184,7 +174,7 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let mut state = UpdateRegionMetadata::new(Peer::new(2, ""));
+        let mut state = UpdateRegionMetadata::new(Peer::new(2, ""), env.path.clone());
 
         let next_state = state.next(&env.context, &failed_region).await.unwrap();
         assert_eq!(format!("{next_state:?}"), "InvalidateCache");
@@ -197,7 +187,7 @@ mod tests {
         async fn test(env: TestingEnv, failed_region: u32, candidate: u64) -> Vec<RegionRoute> {
             let failed_region = env.failed_region(failed_region).await;
 
-            let state = UpdateRegionMetadata::new(Peer::new(candidate, ""));
+            let state = UpdateRegionMetadata::new(Peer::new(candidate, ""), env.path.clone());
             state
                 .update_table_route(&env.context, &failed_region)
                 .await
@@ -335,17 +325,17 @@ mod tests {
             let failed_region_2 = env.failed_region(2).await;
 
             let table_id = failed_region_1.table_id;
-
+            let path = env.path.clone();
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(2, ""));
+                    let state = UpdateRegionMetadata::new(Peer::new(2, ""), path);
                     state
                         .update_metadata(&ctx_1, &failed_region_1)
                         .await
                         .unwrap();
                 }),
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(3, ""));
+                    let state = UpdateRegionMetadata::new(Peer::new(3, ""), env.path.clone());
                     state
                         .update_metadata(&ctx_2, &failed_region_2)
                         .await

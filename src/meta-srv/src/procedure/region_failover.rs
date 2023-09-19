@@ -610,7 +610,10 @@ mod tests {
         let (candidate_tx, mut candidate_rx) = tokio::sync::mpsc::channel(1);
         for (datanode_id, mut recv) in env.heartbeat_receivers.into_iter() {
             let mailbox_clone = env.context.mailbox.clone();
-            let failed_region_clone = failed_region.clone();
+            let opening_region = RegionIdent {
+                datanode_id,
+                ..failed_region.clone()
+            };
             let path = env.path.to_string();
             let candidate_tx = candidate_tx.clone();
             let _handle = common_runtime::spawn_bg(async move {
@@ -620,7 +623,7 @@ mod tests {
                     received.payload,
                     Some(Payload::Json(
                         serde_json::to_string(&Instruction::OpenRegion(OpenRegion::new(
-                            failed_region_clone,
+                            opening_region,
                             &path
                         )))
                         .unwrap(),
