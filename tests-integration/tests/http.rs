@@ -606,7 +606,7 @@ pub async fn test_config_api(store_type: StorageType) {
     let expected_toml_str = format!(
         r#"mode = "standalone"
 node_id = 0
-require_lease_before_startup = false
+require_lease_before_startup = true
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 enable_telemetry = true

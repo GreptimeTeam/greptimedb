@@ -1,5 +1,6 @@
 mode = 'standalone'
 enable_memory_catalog = false
+require_lease_before_startup = true
 
 [wal]
 file_size = '1GB'
