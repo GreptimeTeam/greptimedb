@@ -153,7 +153,7 @@ async fn test_opentsdb_put() {
     assert_eq!(result.status(), 400);
     assert_eq!(
         result.text().await,
-        "{\"error\":\"Invalid OpenTSDB Json request, source: expected value at line 1 column 1\"}"
+        "{\"error\":\"expected value at line 1 column 1\"}"
     );
 
     // internal server error

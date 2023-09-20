@@ -20,7 +20,7 @@ use axum::{Extension, Json};
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{ErrorCompat, ResultExt};
 
 use crate::error::{self, Error, Result};
 use crate::opentsdb::codec::DataPoint;
@@ -160,7 +160,7 @@ impl OpentsdbDebuggingResponse {
         if let Some(details) = self.errors.as_mut() {
             let error = OpentsdbDetailError {
                 datapoint,
-                error: error.to_string(),
+                error: error.iter_chain().last().unwrap().to_string(),
             };
             details.push(error);
         };

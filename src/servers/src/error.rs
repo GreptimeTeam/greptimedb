@@ -26,7 +26,7 @@ use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{Location, Snafu};
+use snafu::{ErrorCompat, Location, Snafu};
 use tonic::Code;
 
 #[derive(Debug, Snafu)]
@@ -517,7 +517,8 @@ impl From<std::io::Error> for Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let error_msg = self.iter_chain().last().unwrap().to_string();
+        let status = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }
             | Error::PromSeriesWrite { .. }
@@ -528,15 +529,15 @@ impl IntoResponse for Error {
             | Error::DecompressPromRemoteRequest { .. }
             | Error::InvalidPromRemoteRequest { .. }
             | Error::InvalidQuery { .. }
-            | Error::TimePrecision { .. } => (HttpStatusCode::BAD_REQUEST, self.to_string()),
+            | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
             _ => {
                 logging::error!(self; "Failed to handle HTTP request");
 
-                (HttpStatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+                HttpStatusCode::INTERNAL_SERVER_ERROR
             }
         };
         let body = Json(json!({
-            "error": error_message,
+            "error": error_msg,
         }));
         (status, body).into_response()
     }
