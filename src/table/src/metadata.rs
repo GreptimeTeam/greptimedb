@@ -244,6 +244,41 @@ impl TableMeta {
         let original_primary_key_indices: HashSet<&usize> =
             self.primary_key_indices.iter().collect();
 
+        let mut names = HashSet::with_capacity(requests.len());
+
+        for col_to_add in requests {
+            ensure!(
+                names.insert(&col_to_add.column_schema.name),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "add column {} more than once",
+                        col_to_add.column_schema.name
+                    ),
+                }
+            );
+
+            ensure!(
+                !table_schema.contains_column(&col_to_add.column_schema.name),
+                error::ColumnExistsSnafu {
+                    table_name,
+                    column_name: col_to_add.column_schema.name.to_string()
+                },
+            );
+
+            ensure!(
+                col_to_add.column_schema.is_nullable()
+                    || col_to_add.column_schema.default_constraint().is_some(),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "no default value for column {}",
+                        col_to_add.column_schema.name
+                    ),
+                },
+            );
+        }
+
         let SplitResult {
             columns_at_first,
             columns_at_after,
@@ -856,6 +891,36 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(StatusCode::TableColumnExists, err.status_code());
+    }
+
+    #[test]
+    fn test_add_invalid_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::default()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new(
+                    "weny",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                is_key: false,
+                location: None,
+            }],
+        };
+
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
