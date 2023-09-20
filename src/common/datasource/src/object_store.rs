@@ -23,6 +23,7 @@ use url::{ParseError, Url};
 use self::fs::build_fs_backend;
 use self::s3::build_s3_backend;
 use crate::error::{self, Result};
+use crate::util::find_dir_and_filename;
 
 pub const FS_SCHEMA: &str = "FS";
 pub const S3_SCHEMA: &str = "S3";
@@ -44,16 +45,16 @@ pub fn parse_url(url: &str) -> Result<(String, Option<String>, String)> {
 }
 
 pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<ObjectStore> {
-    let (schema, host, _path) = parse_url(url)?;
-
+    let (schema, host, path) = parse_url(url)?;
+    let (root, _) = find_dir_and_filename(&path);
     match schema.to_uppercase().as_str() {
         S3_SCHEMA => {
             let host = host.context(error::EmptyHostPathSnafu {
                 url: url.to_string(),
             })?;
-            Ok(build_s3_backend(&host, "/", connection)?)
+            Ok(build_s3_backend(&host, &root, connection)?)
         }
-        FS_SCHEMA => Ok(build_fs_backend("/")?),
+        FS_SCHEMA => Ok(build_fs_backend(&root)?),
 
         _ => error::UnsupportedBackendProtocolSnafu {
             protocol: schema,

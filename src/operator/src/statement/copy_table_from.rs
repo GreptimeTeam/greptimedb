@@ -61,7 +61,7 @@ impl StatementExecutor {
         let object_store =
             build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
 
-        let (dir, filename) = find_dir_and_filename(&path);
+        let (_, filename) = find_dir_and_filename(&path);
         let regex = req
             .pattern
             .as_ref()
@@ -75,7 +75,7 @@ impl StatementExecutor {
             Source::Dir
         };
 
-        let lister = Lister::new(object_store.clone(), source, dir, regex);
+        let lister = Lister::new(object_store.clone(), source, regex);
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
 

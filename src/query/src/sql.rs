@@ -325,7 +325,7 @@ pub async fn prepare_file_table_files(
         .transpose()
         .context(error::BuildRegexSnafu)?;
     let object_store = build_backend(url, options).context(error::BuildBackendSnafu)?;
-    let lister = Lister::new(object_store.clone(), source, dir.to_string(), regex);
+    let lister = Lister::new(object_store.clone(), source, regex);
     // If we scan files in a directory every time the database restarts,
     // then it might lead to a potential undefined behavior:
     // If a user adds a file with an incompatible schema to that directory,
