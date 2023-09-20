@@ -30,7 +30,7 @@ impl<'a> ParserContext<'a> {
             self.parse_show_databases()
         } else if self.matches_keyword(Keyword::TABLES) {
             let _ = self.parser.next_token();
-            self.parse_show_tables()
+            self.parse_show_tables(false)
         } else if self.consume_token("CREATE") {
             if self.consume_token("TABLE") {
                 self.parse_show_create_table()
@@ -39,22 +39,12 @@ impl<'a> ParserContext<'a> {
             }
         } else if self.consume_token("FULL") {
             if self.consume_token("TABLES") {
-                self.parse_show_full_tables()
+                self.parse_show_tables(true)
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
         } else {
             self.unsupported(self.peek_token_as_string())
-        }
-    }
-
-    fn parse_show_full_tables(&mut self) -> Result<Statement> {
-        match self.parser.peek_token().token {
-            Token::EOF | Token::SemiColon => Ok(Statement::ShowTables(ShowTables {
-                kind: ShowKind::Full,
-                database: None,
-            })),
-            _ => self.unsupported(self.peek_token_as_string()),
         }
     }
 
@@ -77,12 +67,13 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
-    fn parse_show_tables(&mut self) -> Result<Statement> {
+    fn parse_show_tables(&mut self, full: bool) -> Result<Statement> {
         let database = match self.parser.peek_token().token {
             Token::EOF | Token::SemiColon => {
                 return Ok(Statement::ShowTables(ShowTables {
                     kind: ShowKind::All,
                     database: None,
+                    full,
                 }));
             }
 
@@ -142,7 +133,11 @@ impl<'a> ParserContext<'a> {
             _ => return self.unsupported(self.peek_token_as_string()),
         };
 
-        Ok(Statement::ShowTables(ShowTables { kind, database }))
+        Ok(Statement::ShowTables(ShowTables {
+            kind,
+            database,
+            full,
+        }))
     }
 
     /// Parses `SHOW DATABASES` statement.
@@ -250,6 +245,7 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::All,
                 database: None,
+                full: false
             })
         );
     }
@@ -269,6 +265,7 @@ mod tests {
                     quote_style: None,
                 }),
                 database: None,
+                full: false
             })
         );
 
@@ -285,6 +282,7 @@ mod tests {
                     quote_style: None,
                 }),
                 database: Some(_),
+                full: false
             })
         );
     }
@@ -301,6 +299,7 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: None,
+                full: false
             })
         );
 
@@ -314,6 +313,7 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: Some(_),
+                full: false
             })
         );
     }
@@ -326,7 +326,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::ShowTables { .. });
         match &stmts[0] {
             Statement::ShowTables(show) => {
-                assert_eq!(ShowKind::Full, show.kind);
+                assert!(!show.full);
             }
             _ => {
                 unreachable!();

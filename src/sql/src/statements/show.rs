@@ -22,7 +22,6 @@ use crate::ast::{Expr, Ident, ObjectName};
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub enum ShowKind {
     All,
-    Full,
     Like(Ident),
     Where(Expr),
 }
@@ -31,7 +30,6 @@ impl fmt::Display for ShowKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ShowKind::All => write!(f, "ALL"),
-            ShowKind::Full => write!(f, "FULL"),
             ShowKind::Like(ident) => write!(f, "LIKE {ident}"),
             ShowKind::Where(expr) => write!(f, "WHERE {expr}"),
         }
@@ -56,6 +54,7 @@ impl ShowDatabases {
 pub struct ShowTables {
     pub kind: ShowKind,
     pub database: Option<String>,
+    pub full: bool,
 }
 
 /// SQL structure for `SHOW CREATE TABLE`.
@@ -78,7 +77,6 @@ mod tests {
     #[test]
     fn test_kind_display() {
         assert_eq!("ALL", format!("{}", ShowKind::All));
-        assert_eq!("FULL", format!("{}", ShowKind::Full));
         assert_eq!(
             "LIKE test",
             format!(
