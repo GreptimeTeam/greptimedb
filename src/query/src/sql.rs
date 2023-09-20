@@ -212,16 +212,15 @@ pub async fn show_tables(
             Ok(result)
         }
         ShowKind::Like(ident) => {
-            let tables =
-                Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?;
+            let (tables, filter) = Helper::like_utf8_filter(tables, &ident.value)
+                .context(error::VectorComputationSnafu)?;
             let mut columns = vec![tables.clone()];
-            if stmt.full {
-                //convert to string
-                let tables = (0..tables.len())
-                    .map(|i| tables.get(i).to_string())
-                    .collect::<Vec<_>>();
-                columns
-                    .push(get_table_types(&tables, catalog_manager, query_ctx, &schema_name).await?)
+
+            if let Some(table_types) = table_types {
+                let table_types = table_types
+                    .filter(&filter)
+                    .context(error::VectorComputationSnafu)?;
+                columns.push(table_types)
             }
 
             let records = RecordBatches::try_from_columns(schema, columns)
@@ -498,12 +497,12 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
 }
 
 async fn get_table_types(
-    tables: &Vec<String>,
+    tables: &[String],
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
     schema_name: &str,
 ) -> Result<Arc<dyn Vector>> {
-    let mut table_types: Vec<String> = Vec::with_capacity(tables.len());
+    let mut table_types = Vec::with_capacity(tables.len());
     for table_name in tables {
         if let Some(table_type) = catalog_manager
             .table(query_ctx.current_catalog(), schema_name, table_name)
