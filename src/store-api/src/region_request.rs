@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 
 use api::v1::add_column_location::LocationType;
@@ -151,6 +151,7 @@ pub struct RegionCreateRequest {
     /// Columns in the primary key.
     pub primary_key: Vec<ColumnId>,
     /// Create region if not exists.
+    // TODO(yingwen): Remove this.
     pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: HashMap<String, String>,
@@ -203,6 +204,14 @@ impl RegionAlterRequest {
 
         Ok(())
     }
+
+    /// Returns true if we need to apply the request to the region.
+    ///
+    /// The `request` should be valid.
+    pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
+        debug_assert!(self.validate(metadata).is_ok());
+        self.kind.need_alter(metadata)
+    }
 }
 
 impl TryFrom<AlterRequest> for RegionAlterRequest {
@@ -238,23 +247,13 @@ pub enum AlterKind {
 
 impl AlterKind {
     /// Returns an error if the the alter kind is invalid.
+    ///
+    /// It allows adding column if not exists and dropping column if exists.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         match self {
             AlterKind::AddColumns { columns } => {
-                let mut names = HashSet::with_capacity(columns.len());
                 for col_to_add in columns {
-                    ensure!(
-                        !names.contains(&col_to_add.column_metadata.column_schema.name),
-                        InvalidRegionRequestSnafu {
-                            region_id: metadata.region_id,
-                            err: format!(
-                                "add column {} more than once",
-                                col_to_add.column_metadata.column_schema.name
-                            ),
-                        }
-                    );
                     col_to_add.validate(metadata)?;
-                    names.insert(&col_to_add.column_metadata.column_schema.name);
                 }
             }
             AlterKind::DropColumns { names } => {
@@ -266,14 +265,24 @@ impl AlterKind {
         Ok(())
     }
 
+    /// Returns true if we need to apply the alteration to the region.
+    pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
+        debug_assert!(self.validate(metadata).is_ok());
+        match self {
+            AlterKind::AddColumns { columns } => columns
+                .iter()
+                .any(|col_to_add| col_to_add.need_alter(metadata)),
+            AlterKind::DropColumns { names } => names
+                .iter()
+                .any(|name| metadata.column_by_name(name).is_some()),
+        }
+    }
+
     /// Returns an error if the column to drop is invalid.
     fn validate_column_to_drop(name: &str, metadata: &RegionMetadata) -> Result<()> {
-        let column = metadata
-            .column_by_name(name)
-            .with_context(|| InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!("column {} does not exist", name),
-            })?;
+        let Some(column) = metadata.column_by_name(name) else {
+            return Ok(());
+        };
         ensure!(
             column.semantic_type == SemanticType::Field,
             InvalidRegionRequestSnafu {
@@ -320,6 +329,8 @@ pub struct AddColumn {
 
 impl AddColumn {
     /// Returns an error if the column to add is invalid.
+    ///
+    /// It allows adding existing columns.
     pub fn validate(&self, metadata: &RegionMetadata) -> Result<()> {
         ensure!(
             self.column_metadata.column_schema.is_nullable()
@@ -336,20 +347,16 @@ impl AddColumn {
                 ),
             }
         );
-        ensure!(
-            metadata
-                .column_by_name(&self.column_metadata.column_schema.name)
-                .is_none(),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "column {} already exists",
-                    self.column_metadata.column_schema.name
-                ),
-            }
-        );
 
         Ok(())
+    }
+
+    /// Returns true if no column to add to the region.
+    pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
+        debug_assert!(self.validate(metadata).is_ok());
+        metadata
+            .column_by_name(&self.column_metadata.column_schema.name)
+            .is_none()
     }
 }
 
@@ -574,7 +581,7 @@ mod tests {
     #[test]
     fn test_add_column_validate() {
         let metadata = new_metadata();
-        AddColumn {
+        let add_column = AddColumn {
             column_metadata: ColumnMetadata {
                 column_schema: ColumnSchema::new(
                     "tag_1",
@@ -585,10 +592,11 @@ mod tests {
                 column_id: 4,
             },
             location: None,
-        }
-        .validate(&metadata)
-        .unwrap();
+        };
+        add_column.validate(&metadata).unwrap();
+        assert!(add_column.need_alter(&metadata));
 
+        // Add not null column.
         AddColumn {
             column_metadata: ColumnMetadata {
                 column_schema: ColumnSchema::new(
@@ -604,7 +612,8 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
-        AddColumn {
+        // Add existing column.
+        let add_column = AddColumn {
             column_metadata: ColumnMetadata {
                 column_schema: ColumnSchema::new(
                     "tag_0",
@@ -615,9 +624,9 @@ mod tests {
                 column_id: 4,
             },
             location: None,
-        }
-        .validate(&metadata)
-        .unwrap_err();
+        };
+        add_column.validate(&metadata).unwrap();
+        assert!(!add_column.need_alter(&metadata));
     }
 
     #[test]
@@ -651,27 +660,30 @@ mod tests {
             ],
         };
         let metadata = new_metadata();
-        kind.validate(&metadata).unwrap_err();
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
     }
 
     #[test]
     fn test_validate_drop_column() {
         let metadata = new_metadata();
-        AlterKind::DropColumns {
+        let kind = AlterKind::DropColumns {
             names: vec!["xxxx".to_string()],
-        }
-        .validate(&metadata)
-        .unwrap_err();
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(!kind.need_alter(&metadata));
+
         AlterKind::DropColumns {
             names: vec!["tag_0".to_string()],
         }
         .validate(&metadata)
         .unwrap_err();
-        AlterKind::DropColumns {
+
+        let kind = AlterKind::DropColumns {
             names: vec!["field_0".to_string()],
-        }
-        .validate(&metadata)
-        .unwrap();
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
     }
 
     #[test]

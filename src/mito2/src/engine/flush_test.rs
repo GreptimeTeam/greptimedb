@@ -250,7 +250,6 @@ async fn test_flush_reopen_region() {
         assert_eq!(1, version_data.last_entry_id);
         assert_eq!(3, version_data.committed_sequence);
         assert_eq!(1, version_data.version.flushed_entry_id);
-        assert_eq!(1, version_data.version.flushed_entry_id);
         assert_eq!(3, version_data.version.flushed_sequence);
     };
     check_region();
