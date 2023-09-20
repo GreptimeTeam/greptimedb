@@ -214,7 +214,7 @@ pub async fn show_tables(
         ShowKind::Like(ident) => {
             let (tables, filter) = Helper::like_utf8_filter(tables, &ident.value)
                 .context(error::VectorComputationSnafu)?;
-            let mut columns = vec![tables.clone()];
+            let mut columns = vec![tables];
 
             if let Some(table_types) = table_types {
                 let table_types = table_types
@@ -504,12 +504,12 @@ async fn get_table_types(
 ) -> Result<Arc<dyn Vector>> {
     let mut table_types = Vec::with_capacity(tables.len());
     for table_name in tables {
-        if let Some(table_type) = catalog_manager
+        if let Some(table) = catalog_manager
             .table(query_ctx.current_catalog(), schema_name, table_name)
             .await
             .context(error::CatalogSnafu)?
         {
-            table_types.push(table_type.table_type().to_string());
+            table_types.push(table.table_type().to_string());
         }
     }
     Ok(Arc::new(StringVector::from(table_types)) as _)
