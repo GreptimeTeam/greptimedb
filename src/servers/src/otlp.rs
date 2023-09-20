@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{InsertRequest, InsertRequests};
-use common_grpc::writer::{LinesWriter, Precision};
+use api::v1::{RowInsertRequests, Value};
+use common_grpc::writer::Precision;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
-use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::Result;
+use crate::row_writer::{self, MultiTableData, TableData};
 
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 const GREPTIME_VALUE: &str = "greptime_value";
+const GREPTIME_COUNT: &str = "greptime_count";
+/// the default column count for table writer
+const APPROXIMATE_COLUMN_COUNT: usize = 8;
 
 /// Normalize otlp instrumentation, metric and attribute names
 ///
@@ -43,117 +46,129 @@ fn normalize_otlp_name(name: &str) -> String {
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
-) -> Result<(InsertRequests, usize)> {
-    let mut insert_batch = Vec::new();
+) -> Result<(RowInsertRequests, usize)> {
+    let mut table_writer = MultiTableData::default();
 
     for resource in request.resource_metrics {
         let resource_attrs = resource.resource.map(|r| r.attributes);
         for scope in resource.scope_metrics {
             let scope_attrs = scope.scope.map(|s| s.attributes);
             for metric in scope.metrics {
-                let inserts =
-                    encode_metrics(&metric, resource_attrs.as_ref(), scope_attrs.as_ref())?;
-
-                insert_batch.extend(inserts);
+                encode_metrics(
+                    &mut table_writer,
+                    &metric,
+                    resource_attrs.as_ref(),
+                    scope_attrs.as_ref(),
+                )?;
             }
         }
     }
 
-    let rows = insert_batch
-        .iter()
-        .map(|i| i.row_count as usize)
-        .sum::<usize>();
-    let inserts = InsertRequests {
-        inserts: insert_batch,
-    };
-
-    Ok((inserts, rows))
+    Ok(table_writer.into_row_insert_requests())
 }
 
-fn encode_metrics(
-    metric: &Metric,
-    resource_attrs: Option<&Vec<KeyValue>>,
-    scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<Vec<InsertRequest>> {
+fn encode_metrics<'a>(
+    table_writer: &mut MultiTableData<'a>,
+    metric: &'a Metric,
+    resource_attrs: Option<&'a Vec<KeyValue>>,
+    scope_attrs: Option<&'a Vec<KeyValue>>,
+) -> Result<()> {
     let name = &metric.name;
     // note that we don't store description or unit, we might want to deal with
     // these fields in the future.
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
-                encode_gauge(name, gauge, resource_attrs, scope_attrs).map(|i| vec![i])
+                encode_gauge(table_writer, name, gauge, resource_attrs, scope_attrs)?;
             }
             metric::Data::Sum(sum) => {
-                encode_sum(name, sum, resource_attrs, scope_attrs).map(|i| vec![i])
+                encode_sum(table_writer, name, sum, resource_attrs, scope_attrs)?;
             }
             metric::Data::Summary(summary) => {
-                encode_summary(name, summary, resource_attrs, scope_attrs).map(|i| vec![i])
+                encode_summary(table_writer, name, summary, resource_attrs, scope_attrs)?;
             }
             metric::Data::Histogram(hist) => {
-                encode_histogram(name, hist, resource_attrs, scope_attrs)
+                encode_histogram(table_writer, name, hist, resource_attrs, scope_attrs)?;
             }
             // TODO(sunng87) leave ExponentialHistogram for next release
-            metric::Data::ExponentialHistogram(_hist) => Ok(vec![]),
+            metric::Data::ExponentialHistogram(_hist) => {}
         }
-    } else {
-        Ok(vec![])
     }
+
+    Ok(())
 }
 
-fn write_attributes(lines: &mut LinesWriter, attrs: Option<&Vec<KeyValue>>) -> Result<()> {
+fn write_attributes<'a>(
+    writer: &mut TableData<'a>,
+    row: &mut Vec<Value>,
+    attrs: Option<&'a Vec<KeyValue>>,
+) -> Result<()> {
     if let Some(attrs) = attrs {
-        for attr in attrs {
-            write_attribute(lines, attr)?;
-        }
+        let table_tags = attrs.iter().filter_map(|attr| {
+            if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
+                match val {
+                    any_value::Value::StringValue(s) => Some((attr.key.as_str(), s.as_str())),
+                    any_value::Value::IntValue(v) => Some((attr.key.as_str(), v.to_string())),
+                    any_value::Value::DoubleValue(v) => Some((attr.key.as_str(), v.to_string())),
+                    _ => None, // TODO(sunng87): allow different type of values
+                }
+            } else {
+                None
+            }
+        });
+
+        row_writer::write_tags(writer, table_tags, row)?;
     }
     Ok(())
 }
 
-fn write_attribute(lines: &mut LinesWriter, attr: &KeyValue) -> Result<()> {
-    if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
-        match val {
-            any_value::Value::StringValue(s) => lines
-                .write_tag(&normalize_otlp_name(&attr.key), s)
-                .context(error::OtlpMetricsWriteSnafu)?,
-
-            any_value::Value::IntValue(v) => lines
-                .write_tag(&normalize_otlp_name(&attr.key), &v.to_string())
-                .context(error::OtlpMetricsWriteSnafu)?,
-            any_value::Value::DoubleValue(v) => lines
-                .write_tag(&normalize_otlp_name(&attr.key), &v.to_string())
-                .context(error::OtlpMetricsWriteSnafu)?,
-            // TODO(sunng87): allow different type of values
-            _ => {}
-        }
-    }
-
-    Ok(())
+fn write_timestamp<'a>(
+    lines: &mut TableData<'a>,
+    row: &mut Vec<Value>,
+    time_nano: i64,
+) -> Result<()> {
+    row_writer::write_ts_precision(
+        lines,
+        GREPTIME_TIMESTAMP,
+        Some(time_nano),
+        Precision::Nanosecond,
+        row,
+    )
 }
 
-fn write_timestamp(lines: &mut LinesWriter, time_nano: i64) -> Result<()> {
-    lines
-        .write_ts(GREPTIME_TIMESTAMP, (time_nano, Precision::Nanosecond))
-        .context(error::OtlpMetricsWriteSnafu)?;
-    Ok(())
-}
-
-fn write_data_point_value(
-    lines: &mut LinesWriter,
-    field: &str,
+fn write_data_point_value<'a>(
+    lines: &mut TableData<'a>,
+    row: &mut Vec<Value>,
+    field: &'a str,
     value: &Option<number_data_point::Value>,
 ) -> Result<()> {
     match value {
         Some(number_data_point::Value::AsInt(val)) => {
             // we coerce all values to f64
-            lines
-                .write_f64(field, *val as f64)
-                .context(error::OtlpMetricsWriteSnafu)?
+            row_writer::write_f64(lines, field, *val as f64, row)?;
         }
-        Some(number_data_point::Value::AsDouble(val)) => lines
-            .write_f64(field, *val)
-            .context(error::OtlpMetricsWriteSnafu)?,
+        Some(number_data_point::Value::AsDouble(val)) => {
+            row_writer::write_f64(lines, field, *val, row)?;
+        }
         _ => {}
     }
+    Ok(())
+}
+
+fn write_tags_and_timestamp<'a>(
+    lines: &mut TableData<'a>,
+    row: &mut Vec<Value>,
+    resource_attrs: Option<&Vec<KeyValue>>,
+    scope_attrs: Option<&Vec<KeyValue>>,
+    data_point_attrs: Option<&Vec<KeyValue>>,
+    timestamp_nanos: i64,
+) -> Result<()> {
+    write_attributes(lines, row, resource_attrs)?;
+    write_attributes(lines, row, scope_attrs)?;
+    write_attributes(lines, row, data_point_attrs)?;
+
+    write_timestamp(lines, row, timestamp_nanos)?;
+
     Ok(())
 }
 
@@ -161,74 +176,69 @@ fn write_data_point_value(
 ///
 /// note that there can be multiple data points in the request, it's going to be
 /// stored as multiple rows
-fn encode_gauge(
+fn encode_gauge<'a>(
+    table_writer: &mut MultiTableData<'a>,
     name: &str,
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<InsertRequest> {
-    let mut lines = LinesWriter::with_lines(gauge.data_points.len());
+) -> Result<()> {
+    let mut lines = table_writer.get_or_default_table_data(
+        &normalize_otlp_name(name),
+        APPROXIMATE_COLUMN_COUNT,
+        gauge.data_points.len(),
+    );
+
     for data_point in &gauge.data_points {
+        let mut row = lines.alloc_one_row();
         write_tags_and_timestamp(
             &mut lines,
+            &mut row,
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
 
-        write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
-
-        lines.commit();
+        write_data_point_value(&mut lines, &mut row, GREPTIME_VALUE, &data_point.value)?;
     }
 
-    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
+    Ok(())
 }
 
 /// encode this sum metric
 ///
 /// `aggregation_temporality` and `monotonic` are ignored for now
-fn encode_sum(
+fn encode_sum<'a>(
+    table_writer: &mut MultiTableData<'a>,
     name: &str,
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<InsertRequest> {
-    let mut lines = LinesWriter::with_lines(sum.data_points.len());
+) -> Result<()> {
+    let mut lines = table_writer.get_or_default_table_data(
+        &normalize_otlp_name(name),
+        APPROXIMATE_COLUMN_COUNT,
+        sum.data_points.len(),
+    );
 
     for data_point in &sum.data_points {
+        let mut row = lines.alloc_one_row();
         write_tags_and_timestamp(
             &mut lines,
+            &mut row,
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
-        write_data_point_value(&mut lines, GREPTIME_VALUE, &data_point.value)?;
-
-        lines.commit();
+        write_data_point_value(&mut lines, &mut row, GREPTIME_VALUE, &data_point.value)?;
     }
-
-    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
-}
-
-const HISTOGRAM_LE_COLUMN: &str = "le";
-
-fn write_tags_and_timestamp(
-    lines: &mut LinesWriter,
-    resource_attrs: Option<&Vec<KeyValue>>,
-    scope_attrs: Option<&Vec<KeyValue>>,
-    data_point_attrs: Option<&Vec<KeyValue>>,
-    timestamp_nanos: i64,
-) -> Result<()> {
-    write_attributes(lines, resource_attrs)?;
-    write_attributes(lines, scope_attrs)?;
-    write_attributes(lines, data_point_attrs)?;
-
-    write_timestamp(lines, timestamp_nanos)?;
 
     Ok(())
 }
+
+const HISTOGRAM_LE_COLUMN: &str = "le";
 
 /// Encode histogram data. This function returns 3 insert requests for 3 tables.
 ///
@@ -241,28 +251,43 @@ fn write_tags_and_timestamp(
 ///
 /// By its Prometheus compatibility, we hope to be able to use prometheus
 /// quantile functions on this table.
-fn encode_histogram(
+fn encode_histogram<'a>(
+    table_writer: &mut MultiTableData<'a>,
     name: &str,
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<Vec<InsertRequest>> {
+) -> Result<()> {
     let normalized_name = normalize_otlp_name(name);
+
     let bucket_table_name = format!("{}_bucket", normalized_name);
     let sum_table_name = format!("{}_sum", normalized_name);
     let count_table_name = format!("{}_count", normalized_name);
 
     let data_points_len = hist.data_points.len();
-    let mut bucket_lines =
-        LinesWriter::with_lines(hist.data_points.iter().map(|p| p.bucket_counts.len()).sum());
-    let mut sum_lines = LinesWriter::with_lines(data_points_len);
-    let mut count_lines = LinesWriter::with_lines(data_points_len);
+    let mut bucket_lines = table_writer.get_or_default_table_data(
+        &bucket_table_name,
+        APPROXIMATE_COLUMN_COUNT,
+        data_points_len,
+    );
+    let mut sum_lines = table_writer.get_or_default_table_data(
+        &sum_table_name,
+        APPROXIMATE_COLUMN_COUNT,
+        data_points_len,
+    );
+    let mut count_lines = table_writer.get_or_default_table_data(
+        &count_table_name,
+        APPROXIMATE_COLUMN_COUNT,
+        data_points_len,
+    );
 
-    let mut accumulated_count = 0;
     for data_point in &hist.data_points {
+        let mut bucket_row = bucket_lines.alloc_one_row();
+        let mut accumulated_count = 0;
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
             write_tags_and_timestamp(
                 &mut bucket_lines,
+                &mut bucket_row,
                 resource_attrs,
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
@@ -270,139 +295,90 @@ fn encode_histogram(
             )?;
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
-                bucket_lines
-                    .write_tag(HISTOGRAM_LE_COLUMN, &upper_bounds.to_string())
-                    .context(error::OtlpMetricsWriteSnafu)?;
+                row_writer::write_tag(
+                    bucket_lines,
+                    HISTOGRAM_LE_COLUMN,
+                    upper_bounds,
+                    &mut bucket_row,
+                )?;
             } else if idx == data_point.explicit_bounds.len() {
                 // The last bucket
-                bucket_lines
-                    .write_tag(HISTOGRAM_LE_COLUMN, &f64::INFINITY.to_string())
-                    .context(error::OtlpMetricsWriteSnafu)?;
+                row_writer::write_tag(
+                    bucket_lines,
+                    HISTOGRAM_LE_COLUMN,
+                    f64::INFINITY,
+                    &mut bucket_row,
+                )?;
             }
 
             accumulated_count += count;
-            bucket_lines
-                .write_u64(GREPTIME_VALUE, accumulated_count)
-                .context(error::OtlpMetricsWriteSnafu)?;
-
-            bucket_lines.commit();
+            row_writer::write_f64(
+                &mut bucket_lines,
+                GREPTIME_VALUE,
+                accumulated_count as f64,
+                &mut bucket_row,
+            )?;
         }
 
         if let Some(sum) = data_point.sum {
+            let mut sum_row = sum_lines.alloc_one_row();
             write_tags_and_timestamp(
                 &mut sum_lines,
+                &mut sum_row,
                 resource_attrs,
                 scope_attrs,
                 Some(data_point.attributes.as_ref()),
                 data_point.time_unix_nano as i64,
             )?;
 
-            sum_lines
-                .write_f64(GREPTIME_VALUE, sum)
-                .context(error::OtlpMetricsWriteSnafu)?;
-            sum_lines.commit();
+            row_writer::write_f64(&mut sum_lines, GREPTIME_VALUE, sum, &mut sum_row)?;
         }
 
+        let mut count_row = count_lines.alloc_one_row();
         write_tags_and_timestamp(
             &mut count_lines,
+            &mut count_row,
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
 
-        count_lines
-            .write_u64(GREPTIME_VALUE, data_point.count)
-            .context(error::OtlpMetricsWriteSnafu)?;
-
-        count_lines.commit();
+        row_writer::write_f64(
+            &mut count_lines,
+            GREPTIME_VALUE,
+            data_point.count as f64,
+            &mut count_row,
+        )?;
     }
 
-    let bucket_insert = insert_request_from_lines(bucket_lines, bucket_table_name);
-    let sum_insert = insert_request_from_lines(sum_lines, sum_table_name);
-    let count_insert = insert_request_from_lines(count_lines, count_table_name);
-
-    Ok(vec![bucket_insert, sum_insert, count_insert])
-}
-
-fn insert_request_from_lines(lines: LinesWriter, name: String) -> InsertRequest {
-    let (columns, row_count) = lines.finish();
-    InsertRequest {
-        table_name: name,
-        columns,
-        row_count,
-    }
+    Ok(())
 }
 
 #[allow(dead_code)]
-fn encode_exponential_histogram(name: &str, hist: &ExponentialHistogram) -> Result<InsertRequest> {
-    let mut lines = LinesWriter::with_lines(hist.data_points.len());
-
-    for data_point in &hist.data_points {
-        for attr in &data_point.attributes {
-            write_attribute(&mut lines, attr)?;
-        }
-
-        write_timestamp(&mut lines, data_point.time_unix_nano as i64)?;
-
-        // TODO(sunng87): confirm if this working
-        if let Some(positive_buckets) = &data_point.positive {
-            for (idx, count) in positive_buckets.bucket_counts.iter().enumerate() {
-                // here we don't store bucket boundary
-                lines
-                    .write_u64(
-                        &format!("bucket_{}", idx + positive_buckets.offset as usize),
-                        *count,
-                    )
-                    .context(error::OtlpMetricsWriteSnafu)?;
-            }
-        }
-
-        if let Some(negative_buckets) = &data_point.negative {
-            for (idx, count) in negative_buckets.bucket_counts.iter().enumerate() {
-                lines
-                    .write_u64(
-                        &format!("bucket_{}", idx + negative_buckets.offset as usize),
-                        *count,
-                    )
-                    .context(error::OtlpMetricsWriteSnafu)?;
-            }
-        }
-
-        if let Some(min) = data_point.min {
-            lines
-                .write_f64("min", min)
-                .context(error::OtlpMetricsWriteSnafu)?;
-        }
-
-        if let Some(max) = data_point.max {
-            lines
-                .write_f64("max", max)
-                .context(error::OtlpMetricsWriteSnafu)?;
-        }
-
-        lines.commit();
-    }
-
-    let (columns, row_count) = lines.finish();
-    Ok(InsertRequest {
-        table_name: normalize_otlp_name(name),
-        columns,
-        row_count,
-    })
+fn encode_exponential_histogram(_name: &str, _hist: &ExponentialHistogram) -> Result<()> {
+    // TODO(sunng87): implement this using a prometheus compatible way
+    Ok(())
 }
 
-fn encode_summary(
+fn encode_summary<'a>(
+    table_writer: &mut MultiTableData<'a>,
     name: &str,
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
-) -> Result<InsertRequest> {
-    let mut lines = LinesWriter::with_lines(summary.data_points.len());
+) -> Result<()> {
+    let mut lines = table_writer.get_or_default_table_data(
+        &normalize_otlp_name(name),
+        APPROXIMATE_COLUMN_COUNT,
+        summary.data_points.len(),
+    );
 
     for data_point in &summary.data_points {
+        let mut row = lines.alloc_one_row();
         write_tags_and_timestamp(
             &mut lines,
+            &mut row,
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
@@ -410,23 +386,23 @@ fn encode_summary(
         )?;
 
         for quantile in &data_point.quantile_values {
-            // here we don't store bucket boundary
-            lines
-                .write_f64(
-                    &format!("greptime_p{:02}", quantile.quantile * 100f64),
-                    quantile.value,
-                )
-                .context(error::OtlpMetricsWriteSnafu)?;
+            row_writer::write_f64(
+                &mut lines,
+                &format!("greptime_p{:02}", quantile.quantile * 100f64),
+                quantile.value,
+                &mut row,
+            )?;
         }
 
-        lines
-            .write_u64("greptime_count", data_point.count)
-            .context(error::OtlpMetricsWriteSnafu)?;
-
-        lines.commit();
+        row_writer::write_f64(
+            &mut lines,
+            GREPTIME_COUNT,
+            data_point.count as f64,
+            &mut row,
+        )?;
     }
 
-    Ok(insert_request_from_lines(lines, normalize_otlp_name(name)))
+    Ok(())
 }
 
 #[cfg(test)]

@@ -71,6 +71,12 @@ pub struct MultiTableData<'a> {
     table_data_map: HashMap<&'a str, TableData<'a>>,
 }
 
+impl<'a> Default for MultiTableData<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> MultiTableData<'a> {
     pub fn new() -> Self {
         Self {
@@ -119,7 +125,7 @@ impl<'a> MultiTableData<'a> {
 
 pub fn write_tags<'a>(
     table_data: &mut TableData<'a>,
-    kvs: impl Iterator<Item = (&'a str, &'a str)>,
+    kvs: impl Iterator<Item = (&'a str, impl ToString)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let ktv_iter = kvs.map(|(k, v)| {
@@ -138,6 +144,24 @@ pub fn write_fields<'a>(
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
+}
+
+pub fn write_tag<'a>(
+    table_data: &mut TableData<'a>,
+    name: &'a str,
+    value: impl ToString,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_by_semantic_type(
+        table_data,
+        SemanticType::Tag,
+        std::iter::once((
+            name,
+            ColumnDataType::String,
+            ValueData::StringValue(value.to_string()),
+        )),
+        one_row,
+    )
 }
 
 pub fn write_f64<'a>(
