@@ -129,10 +129,6 @@ macro_rules! impl_data_type_for_timestamp {
                     Box::new([<Timestamp $unit Vector Builder>]::with_capacity(capacity))
                 }
 
-                fn is_timestamp_compatible(&self) -> bool {
-                    true
-                }
-
                 fn try_cast(&self, from: Value)-> Option<Value>{
                     match from {
                         Value::Timestamp(v) => v.convert_to(TimeUnit::$unit).map(Value::Timestamp),

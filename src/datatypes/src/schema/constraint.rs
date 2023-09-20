@@ -81,7 +81,7 @@ impl ColumnDefaultConstraint {
                     error::UnsupportedDefaultExprSnafu { expr }
                 );
                 ensure!(
-                    data_type.is_timestamp_compatible(),
+                    data_type.is_timestamp(),
                     error::DefaultValueTypeSnafu {
                         reason: "return value of the function must has timestamp type",
                     }
@@ -199,7 +199,7 @@ fn create_current_timestamp_vector(
     let current_timestamp_vector = TimestampMillisecondVector::from_values(
         std::iter::repeat(util::current_time_millis()).take(num_rows),
     );
-    if data_type.is_timestamp_compatible() {
+    if data_type.is_timestamp() {
         current_timestamp_vector.cast(data_type)
     } else {
         error::DefaultValueTypeSnafu {
@@ -348,17 +348,6 @@ mod tests {
         let v = constraint.create_default(&data_type, false).unwrap();
         check_value(v);
 
-        // Int64 type.
-        let data_type = ConcreteDataType::int64_datatype();
-        let v = constraint
-            .create_default_vector(&data_type, false, 4)
-            .unwrap();
-        assert_eq!(4, v.len());
-        assert!(
-            matches!(v.get(0), Value::Int64(_)),
-            "v {:?} is not timestamp",
-            v.get(0)
-        );
 
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
