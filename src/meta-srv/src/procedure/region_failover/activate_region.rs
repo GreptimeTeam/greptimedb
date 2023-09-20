@@ -45,10 +45,10 @@ pub(super) struct ActivateRegion {
 }
 
 impl ActivateRegion {
-    pub(super) fn new(candidate: Peer, remark_inactive_region: bool) -> Self {
+    pub(super) fn new(candidate: Peer) -> Self {
         Self {
             candidate,
-            remark_inactive_region,
+            remark_inactive_region: false,
             region_storage_path: None,
         }
     }
@@ -185,6 +185,10 @@ impl State for ActivateRegion {
 
         self.handle_response(mailbox_receiver, failed_region).await
     }
+
+    fn remark_inactive_region_if_needed(&mut self) {
+        self.remark_inactive_region = true;
+    }
 }
 
 #[cfg(test)]
@@ -203,7 +207,7 @@ mod tests {
         let failed_region = env.failed_region(1).await;
 
         let candidate = 2;
-        let mut state = ActivateRegion::new(Peer::new(candidate, ""), false);
+        let mut state = ActivateRegion::new(Peer::new(candidate, ""));
         let mailbox_receiver = state
             .send_open_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
@@ -274,7 +278,7 @@ mod tests {
         let failed_region = env.failed_region(1).await;
 
         let candidate = 2;
-        let mut state = ActivateRegion::new(Peer::new(candidate, ""), false);
+        let mut state = ActivateRegion::new(Peer::new(candidate, ""));
         let mailbox_receiver = state
             .send_open_region_message(&env.context, &failed_region, Duration::from_millis(100))
             .await
