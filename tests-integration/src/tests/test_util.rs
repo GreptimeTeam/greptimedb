@@ -108,10 +108,7 @@ pub(crate) async fn check_unordered_output_stream(output: Output, expected: &str
     assert_eq!(pretty_print, expected);
 }
 
-/// Find the testing file resource under workspace root to be used in object store.
-pub fn find_testing_resource(path: &str) -> String {
-    let p = find_workspace_path(path).display().to_string();
-
+pub fn prepare_path(p: &str) -> String {
     #[cfg(windows)]
     let p = {
         // We need unix style path even in the Windows, because the path is used in object-store, must
@@ -123,5 +120,12 @@ pub fn find_testing_resource(path: &str) -> String {
         format!("/{p}")
     };
 
-    p
+    p.to_string()
+}
+
+/// Find the testing file resource under workspace root to be used in object store.
+pub fn find_testing_resource(path: &str) -> String {
+    let p = find_workspace_path(path).display().to_string();
+
+    prepare_path(&p)
 }

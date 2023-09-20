@@ -55,6 +55,10 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
         }
         FS_SCHEMA => Ok(build_fs_backend("/")?),
 
-        _ => error::UnsupportedBackendProtocolSnafu { protocol: schema }.fail(),
+        _ => error::UnsupportedBackendProtocolSnafu {
+            protocol: schema,
+            path: url,
+        }
+        .fail(),
     }
 }
