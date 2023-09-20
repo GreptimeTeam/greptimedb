@@ -120,7 +120,6 @@ impl Picker for TwcsPicker {
         let CompactionRequest {
             current_version,
             access_layer,
-            ttl,
             compaction_time_window,
             request_sender,
             waiters,
@@ -131,6 +130,7 @@ impl Picker for TwcsPicker {
         let region_id = region_metadata.region_id;
 
         let levels = current_version.ssts.levels();
+        let ttl = current_version.options.ttl;
         let expired_ssts = get_expired_ssts(levels, ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
@@ -376,7 +376,6 @@ impl CompactionTask for TwcsCompactionTask {
             notify,
         })
         .await;
-        // TODO(hl): handle reschedule
     }
 }
 

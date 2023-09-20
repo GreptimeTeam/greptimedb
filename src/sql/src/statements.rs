@@ -38,7 +38,8 @@ use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
-use datatypes::types::TimestampType;
+use datatypes::types::cast::CastOption;
+use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -50,7 +51,7 @@ use crate::ast::{
 };
 use crate::error::{
     self, ColumnTypeMismatchSnafu, ConvertSqlValueSnafu, ConvertToGrpcDataTypeSnafu,
-    ConvertValueSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
+    ConvertValueSnafu, InvalidCastSnafu, InvalidSqlValueSnafu, ParseSqlValueSnafu, Result,
     SerializeColumnDefaultConstraintSnafu, TimestampOverflowSnafu, UnsupportedDefaultValueSnafu,
 };
 
@@ -140,10 +141,15 @@ macro_rules! parse_number_to_value {
                     Ok(Value::$Type($Target::from(n)))
                 },
             )+
-                _ => ParseSqlValueSnafu {
-                    msg: format!("Fail to parse number {}, invalid column type: {:?}",
-                                 $n, $data_type
-                    )}.fail(),
+            ConcreteDataType::Timestamp(t) => {
+                let n  = parse_sql_number::<i64>($n)?;
+                Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
+            },
+
+            _ => ParseSqlValueSnafu {
+                msg: format!("Fail to parse number {}, invalid column type: {:?}",
+                                $n, $data_type
+                )}.fail(),
         }
     }
 }
@@ -162,8 +168,7 @@ pub fn sql_number_to_value(data_type: &ConcreteDataType, n: &str) -> Result<Valu
         (Int32, i32, i32),
         (Int64, i64, i64),
         (Float64, f64, OrderedF64),
-        (Float32, f32, OrderedF32),
-        (Timestamp, i64, Timestamp)
+        (Float32, f32, OrderedF32)
     )
     // TODO(hl): also Date/DateTime
 }
@@ -186,7 +191,7 @@ pub fn sql_value_to_value(
     data_type: &ConcreteDataType,
     sql_val: &SqlValue,
 ) -> Result<Value> {
-    Ok(match sql_val {
+    let value = match sql_val {
         SqlValue::Number(n, _) => sql_number_to_value(data_type, n)?,
         SqlValue::Null => Value::Null,
         SqlValue::Boolean(b) => {
@@ -215,7 +220,17 @@ pub fn sql_value_to_value(
             }
             .fail()
         }
-    })
+    };
+    if value.data_type() != *data_type {
+        cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
+            InvalidCastSnafu {
+                sql_value: sql_val.clone(),
+                datatype: data_type,
+            }
+        })
+    } else {
+        Ok(value)
+    }
 }
 
 pub fn value_to_sql_value(val: &Value) -> Result<SqlValue> {
@@ -536,6 +551,20 @@ mod tests {
 
         let v = sql_number_to_value(&ConcreteDataType::int32_datatype(), "999").unwrap();
         assert_eq!(Value::Int32(999), v);
+
+        let v = sql_number_to_value(
+            &ConcreteDataType::timestamp_nanosecond_datatype(),
+            "1073741821",
+        )
+        .unwrap();
+        assert_eq!(Value::Timestamp(Timestamp::new_nanosecond(1073741821)), v);
+
+        let v = sql_number_to_value(
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            "999999",
+        )
+        .unwrap();
+        assert_eq!(Value::Timestamp(Timestamp::new_millisecond(999999)), v);
 
         let v = sql_number_to_value(&ConcreteDataType::string_datatype(), "999");
         assert!(v.is_err(), "parse value error is: {v:?}");

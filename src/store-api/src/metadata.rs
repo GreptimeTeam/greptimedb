@@ -353,7 +353,6 @@ impl RegionMetadata {
 
     /// Checks whether it is a valid column.
     fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
-        // TODO(yingwen): Ensure column name is not internal columns.
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata
@@ -460,11 +459,23 @@ impl RegionMetadataBuilder {
         Ok(meta)
     }
 
-    /// Adds columns to the metadata.
+    /// Adds columns to the metadata if not exist.
     fn add_columns(&mut self, columns: Vec<AddColumn>) -> Result<()> {
+        let mut names: HashSet<_> = self
+            .column_metadatas
+            .iter()
+            .map(|col| col.column_schema.name.clone())
+            .collect();
+
         for add_column in columns {
+            if names.contains(&add_column.column_metadata.column_schema.name) {
+                // Column already exists.
+                continue;
+            }
+
             let column_id = add_column.column_metadata.column_id;
             let semantic_type = add_column.column_metadata.semantic_type;
+            let column_name = add_column.column_metadata.column_schema.name.clone();
             match add_column.location {
                 None => {
                     self.column_metadatas.push(add_column.column_metadata);
@@ -489,6 +500,7 @@ impl RegionMetadataBuilder {
                         .insert(pos + 1, add_column.column_metadata);
                 }
             }
+            names.insert(column_name);
             if semantic_type == SemanticType::Tag {
                 // For a new tag, we extend the primary key.
                 self.primary_key.push(column_id);
@@ -498,7 +510,7 @@ impl RegionMetadataBuilder {
         Ok(())
     }
 
-    /// Drops columns from the metadata.
+    /// Drops columns from the metadata if exist.
     fn drop_columns(&mut self, names: &[String]) {
         let name_set: HashSet<_> = names.iter().collect();
         self.column_metadatas
@@ -938,6 +950,7 @@ mod test {
         // a (tag), b (field), c (ts)
         let metadata = build_test_region_metadata();
         let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // tag d
         builder
             .alter(AlterKind::AddColumns {
                 columns: vec![AddColumn {
@@ -1005,9 +1018,89 @@ mod test {
                 names: vec!["a".to_string()],
             })
             .unwrap();
-        // Build returns error as the primary key has more columns.
+        // Build returns error as the primary key contains a.
         let err = builder.build().unwrap_err();
         assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_add_if_not_exists() {
+        // a (tag), b (field), c (ts)
+        let metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // tag d
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        column_metadata: new_column_metadata("d", true, 4),
+                        location: None,
+                    },
+                    AddColumn {
+                        column_metadata: new_column_metadata("d", true, 4),
+                        location: None,
+                    },
+                ],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d"]);
+        assert_eq!([1, 4], &metadata.primary_key[..]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // field b.
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: new_column_metadata("b", false, 2),
+                    location: None,
+                }],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn test_drop_if_exists() {
+        // a (tag), b (field), c (ts)
+        let metadata = build_test_region_metadata();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        // field d, e
+        builder
+            .alter(AlterKind::AddColumns {
+                columns: vec![
+                    AddColumn {
+                        column_metadata: new_column_metadata("d", false, 4),
+                        location: None,
+                    },
+                    AddColumn {
+                        column_metadata: new_column_metadata("e", false, 5),
+                        location: None,
+                    },
+                ],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "b", "c", "d", "e"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropColumns {
+                names: vec!["b".to_string(), "b".to_string()],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "c", "d", "e"]);
+
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        builder
+            .alter(AlterKind::DropColumns {
+                names: vec!["b".to_string(), "e".to_string()],
+            })
+            .unwrap();
+        let metadata = builder.build().unwrap();
+        check_columns(&metadata, &["a", "c", "d"]);
     }
 
     #[test]

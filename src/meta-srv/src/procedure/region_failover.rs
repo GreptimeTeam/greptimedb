@@ -270,6 +270,8 @@ trait State: Sync + Send + Debug {
     fn status(&self) -> Status {
         Status::executing(true)
     }
+
+    fn remark_inactive_region_if_needed(&mut self) {}
 }
 
 /// The states transition of region failover procedure:
@@ -339,7 +341,11 @@ impl RegionFailoverProcedure {
     }
 
     fn from_json(json: &str, context: RegionFailoverContext) -> ProcedureResult<Self> {
-        let node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let mut node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
+        // If the meta leader node dies during the execution of the procedure,
+        // the new leader node needs to remark the failed region as "inactive"
+        // to prevent it from renewing the lease.
+        node.state.remark_inactive_region_if_needed();
         Ok(Self { node, context })
     }
 }
@@ -386,7 +392,9 @@ mod tests {
 
     use api::v1::meta::mailbox_message::Payload;
     use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
-    use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::ddl::utils::region_storage_path;
+    use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
     use common_meta::key::TableMetadataManager;
     use common_meta::sequence::Sequence;
     use common_meta::DatanodeId;
@@ -426,6 +434,7 @@ mod tests {
         pub context: RegionFailoverContext,
         pub heartbeat_receivers: HashMap<DatanodeId, Receiver<tonic::Result<HeartbeatResponse>>>,
         pub pushers: Pushers,
+        pub path: String,
     }
 
     impl TestingEnv {
@@ -549,6 +558,7 @@ mod tests {
                 },
                 pushers,
                 heartbeat_receivers,
+                path: region_storage_path(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME).to_string(),
             }
         }
     }
@@ -606,7 +616,11 @@ mod tests {
         let (candidate_tx, mut candidate_rx) = tokio::sync::mpsc::channel(1);
         for (datanode_id, mut recv) in env.heartbeat_receivers.into_iter() {
             let mailbox_clone = env.context.mailbox.clone();
-            let failed_region_clone = failed_region.clone();
+            let opening_region = RegionIdent {
+                datanode_id,
+                ..failed_region.clone()
+            };
+            let path = env.path.to_string();
             let candidate_tx = candidate_tx.clone();
             let _handle = common_runtime::spawn_bg(async move {
                 let resp = recv.recv().await.unwrap().unwrap();
@@ -614,9 +628,10 @@ mod tests {
                 assert_eq!(
                     received.payload,
                     Some(Payload::Json(
-                        serde_json::to_string(&Instruction::OpenRegion(
-                            failed_region_clone.clone()
-                        ))
+                        serde_json::to_string(&Instruction::OpenRegion(OpenRegion::new(
+                            opening_region,
+                            &path
+                        )))
                         .unwrap(),
                     ))
                 );

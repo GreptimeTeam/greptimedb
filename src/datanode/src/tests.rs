@@ -23,7 +23,7 @@ use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, RegionIdent};
+use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::Runtime;
@@ -90,13 +90,16 @@ fn close_region_instruction() -> Instruction {
 }
 
 fn open_region_instruction() -> Instruction {
-    Instruction::OpenRegion(RegionIdent {
-        table_id: 1024,
-        region_number: 0,
-        cluster_id: 1,
-        datanode_id: 2,
-        engine: "mito2".to_string(),
-    })
+    Instruction::OpenRegion(OpenRegion::new(
+        RegionIdent {
+            table_id: 1024,
+            region_number: 0,
+            cluster_id: 1,
+            datanode_id: 2,
+            engine: "mito2".to_string(),
+        },
+        "path/dir",
+    ))
 }
 
 pub struct MockQueryEngine;

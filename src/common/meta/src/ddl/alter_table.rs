@@ -117,9 +117,10 @@ impl AlterTableProcedure {
         let catalog = &alter_expr.catalog_name;
         let schema = &alter_expr.schema_name;
 
+        let alter_kind = self.alter_kind()?;
         let manager = &self.context.table_metadata_manager;
 
-        if let Kind::RenameTable(RenameTable { new_table_name }) = self.alter_kind()? {
+        if let Kind::RenameTable(RenameTable { new_table_name }) = alter_kind {
             let new_table_name_key = TableNameKey::new(catalog, schema, new_table_name);
 
             let exist = manager
@@ -146,7 +147,11 @@ impl AlterTableProcedure {
             }
         );
 
-        self.data.state = AlterTableState::UpdateMetadata;
+        if matches!(alter_kind, Kind::RenameTable { .. }) {
+            self.data.state = AlterTableState::UpdateMetadata;
+        } else {
+            self.data.state = AlterTableState::SubmitAlterRegionRequests;
+        };
 
         Ok(Status::executing(true))
     }
@@ -174,7 +179,7 @@ impl AlterTableProcedure {
         })
     }
 
-    pub async fn submit_alter_region_requests(&self) -> Result<Status> {
+    pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
         let table_ref = self.data.table_ref();
 
@@ -192,30 +197,31 @@ impl AlterTableProcedure {
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let datanode_manager = self.context.datanode_manager.clone();
-
+            let requester = self.context.datanode_manager.datanode(&datanode).await;
             let regions = find_leader_regions(&region_routes, &datanode);
 
-            alter_region_tasks.push(async move {
-                for region in regions {
-                    let region_id = RegionId::new(table_id, region);
-                    let request = self.create_alter_region_request(region_id)?;
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader {
-                            trace_id: common_telemetry::trace_id().unwrap_or_default(),
-                            ..Default::default()
-                        }),
-                        body: Some(region_request::Body::Alter(request)),
-                    };
-                    debug!("Submitting {request:?} to {datanode}");
+            for region in regions {
+                let region_id = RegionId::new(table_id, region);
+                let request = self.create_alter_region_request(region_id)?;
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        ..Default::default()
+                    }),
+                    body: Some(region_request::Body::Alter(request)),
+                };
+                debug!("Submitting {request:?} to {datanode}");
 
-                    let requester = datanode_manager.datanode(&datanode).await;
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+
+                alter_region_tasks.push(async move {
                     if let Err(e) = requester.handle(request).await {
                         return Err(handle_operate_region_error(datanode)(e));
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
 
         future::join_all(alter_region_tasks)
@@ -223,7 +229,9 @@ impl AlterTableProcedure {
             .into_iter()
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Status::Done)
+        self.data.state = AlterTableState::UpdateMetadata;
+
+        Ok(Status::executing(true))
     }
 
     /// Update table metadata for rename table operation.
@@ -313,22 +321,17 @@ impl AlterTableProcedure {
         let alter_kind = self.alter_kind()?;
         let cache_invalidator = &self.context.cache_invalidator;
 
-        let status = if matches!(alter_kind, Kind::RenameTable { .. }) {
+        if matches!(alter_kind, Kind::RenameTable { .. }) {
             cache_invalidator
                 .invalidate_table_name(&Context::default(), self.data.table_ref().into())
                 .await?;
-
-            Status::Done
         } else {
             cache_invalidator
                 .invalidate_table_id(&Context::default(), self.data.table_id())
                 .await?;
-
-            self.data.state = AlterTableState::SubmitAlterRegionRequests;
-
-            Status::executing(true)
         };
-        Ok(status)
+
+        Ok(Status::Done)
     }
 
     fn lock_key_inner(&self) -> Vec<String> {
@@ -376,9 +379,9 @@ impl Procedure for AlterTableProcedure {
 
         match state {
             AlterTableState::Prepare => self.on_prepare().await,
+            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
             AlterTableState::UpdateMetadata => self.on_update_metadata().await,
             AlterTableState::InvalidateTableCache => self.on_broadcast().await,
-            AlterTableState::SubmitAlterRegionRequests => self.submit_alter_region_requests().await,
         }
         .map_err(error_handler)
     }
@@ -398,11 +401,11 @@ impl Procedure for AlterTableProcedure {
 enum AlterTableState {
     /// Prepares to alter the table
     Prepare,
+    SubmitAlterRegionRequests,
     /// Updates table metadata.
     UpdateMetadata,
     /// Broadcasts the invalidating table cache instruction.
     InvalidateTableCache,
-    SubmitAlterRegionRequests,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

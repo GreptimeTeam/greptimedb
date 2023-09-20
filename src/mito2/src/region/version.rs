@@ -31,6 +31,7 @@ use store_api::storage::SequenceNumber;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId, MemtableRef};
+use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::version::{SstVersion, SstVersionRef};
@@ -204,7 +205,8 @@ pub(crate) struct Version {
     ///
     /// Used to check if it is a flush task during the truncating table.
     pub(crate) truncated_entry_id: Option<EntryId>,
-    // TODO(yingwen): RegionOptions.
+    /// Options of the region.
+    pub(crate) options: RegionOptions,
 }
 
 pub(crate) type VersionRef = Arc<Version>;
@@ -217,6 +219,7 @@ pub(crate) struct VersionBuilder {
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     truncated_entry_id: Option<EntryId>,
+    options: RegionOptions,
 }
 
 impl VersionBuilder {
@@ -229,6 +232,7 @@ impl VersionBuilder {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             truncated_entry_id: None,
+            options: RegionOptions::default(),
         }
     }
 
@@ -241,6 +245,7 @@ impl VersionBuilder {
             flushed_entry_id: version.flushed_entry_id,
             flushed_sequence: version.flushed_sequence,
             truncated_entry_id: version.truncated_entry_id,
+            options: version.options.clone(),
         }
     }
 
@@ -271,6 +276,12 @@ impl VersionBuilder {
     /// Sets truncated entty id.
     pub(crate) fn truncated_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
         self.truncated_entry_id = entry_id;
+        self
+    }
+
+    /// Sets options.
+    pub(crate) fn options(mut self, options: RegionOptions) -> Self {
+        self.options = options;
         self
     }
 
@@ -324,6 +335,7 @@ impl VersionBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             truncated_entry_id: self.truncated_entry_id,
+            options: self.options,
         }
     }
 }

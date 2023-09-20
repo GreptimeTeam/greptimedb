@@ -453,6 +453,23 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display("Invalid options, source: {}", source))]
+    JsonOptions {
+        source: serde_json::Error,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Empty region directory, region_id: {}, region_dir: {}",
+        region_id,
+        region_dir,
+    ))]
+    EmptyRegionDir {
+        region_id: RegionId,
+        region_dir: String,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -522,6 +539,8 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionReadonly { .. } => StatusCode::RegionReadonly,
+            JsonOptions { .. } => StatusCode::InvalidArguments,
+            EmptyRegionDir { .. } => StatusCode::RegionNotFound,
         }
     }
 

@@ -18,14 +18,14 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::info;
-use snafu::{ensure, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{InvalidMetadataSnafu, RegionExistsSnafu, Result};
-use crate::region::opener::RegionOpener;
+use crate::error::{InvalidMetadataSnafu, Result};
+use crate::region::opener::{check_recovered_region, RegionOpener};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -35,13 +35,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionCreateRequest,
     ) -> Result<Output> {
         // Checks whether the table exists.
-        if self.regions.is_region_exists(region_id) {
-            ensure!(
-                request.create_if_not_exists,
-                RegionExistsSnafu { region_id }
-            );
-
+        if let Some(region) = self.regions.get_region(region_id) {
             // Region already exists.
+            check_recovered_region(
+                &region.metadata(),
+                region_id,
+                &request.column_metadatas,
+                &request.primary_key,
+            )?;
+
             return Ok(Output::AffectedRows(0));
         }
 
@@ -62,7 +64,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .metadata(metadata)
         .region_dir(&request.region_dir)
-        .create(&self.config)
+        .options(request.options)
+        .create_or_open(&self.config, &self.wal)
         .await?;
 
         // TODO(yingwen): Custom the Debug format for the metadata and also print it.

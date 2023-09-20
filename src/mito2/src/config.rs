@@ -25,8 +25,6 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_NUM_WORKERS: usize = 1;
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
-/// Default region write buffer size.
-pub(crate) const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(32);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone)]

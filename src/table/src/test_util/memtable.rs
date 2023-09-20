@@ -73,7 +73,6 @@ impl MemTable {
             .value_indices(vec![])
             .engine("mito".to_string())
             .next_column_id(0)
-            .engine_options(Default::default())
             .options(Default::default())
             .created_on(Default::default())
             .region_numbers(regions)

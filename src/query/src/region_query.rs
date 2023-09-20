@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Table Engine config
+use std::sync::Arc;
 
-#[derive(Debug, Clone, Default)]
-pub struct EngineConfig {
-    pub compress_manifest: bool,
+use api::v1::region::QueryRequest;
+use async_trait::async_trait;
+use common_recordbatch::SendableRecordBatchStream;
+
+use crate::error::Result;
+
+#[async_trait]
+pub trait RegionQueryHandler: Send + Sync {
+    // TODO(ruihang): add trace id and span id in the request.
+    async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
 }
+
+pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;
