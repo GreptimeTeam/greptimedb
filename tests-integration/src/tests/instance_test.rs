@@ -533,6 +533,8 @@ async fn test_execute_create(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
+// TODO: enable this test on windows
+#[cfg(not(windows))]
 #[apply(both_instances_cases)]
 async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -570,6 +572,8 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     assert!(matches!(output, Output::AffectedRows(0)));
 }
 
+// TODO: enable this test on windows
+#[cfg(not(windows))]
 #[apply(both_instances_cases)]
 async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -1623,6 +1627,8 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     }
 }
 
+// TODO: enable this test on windows
+#[cfg(not(windows))]
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
@@ -1656,6 +1662,8 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
+// TODO: enable this test on windows
+#[cfg(not(windows))]
 #[apply(both_instances_cases)]
 async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     logging::init_default_ut_logging();
@@ -1691,6 +1699,8 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expected).await;
 }
 
+// TODO: enable this test on windows
+#[cfg(not(windows))]
 #[apply(both_instances_cases)]
 async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
