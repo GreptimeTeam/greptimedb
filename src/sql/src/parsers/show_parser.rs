@@ -326,11 +326,64 @@ mod tests {
         assert_matches!(&stmts[0], Statement::ShowTables { .. });
         match &stmts[0] {
             Statement::ShowTables(show) => {
-                assert!(!show.full);
+                assert!(show.full);
             }
             _ => {
                 unreachable!();
             }
         }
+    }
+
+    #[test]
+    pub fn test_show_full_tables_where() {
+        let sql = "SHOW FULL TABLES IN test_db WHERE Tables LIKE test_table";
+        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
+                database: Some(_),
+                full: true
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_full_tables_like() {
+        let sql = "SHOW FULL TABLES LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: None,
+                full: true
+            })
+        );
+
+        let sql = "SHOW FULL TABLES in test_db LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: Some(_),
+                full: true
+            })
+        );
     }
 }
