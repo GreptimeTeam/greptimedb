@@ -1664,12 +1664,9 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
     .await, Output::AffectedRows(0)));
 
     let filepath = find_testing_resource("/src/common/datasource/tests/orc/test.orc");
-
-    let output = execute_sql(
-        &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
-    )
-    .await;
+    let sql = format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath);
+    common_telemetry::info!("executing: {}", sql);
+    let output = execute_sql(&instance, &sql).await;
 
     assert!(matches!(output, Output::AffectedRows(5)));
 

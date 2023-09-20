@@ -125,6 +125,11 @@ mod tests {
                 expected_dir: "/",
                 expected_filename: None,
             },
+            Test {
+                path: "/C:/to/path/file",
+                expected_dir: "/C:/to/path/",
+                expected_filename: Some("file".into()),
+            },
         ];
 
         for test in tests {

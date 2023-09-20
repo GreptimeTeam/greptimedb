@@ -203,9 +203,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to list objects, source: {}", source))]
+    #[snafu(display("Failed to list objects in path: {}, source: {}", path, source))]
     ListObjects {
         source: common_datasource::error::Error,
+        path: String,
         location: Location,
     },
 
