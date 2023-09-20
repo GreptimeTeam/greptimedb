@@ -56,10 +56,20 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
         }
         FS_SCHEMA => Ok(build_fs_backend(&root)?),
 
-        _ => error::UnsupportedBackendProtocolSnafu {
-            protocol: schema,
-            path: url,
+        _ => {
+            #[cfg(windows)]
+            {
+                // Disk symbol
+                if schema.len() == 1 {
+                    return Ok(build_fs_backend(&url)?);
+                }
+            }
+
+            error::UnsupportedBackendProtocolSnafu {
+                protocol: schema,
+                path: url,
+            }
+            .fail()
         }
-        .fail(),
     }
 }
