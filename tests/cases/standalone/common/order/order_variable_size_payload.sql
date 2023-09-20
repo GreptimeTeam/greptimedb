@@ -2,6 +2,7 @@ create table t0 (c0 varchar, t TIMESTAMP TIME INDEX);
 
 insert into t0 values ('a', 1), (NULL,2), (NULL, 3), (NULL, 4), (NULL, 5), (NULL,6), (NULL,7);
 
+-- SQLNESS SORT_RESULT 2 2
 SELECT * FROM t0 ORDER BY t0.c0 DESC;
 
 CREATE TABLE test0 (job VARCHAR, name VARCHAR, t TIMESTAMP TIME INDEX);

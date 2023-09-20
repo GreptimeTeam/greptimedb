@@ -292,6 +292,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 pub(crate) fn create_datanode_opts(store: ObjectStoreConfig, home_dir: String) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),
+        require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
             store,

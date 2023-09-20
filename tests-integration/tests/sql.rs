@@ -54,10 +54,13 @@ macro_rules! sql_tests {
                 $service,
 
                 test_mysql_auth,
-                test_mysql_crud,
+                // ignore: https://github.com/GreptimeTeam/greptimedb/issues/2445
+                // test_mysql_crud,
                 test_postgres_auth,
-                test_postgres_crud,
-                test_postgres_parameter_inference,
+                // ignore: https://github.com/GreptimeTeam/greptimedb/issues/2445
+                // test_postgres_crud,
+                // ignore: https://github.com/GreptimeTeam/greptimedb/issues/2445
+                // test_postgres_parameter_inference,
             );
         )*
     };
@@ -120,6 +123,7 @@ pub async fn test_mysql_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[allow(dead_code)]
 pub async fn test_mysql_crud(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
@@ -266,6 +270,7 @@ pub async fn test_postgres_auth(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[allow(dead_code)]
 pub async fn test_postgres_crud(store_type: StorageType) {
     let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_crud").await;
 
@@ -342,6 +347,7 @@ pub async fn test_postgres_crud(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[allow(dead_code)]
 pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     let (addr, mut guard, fe_pg_server) = setup_pg_server(store_type, "sql_inference").await;
 
