@@ -37,6 +37,10 @@ use crate::service::mailbox::{Channel, MailboxReceiver};
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct ActivateRegion {
     candidate: Peer,
+    // If the meta leader node dies during the execution of the procedure,
+    // the new leader node needs to remark the failed region as "inactive"
+    // to prevent it from renewing the lease.
+    remark_inactive_region: bool,
     region_storage_path: Option<String>,
 }
 
@@ -44,6 +48,7 @@ impl ActivateRegion {
     pub(super) fn new(candidate: Peer) -> Self {
         Self {
             candidate,
+            remark_inactive_region: false,
             region_storage_path: None,
         }
     }
@@ -55,7 +60,6 @@ impl ActivateRegion {
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
         let table_id = failed_region.table_id;
-        // TODO(weny): considers fetching table info only once.
         let table_info = ctx
             .table_metadata_manager
             .table_info_manager()
@@ -168,11 +172,22 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
+        if self.remark_inactive_region {
+            // Remark the fail region as inactive to prevent it from renewing the lease.
+            InactiveRegionManager::new(&ctx.in_memory)
+                .register_inactive_region(failed_region)
+                .await?;
+        }
+
         let mailbox_receiver = self
             .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;
 
         self.handle_response(mailbox_receiver, failed_region).await
+    }
+
+    fn remark_inactive_region_if_needed(&mut self) {
+        self.remark_inactive_region = true;
     }
 }
 

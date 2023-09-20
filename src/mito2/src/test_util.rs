@@ -42,7 +42,7 @@ use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDeleteRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
@@ -208,8 +208,8 @@ pub struct CreateRequestBuilder {
     region_dir: String,
     tag_num: usize,
     field_num: usize,
-    create_if_not_exists: bool,
     options: HashMap<String, String>,
+    primary_key: Option<Vec<ColumnId>>,
 }
 
 impl Default for CreateRequestBuilder {
@@ -218,34 +218,39 @@ impl Default for CreateRequestBuilder {
             region_dir: "test".to_string(),
             tag_num: 1,
             field_num: 1,
-            create_if_not_exists: false,
             options: HashMap::new(),
+            primary_key: None,
         }
     }
 }
 
 impl CreateRequestBuilder {
+    #[must_use]
     pub fn new() -> CreateRequestBuilder {
         CreateRequestBuilder::default()
     }
 
+    #[must_use]
     pub fn region_dir(mut self, value: &str) -> Self {
         self.region_dir = value.to_string();
         self
     }
 
+    #[must_use]
     pub fn tag_num(mut self, value: usize) -> Self {
         self.tag_num = value;
         self
     }
 
+    #[must_use]
     pub fn field_num(mut self, value: usize) -> Self {
         self.field_num = value;
         self
     }
 
-    pub fn create_if_not_exists(mut self, value: bool) -> Self {
-        self.create_if_not_exists = value;
+    #[must_use]
+    pub fn primary_key(mut self, primary_key: Vec<ColumnId>) -> Self {
+        self.primary_key = Some(primary_key);
         self
     }
 
@@ -297,9 +302,9 @@ impl CreateRequestBuilder {
             // We use empty engine name as we already locates the engine.
             engine: String::new(),
             column_metadatas,
-            primary_key,
-            create_if_not_exists: self.create_if_not_exists,
+            primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options: self.options.clone(),
+            create_if_not_exists: false,
             region_dir: self.region_dir.clone(),
         }
     }

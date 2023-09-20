@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -92,16 +94,23 @@ impl RegionHeartbeatResponseHandler {
 
     fn fill_reply(mut template: InstructionReply, result: Result<Output>) -> InstructionReply {
         let success = result.is_ok();
-        let error = result.map_err(|e| e.to_string()).err();
+        let error = result.as_ref().map_err(|e| e.to_string()).err();
         match &mut template {
             InstructionReply::OpenRegion(reply) => {
                 reply.result = success;
                 reply.error = error;
             }
-            InstructionReply::CloseRegion(reply) => {
-                reply.result = success;
-                reply.error = error;
-            }
+            InstructionReply::CloseRegion(reply) => match result {
+                Err(e) => {
+                    if e.status_code() == StatusCode::RegionNotFound {
+                        reply.result = true;
+                    }
+                }
+                _ => {
+                    reply.result = success;
+                    reply.error = error;
+                }
+            },
             InstructionReply::InvalidateTableCache(reply) => {
                 reply.result = success;
                 reply.error = error;

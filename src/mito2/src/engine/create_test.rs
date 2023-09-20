@@ -14,8 +14,6 @@
 
 use std::time::Duration;
 
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::RegionId;
@@ -39,12 +37,12 @@ async fn test_engine_create_new_region() {
 }
 
 #[tokio::test]
-async fn test_engine_create_region_if_not_exists() {
-    let mut env = TestEnv::with_prefix("create-not-exists");
+async fn test_engine_create_existing_region() {
+    let mut env = TestEnv::with_prefix("create-existing");
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
-    let builder = CreateRequestBuilder::new().create_if_not_exists(true);
+    let builder = CreateRequestBuilder::new();
     engine
         .handle_request(region_id, RegionRequest::Create(builder.build()))
         .await
@@ -58,8 +56,8 @@ async fn test_engine_create_region_if_not_exists() {
 }
 
 #[tokio::test]
-async fn test_engine_create_existing_region() {
-    let mut env = TestEnv::with_prefix("create-existing");
+async fn test_engine_create_with_different_id() {
+    let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let region_id = RegionId::new(1, 1);
@@ -69,15 +67,51 @@ async fn test_engine_create_existing_region() {
         .await
         .unwrap();
 
-    // Create the same region again.
-    let err = engine
+    // Creates with different id.
+    engine
+        .handle_request(RegionId::new(2, 1), RegionRequest::Create(builder.build()))
+        .await
+        .unwrap_err();
+}
+
+#[tokio::test]
+async fn test_engine_create_with_different_schema() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let builder = CreateRequestBuilder::new();
+    engine
+        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .await
+        .unwrap();
+
+    // Creates with different schema.
+    let builder = builder.tag_num(2);
+    engine
         .handle_request(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap_err();
-    assert!(
-        matches!(err.status_code(), StatusCode::RegionAlreadyExists),
-        "unexpected err: {err}"
-    );
+}
+
+#[tokio::test]
+async fn test_engine_create_with_different_primary_key() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let builder = CreateRequestBuilder::new().tag_num(2);
+    engine
+        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .await
+        .unwrap();
+
+    // Creates with different schema.
+    let builder = builder.primary_key(vec![1]);
+    engine
+        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .await
+        .unwrap_err();
 }
 
 #[tokio::test]

@@ -121,12 +121,13 @@ impl DropTableProcedure {
         };
 
         let cache_invalidator = &self.context.cache_invalidator;
-        cache_invalidator
-            .invalidate_table_id(&ctx, self.data.table_id())
-            .await?;
 
         cache_invalidator
             .invalidate_table_name(&ctx, self.data.table_ref().into())
+            .await?;
+
+        cache_invalidator
+            .invalidate_table_id(&ctx, self.data.table_id())
             .await?;
 
         self.data.state = DropTableState::DatanodeDropRegions;

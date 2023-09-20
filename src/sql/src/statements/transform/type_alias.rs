@@ -32,7 +32,7 @@ use crate::statements::{sql_data_type_to_concrete_data_type, TimezoneInfo};
 ///  - `INT8` for `tinyint`
 ///  - `INT16` for `smallint`
 ///  - `INT32` for `int`
-///  - `INT32` for `bigint`
+///  - `INT64` for `bigint`
 ///  -  And `UINT8`, `UINT16` etc. for `UnsignedTinyint` etc.
 pub(crate) struct TypeAliasTransformRule;
 
