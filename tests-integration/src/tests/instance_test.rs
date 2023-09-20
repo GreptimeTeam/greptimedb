@@ -1249,7 +1249,6 @@ async fn test_create_table_after_rename_table(instance: Arc<dyn MockInstance>) {
     check_output_stream(output, expect).await;
 }
 
-#[ignore = "https://github.com/GreptimeTeam/greptimedb/issues/1681"]
 #[apply(both_instances_cases)]
 async fn test_alter_table(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -1271,7 +1270,7 @@ async fn test_alter_table(instance: Arc<dyn MockInstance>) {
             "insert into demo(host, cpu, memory, ts) values ('host1', 1.1, 100, 1000)",
         )
         .await,
-        Output::AffectedRows(0)
+        Output::AffectedRows(1)
     ));
 
     // Add column
