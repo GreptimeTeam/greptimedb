@@ -386,9 +386,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         SqlDataType::Double => Ok(ConcreteDataType::float64_datatype()),
         SqlDataType::Boolean => Ok(ConcreteDataType::boolean_datatype()),
         SqlDataType::Date => Ok(ConcreteDataType::date_datatype()),
-        SqlDataType::Blob(_) | SqlDataType::Bytea | SqlDataType::Varbinary(_) => {
-            Ok(ConcreteDataType::binary_datatype())
-        }
+        SqlDataType::Binary(_)
+        | SqlDataType::Blob(_)
+        | SqlDataType::Bytea
+        | SqlDataType::Varbinary(_) => Ok(ConcreteDataType::binary_datatype()),
         SqlDataType::Datetime(_) => Ok(ConcreteDataType::datetime_datatype()),
         SqlDataType::Timestamp(precision, _) => Ok(precision
             .as_ref()
