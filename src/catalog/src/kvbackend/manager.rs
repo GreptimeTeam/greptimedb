@@ -26,7 +26,7 @@ use common_meta::error::Result as MetaResult;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_meta::key::table_name::TableNameKey;
-use common_meta::key::{TableMetaKey, TableMetadataManager, TableMetadataManagerRef};
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use futures_util::TryStreamExt;
@@ -54,7 +54,6 @@ pub struct KvBackendCatalogManager {
     // TODO(LFC): Maybe use a real implementation for Standalone mode.
     // Now we use `NoopKvCacheInvalidator` for Standalone mode. In Standalone mode, the KV backend
     // is implemented by RaftEngine. Maybe we need a cache for it?
-    backend_cache_invalidator: KvCacheInvalidatorRef,
     table_metadata_cache_invalidator: TableMetadataCacheInvalidator,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
@@ -90,7 +89,6 @@ impl KvBackendCatalogManager {
             table_metadata_cache_invalidator: TableMetadataCacheInvalidator::new(
                 backend_cache_invalidator.clone(),
             ),
-            backend_cache_invalidator,
             datanode_manager,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
@@ -111,9 +109,9 @@ impl KvBackendCatalogManager {
     }
 
     pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
-        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
-        // TODO(weny): refactors to `TableMetadataCacheInvalidator`
-        self.backend_cache_invalidator.invalidate_key(&key).await;
+        self.table_metadata_cache_invalidator
+            .invalidate_schema(catalog, schema)
+            .await
     }
 }
 

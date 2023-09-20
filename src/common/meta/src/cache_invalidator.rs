@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use common_telemetry::debug;
 use table::metadata::TableId;
 
 use crate::error::Result;
+use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
@@ -75,6 +75,11 @@ impl TableMetadataCacheInvalidator {
     pub fn new(kv_cache_invalidator: KvCacheInvalidatorRef) -> Self {
         Self(kv_cache_invalidator)
     }
+
+    pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
+        let key = SchemaNameKey::new(catalog, schema).as_raw_key();
+        self.0.invalidate_key(&key).await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -83,10 +88,6 @@ impl CacheInvalidator for TableMetadataCacheInvalidator {
         let key: TableNameKey = (&table_name).into();
 
         self.0.invalidate_key(&key.as_raw_key()).await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
 
         Ok(())
     }
@@ -94,17 +95,9 @@ impl CacheInvalidator for TableMetadataCacheInvalidator {
     async fn invalidate_table_id(&self, _ctx: &Context, table_id: TableId) -> Result<()> {
         let key = TableInfoKey::new(table_id);
         self.0.invalidate_key(&key.as_raw_key()).await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
 
         let key = &TableRouteKey { table_id };
         self.0.invalidate_key(&key.as_raw_key()).await;
-        debug!(
-            "invalidated cache key: {}",
-            String::from_utf8_lossy(&key.as_raw_key())
-        );
 
         Ok(())
     }

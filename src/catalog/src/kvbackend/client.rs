@@ -29,7 +29,7 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_telemetry::timer;
+use common_telemetry::{debug, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{OptionExt, ResultExt};
@@ -197,7 +197,8 @@ impl KvBackend for CachedMetaKvBackend {
 #[async_trait::async_trait]
 impl KvCacheInvalidator for CachedMetaKvBackend {
     async fn invalidate_key(&self, key: &[u8]) {
-        self.cache.invalidate(key).await
+        self.cache.invalidate(key).await;
+        debug!("invalidated cache key: {}", String::from_utf8_lossy(key));
     }
 }
 
