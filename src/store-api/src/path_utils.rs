@@ -45,7 +45,7 @@ pub fn table_dir(path: &str, table_id: TableId) -> String {
 
 pub fn region_dir(path: &str, region_id: RegionId) -> String {
     format!(
-        "{}{}",
+        "{}{}/",
         table_dir(path, region_id.table_id()),
         region_name(region_id.table_id(), region_id.region_number())
     )
