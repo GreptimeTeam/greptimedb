@@ -45,7 +45,7 @@ pub fn table_dir(path: &str, table_id: TableId) -> String {
 
 pub fn region_dir(path: &str, region_id: RegionId) -> String {
     format!(
-        "{}{}",
+        "{}{}/",
         table_dir(path, region_id.table_id()),
         region_name(region_id.table_id(), region_id.region_number())
     )
@@ -60,7 +60,7 @@ mod tests {
         let region_id = RegionId::new(42, 1);
         assert_eq!(
             region_dir("my_catalog/my_schema", region_id),
-            "data/my_catalog/my_schema/42/42_0000000001"
+            "data/my_catalog/my_schema/42/42_0000000001/"
         );
     }
 }
