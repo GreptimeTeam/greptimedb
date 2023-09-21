@@ -348,7 +348,6 @@ mod tests {
         let v = constraint.create_default(&data_type, false).unwrap();
         check_value(v);
 
-
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         assert!(constraint
