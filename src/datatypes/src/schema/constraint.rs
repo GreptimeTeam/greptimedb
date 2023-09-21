@@ -348,6 +348,11 @@ mod tests {
         let v = constraint.create_default(&data_type, false).unwrap();
         check_value(v);
 
+        // Int64 type.
+        let data_type = ConcreteDataType::int64_datatype();
+        let v = constraint.create_default_vector(&data_type, false, 4);
+        assert!(v.is_err());
+
         let constraint = ColumnDefaultConstraint::Function("no".to_string());
         let data_type = ConcreteDataType::timestamp_millisecond_datatype();
         assert!(constraint
