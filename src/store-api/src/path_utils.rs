@@ -60,7 +60,7 @@ mod tests {
         let region_id = RegionId::new(42, 1);
         assert_eq!(
             region_dir("my_catalog/my_schema", region_id),
-            "data/my_catalog/my_schema/42/42_0000000001"
+            "data/my_catalog/my_schema/42/42_0000000001/"
         );
     }
 }
