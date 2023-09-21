@@ -30,7 +30,6 @@ use crate::error::{Result, UnsupportedSnafu};
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
 use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
 use crate::stats::TableStatistics;
-use crate::RegionStat;
 
 pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
@@ -99,14 +98,6 @@ pub trait Table: Send + Sync {
     /// Close the table.
     async fn close(&self, _regions: &[RegionNumber]) -> Result<()> {
         Ok(())
-    }
-
-    /// Get region stats in this table.
-    fn region_stats(&self) -> Result<Vec<RegionStat>> {
-        UnsupportedSnafu {
-            operation: "REGION_STATS",
-        }
-        .fail()?
     }
 
     /// Return true if contains the region
