@@ -21,25 +21,25 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to start log store gc task, source: {}", source))]
+    #[snafu(display("Failed to start log store gc task"))]
     StartGcTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop log store gc task, source: {}", source))]
+    #[snafu(display("Failed to stop log store gc task"))]
     StopGcTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to add entry to LogBatch, source: {}", source))]
+    #[snafu(display("Failed to add entry to LogBatch"))]
     AddEntryLogBatch {
         source: raft_engine::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to perform raft-engine operation, source: {}", source))]
+    #[snafu(display("Failed to perform raft-engine operation"))]
     RaftEngine {
         source: raft_engine::Error,
         location: Location,
@@ -52,12 +52,11 @@ pub enum Error {
     IllegalNamespace { ns: u64, location: Location },
 
     #[snafu(display(
-        "Failed to fetch entries from namespace: {}, start: {}, end: {}, max size: {}, source: {}",
+        "Failed to fetch entries from namespace: {}, start: {}, end: {}, max size: {}",
+        ns,
         start,
         end,
         max_size,
-        source,
-        ns
     ))]
     FetchEntry {
         ns: u64,

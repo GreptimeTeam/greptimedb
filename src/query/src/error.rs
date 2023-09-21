@@ -35,7 +35,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("General catalog error: {}", source))]
+    #[snafu(display("General catalog error"))]
     Catalog {
         source: catalog::error::Error,
         location: Location,
@@ -50,37 +50,37 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table))]
     TableNotFound { table: String, location: Location },
 
-    #[snafu(display("Failed to do vector computation, source: {}", source))]
+    #[snafu(display("Failed to do vector computation"))]
     VectorComputation {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create RecordBatch, source: {}", source))]
+    #[snafu(display("Failed to create RecordBatch"))]
     CreateRecordBatch {
         source: common_recordbatch::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create Schema, source: {}", source))]
+    #[snafu(display("Failed to create Schema"))]
     CreateSchema {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failure during query execution, source: {}", source))]
+    #[snafu(display("Failure during query execution"))]
     QueryExecution {
         source: BoxedError,
         location: Location,
     },
 
-    #[snafu(display("Failure during query planning, source: {}", source))]
+    #[snafu(display("Failure during query planning"))]
     QueryPlan {
         source: BoxedError,
         location: Location,
     },
 
-    #[snafu(display("Failure during query parsing, query: {}, source: {}", query, source))]
+    #[snafu(display("Failure during query parsing, query: {}", query))]
     QueryParse {
         query: String,
         source: BoxedError,
@@ -97,45 +97,45 @@ pub enum Error {
     #[snafu(display("The SQL string has multiple statements, query: {}", query))]
     MultipleStatements { query: String, location: Location },
 
-    #[snafu(display("Failed to convert Datafusion schema: {}", source))]
+    #[snafu(display("Failed to convert Datafusion schema"))]
     ConvertDatafusionSchema {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse timestamp `{}`: {}", raw, source))]
+    #[snafu(display("Failed to parse timestamp `{}`", raw))]
     ParseTimestamp {
         raw: String,
         source: chrono::ParseError,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse float number `{}`: {}", raw, source))]
+    #[snafu(display("Failed to parse float number `{}`", raw))]
     ParseFloat {
         raw: String,
         source: std::num::ParseFloatError,
         location: Location,
     },
 
-    #[snafu(display("DataFusion error: {}", source))]
+    #[snafu(display("DataFusion error"))]
     DataFusion {
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to encode Substrait logical plan, source: {}", source))]
+    #[snafu(display("Failed to encode Substrait logical plan"))]
     EncodeSubstraitLogicalPlan {
         source: substrait::error::Error,
         location: Location,
     },
 
-    #[snafu(display("General SQL error: {}", source))]
+    #[snafu(display("General SQL error"))]
     Sql {
         location: Location,
         source: sql::error::Error,
     },
 
-    #[snafu(display("Cannot plan SQL: {}, source: {}", sql, source))]
+    #[snafu(display("Cannot plan SQL: {}", sql))]
     PlanSql {
         sql: String,
         source: DataFusionError,
@@ -162,20 +162,20 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to route partition of table {}, source: {}", table, source))]
+    #[snafu(display("Failed to route partition of table {}", table))]
     RoutePartition {
         table: TableName,
         source: partition::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    #[snafu(display("Failed to parse SQL"))]
     ParseSql {
         source: sql::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to request remote peer, source: {}", source))]
+    #[snafu(display("Failed to request remote peer"))]
     RemoteRequest {
         source: client::Error,
         location: Location,
@@ -191,49 +191,45 @@ pub enum Error {
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
 
-    #[snafu(display("Failed to regex, source: {}", source))]
+    #[snafu(display("Failed to regex"))]
     BuildRegex {
         location: Location,
         source: regex::Error,
     },
 
-    #[snafu(display("Failed to build data source backend, source: {}", source))]
+    #[snafu(display("Failed to build data source backend"))]
     BuildBackend {
         source: common_datasource::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to list objects, source: {}", source))]
+    #[snafu(display("Failed to list objects"))]
     ListObjects {
         source: common_datasource::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse file format: {}", source))]
+    #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
         source: common_datasource::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to infer schema: {}", source))]
+    #[snafu(display("Failed to infer schema"))]
     InferSchema {
         source: common_datasource::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert datafusion schema, source: {}", source))]
+    #[snafu(display("Failed to convert datafusion schema"))]
     ConvertSchema {
         source: datatypes::error::Error,
         location: Location,
     },
-    #[snafu(display("Unknown table type, downcast failed, location: {}", location))]
+    #[snafu(display("Unknown table type, downcast failed"))]
     UnknownTable { location: Location },
 
-    #[snafu(display(
-        "Cannot find time index column in table {}, location: {}",
-        table,
-        location
-    ))]
+    #[snafu(display("Cannot find time index column in table {}", table))]
     TimeIndexNotFound { table: String, location: Location },
 
     #[snafu(display("Failed to add duration '{:?}' to SystemTime, overflowed", duration))]

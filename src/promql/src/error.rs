@@ -23,60 +23,46 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Unsupported expr type: {}, location: {}", name, location))]
+    #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
 
-    #[snafu(display("Unexpected token: {:?}, location: {}", token, location))]
+    #[snafu(display("Unexpected token: {:?}", token))]
     UnexpectedToken {
         token: TokenType,
         location: Location,
     },
 
-    #[snafu(display(
-        "Internal error during building DataFusion plan, error: {}, location: {}",
-        source,
-        location
-    ))]
+    #[snafu(display("Internal error during building DataFusion plan"))]
     DataFusionPlanning {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Unexpected plan or expression: {}, location: {}", desc, location))]
+    #[snafu(display("Unexpected plan or expression: {}", desc))]
     UnexpectedPlanExpr { desc: String, location: Location },
 
-    #[snafu(display("Unknown table type, downcast failed, location: {}", location))]
+    #[snafu(display("Unknown table type, downcast failed"))]
     UnknownTable { location: Location },
 
-    #[snafu(display(
-        "Cannot find time index column in table {}, location: {}",
-        table,
-        location
-    ))]
+    #[snafu(display("Cannot find time index column in table {}", table))]
     TimeIndexNotFound { table: String, location: Location },
 
-    #[snafu(display("Cannot find value columns in table {}, location: {}", table, location))]
+    #[snafu(display("Cannot find value columns in table {}", table))]
     ValueNotFound { table: String, location: Location },
 
     #[snafu(display(
-        "Cannot accept multiple vector as function input, PromQL expr: {:?}, location: {}",
+        "Cannot accept multiple vector as function input, PromQL expr: {:?}",
         expr,
-        location
     ))]
     MultipleVector { expr: PromExpr, location: Location },
 
-    #[snafu(display(
-        "Expect a PromQL expr but not found, input expr: {:?}, location: {}",
-        expr,
-        location
-    ))]
+    #[snafu(display("Expect a PromQL expr but not found, input expr: {:?}", expr))]
     ExpectExpr { expr: PromExpr, location: Location },
     #[snafu(display(
-        "Illegal range: offset {}, length {}, array len {}, location: {}",
+        "Illegal range: offset {}, length {}, array len {}",
         offset,
         length,
         len,
-        location
     ))]
     IllegalRange {
         offset: u32,
@@ -85,39 +71,39 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize: {}", source))]
+    #[snafu(display("Failed to deserialize"))]
     Deserialize {
         source: prost::DecodeError,
         location: Location,
     },
 
-    #[snafu(display("Empty range is not expected, location: {}", location))]
+    #[snafu(display("Empty range is not expected"))]
     EmptyRange { location: Location },
 
     #[snafu(display(
-        "Table (metric) name not found, this indicates a procedure error in PromQL planner, location: {}", location
+        "Table (metric) name not found, this indicates a procedure error in PromQL planner"
     ))]
     TableNameNotFound { location: Location },
 
-    #[snafu(display("General catalog error: {source}, location: {}", location))]
+    #[snafu(display("General catalog error: "))]
     Catalog {
         location: Location,
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Expect a range selector, but not found, location: {}", location))]
+    #[snafu(display("Expect a range selector, but not found"))]
     ExpectRangeSelector { location: Location },
 
-    #[snafu(display("Zero range in range selector, location: {}", location))]
+    #[snafu(display("Zero range in range selector"))]
     ZeroRangeSelector { location: Location },
 
-    #[snafu(display("Cannot find column {col}, location: {}", location))]
+    #[snafu(display("Cannot find column {col}"))]
     ColumnNotFound { col: String, location: Location },
 
-    #[snafu(display("Found multiple metric matchers in selector, location: {}", location))]
+    #[snafu(display("Found multiple metric matchers in selector"))]
     MultipleMetricMatchers { location: Location },
 
-    #[snafu(display("Expect a metric matcher, but not found, location: {}", location))]
+    #[snafu(display("Expect a metric matcher, but not found"))]
     NoMetricMatcher { location: Location },
 }
 

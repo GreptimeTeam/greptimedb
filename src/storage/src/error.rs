@@ -36,7 +36,7 @@ use crate::write_batch;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Invalid region descriptor, region: {}, source: {}", region, source))]
+    #[snafu(display("Invalid region descriptor, region: {}", region))]
     InvalidRegionDesc {
         region: String,
         location: Location,
@@ -46,89 +46,79 @@ pub enum Error {
     #[snafu(display("Missing column {} in write batch", column))]
     BatchMissingColumn { column: String, location: Location },
 
-    #[snafu(display("Failed to write parquet file, source: {}", source))]
+    #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
         source: parquet::errors::ParquetError,
         location: Location,
     },
 
-    #[snafu(display("Failed to write to buffer, source: {}", source))]
+    #[snafu(display("Failed to write to buffer"))]
     WriteBuffer {
         location: Location,
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to create RecordBatch from vectors, source: {}", source))]
+    #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
         location: Location,
         source: ArrowError,
     },
 
-    #[snafu(display("Fail to read object from path: {}, source: {}", path, source))]
+    #[snafu(display("Fail to read object from path: {}", path))]
     ReadObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to write object into path: {}, source: {}", path, source))]
+    #[snafu(display("Fail to write object into path: {}", path))]
     WriteObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to delete object from path: {}, source: {}", path, source))]
+    #[snafu(display("Fail to delete object from path: {}", path))]
     DeleteObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display(
-        "Fail to compress object by {}, path: {}, source: {}",
-        compress_type,
-        path,
-        source
-    ))]
+    #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
         path: String,
         source: std::io::Error,
     },
 
-    #[snafu(display(
-        "Fail to decompress object by {}, path: {}, source: {}",
-        compress_type,
-        path,
-        source
-    ))]
+    #[snafu(display("Fail to decompress object by {}, path: {}", compress_type, path))]
     DecompressObject {
         compress_type: CompressionType,
         path: String,
         source: std::io::Error,
     },
 
-    #[snafu(display("Fail to list objects in path: {}, source: {}", path, source))]
+    #[snafu(display("Fail to list objects in path: {}", path))]
     ListObjects {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to create str from bytes, source: {}", source))]
+    #[snafu(display("Fail to create str from bytes"))]
     Utf8 {
         location: Location,
         source: Utf8Error,
     },
 
-    #[snafu(display("Fail to encode object into json , source: {}", source))]
+    #[snafu(display("Fail to encode object into json "))]
     EncodeJson {
         location: Location,
         source: JsonError,
     },
 
-    #[snafu(display("Fail to decode object from json , source: {}", source))]
+    #[snafu(display("Fail to decode object from json "))]
     DecodeJson {
         location: Location,
         source: JsonError,
@@ -141,34 +131,26 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to write WAL, WAL region_id: {}, source: {}",
-        region_id,
-        source
-    ))]
+    #[snafu(display("Failed to write WAL, WAL region_id: {}", region_id))]
     WriteWal {
         region_id: RegionId,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to encode WAL header, source {}", source))]
+    #[snafu(display("Failed to encode WAL header"))]
     EncodeWalHeader {
         location: Location,
         source: std::io::Error,
     },
 
-    #[snafu(display("Failed to decode WAL header, source {}", source))]
+    #[snafu(display("Failed to decode WAL header"))]
     DecodeWalHeader {
         location: Location,
         source: std::io::Error,
     },
 
-    #[snafu(display(
-        "Failed to wait flushing, region_id: {}, source: {}",
-        region_id,
-        source
-    ))]
+    #[snafu(display("Failed to wait flushing, region_id: {}", region_id))]
     WaitFlush {
         region_id: RegionId,
         source: tokio::sync::oneshot::error::RecvError,
@@ -200,10 +182,10 @@ pub enum Error {
     #[snafu(display("Failed to decode action list, {}", msg))]
     DecodeMetaActionList { msg: String, location: Location },
 
-    #[snafu(display("Failed to read line, err: {}", source))]
+    #[snafu(display("Failed to read line, err"))]
     Readline { source: IoError },
 
-    #[snafu(display("Failed to read Parquet file: {}, source: {}", file, source))]
+    #[snafu(display("Failed to read Parquet file: {}", file))]
     ReadParquet {
         file: String,
         source: parquet::errors::ParquetError,
@@ -216,18 +198,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to read WAL, region_id: {}, source: {}", region_id, source))]
+    #[snafu(display("Failed to read WAL, region_id: {}", region_id))]
     ReadWal {
         region_id: RegionId,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to mark WAL as obsolete, region id: {}, source: {}",
-        region_id,
-        source
-    ))]
+    #[snafu(display("Failed to mark WAL as obsolete, region id: {}", region_id))]
     MarkWalObsolete {
         region_id: u64,
         location: Location,
@@ -241,11 +219,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to delete WAL namespace, region id: {}, source: {}",
-        region_id,
-        source
-    ))]
+    #[snafu(display("Failed to delete WAL namespace, region id: {}", region_id))]
     DeleteWalNamespace {
         region_id: RegionId,
         location: Location,
@@ -263,14 +237,14 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to convert store schema, file: {}, source: {}", file, source))]
+    #[snafu(display("Failed to convert store schema, file: {}", file))]
     ConvertStoreSchema {
         file: String,
         location: Location,
         source: MetadataError,
     },
 
-    #[snafu(display("Invalid raw region metadata, region: {}, source: {}", region, source))]
+    #[snafu(display("Invalid raw region metadata, region: {}", region))]
     InvalidRawRegion {
         region: String,
         location: Location,
@@ -280,13 +254,13 @@ pub enum Error {
     #[snafu(display("Try to write the closed region"))]
     ClosedRegion { location: Location },
 
-    #[snafu(display("Invalid projection, source: {}", source))]
+    #[snafu(display("Invalid projection"))]
     InvalidProjection {
         location: Location,
         source: MetadataError,
     },
 
-    #[snafu(display("Failed to push data to batch builder, source: {}", source))]
+    #[snafu(display("Failed to push data to batch builder"))]
     PushBatch {
         location: Location,
         source: datatypes::error::Error,
@@ -295,30 +269,26 @@ pub enum Error {
     #[snafu(display("Failed to build batch, {}", msg))]
     BuildBatch { msg: String, location: Location },
 
-    #[snafu(display("Failed to filter column {}, source: {}", name, source))]
+    #[snafu(display("Failed to filter column {}", name))]
     FilterColumn {
         name: String,
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid alter request, source: {}", source))]
+    #[snafu(display("Invalid alter request"))]
     InvalidAlterRequest {
         location: Location,
         source: MetadataError,
     },
 
-    #[snafu(display("Failed to alter metadata, source: {}", source))]
+    #[snafu(display("Failed to alter metadata"))]
     AlterMetadata {
         location: Location,
         source: MetadataError,
     },
 
-    #[snafu(display(
-        "Failed to create default value for column {}, source: {}",
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to create default value for column {}", name))]
     CreateDefault {
         name: String,
         location: Location,
@@ -347,11 +317,7 @@ pub enum Error {
     #[snafu(display("Incompatible schema to read, reason: {}", reason))]
     CompatRead { reason: String, location: Location },
 
-    #[snafu(display(
-        "Failed to read column {}, could not create default value, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Failed to read column {}, could not create default value", column))]
     CreateDefaultToRead {
         column: String,
         location: Location,
@@ -361,11 +327,7 @@ pub enum Error {
     #[snafu(display("Failed to read column {}, no proper default value for it", column))]
     NoDefaultToRead { column: String, location: Location },
 
-    #[snafu(display(
-        "Failed to convert arrow chunk to batch, name: {}, source: {}",
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to convert arrow chunk to batch, name: {}", name))]
     ConvertChunk {
         name: String,
         location: Location,
@@ -375,7 +337,7 @@ pub enum Error {
     #[snafu(display("Unknown column {}", name))]
     UnknownColumn { name: String, location: Location },
 
-    #[snafu(display("Failed to create record batch for write batch, source:{}", source))]
+    #[snafu(display("Failed to create record batch for write batch"))]
     CreateRecordBatch {
         location: Location,
         source: common_recordbatch::error::Error,
@@ -420,19 +382,19 @@ pub enum Error {
     #[snafu(display("Failed to decode write batch, corrupted data {}", message))]
     BatchCorrupted { message: String, location: Location },
 
-    #[snafu(display("Failed to decode arrow data, source: {}", source))]
+    #[snafu(display("Failed to decode arrow data"))]
     DecodeArrow {
         location: Location,
         source: ArrowError,
     },
 
-    #[snafu(display("Failed to encode arrow data, source: {}", source))]
+    #[snafu(display("Failed to encode arrow data"))]
     EncodeArrow {
         location: Location,
         source: ArrowError,
     },
 
-    #[snafu(display("Failed to parse schema, source: {}", source))]
+    #[snafu(display("Failed to parse schema"))]
     ParseSchema {
         location: Location,
         source: datatypes::error::Error,
@@ -450,31 +412,31 @@ pub enum Error {
     #[snafu(display("Cannot schedule request, scheduler's already stopped"))]
     IllegalSchedulerState { location: Location },
 
-    #[snafu(display("Failed to start manifest gc task: {}", source))]
+    #[snafu(display("Failed to start manifest gc task"))]
     StartManifestGcTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop manifest gc task: {}", source))]
+    #[snafu(display("Failed to stop manifest gc task"))]
     StopManifestGcTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop scheduler, source: {}", source))]
+    #[snafu(display("Failed to stop scheduler"))]
     StopScheduler {
         source: JoinError,
         location: Location,
     },
 
-    #[snafu(display("Failed to delete SST file, source: {}", source))]
+    #[snafu(display("Failed to delete SST file"))]
     DeleteSst {
         source: object_store::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to calculate SST expire time, source: {}", source))]
+    #[snafu(display("Failed to calculate SST expire time"))]
     TtlCalculation {
         location: Location,
         source: common_time::error::Error,
@@ -500,41 +462,37 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to start picking task for flush: {}", source))]
+    #[snafu(display("Failed to start picking task for flush"))]
     StartPickTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to stop picking task for flush: {}", source))]
+    #[snafu(display("Failed to stop picking task for flush"))]
     StopPickTask {
         location: Location,
         source: RuntimeError,
     },
 
-    #[snafu(display("Failed to convert columns to rows, source: {}", source))]
+    #[snafu(display("Failed to convert columns to rows"))]
     ConvertColumnsToRows {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to sort arrays, source: {}", source))]
+    #[snafu(display("Failed to sort arrays"))]
     SortArrays {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to build scan predicate, source: {}", source))]
+    #[snafu(display("Failed to build scan predicate"))]
     BuildPredicate {
         source: table::error::Error,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to join spawned tasks, source: {}, location: {}",
-        source,
-        location
-    ))]
+    #[snafu(display("Failed to join spawned tasks"))]
     JoinError {
         source: JoinError,
         location: Location,

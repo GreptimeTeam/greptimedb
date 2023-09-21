@@ -166,6 +166,8 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
+    use snafu::ErrorCompat;
+
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     #[test]
@@ -284,11 +286,21 @@ mod tests {
         // Invalid duration
         let sql = "TQL EVAL (1676887657, 1676887659, 1m) http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        assert!(result.to_string().contains("Expected ), found: m"));
+        assert!(result
+            .iter_chain()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("Expected ), found: m"));
 
         // missing end
         let sql = "TQL EVAL (1676887657, '1m') http_requests_total{environment=~'staging|testing|development',method!='GET'} @ 1609746000 offset 5m";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        assert!(result.to_string().contains("Expected ,, found: )"));
+        assert!(result
+            .iter_chain()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("Expected ,, found: )"));
     }
 }

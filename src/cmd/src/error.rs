@@ -23,55 +23,55 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to create default catalog and schema, source: {}", source))]
+    #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to iter stream, source: {}", source))]
+    #[snafu(display("Failed to iter stream"))]
     IterStream {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to start datanode, source: {}", source))]
+    #[snafu(display("Failed to start datanode"))]
     StartDatanode {
         location: Location,
         source: datanode::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown datanode, source: {}", source))]
+    #[snafu(display("Failed to shutdown datanode"))]
     ShutdownDatanode {
         location: Location,
         source: datanode::error::Error,
     },
 
-    #[snafu(display("Failed to start frontend, source: {}", source))]
+    #[snafu(display("Failed to start frontend"))]
     StartFrontend {
         location: Location,
         source: frontend::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown frontend, source: {}", source))]
+    #[snafu(display("Failed to shutdown frontend"))]
     ShutdownFrontend {
         location: Location,
         source: frontend::error::Error,
     },
 
-    #[snafu(display("Failed to build meta server, source: {}", source))]
+    #[snafu(display("Failed to build meta server"))]
     BuildMetaServer {
         location: Location,
         source: meta_srv::error::Error,
     },
 
-    #[snafu(display("Failed to start meta server, source: {}", source))]
+    #[snafu(display("Failed to start meta server"))]
     StartMetaServer {
         location: Location,
         source: meta_srv::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown meta server, source: {}", source))]
+    #[snafu(display("Failed to shutdown meta server"))]
     ShutdownMetaServer {
         location: Location,
         source: meta_srv::error::Error,
@@ -83,13 +83,13 @@ pub enum Error {
     #[snafu(display("Illegal config: {}", msg))]
     IllegalConfig { msg: String, location: Location },
 
-    #[snafu(display("Illegal auth config: {}", source))]
+    #[snafu(display("Illegal auth config"))]
     IllegalAuthConfig {
         location: Location,
         source: auth::error::Error,
     },
 
-    #[snafu(display("Unsupported selector type, {} source: {}", selector_type, source))]
+    #[snafu(display("Unsupported selector type: {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
         location: Location,
@@ -99,75 +99,75 @@ pub enum Error {
     #[snafu(display("Invalid REPL command: {reason}"))]
     InvalidReplCommand { reason: String },
 
-    #[snafu(display("Cannot create REPL: {}", source))]
+    #[snafu(display("Cannot create REPL"))]
     ReplCreation {
         source: ReadlineError,
         location: Location,
     },
 
-    #[snafu(display("Error reading command: {}", source))]
+    #[snafu(display("Error reading command"))]
     Readline {
         source: ReadlineError,
         location: Location,
     },
 
-    #[snafu(display("Failed to request database, sql: {sql}, source: {source}"))]
+    #[snafu(display("Failed to request database, sql: {sql}"))]
     RequestDatabase {
         sql: String,
         location: Location,
         source: client::Error,
     },
 
-    #[snafu(display("Failed to collect RecordBatches, source: {source}"))]
+    #[snafu(display("Failed to collect RecordBatches"))]
     CollectRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to pretty print Recordbatches, source: {source}"))]
+    #[snafu(display("Failed to pretty print Recordbatches"))]
     PrettyPrintRecordBatches {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to start Meta client, source: {}", source))]
+    #[snafu(display("Failed to start Meta client"))]
     StartMetaClient {
         location: Location,
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to parse SQL: {}, source: {}", sql, source))]
+    #[snafu(display("Failed to parse SQL: {}", sql))]
     ParseSql {
         sql: String,
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to plan statement, source: {}", source))]
+    #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to encode logical plan in substrait, source: {}", source))]
+    #[snafu(display("Failed to encode logical plan in substrait"))]
     SubstraitEncodeLogicalPlan {
         location: Location,
         source: substrait::error::Error,
     },
 
-    #[snafu(display("Failed to load layered config, source: {}", source))]
+    #[snafu(display("Failed to load layered config"))]
     LoadLayeredConfig {
         source: ConfigError,
         location: Location,
     },
 
-    #[snafu(display("Failed to start catalog manager, source: {}", source))]
+    #[snafu(display("Failed to start catalog manager"))]
     StartCatalogManager {
         location: Location,
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to connect to Etcd at {etcd_addr}, source: {}", source))]
+    #[snafu(display("Failed to connect to Etcd at {etcd_addr}"))]
     ConnectEtcd {
         etcd_addr: String,
         source: etcd_client::Error,

@@ -24,61 +24,61 @@ use store_api::storage::RegionNumber;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to invalidate table cache, source: {}", source))]
+    #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to open raft engine backend, source: {}", source))]
+    #[snafu(display("Failed to open raft engine backend"))]
     OpenRaftEngineBackend {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
+    #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     External {
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to query, source: {}", source))]
+    #[snafu(display("Failed to query"))]
     RequestQuery {
         #[snafu(backtrace)]
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Runtime resource error, source: {}", source))]
+    #[snafu(display("Runtime resource error"))]
     RuntimeResource {
         #[snafu(backtrace)]
         source: common_runtime::error::Error,
     },
 
-    #[snafu(display("Failed to start server, source: {}", source))]
+    #[snafu(display("Failed to start server"))]
     StartServer {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    #[snafu(display("Failed to shutdown server"))]
     ShutdownServer {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,
     },
 
-    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    #[snafu(display("Failed to parse SQL"))]
     ParseSql {
         #[snafu(backtrace)]
         source: sql::error::Error,
@@ -105,35 +105,31 @@ pub enum Error {
     #[snafu(display("Invalid DeleteRequest, reason: {}", reason))]
     InvalidDeleteRequest { reason: String, location: Location },
 
-    #[snafu(display("Invalid system table definition: {err_msg}, at {location}"))]
+    #[snafu(display("Invalid system table definition: {err_msg}"))]
     InvalidSystemTableDef { err_msg: String, location: Location },
 
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
-    #[snafu(display("General catalog error: {}", source))]
+    #[snafu(display("General catalog error"))]
     Catalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to start Meta client, source: {}", source))]
+    #[snafu(display("Failed to start Meta client"))]
     StartMetaClient {
         #[snafu(backtrace)]
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to create heartbeat stream to Metasrv, source: {}", source))]
+    #[snafu(display("Failed to create heartbeat stream to Metasrv"))]
     CreateMetaHeartbeatStream {
         source: meta_client::error::Error,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to find table route for table id {}, source: {}",
-        table_id,
-        source
-    ))]
+    #[snafu(display("Failed to find table route for table id {}", table_id))]
     FindTableRoute {
         table_id: u32,
         #[snafu(backtrace)]
@@ -143,7 +139,7 @@ pub enum Error {
     #[snafu(display("Schema {} already exists", name))]
     SchemaExists { name: String, location: Location },
 
-    #[snafu(display("Table occurs error, source: {}", source))]
+    #[snafu(display("Table occurs error"))]
     Table {
         #[snafu(backtrace)]
         source: table::error::Error,
@@ -152,26 +148,26 @@ pub enum Error {
     #[snafu(display("Cannot find column by name: {}", msg))]
     ColumnNotFound { msg: String, location: Location },
 
-    #[snafu(display("Failed to plan statement, source: {}", source))]
+    #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to read table: {table_name}, source: {source}"))]
+    #[snafu(display("Failed to read table: {table_name}"))]
     ReadTable {
         table_name: String,
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    #[snafu(display("Failed to execute logical plan"))]
     ExecLogicalPlan {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     InvokeRegionServer {
         #[snafu(backtrace)]
         source: servers::error::Error,
@@ -192,30 +188,27 @@ pub enum Error {
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
 
-    #[snafu(display("SQL execution intercepted, source: {}", source))]
+    #[snafu(display("SQL execution intercepted"))]
     SqlExecIntercepted {
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
     // TODO(ruihang): merge all query execution error kinds
-    #[snafu(display("Failed to execute PromQL query {}, source: {}", query, source))]
+    #[snafu(display("Failed to execute PromQL query {}", query))]
     ExecutePromql {
         query: String,
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to create logical plan for prometheus query, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to create logical plan for prometheus query"))]
     PromStoreRemoteQueryPlan {
         #[snafu(backtrace)]
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
+    #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
@@ -224,24 +217,20 @@ pub enum Error {
     #[snafu(display("Illegal primary keys definition: {}", msg))]
     IllegalPrimaryKeysDef { msg: String, location: Location },
 
-    #[snafu(display("Failed to start script manager, source: {}", source))]
+    #[snafu(display("Failed to start script manager"))]
     StartScriptManager {
         #[snafu(backtrace)]
         source: script::error::Error,
     },
 
-    #[snafu(display("Failed to copy table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to copy table: {}", table_name))]
     CopyTable {
         table_name: String,
         #[snafu(backtrace)]
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to insert value into table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
         #[snafu(backtrace)]
@@ -251,13 +240,13 @@ pub enum Error {
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat { location: Location, format: Format },
 
-    #[snafu(display("Table metadata manager error: {}", source))]
+    #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to pass permission check, source: {}", source))]
+    #[snafu(display("Failed to pass permission check"))]
     Permission {
         source: auth::error::Error,
         location: Location,
@@ -275,7 +264,7 @@ pub enum Error {
     #[snafu(display("Invalid region request, reason: {}", reason))]
     InvalidRegionRequest { reason: String },
 
-    #[snafu(display("{}", source))]
+    #[snafu(display("Table operation error"))]
     TableOperation {
         source: operator::error::Error,
         location: Location,

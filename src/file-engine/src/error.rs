@@ -34,7 +34,7 @@ pub enum Error {
     #[snafu(display("Unexpected engine: {}", engine))]
     UnexpectedEngine { engine: String, location: Location },
 
-    #[snafu(display("Invalid region metadata, source: {}", source))]
+    #[snafu(display("Invalid region metadata"))]
     InvalidMetadata {
         source: store_api::metadata::MetadataError,
         location: Location,
@@ -52,52 +52,40 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to check object from path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to check object from path: {}", path))]
     CheckObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Fail to encode object into json, source: {}", source))]
+    #[snafu(display("Fail to encode object into json"))]
     EncodeJson {
         location: Location,
         source: JsonError,
     },
 
-    #[snafu(display("Fail to decode object from json, source: {}", source))]
+    #[snafu(display("Fail to decode object from json"))]
     DecodeJson {
         location: Location,
         source: JsonError,
     },
 
-    #[snafu(display(
-        "Failed to store region manifest, region_id: {}, source: {}",
-        region_id,
-        source,
-    ))]
+    #[snafu(display("Failed to store region manifest, region_id: {}", region_id))]
     StoreRegionManifest {
         source: object_store::Error,
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to load region manifest, region_id: {}, source: {}",
-        region_id,
-        source,
-    ))]
+    #[snafu(display("Failed to load region manifest, region_id: {}", region_id))]
     LoadRegionManifest {
         source: object_store::Error,
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to delete region manifest, region_id: {}, source: {}",
-        region_id,
-        source,
-    ))]
+    #[snafu(display("Failed to delete region manifest, region_id: {},", region_id))]
     DeleteRegionManifest {
         source: object_store::Error,
         region_id: RegionId,
@@ -110,49 +98,49 @@ pub enum Error {
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
 
-    #[snafu(display("Failed to build backend, source: {}", source))]
+    #[snafu(display("Failed to build backend"))]
     BuildBackend {
         location: Location,
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build csv config: {}", source))]
+    #[snafu(display("Failed to build csv config"))]
     BuildCsvConfig {
         source: common_datasource::file_format::csv::CsvConfigBuilderError,
         location: Location,
     },
 
-    #[snafu(display("Failed to build stream: {}", source))]
+    #[snafu(display("Failed to build stream"))]
     BuildStream {
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to project schema: {}", source))]
+    #[snafu(display("Failed to project schema"))]
     ProjectArrowSchema {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to project schema: {}", source))]
+    #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build stream adapter: {}", source))]
+    #[snafu(display("Failed to build stream adapter"))]
     BuildStreamAdapter {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to parse file format: {}", source))]
+    #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
         location: Location,
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to generate parquet scan plan: {}", source))]
+    #[snafu(display("Failed to generate parquet scan plan"))]
     ParquetScanPlan {
         source: DataFusionError,
         location: Location,
@@ -169,7 +157,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to extract column from filter: {}", source))]
+    #[snafu(display("Failed to extract column from filter"))]
     ExtractColumnFromFilter {
         source: DataFusionError,
         location: Location,

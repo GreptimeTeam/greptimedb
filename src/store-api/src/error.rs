@@ -21,17 +21,17 @@ use crate::storage::ColumnDescriptorBuilderError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Invalid raw region request: {err}, at {location}"))]
+    #[snafu(display("Invalid raw region request: {err}"))]
     InvalidRawRegionRequest { err: String, location: Location },
 
-    #[snafu(display("Invalid default constraint: {constraint}, source: {source}, at {location}"))]
+    #[snafu(display("Invalid default constraint: {constraint}"))]
     InvalidDefaultConstraint {
         constraint: String,
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build column descriptor: {source}, at {location}"))]
+    #[snafu(display("Failed to build column descriptor: "))]
     BuildColumnDescriptor {
         source: ColumnDescriptorBuilderError,
         location: Location,

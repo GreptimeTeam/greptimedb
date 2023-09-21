@@ -34,25 +34,25 @@ pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
-    #[snafu(display("Datatype error: {}", source))]
+    #[snafu(display("Datatype error"))]
     TypeCast {
         location: SnafuLocation,
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to query, source: {}", source))]
+    #[snafu(display("Failed to query"))]
     DatabaseQuery {
         location: SnafuLocation,
         source: QueryError,
     },
 
-    #[snafu(display("Failed to parse script, source: {}", source))]
+    #[snafu(display("Failed to parse script"))]
     PyParse {
         location: SnafuLocation,
         source: ParseError,
     },
 
-    #[snafu(display("Failed to compile script, source: {}", source))]
+    #[snafu(display("Failed to compile script"))]
     PyCompile {
         location: SnafuLocation,
         source: CodegenError,
@@ -65,13 +65,13 @@ pub enum Error {
         location: SnafuLocation,
     },
 
-    #[snafu(display("Arrow error: {}", source))]
+    #[snafu(display("Arrow error"))]
     Arrow {
         location: SnafuLocation,
         source: ArrowError,
     },
 
-    #[snafu(display("DataFusion error: {}", source))]
+    #[snafu(display("DataFusion error"))]
     DataFusion {
         location: SnafuLocation,
         source: DataFusionError,
@@ -104,18 +104,18 @@ pub enum Error {
         location: SnafuLocation,
     },
 
-    #[snafu(display("Failed to retrieve record batches, source: {}", source))]
+    #[snafu(display("Failed to retrieve record batches"))]
     RecordBatch {
         location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to create record batch, source: {}", source))]
+    #[snafu(display("Failed to create record batch"))]
     NewRecordBatch {
         location: SnafuLocation,
         source: common_recordbatch::error::Error,
     },
-    #[snafu(display("Failed to create tokio task, source: {}", source))]
+    #[snafu(display("Failed to create tokio task"))]
     TokioJoin { source: tokio::task::JoinError },
 }
 

@@ -33,6 +33,8 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
+    use snafu::ErrorCompat;
+
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
 
@@ -53,6 +55,9 @@ mod tests {
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
+            .iter_chain()
+            .last()
+            .unwrap()
             .to_string()
             .contains("Expected an expression"));
     }

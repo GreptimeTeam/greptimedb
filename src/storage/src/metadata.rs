@@ -50,7 +50,7 @@ pub enum Error {
     #[snafu(display("Column id {} already exists", id))]
     ColIdExists { id: ColumnId, location: Location },
 
-    #[snafu(display("Failed to build schema, source: {}", source))]
+    #[snafu(display("Failed to build schema"))]
     InvalidSchema {
         location: Location,
         source: datatypes::error::Error,
@@ -85,17 +85,13 @@ pub enum Error {
     DropInternalColumn { name: String },
 
     // End of variants for validating `AlterRequest`.
-    #[snafu(display("Failed to convert to column schema, source: {}", source))]
+    #[snafu(display("Failed to convert to column schema"))]
     ToColumnSchema {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to parse metadata to int, key_value: {}, source: {}",
-        key_value,
-        source
-    ))]
+    #[snafu(display("Failed to parse metadata to int, key_value: {}", key_value))]
     ParseMetaInt {
         // Store key and value in one string to reduce the enum size.
         key_value: String,
@@ -106,13 +102,13 @@ pub enum Error {
     #[snafu(display("Metadata of {} not found", key))]
     MetaNotFound { key: String, location: Location },
 
-    #[snafu(display("Failed to build column descriptor, source: {}", source))]
+    #[snafu(display("Failed to build column descriptor"))]
     BuildColumnDescriptor {
         source: ColumnDescriptorBuilderError,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert from arrow schema, source: {}", source))]
+    #[snafu(display("Failed to convert from arrow schema"))]
     ConvertArrowSchema {
         location: Location,
         source: datatypes::error::Error,
@@ -121,18 +117,14 @@ pub enum Error {
     #[snafu(display("Invalid internal column index in arrow schema"))]
     InvalidIndex { location: Location },
 
-    #[snafu(display(
-        "Failed to convert arrow chunk to batch, name: {}, source: {}",
-        name,
-        source
-    ))]
+    #[snafu(display("Failed to convert arrow chunk to batch, name: {}", name))]
     ConvertChunk {
         name: String,
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to convert schema, source: {}", source))]
+    #[snafu(display("Failed to convert schema"))]
     ConvertSchema {
         location: Location,
         source: datatypes::error::Error,

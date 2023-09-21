@@ -26,13 +26,13 @@ use snafu::{Location, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to invalidate table cache, source: {}", source))]
+    #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to execute ddl, source: {}", source))]
+    #[snafu(display("Failed to execute ddl"))]
     ExecuteDdl {
         location: Location,
         source: common_meta::error::Error,
@@ -44,25 +44,25 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display("external error"))]
     External {
         #[snafu(backtrace)]
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to insert data, source: {}", source))]
+    #[snafu(display("Failed to insert data"))]
     RequestInserts {
         #[snafu(backtrace)]
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to delete data, source: {}", source))]
+    #[snafu(display("Failed to delete data"))]
     RequestDeletes {
         #[snafu(backtrace)]
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    #[snafu(display("Failed to parse SQL"))]
     ParseSql {
         #[snafu(backtrace)]
         source: sql::error::Error,
@@ -75,28 +75,20 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
+    #[snafu(display("Column datatype error"))]
     ColumnDataType {
         #[snafu(backtrace)]
         source: api::error::Error,
     },
 
-    #[snafu(display(
-        "Invalid column proto definition, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Invalid column proto definition, column: {}", column))]
     InvalidColumnDef {
         column: String,
         #[snafu(backtrace)]
         source: api::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to convert column default constraint, column: {}, source: {}",
-        column_name,
-        source
-    ))]
+    #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
     ConvertColumnDefaultConstraint {
         column_name: String,
         #[snafu(backtrace)]
@@ -115,54 +107,50 @@ pub enum Error {
     #[snafu(display("Table not found: {}", table_name))]
     TableNotFound { table_name: String },
 
-    #[snafu(display("Failed to join task, source: {}", source))]
+    #[snafu(display("Failed to join task"))]
     JoinTask {
         source: common_runtime::JoinError,
         location: Location,
     },
 
-    #[snafu(display("General catalog error: {}", source))]
+    #[snafu(display("General catalog error"))]
     Catalog {
         #[snafu(backtrace)]
         source: catalog::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to find table partition rule for table {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to find table partition rule for table {}", table_name))]
     FindTablePartitionRule {
         table_name: String,
         #[snafu(backtrace)]
         source: partition::error::Error,
     },
 
-    #[snafu(display("Failed to split insert request, source: {}", source))]
+    #[snafu(display("Failed to split insert request"))]
     SplitInsert {
         source: partition::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to split delete request, source: {}", source))]
+    #[snafu(display("Failed to split delete request"))]
     SplitDelete {
         source: partition::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to find leader for region, source: {}", source))]
+    #[snafu(display("Failed to find leader for region"))]
     FindRegionLeader {
         source: partition::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to create table info, source: {}", source))]
+    #[snafu(display("Failed to create table info"))]
     CreateTableInfo {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Failed to build CreateExpr on insertion: {}", source))]
+    #[snafu(display("Failed to build CreateExpr on insertion"))]
     BuildCreateExprOnInsertion {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
@@ -177,7 +165,7 @@ pub enum Error {
     #[snafu(display("Schema {} already exists", name))]
     SchemaExists { name: String, location: Location },
 
-    #[snafu(display("Table occurs error, source: {}", source))]
+    #[snafu(display("Table occurs error"))]
     Table {
         #[snafu(backtrace)]
         source: table::error::Error,
@@ -186,47 +174,43 @@ pub enum Error {
     #[snafu(display("Cannot find column by name: {}", msg))]
     ColumnNotFound { msg: String, location: Location },
 
-    #[snafu(display("Failed to execute statement, source: {}", source))]
+    #[snafu(display("Failed to execute statement"))]
     ExecuteStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to plan statement, source: {}", source))]
+    #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to parse query, source: {}", source))]
+    #[snafu(display("Failed to parse query"))]
     ParseQuery {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    #[snafu(display("Failed to execute logical plan"))]
     ExecLogicalPlan {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to build DataFusion logical plan, source: {}", source))]
+    #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
         source: datafusion_common::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert AlterExpr to AlterRequest, source: {}", source))]
+    #[snafu(display("Failed to convert AlterExpr to AlterRequest"))]
     AlterExprToRequest {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to build table meta for table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         table_name: String,
         source: table::metadata::TableMetaBuilderError,
@@ -236,28 +220,25 @@ pub enum Error {
     #[snafu(display("Not supported: {}", feat))]
     NotSupported { feat: String },
 
-    #[snafu(display("Failed to find new columns on insertion: {}", source))]
+    #[snafu(display("Failed to find new columns on insertion"))]
     FindNewColumnsOnInsertion {
         #[snafu(backtrace)]
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Failed to convert into vectors, source: {}", source))]
+    #[snafu(display("Failed to convert into vectors"))]
     IntoVectors {
         #[snafu(backtrace)]
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to deserialize partition in meta to partition def, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to deserialize partition in meta to partition def"))]
     DeserializePartition {
         #[snafu(backtrace)]
         source: partition::error::Error,
     },
 
-    #[snafu(display("Failed to describe schema for given statement, source: {}", source))]
+    #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
         #[snafu(backtrace)]
         source: query::error::Error,
@@ -266,43 +247,39 @@ pub enum Error {
     #[snafu(display("Illegal primary keys definition: {}", msg))]
     IllegalPrimaryKeysDef { msg: String, location: Location },
 
-    #[snafu(display("Unrecognized table option: {}", source))]
+    #[snafu(display("Unrecognized table option"))]
     UnrecognizedTableOption {
         #[snafu(backtrace)]
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing time index column: {}", source))]
+    #[snafu(display("Missing time index column"))]
     MissingTimeIndexColumn {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to build regex, source: {}", source))]
+    #[snafu(display("Failed to build regex"))]
     BuildRegex {
         location: Location,
         source: regex::Error,
     },
 
-    #[snafu(display("Failed to copy table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to copy table: {}", table_name))]
     CopyTable {
         table_name: String,
         #[snafu(backtrace)]
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to insert value into table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
         #[snafu(backtrace)]
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to parse data source url, source: {}", source))]
+    #[snafu(display("Failed to parse data source url"))]
     ParseUrl {
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
@@ -311,82 +288,82 @@ pub enum Error {
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat { location: Location, format: Format },
 
-    #[snafu(display("Failed to parse file format, source: {}", source))]
+    #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build data source backend, source: {}", source))]
+    #[snafu(display("Failed to build data source backend"))]
     BuildBackend {
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to list objects, source: {}", source))]
+    #[snafu(display("Failed to list objects"))]
     ListObjects {
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to infer schema from path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to infer schema from path: {}", path))]
     InferSchema {
         path: String,
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to build csv config: {}", source))]
+    #[snafu(display("Failed to build csv config"))]
     BuildCsvConfig {
         source: common_datasource::file_format::csv::CsvConfigBuilderError,
         location: Location,
     },
 
-    #[snafu(display("Failed to write stream to path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to write stream to path: {}", path))]
     WriteStreamToFile {
         path: String,
         #[snafu(backtrace)]
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to read object in path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to read object in path: {}", path))]
     ReadObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to read record batch, source: {}", source))]
+    #[snafu(display("Failed to read record batch"))]
     ReadDfRecordBatch {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to read parquet file, source: {}", source))]
+    #[snafu(display("Failed to read parquet file"))]
     ReadParquet {
         source: parquet::errors::ParquetError,
         location: Location,
     },
 
-    #[snafu(display("Failed to read orc schema, source: {}", source))]
+    #[snafu(display("Failed to read orc schema"))]
     ReadOrc {
         source: common_datasource::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build parquet record batch stream, source: {}", source))]
+    #[snafu(display("Failed to build parquet record batch stream"))]
     BuildParquetRecordBatchStream {
         location: Location,
         source: parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to build file stream, source: {}", source))]
+    #[snafu(display("Failed to build file stream"))]
     BuildFileStream {
         location: Location,
         source: datafusion::error::DataFusionError,
     },
 
-    #[snafu(display("Failed to write parquet file, source: {}", source))]
+    #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
         #[snafu(backtrace)]
         source: storage::error::Error,
@@ -405,19 +382,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to project schema: {}", source))]
+    #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         source: serde_json::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    #[snafu(display("Failed to prepare immutable table"))]
     PrepareImmutableTable {
         #[snafu(backtrace)]
         source: query::error::Error,
@@ -430,35 +407,31 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table metadata manager error: {}", source))]
+    #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to read record batch, source: {}", source))]
+    #[snafu(display("Failed to read record batch"))]
     ReadRecordBatch {
         source: common_recordbatch::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build column vectors, source: {}", source))]
+    #[snafu(display("Failed to build column vectors"))]
     BuildColumnVectors {
         source: common_recordbatch::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Missing insert body, source: {source}"))]
+    #[snafu(display("Missing insert body"))]
     MissingInsertBody {
         source: sql::error::Error,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to build default value, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Failed to build default value, column: {}", column))]
     ColumnDefaultValue {
         column: String,
         location: Location,
@@ -482,22 +455,19 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to prepare file table: {}", source))]
+    #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to infer file table schema: {}", source))]
+    #[snafu(display("Failed to infer file table schema"))]
     InferFileTableSchema {
         #[snafu(backtrace)]
         source: query::error::Error,
     },
 
-    #[snafu(display(
-        "The schema of the file table is incompatible with the table schema: {}",
-        source
-    ))]
+    #[snafu(display("The schema of the file table is incompatible with the table schema"))]
     SchemaIncompatible {
         #[snafu(backtrace)]
         source: query::error::Error,

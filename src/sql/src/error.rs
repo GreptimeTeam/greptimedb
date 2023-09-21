@@ -36,11 +36,10 @@ pub enum Error {
     Unsupported { sql: String, keyword: String },
 
     #[snafu(display(
-        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}, source: {}",
+        "Unexpected token while parsing SQL statement: {}, expected: '{}', found: {}",
         sql,
         expected,
         actual,
-        source
     ))]
     Unexpected {
         sql: String,
@@ -57,7 +56,7 @@ pub enum Error {
     UnsupportedDefaultValue { column_name: String, expr: Expr },
 
     // Syntax error from sql parser.
-    #[snafu(display("Syntax error, source: {}, sql: {}", source, sql))]
+    #[snafu(display("Syntax error, sql: {}", sql))]
     Syntax { sql: String, source: ParserError },
 
     #[snafu(display("Missing time index constraint"))]
@@ -96,7 +95,7 @@ pub enum Error {
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName { name: String },
 
-    #[snafu(display("Invalid default constraint, column: {}, source: {}", column, source))]
+    #[snafu(display("Invalid default constraint, column: {}", column))]
     InvalidDefault {
         column: String,
         location: Location,
@@ -114,16 +113,13 @@ pub enum Error {
     #[snafu(display("Invalid table option key: {}", key))]
     InvalidTableOption { key: String, location: Location },
 
-    #[snafu(display("Failed to serialize column default constraint, source: {}", source))]
+    #[snafu(display("Failed to serialize column default constraint"))]
     SerializeColumnDefaultConstraint {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to convert data type to gRPC data type defined in proto, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to convert data type to gRPC data type defined in proto"))]
     ConvertToGrpcDataType {
         location: Location,
         source: api::error::Error,

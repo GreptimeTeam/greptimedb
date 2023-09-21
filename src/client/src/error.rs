@@ -26,30 +26,26 @@ pub enum Error {
     #[snafu(display("Illegal Flight messages, reason: {}", reason))]
     IllegalFlightMessages { reason: String, location: Location },
 
-    #[snafu(display("Failed to do Flight get, code: {}, source: {}", tonic_code, source))]
+    #[snafu(display("Failed to do Flight get, code: {}", tonic_code))]
     FlightGet {
         addr: String,
         tonic_code: Code,
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failure occurs during handling request, location: {}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failure occurs during handling request"))]
     HandleRequest {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to convert FlightData, source: {}", source))]
+    #[snafu(display("Failed to convert FlightData"))]
     ConvertFlightData {
         location: Location,
         source: common_grpc::Error,
     },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
+    #[snafu(display("Column datatype error"))]
     ColumnDataType {
         location: Location,
         source: api::error::Error,
@@ -61,18 +57,14 @@ pub enum Error {
     #[snafu(display("Missing required field in protobuf, field: {}", field))]
     MissingField { field: String, location: Location },
 
-    #[snafu(display(
-        "Failed to create gRPC channel, peer address: {}, source: {}",
-        addr,
-        source
-    ))]
+    #[snafu(display("Failed to create gRPC channel, peer address: {}", addr))]
     CreateChannel {
         addr: String,
         location: Location,
         source: common_grpc::error::Error,
     },
 
-    #[snafu(display("Failed to request RegionServer, code: {}, source: {}", code, source))]
+    #[snafu(display("Failed to request RegionServer, code: {}", code))]
     RegionServer { code: Code, source: BoxedError },
 
     // Server error carried in Tonic Status's metadata.

@@ -25,19 +25,19 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to create datafusion record batch, source: {}", source))]
+    #[snafu(display("Fail to create datafusion record batch"))]
     NewDfRecordBatch {
         source: datatypes::arrow::error::ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Data types error, source: {}", source))]
+    #[snafu(display("Data types error"))]
     DataTypes {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("External error, location: {}, source: {}", location, source))]
+    #[snafu(display("External error"))]
     External {
         location: Location,
         source: BoxedError,
@@ -46,35 +46,34 @@ pub enum Error {
     #[snafu(display("Failed to create RecordBatches, reason: {}", reason))]
     CreateRecordBatches { reason: String, location: Location },
 
-    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    #[snafu(display("Failed to convert Arrow schema"))]
     SchemaConversion {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to poll stream, source: {}", source))]
+    #[snafu(display("Failed to poll stream"))]
     PollStream {
         source: datafusion::error::DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Fail to format record batch, source: {}", source))]
+    #[snafu(display("Fail to format record batch"))]
     Format {
         source: datatypes::arrow::error::ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to init Recordbatch stream, source: {}", source))]
+    #[snafu(display("Failed to init Recordbatch stream"))]
     InitRecordbatchStream {
         source: datafusion_common::DataFusionError,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to project Arrow RecordBatch with schema {:?} and projection {:?}, source: {}",
+        "Failed to project Arrow RecordBatch with schema {:?} and projection {:?}",
         schema,
         projection,
-        source
     ))]
     ProjectArrowRecordBatch {
         source: datatypes::arrow::error::ArrowError,
@@ -91,10 +90,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to cast vector of type '{:?}' to type '{:?}', source: {}",
+        "Failed to cast vector of type '{:?}' to type '{:?}'",
         from_type,
         to_type,
-        source
     ))]
     CastVector {
         from_type: ConcreteDataType,

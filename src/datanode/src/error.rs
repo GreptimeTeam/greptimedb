@@ -27,43 +27,43 @@ use table::error::Error as TableError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to handle heartbeat response, source: {}", source))]
+    #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to get info from meta server, source: {}", source))]
+    #[snafu(display("Failed to get info from meta server"))]
     GetMetadata {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to execute sql, source: {}", source))]
+    #[snafu(display("Failed to execute sql"))]
     ExecuteSql {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to plan statement, source: {}", source))]
+    #[snafu(display("Failed to plan statement"))]
     PlanStatement {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute statement, source: {}", source))]
+    #[snafu(display("Failed to execute statement"))]
     ExecuteStatement {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to execute logical plan, source: {}", source))]
+    #[snafu(display("Failed to execute logical plan"))]
     ExecuteLogicalPlan {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to decode logical plan, source: {}", source))]
+    #[snafu(display("Failed to decode logical plan"))]
     DecodeLogicalPlan {
         location: Location,
         source: substrait::error::Error,
@@ -78,32 +78,28 @@ pub enum Error {
     #[snafu(display("Schema not found: {}", name))]
     SchemaNotFound { name: String, location: Location },
 
-    #[snafu(display("Failed to create table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to create table: {}", table_name))]
     CreateTable {
         table_name: String,
         location: Location,
         source: TableError,
     },
 
-    #[snafu(display("Failed to drop table {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to drop table {}", table_name))]
     DropTable {
         table_name: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
+    #[snafu(display("Table engine not found: {}", engine_name))]
     TableEngineNotFound {
         engine_name: String,
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Table engine procedure not found: {}, source: {}",
-        engine_name,
-        source
-    ))]
+    #[snafu(display("Table engine procedure not found: {}", engine_name))]
     EngineProcedureNotFound {
         engine_name: String,
         location: Location,
@@ -132,74 +128,70 @@ pub enum Error {
     ))]
     ColumnValuesNumberMismatch { columns: usize, values: usize },
 
-    #[snafu(display("Missing insert body, source: {source}"))]
+    #[snafu(display("Missing insert body"))]
     MissingInsertBody {
         source: sql::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to insert value to table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to insert value to table: {}", table_name))]
     Insert {
         table_name: String,
         location: Location,
         source: TableError,
     },
 
-    #[snafu(display(
-        "Failed to delete value from table: {}, source: {}",
-        table_name,
-        source
-    ))]
+    #[snafu(display("Failed to delete value from table: {}", table_name))]
     Delete {
         table_name: String,
         location: Location,
         source: TableError,
     },
 
-    #[snafu(display("Failed to flush table: {}, source: {}", table_name, source))]
+    #[snafu(display("Failed to flush table: {}", table_name))]
     FlushTable {
         table_name: String,
         location: Location,
         source: TableError,
     },
 
-    #[snafu(display("Failed to start server, source: {}", source))]
+    #[snafu(display("Failed to start server"))]
     StartServer {
         location: Location,
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to wait for GRPC serving, source: {}", source))]
+    #[snafu(display("Failed to wait for GRPC serving"))]
     WaitForGrpcServing {
         source: servers::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to parse address {}, source: {}", addr, source))]
+    #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
         source: std::net::AddrParseError,
     },
 
-    #[snafu(display("Failed to create directory {}, source: {}", dir, source))]
+    #[snafu(display("Failed to create directory {}", dir))]
     CreateDir { dir: String, source: std::io::Error },
 
-    #[snafu(display("Failed to remove directory {}, source: {}", dir, source))]
+    #[snafu(display("Failed to remove directory {}", dir))]
     RemoveDir { dir: String, source: std::io::Error },
 
-    #[snafu(display("Failed to open log store, source: {}", source))]
+    #[snafu(display("Failed to open log store"))]
     OpenLogStore {
         location: Location,
         source: Box<log_store::error::Error>,
     },
 
-    #[snafu(display("Failed to init backend, source: {}", source))]
+    #[snafu(display("Failed to init backend"))]
     InitBackend {
         source: object_store::Error,
         location: Location,
     },
 
-    #[snafu(display("Runtime resource error, source: {}", source))]
+    #[snafu(display("Runtime resource error"))]
     RuntimeResource {
         location: Location,
         source: common_runtime::error::Error,
@@ -208,7 +200,7 @@ pub enum Error {
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
-    #[snafu(display("Expect MetaClient but not found, location: {}", location))]
+    #[snafu(display("Expect MetaClient but not found"))]
     MissingMetaClient { location: Location },
 
     #[snafu(display("Invalid SQL, error: {}", msg))]
@@ -232,7 +224,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to register a new schema, source: {}", source))]
+    #[snafu(display("Failed to register a new schema"))]
     RegisterSchema {
         location: Location,
         source: catalog::error::Error,
@@ -241,37 +233,37 @@ pub enum Error {
     #[snafu(display("Schema {} already exists", name))]
     SchemaExists { name: String, location: Location },
 
-    #[snafu(display("Failed to convert delete expr to request: {}", source))]
+    #[snafu(display("Failed to convert delete expr to request"))]
     DeleteExprToRequest {
         location: Location,
         source: common_grpc_expr::error::Error,
     },
 
-    #[snafu(display("Failed to parse SQL, source: {}", source))]
+    #[snafu(display("Failed to parse SQL"))]
     ParseSql {
         location: Location,
         source: sql::error::Error,
     },
 
-    #[snafu(display("Failed to prepare immutable table: {}", source))]
+    #[snafu(display("Failed to prepare immutable table"))]
     PrepareImmutableTable {
         location: Location,
         source: query::error::Error,
     },
 
-    #[snafu(display("Failed to access catalog, source: {}", source))]
+    #[snafu(display("Failed to access catalog"))]
     Catalog {
         location: Location,
         source: catalog::error::Error,
     },
 
-    #[snafu(display("Failed to initialize meta client, source: {}", source))]
+    #[snafu(display("Failed to initialize meta client"))]
     MetaClientInit {
         location: Location,
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Failed to insert data, source: {}", source))]
+    #[snafu(display("Failed to insert data"))]
     InsertData {
         location: Location,
         source: common_grpc_expr::error::Error,
@@ -282,16 +274,16 @@ pub enum Error {
     ))]
     TableIdProviderNotFound { location: Location },
 
-    #[snafu(display("Failed to bump table id, source: {}", source))]
+    #[snafu(display("Failed to bump table id"))]
     BumpTableId {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Missing node id in Datanode config, location: {}", location))]
+    #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId { location: Location },
 
-    #[snafu(display("Missing node id option in distributed mode, location: {}", location))]
+    #[snafu(display("Missing node id option in distributed mode"))]
     MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
@@ -300,11 +292,7 @@ pub enum Error {
     #[snafu(display("Cannot find requested database: {}-{}", catalog, schema))]
     DatabaseNotFound { catalog: String, schema: String },
 
-    #[snafu(display(
-        "Failed to build default value, column: {}, source: {}",
-        column,
-        source
-    ))]
+    #[snafu(display("Failed to build default value, column: {}", column))]
     ColumnDefaultValue {
         column: String,
         location: Location,
@@ -317,39 +305,39 @@ pub enum Error {
     ))]
     ColumnNoneDefaultValue { column: String, location: Location },
 
-    #[snafu(display("Unrecognized table option: {}", source))]
+    #[snafu(display("Unrecognized table option"))]
     UnrecognizedTableOption {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to submit procedure {}, source: {}", procedure_id, source))]
+    #[snafu(display("Failed to submit procedure {}", procedure_id))]
     SubmitProcedure {
         procedure_id: ProcedureId,
         location: Location,
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to wait procedure {} done, source: {}", procedure_id, source))]
+    #[snafu(display("Failed to wait procedure {} done", procedure_id))]
     WaitProcedure {
         procedure_id: ProcedureId,
         location: Location,
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown server, source: {}", source))]
+    #[snafu(display("Failed to shutdown server"))]
     ShutdownServer {
         location: Location,
         source: servers::error::Error,
     },
 
-    #[snafu(display("Failed to shutdown instance, source: {}", source))]
+    #[snafu(display("Failed to shutdown instance"))]
     ShutdownInstance {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to encode object into json, source: {}", source))]
+    #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         location: Location,
         source: JsonError,
@@ -361,13 +349,13 @@ pub enum Error {
     #[snafu(display("Missing WAL dir config"))]
     MissingWalDirConfig { location: Location },
 
-    #[snafu(display("Failed to join task, source: {}", source))]
+    #[snafu(display("Failed to join task"))]
     JoinTask {
         source: common_runtime::JoinError,
         location: Location,
     },
 
-    #[snafu(display("Column datatype error, source: {}", source))]
+    #[snafu(display("Column datatype error"))]
     ColumnDataType {
         location: Location,
         source: api::error::Error,
@@ -379,46 +367,35 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to handle request for region {}, source: {}, location: {}",
-        region_id,
-        source,
-        location
-    ))]
+    #[snafu(display("Failed to handle request for region {}", region_id))]
     HandleRegionRequest {
         region_id: RegionId,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("RegionId {} not found, location: {}", region_id, location))]
+    #[snafu(display("RegionId {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Region engine {} is not registered, location: {}", name, location))]
+    #[snafu(display("Region engine {} is not registered", name))]
     RegionEngineNotFound { name: String, location: Location },
 
-    #[snafu(display("Unsupported gRPC request, kind: {}, location: {}", kind, location))]
+    #[snafu(display("Unsupported gRPC request, kind: {}", kind))]
     UnsupportedGrpcRequest { kind: String, location: Location },
 
-    #[snafu(display(
-        "Unsupported output type, expected: {}, location: {}",
-        expected,
-        location
-    ))]
+    #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
         location: Location,
     },
 
     #[snafu(display(
-        "Failed to get metadata from engine {} for region_id {}, location: {}, source: {}",
+        "Failed to get metadata from engine {} for region_id {}",
         engine,
         region_id,
-        location,
-        source
     ))]
     GetRegionMetadata {
         engine: String,
@@ -427,22 +404,13 @@ pub enum Error {
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to build region requests, location:{}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to build region requests"))]
     BuildRegionRequests {
         location: Location,
         source: store_api::metadata::MetadataError,
     },
 
-    #[snafu(display(
-        "Failed to stop region engine {}, location:{}, source: {}",
-        name,
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to stop region engine {}", name))]
     StopRegionEngine {
         name: String,
         location: Location,

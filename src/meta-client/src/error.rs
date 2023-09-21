@@ -33,7 +33,7 @@ pub enum Error {
     #[snafu(display("No leader, should ask leader first"))]
     NoLeader { location: Location },
 
-    #[snafu(display("Failed to create gRPC channel, source: {}", source))]
+    #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
         location: Location,
         source: common_grpc::error::Error,
@@ -48,19 +48,19 @@ pub enum Error {
     #[snafu(display("Failed create heartbeat stream to server"))]
     CreateHeartbeatStream { location: Location },
 
-    #[snafu(display("Invalid response header, source: {}", source))]
+    #[snafu(display("Invalid response header"))]
     InvalidResponseHeader {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to convert Metasrv request, source: {}", source))]
+    #[snafu(display("Failed to convert Metasrv request"))]
     ConvertMetaRequest {
         location: Location,
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to convert Metasrv response, source: {}", source))]
+    #[snafu(display("Failed to convert Metasrv response"))]
     ConvertMetaResponse {
         location: Location,
         source: common_meta::error::Error,

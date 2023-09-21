@@ -42,82 +42,82 @@ pub enum Error {
     #[snafu(display("empty host: {}", url))]
     EmptyHostPath { url: String, location: Location },
 
-    #[snafu(display("Invalid url: {}, error :{}", url, source))]
+    #[snafu(display("Invalid url: {}", url))]
     InvalidUrl {
         url: String,
         source: ParseError,
         location: Location,
     },
 
-    #[snafu(display("Failed to build backend, source: {}", source))]
+    #[snafu(display("Failed to build backend"))]
     BuildBackend {
         source: object_store::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to build orc reader, source: {}", source))]
+    #[snafu(display("Failed to build orc reader"))]
     OrcReader {
         location: Location,
         source: orc_rust::error::Error,
     },
 
-    #[snafu(display("Failed to read object from path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to read object from path: {}", path))]
     ReadObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to write object to path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to write object to path: {}", path))]
     WriteObject {
         path: String,
         location: Location,
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to write: {}", source))]
+    #[snafu(display("Failed to write"))]
     AsyncWrite {
         source: std::io::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to write record batch: {}", source))]
+    #[snafu(display("Failed to write record batch"))]
     WriteRecordBatch {
         location: Location,
         source: ArrowError,
     },
 
-    #[snafu(display("Failed to encode record batch: {}", source))]
+    #[snafu(display("Failed to encode record batch"))]
     EncodeRecordBatch {
         location: Location,
         source: ParquetError,
     },
 
-    #[snafu(display("Failed to read record batch: {}", source))]
+    #[snafu(display("Failed to read record batch"))]
     ReadRecordBatch {
         location: Location,
         source: datafusion::error::DataFusionError,
     },
 
-    #[snafu(display("Failed to read parquet source: {}", source))]
+    #[snafu(display("Failed to read parquet"))]
     ReadParquetSnafu {
         location: Location,
         source: datafusion::parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to convert parquet to schema: {}", source))]
+    #[snafu(display("Failed to convert parquet to schema"))]
     ParquetToSchema {
         location: Location,
         source: datafusion::parquet::errors::ParquetError,
     },
 
-    #[snafu(display("Failed to infer schema from file, source: {}", source))]
+    #[snafu(display("Failed to infer schema from file"))]
     InferSchema {
         location: Location,
         source: arrow_schema::ArrowError,
     },
 
-    #[snafu(display("Failed to list object in path: {}, source: {}", path, source))]
+    #[snafu(display("Failed to list object in path: {}", path))]
     ListObjects {
         path: String,
         location: Location,
@@ -127,7 +127,7 @@ pub enum Error {
     #[snafu(display("Invalid connection: {}", msg))]
     InvalidConnection { msg: String, location: Location },
 
-    #[snafu(display("Failed to join handle: {}", source))]
+    #[snafu(display("Failed to join handle"))]
     JoinHandle {
         location: Location,
         source: tokio::task::JoinError,
@@ -140,7 +140,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to merge schema: {}", source))]
+    #[snafu(display("Failed to merge schema"))]
     MergeSchema {
         source: arrow_schema::ArrowError,
         location: Location,

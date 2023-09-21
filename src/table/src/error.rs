@@ -28,13 +28,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Datafusion error: {}", source))]
+    #[snafu(display("Datafusion error"))]
     Datafusion {
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Failed to convert Arrow schema, source: {}", source))]
+    #[snafu(display("Failed to convert Arrow schema"))]
     SchemaConversion {
         source: datatypes::error::Error,
         location: Location,
@@ -46,26 +46,26 @@ pub enum Error {
     #[snafu(display("Engine exist: {}", engine))]
     EngineExist { engine: String, location: Location },
 
-    #[snafu(display("Table projection error, source: {}", source))]
+    #[snafu(display("Table projection error"))]
     TableProjection {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Failed to create record batch for Tables, source: {}", source))]
+    #[snafu(display("Failed to create record batch for Tables"))]
     TablesRecordBatch {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Column {column_name} already exists in table {table_name}, at {location}"))]
+    #[snafu(display("Column {column_name} already exists in table {table_name}"))]
     ColumnExists {
         column_name: String,
         table_name: String,
         location: Location,
     },
 
-    #[snafu(display("Failed to build schema, msg: {}, source: {}", msg, source))]
+    #[snafu(display("Failed to build schema, msg: {}", msg))]
     SchemaBuild {
         location: Location,
         source: datatypes::error::Error,
@@ -94,10 +94,9 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build column descriptor for table: {}, column: {}, source: {}",
+        "Failed to build column descriptor for table: {}, column: {}",
         table_name,
         column_name,
-        source,
     ))]
     BuildColumnDescriptor {
         source: store_api::storage::ColumnDescriptorBuilderError,
@@ -109,7 +108,7 @@ pub enum Error {
     #[snafu(display("Regions schemas mismatch in table: {}", table))]
     RegionSchemaMismatch { table: String, location: Location },
 
-    #[snafu(display("Failed to operate table, source: {}", source))]
+    #[snafu(display("Failed to operate table"))]
     TableOperation { source: BoxedError },
 
     #[snafu(display("Unsupported operation: {}", operation))]

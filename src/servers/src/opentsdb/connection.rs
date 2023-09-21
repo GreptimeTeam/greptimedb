@@ -116,6 +116,7 @@ mod tests {
     use std::io::Write;
 
     use bytes::BufMut;
+    use snafu::ErrorCompat;
     use tokio_test::io::Builder;
 
     use super::*;
@@ -186,10 +187,8 @@ mod tests {
         buffer.writer().write_all(b"Hello Wor\xffld.\r\n").unwrap();
         let result = conn.parse_line();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Invalid OpenTSDB line, source: invalid utf-8 sequence"));
+        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        assert!(err.contains("invalid utf-8 sequence"));
     }
 
     #[tokio::test]

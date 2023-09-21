@@ -565,44 +565,31 @@ impl SkippedFields {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum MetadataError {
-    #[snafu(display("Invalid schema, source: {}, location: {}", source, location))]
+    #[snafu(display("Invalid schema"))]
     InvalidSchema {
         source: datatypes::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Invalid metadata, {}, location: {}", reason, location))]
+    #[snafu(display("Invalid metadata, {}", reason))]
     InvalidMeta { reason: String, location: Location },
 
-    #[snafu(display(
-        "Failed to ser/de json object. Location: {}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to ser/de json object"))]
     SerdeJson {
         location: Location,
         source: serde_json::Error,
     },
 
-    #[snafu(display(
-        "Failed to convert struct from datatypes, location: {}, source: {}",
-        location,
-        source
-    ))]
+    #[snafu(display("Failed to convert struct from datatypes"))]
     ConvertDatatypes {
         location: Location,
         source: datatypes::error::Error,
     },
 
-    #[snafu(display("Invalid raw region request, err: {}, location: {}", err, location))]
+    #[snafu(display("Invalid raw region request, err: {}", err))]
     InvalidRawRegionRequest { err: String, location: Location },
 
-    #[snafu(display(
-        "Invalid region request, region_id: {}, err: {}, location: {}",
-        region_id,
-        err,
-        location
-    ))]
+    #[snafu(display("Invalid region request, region_id: {}, err: {}", region_id, err))]
     InvalidRegionRequest {
         region_id: RegionId,
         err: String,

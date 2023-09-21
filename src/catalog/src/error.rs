@@ -26,44 +26,37 @@ use tokio::task::JoinError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Failed to list catalogs, source: {}", source))]
+    #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list {}'s schemas, source: {}", catalog, source))]
+    #[snafu(display("Failed to list {}'s schemas", catalog))]
     ListSchemas {
         location: Location,
         catalog: String,
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to re-compile script due to internal error, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to re-compile script due to internal error"))]
     CompileScriptInternal {
         location: Location,
         source: BoxedError,
     },
-    #[snafu(display("Failed to open system catalog table, source: {}", source))]
+    #[snafu(display("Failed to open system catalog table"))]
     OpenSystemCatalog {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to create system catalog table, source: {}", source))]
+    #[snafu(display("Failed to create system catalog table"))]
     CreateSystemCatalog {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to create table, table info: {}, source: {}",
-        table_info,
-        source
-    ))]
+    #[snafu(display("Failed to create table, table info: {}", table_info))]
     CreateTable {
         table_info: String,
         location: Location,
@@ -97,13 +90,13 @@ pub enum Error {
     #[snafu(display("Catalog value is not present"))]
     EmptyValue { location: Location },
 
-    #[snafu(display("Failed to deserialize value, source: {}", source))]
+    #[snafu(display("Failed to deserialize value"))]
     ValueDeserialize {
         source: serde_json::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Table engine not found: {}, source: {}", engine_name, source))]
+    #[snafu(display("Table engine not found: {}", engine_name))]
     TableEngineNotFound {
         engine_name: String,
         location: Location,
@@ -141,14 +134,14 @@ pub enum Error {
     #[snafu(display("Operation {} not supported", op))]
     NotSupported { op: String, location: Location },
 
-    #[snafu(display("Failed to open table {table_id}, source: {source}, at {location}"))]
+    #[snafu(display("Failed to open table {table_id}"))]
     OpenTable {
         table_id: TableId,
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to open table in parallel, source: {}", source))]
+    #[snafu(display("Failed to open table in parallel"))]
     ParallelOpenTable { source: JoinError },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
@@ -163,58 +156,52 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to create recordbatch, source: {}", source))]
+    #[snafu(display("Failed to create recordbatch"))]
     CreateRecordBatch {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display(
-        "Failed to insert table creation record to system catalog, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to insert table creation record to system catalog"))]
     InsertCatalogRecord {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to scan system catalog table, source: {}", source))]
+    #[snafu(display("Failed to scan system catalog table"))]
     SystemCatalogTableScan {
         location: Location,
         source: table::error::Error,
     },
 
-    #[snafu(display("{source}"))]
+    #[snafu(display(""))]
     Internal {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display(
-        "Failed to upgrade weak catalog manager reference. location: {}",
-        location
-    ))]
+    #[snafu(display("Failed to upgrade weak catalog manager reference"))]
     UpgradeWeakCatalogManagerRef { location: Location },
 
-    #[snafu(display("Failed to execute system catalog table scan, source: {}", source))]
+    #[snafu(display("Failed to execute system catalog table scan"))]
     SystemCatalogTableScanExec {
         location: Location,
         source: common_query::error::Error,
     },
 
-    #[snafu(display("Cannot parse catalog value, source: {}", source))]
+    #[snafu(display("Cannot parse catalog value"))]
     InvalidCatalogValue {
         location: Location,
         source: common_catalog::error::Error,
     },
 
-    #[snafu(display("Failed to perform metasrv operation, source: {}", source))]
+    #[snafu(display("Failed to perform metasrv operation"))]
     MetaSrv {
         location: Location,
         source: meta_client::error::Error,
     },
 
-    #[snafu(display("Invalid table info in catalog, source: {}", source))]
+    #[snafu(display("Invalid table info in catalog"))]
     InvalidTableInfoInCatalog {
         location: Location,
         source: datatypes::error::Error,
@@ -223,14 +210,14 @@ pub enum Error {
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
 
-    #[snafu(display("{}: {}", msg, source))]
+    #[snafu(display("msg: {}", msg))]
     Datafusion {
         msg: String,
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display("Table schema mismatch, source: {}", source))]
+    #[snafu(display("Table schema mismatch"))]
     TableSchemaMismatch {
         location: Location,
         source: table::error::Error,
@@ -239,7 +226,7 @@ pub enum Error {
     #[snafu(display("A generic error has occurred, msg: {}", msg))]
     Generic { msg: String, location: Location },
 
-    #[snafu(display("Table metadata manager error: {}", source))]
+    #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
         source: common_meta::error::Error,
         location: Location,
