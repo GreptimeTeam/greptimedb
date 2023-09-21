@@ -609,6 +609,8 @@ node_id = 0
 require_lease_before_startup = true
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
+rpc_max_recv_message_size = 536870912
+rpc_max_send_message_size = 536870912
 enable_telemetry = true
 
 [heartbeat]
