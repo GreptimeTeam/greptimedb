@@ -32,7 +32,7 @@ use session::context::{QueryContext, QueryContextRef};
 use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, find_testing_resource,
-    standalone, standalone_instance_case, MockInstance,
+    prepare_path, standalone, standalone_instance_case, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -538,7 +538,7 @@ async fn test_execute_external_create(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
     let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create");
-    let location = tmp_dir.path().to_str().unwrap();
+    let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let output = execute_sql(
         &instance,
@@ -595,7 +595,7 @@ async fn test_execute_external_create_without_ts(instance: Arc<dyn MockInstance>
     let instance = instance.frontend();
 
     let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_without_ts");
-    let location = tmp_dir.path().to_str().unwrap();
+    let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let result = try_execute_sql(
         &instance,
@@ -616,7 +616,7 @@ async fn test_execute_external_create_with_invalid_ts(instance: Arc<dyn MockInst
     let instance = instance.frontend();
 
     let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_with_invalid_ts");
-    let location = tmp_dir.path().to_str().unwrap();
+    let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let result = try_execute_sql(
         &instance,

@@ -16,7 +16,9 @@ pub mod fs;
 pub mod s3;
 use std::collections::HashMap;
 
+use lazy_static::lazy_static;
 use object_store::ObjectStore;
+use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 use url::{ParseError, Url};
 
@@ -55,6 +57,38 @@ pub fn build_backend(url: &str, connection: &HashMap<String, String>) -> Result<
         }
         FS_SCHEMA => Ok(build_fs_backend("/")?),
 
-        _ => error::UnsupportedBackendProtocolSnafu { protocol: schema }.fail(),
+        _ => {
+            #[cfg(windows)]
+            {
+                // On Windows, the url may start with `C:/`.
+                if let Some(root) = handle_windows_path(url) {
+                    return Ok(build_fs_backend(&root)?);
+                }
+            }
+            error::UnsupportedBackendProtocolSnafu { protocol: schema }.fail()
+        }
+    }
+}
+
+lazy_static! {
+    static ref DISK_SYMBOL_PATTERN: Regex = Regex::new("^([A-Za-z]:/)").unwrap();
+}
+
+pub fn handle_windows_path(url: &str) -> Option<String> {
+    DISK_SYMBOL_PATTERN
+        .captures(url)
+        .map(|captures| captures[0].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_windows_path;
+
+    #[test]
+    fn test_handle_windows_path() {
+        assert_eq!(
+            handle_windows_path("C:/to/path/file"),
+            Some("C:/".to_string())
+        );
     }
 }
