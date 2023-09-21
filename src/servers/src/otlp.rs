@@ -49,17 +49,12 @@ pub fn to_grpc_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     let mut table_writer = MultiTableData::default();
 
-    for resource in request.resource_metrics {
-        let resource_attrs = resource.resource.map(|r| r.attributes);
-        for scope in resource.scope_metrics {
-            let scope_attrs = scope.scope.map(|s| s.attributes);
-            for metric in scope.metrics {
-                encode_metrics(
-                    &mut table_writer,
-                    &metric,
-                    resource_attrs.as_ref(),
-                    scope_attrs.as_ref(),
-                )?;
+    for resource in &request.resource_metrics {
+        let resource_attrs = resource.resource.as_ref().map(|r| &r.attributes);
+        for scope in &resource.scope_metrics {
+            let scope_attrs = scope.scope.as_ref().map(|s| &s.attributes);
+            for metric in &scope.metrics {
+                encode_metrics(&mut table_writer, &metric, resource_attrs, scope_attrs)?;
             }
         }
     }
@@ -67,11 +62,11 @@ pub fn to_grpc_insert_requests(
     Ok(table_writer.into_row_insert_requests())
 }
 
-fn encode_metrics<'a>(
-    table_writer: &mut MultiTableData<'a>,
-    metric: &'a Metric,
-    resource_attrs: Option<&'a Vec<KeyValue>>,
-    scope_attrs: Option<&'a Vec<KeyValue>>,
+fn encode_metrics(
+    table_writer: &mut MultiTableData,
+    metric: &Metric,
+    resource_attrs: Option<&Vec<KeyValue>>,
+    scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     let name = &metric.name;
     // note that we don't store description or unit, we might want to deal with
@@ -98,18 +93,18 @@ fn encode_metrics<'a>(
     Ok(())
 }
 
-fn write_attributes<'a>(
-    writer: &mut TableData<'a>,
+fn write_attributes(
+    writer: &mut TableData,
     row: &mut Vec<Value>,
-    attrs: Option<&'a Vec<KeyValue>>,
+    attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
     if let Some(attrs) = attrs {
         let table_tags = attrs.iter().filter_map(|attr| {
             if let Some(val) = attr.value.as_ref().and_then(|v| v.value.as_ref()) {
                 match val {
-                    any_value::Value::StringValue(s) => Some((attr.key.as_str(), s.as_str())),
-                    any_value::Value::IntValue(v) => Some((attr.key.as_str(), v.to_string())),
-                    any_value::Value::DoubleValue(v) => Some((attr.key.as_str(), v.to_string())),
+                    any_value::Value::StringValue(s) => Some((attr.key.to_string(), s.to_string())),
+                    any_value::Value::IntValue(v) => Some((attr.key.to_string(), v.to_string())),
+                    any_value::Value::DoubleValue(v) => Some((attr.key.to_string(), v.to_string())),
                     _ => None, // TODO(sunng87): allow different type of values
                 }
             } else {
@@ -122,13 +117,9 @@ fn write_attributes<'a>(
     Ok(())
 }
 
-fn write_timestamp<'a>(
-    lines: &mut TableData<'a>,
-    row: &mut Vec<Value>,
-    time_nano: i64,
-) -> Result<()> {
+fn write_timestamp(table: &mut TableData, row: &mut Vec<Value>, time_nano: i64) -> Result<()> {
     row_writer::write_ts_precision(
-        lines,
+        table,
         GREPTIME_TIMESTAMP,
         Some(time_nano),
         Precision::Nanosecond,
@@ -136,38 +127,38 @@ fn write_timestamp<'a>(
     )
 }
 
-fn write_data_point_value<'a>(
-    lines: &mut TableData<'a>,
+fn write_data_point_value(
+    table: &mut TableData,
     row: &mut Vec<Value>,
-    field: &'a str,
+    field: &str,
     value: &Option<number_data_point::Value>,
 ) -> Result<()> {
     match value {
         Some(number_data_point::Value::AsInt(val)) => {
             // we coerce all values to f64
-            row_writer::write_f64(lines, field, *val as f64, row)?;
+            row_writer::write_f64(table, field, *val as f64, row)?;
         }
         Some(number_data_point::Value::AsDouble(val)) => {
-            row_writer::write_f64(lines, field, *val, row)?;
+            row_writer::write_f64(table, field, *val, row)?;
         }
         _ => {}
     }
     Ok(())
 }
 
-fn write_tags_and_timestamp<'a>(
-    lines: &mut TableData<'a>,
+fn write_tags_and_timestamp(
+    table: &mut TableData,
     row: &mut Vec<Value>,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     data_point_attrs: Option<&Vec<KeyValue>>,
     timestamp_nanos: i64,
 ) -> Result<()> {
-    write_attributes(lines, row, resource_attrs)?;
-    write_attributes(lines, row, scope_attrs)?;
-    write_attributes(lines, row, data_point_attrs)?;
+    write_attributes(table, row, resource_attrs)?;
+    write_attributes(table, row, scope_attrs)?;
+    write_attributes(table, row, data_point_attrs)?;
 
-    write_timestamp(lines, row, timestamp_nanos)?;
+    write_timestamp(table, row, timestamp_nanos)?;
 
     Ok(())
 }
@@ -176,23 +167,23 @@ fn write_tags_and_timestamp<'a>(
 ///
 /// note that there can be multiple data points in the request, it's going to be
 /// stored as multiple rows
-fn encode_gauge<'a>(
-    table_writer: &mut MultiTableData<'a>,
+fn encode_gauge(
+    table_writer: &mut MultiTableData,
     name: &str,
     gauge: &Gauge,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
-    let mut lines = table_writer.get_or_default_table_data(
+    let mut table = table_writer.get_or_default_table_data(
         &normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         gauge.data_points.len(),
     );
 
     for data_point in &gauge.data_points {
-        let mut row = lines.alloc_one_row();
+        let mut row = table.alloc_one_row();
         write_tags_and_timestamp(
-            &mut lines,
+            &mut table,
             &mut row,
             resource_attrs,
             scope_attrs,
@@ -200,7 +191,7 @@ fn encode_gauge<'a>(
             data_point.time_unix_nano as i64,
         )?;
 
-        write_data_point_value(&mut lines, &mut row, GREPTIME_VALUE, &data_point.value)?;
+        write_data_point_value(&mut table, &mut row, GREPTIME_VALUE, &data_point.value)?;
     }
 
     Ok(())
@@ -209,30 +200,30 @@ fn encode_gauge<'a>(
 /// encode this sum metric
 ///
 /// `aggregation_temporality` and `monotonic` are ignored for now
-fn encode_sum<'a>(
-    table_writer: &mut MultiTableData<'a>,
+fn encode_sum(
+    table_writer: &mut MultiTableData,
     name: &str,
     sum: &Sum,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
-    let mut lines = table_writer.get_or_default_table_data(
+    let mut table = table_writer.get_or_default_table_data(
         &normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         sum.data_points.len(),
     );
 
     for data_point in &sum.data_points {
-        let mut row = lines.alloc_one_row();
+        let mut row = table.alloc_one_row();
         write_tags_and_timestamp(
-            &mut lines,
+            &mut table,
             &mut row,
             resource_attrs,
             scope_attrs,
             Some(data_point.attributes.as_ref()),
             data_point.time_unix_nano as i64,
         )?;
-        write_data_point_value(&mut lines, &mut row, GREPTIME_VALUE, &data_point.value)?;
+        write_data_point_value(&mut table, &mut row, GREPTIME_VALUE, &data_point.value)?;
     }
 
     Ok(())
@@ -251,8 +242,8 @@ const HISTOGRAM_LE_COLUMN: &str = "le";
 ///
 /// By its Prometheus compatibility, we hope to be able to use prometheus
 /// quantile functions on this table.
-fn encode_histogram<'a>(
-    table_writer: &mut MultiTableData<'a>,
+fn encode_histogram(
+    table_writer: &mut MultiTableData,
     name: &str,
     hist: &Histogram,
     resource_attrs: Option<&Vec<KeyValue>>,
@@ -265,28 +256,17 @@ fn encode_histogram<'a>(
     let count_table_name = format!("{}_count", normalized_name);
 
     let data_points_len = hist.data_points.len();
-    let mut bucket_lines = table_writer.get_or_default_table_data(
-        &bucket_table_name,
-        APPROXIMATE_COLUMN_COUNT,
-        data_points_len,
-    );
-    let mut sum_lines = table_writer.get_or_default_table_data(
-        &sum_table_name,
-        APPROXIMATE_COLUMN_COUNT,
-        data_points_len,
-    );
-    let mut count_lines = table_writer.get_or_default_table_data(
-        &count_table_name,
-        APPROXIMATE_COLUMN_COUNT,
-        data_points_len,
-    );
+    // Note that the row and columns number here is approximate
+    let mut bucket_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len * 3);
+    let mut sum_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len);
+    let mut count_table = TableData::new(APPROXIMATE_COLUMN_COUNT, data_points_len);
 
     for data_point in &hist.data_points {
-        let mut bucket_row = bucket_lines.alloc_one_row();
+        let mut bucket_row = bucket_table.alloc_one_row();
         let mut accumulated_count = 0;
         for (idx, count) in data_point.bucket_counts.iter().enumerate() {
             write_tags_and_timestamp(
-                &mut bucket_lines,
+                &mut bucket_table,
                 &mut bucket_row,
                 resource_attrs,
                 scope_attrs,
@@ -296,7 +276,7 @@ fn encode_histogram<'a>(
 
             if let Some(upper_bounds) = data_point.explicit_bounds.get(idx) {
                 row_writer::write_tag(
-                    bucket_lines,
+                    &mut bucket_table,
                     HISTOGRAM_LE_COLUMN,
                     upper_bounds,
                     &mut bucket_row,
@@ -304,7 +284,7 @@ fn encode_histogram<'a>(
             } else if idx == data_point.explicit_bounds.len() {
                 // The last bucket
                 row_writer::write_tag(
-                    bucket_lines,
+                    &mut bucket_table,
                     HISTOGRAM_LE_COLUMN,
                     f64::INFINITY,
                     &mut bucket_row,
@@ -313,7 +293,7 @@ fn encode_histogram<'a>(
 
             accumulated_count += count;
             row_writer::write_f64(
-                &mut bucket_lines,
+                &mut bucket_table,
                 GREPTIME_VALUE,
                 accumulated_count as f64,
                 &mut bucket_row,
@@ -321,9 +301,9 @@ fn encode_histogram<'a>(
         }
 
         if let Some(sum) = data_point.sum {
-            let mut sum_row = sum_lines.alloc_one_row();
+            let mut sum_row = sum_table.alloc_one_row();
             write_tags_and_timestamp(
-                &mut sum_lines,
+                &mut sum_table,
                 &mut sum_row,
                 resource_attrs,
                 scope_attrs,
@@ -331,12 +311,12 @@ fn encode_histogram<'a>(
                 data_point.time_unix_nano as i64,
             )?;
 
-            row_writer::write_f64(&mut sum_lines, GREPTIME_VALUE, sum, &mut sum_row)?;
+            row_writer::write_f64(&mut sum_table, GREPTIME_VALUE, sum, &mut sum_row)?;
         }
 
-        let mut count_row = count_lines.alloc_one_row();
+        let mut count_row = count_table.alloc_one_row();
         write_tags_and_timestamp(
-            &mut count_lines,
+            &mut count_table,
             &mut count_row,
             resource_attrs,
             scope_attrs,
@@ -345,12 +325,16 @@ fn encode_histogram<'a>(
         )?;
 
         row_writer::write_f64(
-            &mut count_lines,
+            &mut count_table,
             GREPTIME_VALUE,
             data_point.count as f64,
             &mut count_row,
         )?;
     }
+
+    table_writer.add_table_data(bucket_table_name, bucket_table);
+    table_writer.add_table_data(sum_table_name, sum_table);
+    table_writer.add_table_data(count_table_name, count_table);
 
     Ok(())
 }
@@ -361,23 +345,23 @@ fn encode_exponential_histogram(_name: &str, _hist: &ExponentialHistogram) -> Re
     Ok(())
 }
 
-fn encode_summary<'a>(
-    table_writer: &mut MultiTableData<'a>,
+fn encode_summary(
+    table_writer: &mut MultiTableData,
     name: &str,
     summary: &Summary,
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
 ) -> Result<()> {
-    let mut lines = table_writer.get_or_default_table_data(
+    let mut table = table_writer.get_or_default_table_data(
         &normalize_otlp_name(name),
         APPROXIMATE_COLUMN_COUNT,
         summary.data_points.len(),
     );
 
     for data_point in &summary.data_points {
-        let mut row = lines.alloc_one_row();
+        let mut row = table.alloc_one_row();
         write_tags_and_timestamp(
-            &mut lines,
+            table,
             &mut row,
             resource_attrs,
             scope_attrs,
@@ -387,7 +371,7 @@ fn encode_summary<'a>(
 
         for quantile in &data_point.quantile_values {
             row_writer::write_f64(
-                &mut lines,
+                table,
                 &format!("greptime_p{:02}", quantile.quantile * 100f64),
                 quantile.value,
                 &mut row,
@@ -395,7 +379,7 @@ fn encode_summary<'a>(
         }
 
         row_writer::write_f64(
-            &mut lines,
+            &mut table,
             GREPTIME_COUNT,
             data_point.count as f64,
             &mut row,
