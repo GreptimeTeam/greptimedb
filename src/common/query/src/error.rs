@@ -29,23 +29,20 @@ use statrs::StatsError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to execute Python UDF, source: {}", msg))]
+    #[snafu(display("Failed to execute Python UDF: {}", msg))]
     PyUdf {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
         location: Location,
     },
 
-    #[snafu(display(
-        "Fail to create temporary recordbatch when eval Python UDF, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to create temporary recordbatch when eval Python UDF"))]
     UdfTempRecordBatch {
         location: Location,
         source: RecordbatchError,
     },
 
-    #[snafu(display("Fail to execute function, source: {}", source))]
+    #[snafu(display("Failed to execute function"))]
     ExecuteFunction {
         source: DataFusionError,
         location: Location,
@@ -58,25 +55,25 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Fail to generate function, source: {}", source))]
+    #[snafu(display("Failed to generate function"))]
     GenerateFunction {
         source: StatsError,
         location: Location,
     },
 
-    #[snafu(display("Fail to cast scalar value into vector: {}", source))]
+    #[snafu(display("Failed to cast scalar value into vector"))]
     FromScalarValue {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Fail to cast arrow array into vector: {}", source))]
+    #[snafu(display("Failed to cast arrow array into vector"))]
     FromArrowArray {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Fail to cast arrow array into vector: {:?}, {}", data_type, source))]
+    #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
         location: Location,
         source: DataTypeError,
@@ -110,56 +107,50 @@ pub enum Error {
     #[snafu(display("Not expected to run ExecutionPlan more than once"))]
     ExecuteRepeatedly { location: Location },
 
-    #[snafu(display("General DataFusion error, source: {}", source))]
+    #[snafu(display("General DataFusion error"))]
     GeneralDataFusion {
         source: DataFusionError,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to convert DataFusion's recordbatch stream, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to convert DataFusion's recordbatch stream"))]
     ConvertDfRecordBatchStream {
         location: Location,
         source: common_recordbatch::error::Error,
     },
 
-    #[snafu(display("Failed to convert arrow schema, source: {}", source))]
+    #[snafu(display("Failed to convert arrow schema"))]
     ConvertArrowSchema {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to execute physical plan, source: {}", source))]
+    #[snafu(display("Failed to execute physical plan"))]
     ExecutePhysicalPlan {
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to cast array to {:?}, source: {}", typ, source))]
+    #[snafu(display("Failed to cast array to {:?}", typ))]
     TypeCast {
         source: ArrowError,
         typ: arrow::datatypes::DataType,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to perform compute operation on arrow arrays, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to perform compute operation on arrow arrays"))]
     ArrowCompute {
         source: ArrowError,
         location: Location,
     },
 
-    #[snafu(display("Query engine fail to cast value: {}", source))]
+    #[snafu(display("Query engine fail to cast value"))]
     ToScalarValue {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Failed to get scalar vector, {}", source))]
+    #[snafu(display("Failed to get scalar vector"))]
     GetScalarVector {
         location: Location,
         source: DataTypeError,

@@ -98,6 +98,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
+    use snafu::ErrorCompat;
     use sqlparser::ast::{ColumnOption, DataType};
 
     use super::*;
@@ -214,9 +215,8 @@ mod tests {
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        assert!(result
-            .to_string()
-            .contains("expect keyword COLUMN after ALTER TABLE DROP"));
+        let err = result.iter_chain().last().unwrap().to_string();
+        assert!(err.contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
         let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
@@ -245,9 +245,8 @@ mod tests {
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        assert!(result
-            .to_string()
-            .contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
+        let err = result.iter_chain().last().unwrap().to_string();
+        assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";
         let mut result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();

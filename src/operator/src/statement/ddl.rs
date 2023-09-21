@@ -123,12 +123,6 @@ impl StatementExecutor {
 
         let table = DistTable::table(table_info);
 
-        // Invalidates local cache ASAP.
-        self.cache_invalidator
-            .invalidate_table_id(&Context::default(), table_id)
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
-
         Ok(table)
     }
 
@@ -151,6 +145,11 @@ impl StatementExecutor {
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate_table_id(&Context::default(), table_id)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        self.cache_invalidator
+            .invalidate_table_name(&Context::default(), table_name.clone())
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -259,6 +258,14 @@ impl StatementExecutor {
         // Invalidates local cache ASAP.
         self.cache_invalidator
             .invalidate_table_id(&Context::default(), table_id)
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        self.cache_invalidator
+            .invalidate_table_name(
+                &Context::default(),
+                TableName::new(catalog_name, schema_name, table_name),
+            )
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
@@ -446,7 +453,6 @@ fn create_table_info(
         engine: create_table.engine.clone(),
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
-        engine_options: HashMap::new(),
         options: table_options,
         created_on: DateTime::default(),
         partition_key_indices,

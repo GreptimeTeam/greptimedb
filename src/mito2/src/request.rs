@@ -16,14 +16,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
     to_proto_value,
 };
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
-use common_base::readable_size::ReadableSize;
 use common_query::Output;
 use common_query::Output::AffectedRows;
 use common_telemetry::tracing::log::info;
@@ -37,10 +35,9 @@ use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
-use store_api::storage::{CompactionStrategy, RegionId, SequenceNumber};
+use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::config::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{
     CompactRegionSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu,
     InvalidRequestSnafu, Result,
@@ -49,29 +46,6 @@ use crate::memtable::MemtableId;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 use crate::wal::EntryId;
-
-/// Options that affect the entire region.
-///
-/// Users need to specify the options while creating/opening a region.
-#[derive(Debug)]
-pub struct RegionOptions {
-    /// Region memtable max size in bytes.
-    pub write_buffer_size: Option<ReadableSize>,
-    /// Region SST files TTL.
-    pub ttl: Option<Duration>,
-    /// Compaction strategy.
-    pub compaction_strategy: CompactionStrategy,
-}
-
-impl Default for RegionOptions {
-    fn default() -> Self {
-        RegionOptions {
-            write_buffer_size: Some(DEFAULT_WRITE_BUFFER_SIZE),
-            ttl: None,
-            compaction_strategy: CompactionStrategy::default(),
-        }
-    }
-}
 
 /// Request to write a region.
 #[derive(Debug)]

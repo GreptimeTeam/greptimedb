@@ -20,7 +20,7 @@ use axum::{Extension, Json};
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{ErrorCompat, ResultExt};
 
 use crate::error::{self, Error, Result};
 use crate::opentsdb::codec::DataPoint;
@@ -160,7 +160,7 @@ impl OpentsdbDebuggingResponse {
         if let Some(details) = self.errors.as_mut() {
             let error = OpentsdbDetailError {
                 datapoint,
-                error: error.to_string(),
+                error: error.iter_chain().last().unwrap().to_string(),
             };
             details.push(error);
         };
@@ -169,6 +169,8 @@ impl OpentsdbDebuggingResponse {
 
 #[cfg(test)]
 mod test {
+    use snafu::ErrorCompat;
+
     use super::*;
 
     #[test]
@@ -227,17 +229,13 @@ mod test {
         let body = Body::from("");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Invalid OpenTSDB Json request, source: EOF while parsing a value at line 1 column 0"
-        );
+        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        assert!(err.contains("EOF while parsing a value at line 1 column 0"));
 
         let body = Body::from("hello world");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "Invalid OpenTSDB Json request, source: expected value at line 1 column 1"
-        );
+        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        assert!(err.contains("expected value at line 1 column 1"));
     }
 }

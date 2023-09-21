@@ -25,7 +25,7 @@ use table::metadata::TableId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Table route manager error: {}", source))]
+    #[snafu(display("Table route manager error"))]
     TableRouteManager {
         source: common_meta::error::Error,
         location: Location,
@@ -34,7 +34,7 @@ pub enum Error {
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
     GetCache { err_msg: String, location: Location },
 
-    #[snafu(display("Failed to request Meta, source: {}", source))]
+    #[snafu(display("Failed to request Meta"))]
     RequestMeta {
         location: Location,
         source: meta_client::error::Error,
@@ -64,13 +64,13 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to serialize value to json, source: {}", source))]
+    #[snafu(display("Failed to serialize value to json"))]
     SerializeJson {
         source: serde_json::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize value from json, source: {}", source))]
+    #[snafu(display("Failed to deserialize value from json"))]
     DeserializeJson {
         source: serde_json::Error,
         location: Location,
@@ -108,11 +108,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to convert DataFusion's ScalarValue: {:?}, source: {}",
-        value,
-        source
-    ))]
+    #[snafu(display("Failed to convert DataFusion's ScalarValue: {:?}", value))]
     ConvertScalarValue {
         value: ScalarValue,
         location: Location,

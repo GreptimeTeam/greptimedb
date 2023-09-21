@@ -30,6 +30,7 @@ pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::{error, info};
 use file_engine::engine::FileRegionEngine;
+use futures_util::future::try_join_all;
 use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
@@ -63,6 +64,8 @@ use crate::server::Services;
 use crate::store;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+
+const OPEN_REGION_PARALLELISM: usize = 16;
 
 /// Datanode service.
 pub struct Datanode {
@@ -283,6 +286,7 @@ impl DatanodeBuilder {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
         let mut regions = vec![];
         let mut table_values = datanode_table_manager.tables(node_id);
+
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
             for region_number in table_value.regions {
@@ -295,27 +299,35 @@ impl DatanodeBuilder {
         }
 
         info!("going to open {} regions", regions.len());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
+        let mut tasks = vec![];
 
         for (region_id, engine, store_path) in regions {
             let region_dir = region_dir(&store_path, region_id);
-            region_server
-                .handle_request(
-                    region_id,
-                    RegionRequest::Open(RegionOpenRequest {
-                        engine: engine.clone(),
-                        region_dir,
-                        options: HashMap::new(),
-                    }),
-                )
-                .await?;
-            if open_with_writable {
-                if let Err(e) = region_server.set_writable(region_id, true) {
-                    error!(
-                        e; "failed to set writable for region {region_id}"
-                    );
+            let semaphore_moved = semaphore.clone();
+            tasks.push(async move {
+                let _permit = semaphore_moved.acquire().await;
+                region_server
+                    .handle_request(
+                        region_id,
+                        RegionRequest::Open(RegionOpenRequest {
+                            engine: engine.clone(),
+                            region_dir,
+                            options: HashMap::new(),
+                        }),
+                    )
+                    .await?;
+                if open_with_writable {
+                    if let Err(e) = region_server.set_writable(region_id, true) {
+                        error!(
+                            e; "failed to set writable for region {region_id}"
+                        );
+                    }
                 }
-            }
+                Ok(())
+            });
         }
+        let _ = try_join_all(tasks).await?;
 
         info!("region server is initialized");
 

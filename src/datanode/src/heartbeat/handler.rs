@@ -15,15 +15,18 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
+use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::RegionIdent;
 use common_query::Output;
 use common_telemetry::error;
 use snafu::OptionExt;
+use store_api::path_utils::region_dir;
 use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -43,11 +46,14 @@ impl RegionHeartbeatResponseHandler {
 
     fn instruction_to_request(instruction: Instruction) -> MetaResult<(RegionId, RegionRequest)> {
         match instruction {
-            Instruction::OpenRegion(region_ident) => {
+            Instruction::OpenRegion(OpenRegion {
+                region_ident,
+                region_storage_path,
+            }) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
                     engine: region_ident.engine,
-                    region_dir: "".to_string(),
+                    region_dir: region_dir(&region_storage_path, region_id),
                     options: HashMap::new(),
                 });
                 Ok((region_id, open_region_req))
@@ -88,16 +94,23 @@ impl RegionHeartbeatResponseHandler {
 
     fn fill_reply(mut template: InstructionReply, result: Result<Output>) -> InstructionReply {
         let success = result.is_ok();
-        let error = result.map_err(|e| e.to_string()).err();
+        let error = result.as_ref().map_err(|e| e.to_string()).err();
         match &mut template {
             InstructionReply::OpenRegion(reply) => {
                 reply.result = success;
                 reply.error = error;
             }
-            InstructionReply::CloseRegion(reply) => {
-                reply.result = success;
-                reply.error = error;
-            }
+            InstructionReply::CloseRegion(reply) => match result {
+                Err(e) => {
+                    if e.status_code() == StatusCode::RegionNotFound {
+                        reply.result = true;
+                    }
+                }
+                _ => {
+                    reply.result = success;
+                    reply.error = error;
+                }
+            },
             InstructionReply::InvalidateTableCache(reply) => {
                 reply.result = success;
                 reply.error = error;

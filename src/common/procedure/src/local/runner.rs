@@ -460,6 +460,7 @@ mod tests {
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
     use object_store::ObjectStore;
+    use snafu::ErrorCompat;
 
     use super::*;
     use crate::local::test_util;
@@ -942,7 +943,14 @@ mod tests {
 
         // Run the runner and execute the procedure.
         runner.run().await;
-        let err = meta.state().error().unwrap().to_string();
+        let err = meta
+            .state()
+            .error()
+            .unwrap()
+            .iter_chain()
+            .last()
+            .unwrap()
+            .to_string();
         assert!(err.contains("subprocedure failed"), "{err}");
     }
 }

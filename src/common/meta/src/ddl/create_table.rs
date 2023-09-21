@@ -182,7 +182,7 @@ impl CreateTableProcedure {
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let manager = self.context.datanode_manager.clone();
+            let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
             let requests = regions
@@ -197,23 +197,25 @@ impl CreateTableProcedure {
                 })
                 .collect::<Vec<_>>();
 
-            create_region_tasks.push(async move {
-                for request in requests {
-                    let requester = manager.datanode(&datanode).await;
+            for request in requests {
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        trace_id: 0,
+                        span_id: 0,
+                    }),
+                    body: Some(request),
+                };
 
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader {
-                            trace_id: 0,
-                            span_id: 0,
-                        }),
-                        body: Some(request),
-                    };
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+
+                create_region_tasks.push(async move {
                     if let Err(err) = requester.handle(request).await {
                         return Err(handle_operate_region_error(datanode)(err));
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
 
         join_all(create_region_tasks)

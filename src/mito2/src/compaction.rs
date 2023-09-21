@@ -20,12 +20,11 @@ mod twcs;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
-use store_api::storage::{CompactionStrategy, RegionId, TwcsOptions};
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
@@ -33,6 +32,7 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
+use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
 use crate::schedule::scheduler::SchedulerRef;
@@ -42,7 +42,6 @@ use crate::sst::file_purger::FilePurgerRef;
 pub struct CompactionRequest {
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) ttl: Option<Duration>,
     pub(crate) compaction_time_window: Option<i64>,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
@@ -64,13 +63,13 @@ impl CompactionRequest {
     }
 }
 
-/// Builds compaction picker according to [CompactionStrategy].
-pub fn compaction_strategy_to_picker(strategy: &CompactionStrategy) -> CompactionPickerRef {
+/// Builds compaction picker according to [CompactionOptions].
+pub fn compaction_options_to_picker(strategy: &CompactionOptions) -> CompactionPickerRef {
     match strategy {
-        CompactionStrategy::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
+        CompactionOptions::Twcs(twcs_opts) => Arc::new(TwcsPicker::new(
             twcs_opts.max_active_window_files,
             twcs_opts.max_inactive_window_files,
-            twcs_opts.time_window_seconds,
+            twcs_opts.time_window_seconds(),
         )) as Arc<_>,
     }
 }
@@ -175,9 +174,7 @@ impl CompactionScheduler {
     ///
     /// If the region has nothing to compact, it removes the region from the status map.
     fn schedule_compaction_request(&mut self, request: CompactionRequest) -> Result<()> {
-        // TODO(hl): build picker according to region options.
-        let picker =
-            compaction_strategy_to_picker(&CompactionStrategy::Twcs(TwcsOptions::default()));
+        let picker = compaction_options_to_picker(&request.current_version.options.compaction);
         let region_id = request.region_id();
         debug!(
             "Pick compaction strategy {:?} for region: {}",
@@ -309,8 +306,6 @@ impl CompactionStatus {
         let mut req = CompactionRequest {
             current_version,
             access_layer: self.access_layer.clone(),
-            // TODO(hl): get TTL info from region metadata
-            ttl: None,
             // TODO(hl): get persisted region compaction time window
             compaction_time_window: None,
             request_sender: request_sender.clone(),

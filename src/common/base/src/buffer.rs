@@ -37,7 +37,7 @@ pub enum Error {
     #[snafu(display("Buffer underflow"))]
     Underflow { location: Location },
 
-    #[snafu(display("IO operation reach EOF, source: {}", source))]
+    #[snafu(display("IO operation reach EOF"))]
     Eof {
         source: std::io::Error,
         location: Location,

@@ -26,16 +26,13 @@ use crate::procedure::ProcedureId;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display(
-        "Failed to execute procedure due to external error, source: {}",
-        source
-    ))]
+    #[snafu(display("Failed to execute procedure due to external error"))]
     External { source: BoxedError },
 
     #[snafu(display("Loader {} is already registered", name))]
     LoaderConflict { name: String, location: Location },
 
-    #[snafu(display("Failed to serialize to json, source: {}", source))]
+    #[snafu(display("Failed to serialize to json"))]
     ToJson {
         source: serde_json::Error,
         location: Location,
@@ -47,83 +44,79 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to put state, key: '{key}', source: {source}"))]
+    #[snafu(display("Failed to put state, key: '{key}'"))]
     PutState {
         key: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to delete {}, source: {}", key, source))]
+    #[snafu(display("Failed to delete {}", key))]
     DeleteState {
         key: String,
         source: object_store::Error,
     },
 
-    #[snafu(display("Failed to delete keys: '{keys}', source: {source}"))]
+    #[snafu(display("Failed to delete keys: '{keys}'"))]
     DeleteStates {
         keys: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to list state, path: '{path}', source: {source}"))]
+    #[snafu(display("Failed to list state, path: '{path}'"))]
     ListState {
         path: String,
         location: Location,
         source: BoxedError,
     },
 
-    #[snafu(display("Failed to deserialize from json, source: {}", source))]
+    #[snafu(display("Failed to deserialize from json"))]
     FromJson {
         source: serde_json::Error,
         location: Location,
     },
 
-    #[snafu(display("Procedure exec failed, source: {}", source))]
+    #[snafu(display("Procedure exec failed"))]
     RetryLater { source: BoxedError },
 
     #[snafu(display("Procedure panics, procedure_id: {}", procedure_id))]
     ProcedurePanic { procedure_id: ProcedureId },
 
-    #[snafu(display("Failed to wait watcher, source: {}", source))]
+    #[snafu(display("Failed to wait watcher"))]
     WaitWatcher {
         source: tokio::sync::watch::error::RecvError,
         location: Location,
     },
 
-    #[snafu(display("Failed to execute procedure, source: {}", source))]
+    #[snafu(display("Failed to execute procedure"))]
     ProcedureExec {
         source: Arc<Error>,
         location: Location,
     },
 
-    #[snafu(display(
-        "Procedure retry exceeded max times, procedure_id: {}, source:{}",
-        procedure_id,
-        source
-    ))]
+    #[snafu(display("Procedure retry exceeded max times, procedure_id: {}", procedure_id))]
     RetryTimesExceeded {
         source: Arc<Error>,
         procedure_id: ProcedureId,
     },
 
-    #[snafu(display("Corrupted data, error: {source}"))]
+    #[snafu(display("Corrupted data, error: "))]
     CorruptedData { source: FromUtf8Error },
 
-    #[snafu(display("Failed to start the remove_outdated_meta method, error: {}", source))]
+    #[snafu(display("Failed to start the remove_outdated_meta method, error"))]
     StartRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Failed to stop the remove_outdated_meta method, error: {}", source))]
+    #[snafu(display("Failed to stop the remove_outdated_meta method, error"))]
     StopRemoveOutdatedMetaTask {
         source: common_runtime::error::Error,
         location: Location,
     },
 
-    #[snafu(display("Subprocedure {} failed, source: {}", subprocedure_id, source))]
+    #[snafu(display("Subprocedure {} failed", subprocedure_id))]
     SubprocedureFailed {
         subprocedure_id: ProcedureId,
         source: Arc<Error>,

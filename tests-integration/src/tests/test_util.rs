@@ -117,7 +117,7 @@ pub fn find_testing_resource(path: &str) -> String {
         // We need unix style path even in the Windows, because the path is used in object-store, must
         // be delimited with '/'. Inside the object-store, it will be converted to file system needed
         // path in the end.
-        let p = p.replace('\\', "/");
+        let p = p.replace(':', "").replace('\\', "/");
 
         // Prepend a '/' to indicate it's a file system path when parsed as object-store url in Windows.
         format!("/{p}")
