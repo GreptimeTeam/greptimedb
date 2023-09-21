@@ -112,7 +112,6 @@ mod tests {
             engine: "file".to_string(),
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
-            create_if_not_exists: true,
             options: new_test_options(),
             region_dir: "create_region_dir/".to_string(),
         };
@@ -151,7 +150,6 @@ mod tests {
             engine: "file".to_string(),
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
-            create_if_not_exists: true,
             options: new_test_options(),
             region_dir: region_dir.clone(),
         };
@@ -189,7 +187,6 @@ mod tests {
             engine: "file".to_string(),
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
-            create_if_not_exists: true,
             options: new_test_options(),
             region_dir: region_dir.clone(),
         };
