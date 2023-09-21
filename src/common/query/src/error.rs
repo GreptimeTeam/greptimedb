@@ -29,20 +29,20 @@ use statrs::StatsError;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
-    #[snafu(display("Fail to execute Python UDF: {}", msg))]
+    #[snafu(display("Failed to execute Python UDF: {}", msg))]
     PyUdf {
         // TODO(discord9): find a way that prevent circle depend(query<-script<-query) and can use script's error type
         msg: String,
         location: Location,
     },
 
-    #[snafu(display("Fail to create temporary recordbatch when eval Python UDF"))]
+    #[snafu(display("Failed to create temporary recordbatch when eval Python UDF"))]
     UdfTempRecordBatch {
         location: Location,
         source: RecordbatchError,
     },
 
-    #[snafu(display("Fail to execute function"))]
+    #[snafu(display("Failed to execute function"))]
     ExecuteFunction {
         source: DataFusionError,
         location: Location,
@@ -55,25 +55,25 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Fail to generate function"))]
+    #[snafu(display("Failed to generate function"))]
     GenerateFunction {
         source: StatsError,
         location: Location,
     },
 
-    #[snafu(display("Fail to cast scalar value into vector"))]
+    #[snafu(display("Failed to cast scalar value into vector"))]
     FromScalarValue {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Fail to cast arrow array into vector"))]
+    #[snafu(display("Failed to cast arrow array into vector"))]
     FromArrowArray {
         location: Location,
         source: DataTypeError,
     },
 
-    #[snafu(display("Fail to cast arrow array into vector: {:?}", data_type))]
+    #[snafu(display("Failed to cast arrow array into vector: {:?}", data_type))]
     IntoVector {
         location: Location,
         source: DataTypeError,

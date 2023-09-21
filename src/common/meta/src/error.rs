@@ -220,7 +220,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("external error"))]
+    #[snafu(display("External error"))]
     External {
         location: Location,
         source: BoxedError,
