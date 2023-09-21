@@ -52,6 +52,12 @@ impl SchedulerEnv {
         }
     }
 
+    /// Set scheduler.
+    pub(crate) fn scheduler(mut self, scheduler: SchedulerRef) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
     /// Creates a new compaction scheduler.
     pub(crate) fn mock_compaction_scheduler(
         &self,

@@ -324,12 +324,15 @@ impl CompactionStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use common_query::Output;
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::schedule::scheduler::{Job, Scheduler};
     use crate::test_util::scheduler_util::SchedulerEnv;
-    use crate::test_util::version_util::VersionControlBuilder;
+    use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
 
     #[tokio::test]
     async fn test_schedule_empty() {
@@ -372,5 +375,124 @@ mod tests {
         let output = output_rx.await.unwrap().unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
         assert!(scheduler.region_status.is_empty());
+    }
+
+    #[derive(Default)]
+    struct VecScheduler {
+        jobs: Mutex<Vec<Job>>,
+    }
+
+    impl VecScheduler {
+        fn num_jobs(&self) -> usize {
+            self.jobs.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Scheduler for VecScheduler {
+        fn schedule(&self, job: Job) -> Result<()> {
+            self.jobs.lock().unwrap().push(job);
+            Ok(())
+        }
+
+        async fn stop(&self, _await_termination: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_schedule_on_finished() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let purger = builder.file_purger();
+        let region_id = builder.region_id();
+
+        // 5 files to compact.
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        // Should schedule 1 compaction.
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        let data = version_control.current();
+        let file_metas: Vec<_> = data.version.ssts.levels()[0]
+            .files
+            .values()
+            .map(|file| file.meta())
+            .collect();
+
+        // 5 files for next compaction and removes old files.
+        apply_edit(
+            &version_control,
+            &[(0, end), (20, end), (40, end), (60, end), (80, end)],
+            &file_metas,
+            purger.clone(),
+        );
+        // The task is pending.
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        assert!(scheduler
+            .region_status
+            .get(&builder.region_id())
+            .unwrap()
+            .pending_compaction
+            .is_some());
+
+        // On compaction finished and schedule next compaction.
+        scheduler.on_compaction_finished(region_id);
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(2, job_scheduler.num_jobs());
+        // 5 files for next compaction.
+        apply_edit(
+            &version_control,
+            &[(0, end), (20, end), (40, end), (60, end), (80, end)],
+            &[],
+            purger.clone(),
+        );
+        // The task is pending.
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        assert_eq!(2, job_scheduler.num_jobs());
+        assert!(scheduler
+            .region_status
+            .get(&builder.region_id())
+            .unwrap()
+            .pending_compaction
+            .is_some());
     }
 }
