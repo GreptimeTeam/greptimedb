@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 pub use client::{CachedMetaKvBackend, MetaKvBackend};
 
 mod client;
@@ -22,18 +20,3 @@ mod manager;
 #[cfg(feature = "testing")]
 pub mod mock;
 pub use manager::KvBackendCatalogManager;
-
-/// KvBackend cache invalidator
-#[async_trait::async_trait]
-pub trait KvCacheInvalidator: Send + Sync {
-    async fn invalidate_key(&self, key: &[u8]);
-}
-
-pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
-
-pub struct DummyKvCacheInvalidator;
-
-#[async_trait::async_trait]
-impl KvCacheInvalidator for DummyKvCacheInvalidator {
-    async fn invalidate_key(&self, _key: &[u8]) {}
-}

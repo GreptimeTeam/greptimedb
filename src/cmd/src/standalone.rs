@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
-use catalog::kvbackend::{DummyKvCacheInvalidator, KvBackendCatalogManager};
+use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
 use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
+use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
