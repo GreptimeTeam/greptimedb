@@ -27,7 +27,7 @@ pub enum Source {
 pub struct Lister {
     object_store: ObjectStore,
     source: Source,
-    path: String,
+    root: String,
     regex: Option<Regex>,
 }
 
@@ -35,13 +35,13 @@ impl Lister {
     pub fn new(
         object_store: ObjectStore,
         source: Source,
-        path: String,
+        root: String,
         regex: Option<Regex>,
     ) -> Self {
         Lister {
             object_store,
             source,
-            path,
+            root,
             regex,
         }
     }
@@ -51,9 +51,9 @@ impl Lister {
             Source::Dir => {
                 let streamer = self
                     .object_store
-                    .lister_with(&self.path)
+                    .lister_with("/")
                     .await
-                    .context(error::ListObjectsSnafu { path: &self.path })?;
+                    .context(error::ListObjectsSnafu { path: &self.root })?;
 
                 streamer
                     .try_filter(|f| {
@@ -66,22 +66,21 @@ impl Lister {
                     })
                     .try_collect::<Vec<_>>()
                     .await
-                    .context(error::ListObjectsSnafu { path: &self.path })
+                    .context(error::ListObjectsSnafu { path: &self.root })
             }
             Source::Filename(filename) => {
                 // make sure this file exists
-                let file_full_path = format!("{}{}", self.path, filename);
-                let _ = self.object_store.stat(&file_full_path).await.context(
+                let _ = self.object_store.stat(filename).await.with_context(|_| {
                     error::ListObjectsSnafu {
-                        path: &file_full_path,
-                    },
-                )?;
+                        path: format!("{}{}", &self.root, filename),
+                    }
+                })?;
 
                 Ok(self
                     .object_store
-                    .list_with(&self.path)
+                    .list_with("/")
                     .await
-                    .context(error::ListObjectsSnafu { path: &self.path })?
+                    .context(error::ListObjectsSnafu { path: &self.root })?
                     .into_iter()
                     .find(|f| f.name() == filename)
                     .map(|f| vec![f])

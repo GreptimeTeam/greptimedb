@@ -1712,6 +1712,7 @@ dependencies = [
  "datafusion",
  "derive_builder 0.12.0",
  "futures",
+ "lazy_static",
  "object-store",
  "orc-rust",
  "paste",
