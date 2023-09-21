@@ -101,24 +101,21 @@ impl CompactionScheduler {
         file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
     ) -> Result<()> {
-        let status = self.region_status.entry(region_id).or_insert_with(|| {
-            CompactionStatus::new(
-                region_id,
-                version_control.clone(),
-                access_layer.clone(),
-                file_purger.clone(),
-            )
-        });
-        if status.compacting {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
             status.merge_waiter(waiter);
             return Ok(());
         }
 
         // The region can compact directly.
+        let mut status = CompactionStatus::new(
+            region_id,
+            version_control.clone(),
+            access_layer.clone(),
+            file_purger.clone(),
+        );
         let request = status.new_compaction_request(self.request_sender.clone(), waiter);
-        // Mark the region as compacting.
-        status.compacting = true;
+        self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
     }
 
@@ -127,7 +124,6 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
-        status.compacting = false;
         // We should always try to compact the region until picker returns None.
         let request =
             status.new_compaction_request(self.request_sender.clone(), OptionOutputTx::none());
@@ -252,8 +248,6 @@ struct CompactionStatus {
     access_layer: AccessLayerRef,
     /// File purger of the region.
     file_purger: FilePurgerRef,
-    /// Whether a compaction task is running.
-    compacting: bool,
     /// Compaction pending to schedule.
     ///
     /// For simplicity, we merge all pending compaction requests into one.
@@ -273,7 +267,6 @@ impl CompactionStatus {
             version_control,
             access_layer,
             file_purger,
-            compacting: false,
             pending_compaction: None,
         }
     }
