@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::InsertRequests;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
 use servers::error as server_error;
 use servers::error::AuthSnafu;
 use servers::opentsdb::codec::DataPoint;
+use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -34,11 +34,9 @@ impl OpentsdbProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
             .context(AuthSnafu)?;
 
-        let requests = InsertRequests {
-            inserts: vec![data_point.as_grpc_insert()],
-        };
+        let (requests, _) = data_point_to_grpc_row_insert_requests(data_point)?;
         let _ = self
-            .handle_inserts(requests, ctx)
+            .handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .with_context(|_| server_error::ExecuteQuerySnafu {
