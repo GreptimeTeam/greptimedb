@@ -218,6 +218,7 @@ impl RegionOpener {
             .flushed_entry_id(manifest.flushed_entry_id)
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
+            .compaction_time_window(manifest.compaction_time_window)
             .options(options)
             .build();
         let flushed_entry_id = version.flushed_entry_id;

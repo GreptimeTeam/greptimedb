@@ -42,7 +42,6 @@ use crate::sst::file_purger::FilePurgerRef;
 pub struct CompactionRequest {
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) compaction_time_window: Option<i64>,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
@@ -299,8 +298,6 @@ impl CompactionStatus {
         let mut req = CompactionRequest {
             current_version,
             access_layer: self.access_layer.clone(),
-            // TODO(hl): get persisted region compaction time window
-            compaction_time_window: None,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),

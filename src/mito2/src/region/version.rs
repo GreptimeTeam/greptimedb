@@ -24,6 +24,7 @@
 //! and became invisible between step 1 and 2, so need to acquire version at first.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
@@ -205,6 +206,8 @@ pub(crate) struct Version {
     ///
     /// Used to check if it is a flush task during the truncating table.
     pub(crate) truncated_entry_id: Option<EntryId>,
+    /// Inferred compaction time window.
+    pub(crate) compaction_time_window: Option<Duration>,
     /// Options of the region.
     pub(crate) options: RegionOptions,
 }
@@ -219,6 +222,7 @@ pub(crate) struct VersionBuilder {
     flushed_entry_id: EntryId,
     flushed_sequence: SequenceNumber,
     truncated_entry_id: Option<EntryId>,
+    compaction_time_window: Option<Duration>,
     options: RegionOptions,
 }
 
@@ -232,6 +236,7 @@ impl VersionBuilder {
             flushed_entry_id: 0,
             flushed_sequence: 0,
             truncated_entry_id: None,
+            compaction_time_window: None,
             options: RegionOptions::default(),
         }
     }
@@ -245,6 +250,7 @@ impl VersionBuilder {
             flushed_entry_id: version.flushed_entry_id,
             flushed_sequence: version.flushed_sequence,
             truncated_entry_id: version.truncated_entry_id,
+            compaction_time_window: version.compaction_time_window,
             options: version.options.clone(),
         }
     }
@@ -279,6 +285,12 @@ impl VersionBuilder {
         self
     }
 
+    /// Sets compaction time window.
+    pub(crate) fn compaction_time_window(mut self, window: Option<Duration>) -> Self {
+        self.compaction_time_window = window;
+        self
+    }
+
     /// Sets options.
     pub(crate) fn options(mut self, options: RegionOptions) -> Self {
         self.options = options;
@@ -292,6 +304,9 @@ impl VersionBuilder {
         }
         if let Some(sequence) = edit.flushed_sequence {
             self.flushed_sequence = self.flushed_sequence.max(sequence);
+        }
+        if let Some(window) = edit.compaction_time_window {
+            self.compaction_time_window = Some(window);
         }
         if !edit.files_to_add.is_empty() || !edit.files_to_remove.is_empty() {
             let mut ssts = (*self.ssts).clone();
@@ -335,6 +350,7 @@ impl VersionBuilder {
             flushed_entry_id: self.flushed_entry_id,
             flushed_sequence: self.flushed_sequence,
             truncated_entry_id: self.truncated_entry_id,
+            compaction_time_window: self.compaction_time_window,
             options: self.options,
         }
     }

@@ -15,6 +15,7 @@
 //! Defines [RegionMetaAction] related structs and [RegionCheckpoint].
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -49,7 +50,8 @@ pub struct RegionChange {
 pub struct RegionEdit {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
-    pub compaction_time_window: Option<i64>,
+    #[serde(with = "humantime_serde")]
+    pub compaction_time_window: Option<Duration>,
     pub flushed_entry_id: Option<EntryId>,
     pub flushed_sequence: Option<SequenceNumber>,
 }
@@ -84,6 +86,9 @@ pub struct RegionManifest {
     pub manifest_version: ManifestVersion,
     /// Last WAL entry id of truncated data.
     pub truncated_entry_id: Option<EntryId>,
+    /// Inferred compaction time window.
+    #[serde(with = "humantime_serde")]
+    pub compaction_time_window: Option<Duration>,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +99,7 @@ pub struct RegionManifestBuilder {
     flushed_sequence: SequenceNumber,
     manifest_version: ManifestVersion,
     truncated_entry_id: Option<EntryId>,
+    compaction_time_window: Option<Duration>,
 }
 
 impl RegionManifestBuilder {
@@ -107,6 +113,7 @@ impl RegionManifestBuilder {
                 manifest_version: s.manifest_version,
                 flushed_sequence: s.flushed_sequence,
                 truncated_entry_id: s.truncated_entry_id,
+                compaction_time_window: s.compaction_time_window,
             }
         } else {
             Default::default()
@@ -132,6 +139,9 @@ impl RegionManifestBuilder {
         if let Some(flushed_sequence) = edit.flushed_sequence {
             self.flushed_sequence = self.flushed_sequence.max(flushed_sequence);
         }
+        if let Some(window) = edit.compaction_time_window {
+            self.compaction_time_window = Some(window);
+        }
     }
 
     pub fn apply_truncate(&mut self, manifest_version: ManifestVersion, truncate: RegionTruncate) {
@@ -156,6 +166,7 @@ impl RegionManifestBuilder {
             flushed_sequence: self.flushed_sequence,
             manifest_version: self.manifest_version,
             truncated_entry_id: self.truncated_entry_id,
+            compaction_time_window: self.compaction_time_window,
         })
     }
 }
