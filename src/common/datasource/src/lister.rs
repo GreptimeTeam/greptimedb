@@ -51,7 +51,7 @@ impl Lister {
             Source::Dir => {
                 let streamer = self
                     .object_store
-                    .lister_with("./")
+                    .lister_with("/")
                     .await
                     .context(error::ListObjectsSnafu { path: &self.root })?;
 
@@ -78,7 +78,7 @@ impl Lister {
 
                 Ok(self
                     .object_store
-                    .list_with("./")
+                    .list_with("/")
                     .await
                     .context(error::ListObjectsSnafu { path: &self.root })?
                     .into_iter()

@@ -575,12 +575,7 @@ async fn test_execute_external_create_infer_format(instance: Arc<dyn MockInstanc
     let instance = instance.frontend();
 
     let tmp_dir = temp_dir::create_temp_dir("test_execute_external_create_infer_format");
-    let location = tmp_dir
-        .path()
-        .to_str()
-        .unwrap()
-        .replace(':', "")
-        .replace('\\', "/");
+    let location = prepare_path(tmp_dir.path().to_str().unwrap());
 
     let output = execute_sql(
         &instance,
