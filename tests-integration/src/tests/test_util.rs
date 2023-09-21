@@ -114,7 +114,7 @@ pub fn prepare_path(p: &str) -> String {
         // We need unix style path even in the Windows, because the path is used in object-store, must
         // be delimited with '/'. Inside the object-store, it will be converted to file system needed
         // path in the end.
-        p.replace(':', "").replace('\\', "/")
+        p.replace('\\', "/")
     };
 
     p.to_string()
