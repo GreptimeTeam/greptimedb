@@ -29,6 +29,7 @@ use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
+use common_telemetry::debug;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream};
@@ -75,10 +76,10 @@ impl StatementExecutor {
             Source::Dir
         };
 
-        let lister = Lister::new(object_store.clone(), source, dir, regex);
+        let lister = Lister::new(object_store.clone(), source.clone(), dir.to_string(), regex);
 
         let entries = lister.list().await.context(error::ListObjectsSnafu)?;
-
+        debug!("Copy from dir: {dir:?}, {source:?}, entries: {entries:?}");
         Ok((object_store, entries))
     }
 
