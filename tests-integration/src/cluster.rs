@@ -274,6 +274,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
     let grpc_server = GrpcServer::new(
         None,
         None,
+        None,
         flight_handler,
         region_server_handler,
         None,

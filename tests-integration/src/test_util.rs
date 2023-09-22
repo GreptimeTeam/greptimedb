@@ -39,7 +39,7 @@ use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
 use secrecy::ExposeSecret;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
-use servers::grpc::GrpcServer;
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -423,13 +423,22 @@ pub async fn setup_grpc_server(
     store_type: StorageType,
     name: &str,
 ) -> (String, TestGuard, Arc<GrpcServer>) {
-    setup_grpc_server_with_user_provider(store_type, name, None).await
+    setup_grpc_server_with(store_type, name, None, None).await
 }
 
 pub async fn setup_grpc_server_with_user_provider(
     store_type: StorageType,
     name: &str,
     user_provider: Option<UserProviderRef>,
+) -> (String, TestGuard, Arc<GrpcServer>) {
+    setup_grpc_server_with(store_type, name, user_provider, None).await
+}
+
+pub async fn setup_grpc_server_with(
+    store_type: StorageType,
+    name: &str,
+    user_provider: Option<UserProviderRef>,
+    grpc_config: Option<GrpcServerConfig>,
 ) -> (String, TestGuard, Arc<GrpcServer>) {
     let instance = setup_standalone_instance(name, store_type).await;
 
@@ -447,7 +456,9 @@ pub async fn setup_grpc_server_with_user_provider(
         user_provider.clone(),
         runtime.clone(),
     ));
+
     let fe_grpc_server = Arc::new(GrpcServer::new(
+        grpc_config,
         Some(ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone())),
         Some(fe_instance_ref.clone()),
         Some(flight_handler),
