@@ -24,10 +24,11 @@ use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
 use common_query::Output;
 use common_recordbatch::RecordBatches;
+use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
 use tests_integration::test_util::{
-    setup_grpc_server, setup_grpc_server_with_user_provider, StorageType,
+    setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
 };
 
 #[macro_export]
@@ -64,6 +65,9 @@ macro_rules! grpc_tests {
                 test_auto_create_table,
                 test_insert_and_select,
                 test_dbname,
+                test_grpc_message_size_ok,
+                test_grpc_message_size_limit_recv,
+                test_grpc_message_size_limit_send,
                 test_grpc_auth,
                 test_health_check,
                 test_prom_gateway_query,
@@ -111,6 +115,66 @@ pub async fn test_dbname(store_type: StorageType) {
         grpc_client,
     );
     insert_and_assert(&db).await;
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_message_size_ok(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 1024,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    db.sql("show tables;").await.unwrap();
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024,
+        max_send_message_size: 50,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    let err_msg = db.sql("show tables;").await.unwrap_err().to_string();
+    assert!(err_msg.contains("message length too large"), "{}", err_msg);
+    let _ = fe_grpc_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_grpc_message_size_limit_recv(store_type: StorageType) {
+    let config = GrpcServerConfig {
+        max_recv_message_size: 10,
+        max_send_message_size: 1024,
+    };
+    let (addr, mut guard, fe_grpc_server) =
+        setup_grpc_server_with(store_type, "auto_create_table", None, Some(config)).await;
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        grpc_client,
+    );
+    let err_msg = db.sql("show tables;").await.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Operation was attempted past the valid range"),
+        "{}",
+        err_msg
+    );
     let _ = fe_grpc_server.shutdown().await;
     guard.remove_all().await;
 }

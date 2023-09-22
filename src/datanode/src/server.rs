@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use futures::future;
-use servers::grpc::GrpcServer;
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -39,9 +39,14 @@ impl Services {
         let flight_handler = Some(Arc::new(region_server.clone()) as _);
         let region_server_handler = Some(Arc::new(region_server.clone()) as _);
         let runtime = region_server.runtime();
+        let grpc_config = GrpcServerConfig {
+            max_recv_message_size: opts.rpc_max_recv_message_size,
+            max_send_message_size: opts.rpc_max_send_message_size,
+        };
 
         Ok(Self {
             grpc_server: GrpcServer::new(
+                Some(grpc_config),
                 None,
                 None,
                 flight_handler,

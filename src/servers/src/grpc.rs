@@ -33,7 +33,9 @@ use arrow_flight::flight_service_server::FlightService;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use common_grpc::channel_manager::DEFAULT_MAX_GRPC_MESSAGE_SIZE;
+use common_grpc::channel_manager::{
+    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+};
 use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use common_telemetry::{error, warn};
@@ -82,21 +84,24 @@ pub struct GrpcServer {
 /// Grpc Server configuration
 #[derive(Debug, Clone)]
 pub struct GrpcServerConfig {
-    // Max gRPC message size
-    // TODO(dennis): make it configurable
-    pub max_message_size: usize,
+    // Max gRPC receiving(decoding) message size
+    pub max_recv_message_size: usize,
+    // Max gRPC sending(encoding) message size
+    pub max_send_message_size: usize,
 }
 
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            max_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
         }
     }
 }
 
 impl GrpcServer {
     pub fn new(
+        config: Option<GrpcServerConfig>,
         query_handler: Option<ServerGrpcQueryHandlerRef>,
         prometheus_handler: Option<PrometheusHandlerRef>,
         flight_handler: Option<FlightCraftRef>,
@@ -110,7 +115,7 @@ impl GrpcServer {
         let region_server_handler = region_server_handler
             .map(|handler| RegionServerRequestHandler::new(handler, runtime.clone()));
         Self {
-            config: GrpcServerConfig::default(),
+            config: config.unwrap_or_default(),
             shutdown_tx: Mutex::new(None),
             user_provider,
             serve_state: Mutex::new(None),
@@ -201,7 +206,8 @@ impl Server for GrpcServer {
     }
 
     async fn start(&self, addr: SocketAddr) -> Result<SocketAddr> {
-        let max_message_size = self.config.max_message_size;
+        let max_recv_message_size = self.config.max_recv_message_size;
+        let max_send_message_size = self.config.max_send_message_size;
         let (tx, rx) = oneshot::channel();
         let (listener, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
@@ -227,7 +233,8 @@ impl Server for GrpcServer {
         if let Some(database_handler) = &self.database_handler {
             builder = builder.add_service(
                 GreptimeDatabaseServer::new(DatabaseService::new(database_handler.clone()))
-                    .max_decoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_recv_message_size)
+                    .max_encoding_message_size(max_send_message_size),
             )
         }
         if let Some(prometheus_handler) = &self.prometheus_handler {
@@ -237,18 +244,24 @@ impl Server for GrpcServer {
         if let Some(flight_handler) = &self.flight_handler {
             builder = builder.add_service(
                 FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone()))
-                    .max_decoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_recv_message_size)
+                    .max_encoding_message_size(max_send_message_size),
             )
         } else {
             // TODO(ruihang): this is a temporary workaround before region server is ready.
-            builder = builder.add_service(FlightServiceServer::new(FlightCraftWrapper(
-                self.database_handler.clone().unwrap(),
-            )))
+            builder = builder.add_service(
+                FlightServiceServer::new(FlightCraftWrapper(
+                    self.database_handler.clone().unwrap(),
+                ))
+                .max_decoding_message_size(max_recv_message_size)
+                .max_encoding_message_size(max_send_message_size),
+            )
         }
         if let Some(region_server_handler) = &self.region_server_handler {
             builder = builder.add_service(
                 RegionServer::new(region_server_handler.clone())
-                    .max_decoding_message_size(max_message_size),
+                    .max_decoding_message_size(max_recv_message_size)
+                    .max_encoding_message_size(max_send_message_size),
             );
         }
 
