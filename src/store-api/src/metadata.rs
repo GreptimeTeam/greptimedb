@@ -672,7 +672,8 @@ mod test {
         builder.push_column_metadata(col);
         let err = builder.build().unwrap_err();
         assert!(
-            err.to_string().contains("column `ts` is not timestamp type"),
+            err.to_string()
+                .contains("column `ts` is not timestamp type"),
             "unexpected err: {err}",
         );
     }
