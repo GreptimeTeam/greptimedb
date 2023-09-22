@@ -33,8 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::config::EngineConfig;
 use crate::error::{
-    RegionExistsSnafu, RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu,
-    UnsupportedSnafu,
+    RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu, UnsupportedSnafu,
 };
 use crate::region::{FileRegion, FileRegionRef};
 
@@ -168,11 +167,7 @@ impl EngineInner {
         );
 
         if self.exists(region_id).await {
-            return if request.create_if_not_exists {
-                Ok(Output::AffectedRows(0))
-            } else {
-                RegionExistsSnafu { region_id }.fail()
-            };
+            return Ok(Output::AffectedRows(0));
         }
 
         info!("Try to create region, region_id: {}", region_id);
@@ -180,11 +175,7 @@ impl EngineInner {
         let _lock = self.region_mutex.lock().await;
         // Check again after acquiring the lock
         if self.exists(region_id).await {
-            return if request.create_if_not_exists {
-                Ok(Output::AffectedRows(0))
-            } else {
-                RegionExistsSnafu { region_id }.fail()
-            };
+            return Ok(Output::AffectedRows(0));
         }
 
         let res = FileRegion::create(region_id, request, &self.object_store).await;
