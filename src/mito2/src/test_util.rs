@@ -304,7 +304,6 @@ impl CreateRequestBuilder {
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options: self.options.clone(),
-            create_if_not_exists: false,
             region_dir: self.region_dir.clone(),
         }
     }

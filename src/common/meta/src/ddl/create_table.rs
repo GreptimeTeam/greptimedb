@@ -161,7 +161,6 @@ impl CreateTableProcedure {
             engine: create_table_expr.engine.to_string(),
             column_defs,
             primary_key,
-            create_if_not_exists: true,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
         })

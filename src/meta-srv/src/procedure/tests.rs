@@ -151,7 +151,6 @@ fn test_create_region_request_template() {
             },
         ],
         primary_key: vec![2, 1],
-        create_if_not_exists: true,
         path: String::new(),
         options: HashMap::new(),
     };
