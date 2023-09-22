@@ -20,6 +20,8 @@ interval_millis = 3000
 [meta_client]
 # Metasrv address list.
 metasrv_addrs = ["127.0.0.1:3002"]
+# Heartbeat timeout in milliseconds, 500 by default.
+heartbeat_timeout_millis = 500
 # Operation timeout in milliseconds, 3000 by default.
 timeout_millis = 3000
 # Connect server timeout in milliseconds, 5000 by default.
