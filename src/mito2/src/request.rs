@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
@@ -640,6 +641,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
+    /// Inferred Compaction time window.
+    pub(crate) compaction_time_window: Option<Duration>,
 }
 
 impl CompactionFinished {

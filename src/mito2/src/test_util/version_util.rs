@@ -24,6 +24,7 @@ use datatypes::schema::ColumnSchema;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::storage::RegionId;
 
+use crate::manifest::action::RegionEdit;
 use crate::memtable::{MemtableBuilder, MemtableBuilderRef};
 use crate::region::version::{Version, VersionBuilder, VersionControl};
 use crate::sst::file::{FileId, FileMeta};
@@ -112,4 +113,42 @@ impl VersionControlBuilder {
         let version = self.build_version();
         VersionControl::new(version)
     }
+}
+
+/// Add mocked l0 files to the version control.
+/// `files_to_add` are slice of `(start_ms, end_ms)`.
+pub(crate) fn apply_edit(
+    version_control: &VersionControl,
+    files_to_add: &[(i64, i64)],
+    files_to_remove: &[FileMeta],
+    purger: FilePurgerRef,
+) {
+    let region_id = version_control.current().version.metadata.region_id;
+    let files_to_add = files_to_add
+        .iter()
+        .map(|(start_ms, end_ms)| {
+            FileMeta {
+                region_id,
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(*start_ms),
+                    Timestamp::new_millisecond(*end_ms),
+                ),
+                level: 0,
+                file_size: 0, // We don't care file size.
+            }
+        })
+        .collect();
+
+    version_control.apply_edit(
+        RegionEdit {
+            files_to_add,
+            files_to_remove: files_to_remove.to_vec(),
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+        },
+        &[],
+        purger,
+    );
 }

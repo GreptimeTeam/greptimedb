@@ -61,7 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let edit = RegionEdit {
             files_to_add: std::mem::take(&mut request.compaction_outputs),
             files_to_remove: std::mem::take(&mut request.compacted_files),
-            compaction_time_window: None, // TODO(hl): update window maybe
+            compaction_time_window: request.compaction_time_window,
             flushed_entry_id: None,
             flushed_sequence: None,
         };
