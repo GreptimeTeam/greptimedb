@@ -232,13 +232,13 @@ fn encode_sum(
     Ok(())
 }
 
-const HISTOGRAM_LE_COLUMN: &str = "le";
+const HISTOGRAM_LE_COLUMN: &str = "greptime_le";
 
 /// Encode histogram data. This function returns 3 insert requests for 3 tables.
 ///
 /// The implementation has been following Prometheus histogram table format:
 ///
-/// - A `%metric%_bucket` table including `le` tag that stores bucket upper
+/// - A `%metric%_bucket` table including `greptime_le` tag that stores bucket upper
 /// limit, and `greptime_value` for bucket count
 /// - A `%metric%_sum` table storing sum of samples
 /// -  A `%metric%_count` table storing count of samples.
