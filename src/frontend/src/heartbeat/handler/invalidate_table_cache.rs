@@ -13,24 +13,20 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use catalog::kvbackend::KvCacheInvalidatorRef;
+use common_meta::cache_invalidator::{
+    CacheInvalidator, Context, KvCacheInvalidatorRef, TableMetadataCacheInvalidator,
+};
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
 use common_meta::instruction::{Instruction, InstructionReply, SimpleReply};
-use common_meta::key::table_info::TableInfoKey;
-use common_meta::key::table_name::TableNameKey;
-use common_meta::key::table_route::TableRouteKey;
-use common_meta::key::TableMetaKey;
-use common_meta::table_name::TableName;
 use common_telemetry::error;
 use futures::future::Either;
-use table::metadata::TableId;
 
 #[derive(Clone)]
 pub struct InvalidateTableCacheHandler {
-    backend_cache_invalidator: KvCacheInvalidatorRef,
+    table_metadata_cache_invalidator: TableMetadataCacheInvalidator,
 }
 
 #[async_trait]
@@ -45,24 +41,31 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let mailbox = ctx.mailbox.clone();
-        let self_ref = self.clone();
+        let cache_invalidator = self.table_metadata_cache_invalidator.clone();
 
         let (meta, invalidator) = match ctx.incoming_message.take() {
             Some((meta, Instruction::InvalidateTableIdCache(table_id))) => (
                 meta,
-                Either::Left(async move { self_ref.invalidate_table_id_cache(table_id).await }),
+                Either::Left(async move {
+                    cache_invalidator
+                        .invalidate_table_id(&Context::default(), table_id)
+                        .await
+                }),
             ),
             Some((meta, Instruction::InvalidateTableNameCache(table_name))) => (
                 meta,
-                Either::Right(
-                    async move { self_ref.invalidate_table_name_cache(table_name).await },
-                ),
+                Either::Right(async move {
+                    cache_invalidator
+                        .invalidate_table_name(&Context::default(), table_name)
+                        .await
+                }),
             ),
             _ => unreachable!("InvalidateTableCacheHandler: should be guarded by 'is_acceptable'"),
         };
 
         let _handle = common_runtime::spawn_bg(async move {
-            invalidator.await;
+            // Local cache invalidation always succeeds.
+            let _ = invalidator.await;
 
             if let Err(e) = mailbox
                 .send((
@@ -85,23 +88,9 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 impl InvalidateTableCacheHandler {
     pub fn new(backend_cache_invalidator: KvCacheInvalidatorRef) -> Self {
         Self {
-            backend_cache_invalidator,
+            table_metadata_cache_invalidator: TableMetadataCacheInvalidator::new(
+                backend_cache_invalidator,
+            ),
         }
-    }
-
-    async fn invalidate_table_id_cache(&self, table_id: TableId) {
-        self.backend_cache_invalidator
-            .invalidate_key(&TableInfoKey::new(table_id).as_raw_key())
-            .await;
-
-        self.backend_cache_invalidator
-            .invalidate_key(&TableRouteKey { table_id }.as_raw_key())
-            .await;
-    }
-
-    async fn invalidate_table_name_cache(&self, table_name: TableName) {
-        self.backend_cache_invalidator
-            .invalidate_key(&TableNameKey::from(&table_name).as_raw_key())
-            .await;
     }
 }

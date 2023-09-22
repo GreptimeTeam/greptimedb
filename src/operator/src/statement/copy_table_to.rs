@@ -19,16 +19,18 @@ use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{build_backend, parse_url};
+use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::debug;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
 use query::plan::LogicalPlan;
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use storage::sst::SstInfo;
 use storage::{ParquetWriter, Source};
 use table::engine::TableReference;
@@ -89,7 +91,7 @@ impl StatementExecutor {
     ) -> Result<usize> {
         let table_ref = TableReference::full(&req.catalog_name, &req.schema_name, &req.table_name);
         let table = self.get_table(&table_ref).await?;
-
+        let table_id = table.table_info().table_id();
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
 
         let df_table_ref = DfTableReference::from(table_ref);
@@ -132,11 +134,15 @@ impl StatementExecutor {
         };
 
         let (_schema, _host, path) = parse_url(&req.location).context(error::ParseUrlSnafu)?;
+        let (_, filename) = find_dir_and_filename(&path);
+        let filename = filename.context(error::UnexpectedSnafu {
+            violated: format!("Expected filename, path: {path}"),
+        })?;
         let object_store =
             build_backend(&req.location, &req.connection).context(error::BuildBackendSnafu)?;
-
+        debug!("Copy table: {table_id} to path: {path}");
         let rows_copied = self
-            .stream_to_file(stream, &format, object_store, &path)
+            .stream_to_file(stream, &format, object_store, &filename)
             .await?;
 
         Ok(rows_copied)

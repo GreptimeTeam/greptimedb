@@ -23,7 +23,7 @@ use common_meta::heartbeat::handler::{
     HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
 use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, RegionIdent};
+use common_meta::instruction::{Instruction, OpenRegion, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_runtime::Runtime;
@@ -34,29 +34,9 @@ use query::query_engine::DescribeResult;
 use query::QueryEngine;
 use session::context::QueryContextRef;
 use table::TableRef;
-use tokio::sync::mpsc::{self, Receiver};
 
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
-use crate::Instance;
-
-struct HandlerTestGuard {
-    instance: Instance,
-    mailbox: Arc<HeartbeatMailbox>,
-    rx: Receiver<(MessageMeta, InstructionReply)>,
-}
-
-async fn prepare_handler_test(_name: &str) -> HandlerTestGuard {
-    let instance = Instance;
-    let (tx, rx) = mpsc::channel(8);
-    let mailbox = Arc::new(HeartbeatMailbox::new(tx));
-
-    HandlerTestGuard {
-        instance,
-        mailbox,
-        rx,
-    }
-}
 
 pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
     MessageMeta {

@@ -79,7 +79,7 @@ derive_builder = "0.12"
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "115c1080773be8a819e50b257fece9f839a0c836" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"

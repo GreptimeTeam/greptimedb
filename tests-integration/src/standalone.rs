@@ -14,9 +14,10 @@
 
 use std::sync::Arc;
 
-use catalog::kvbackend::{DummyKvCacheInvalidator, KvBackendCatalogManager};
+use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_config::KvStoreConfig;
+use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_procedure::options::ProcedureConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;

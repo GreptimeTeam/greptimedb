@@ -120,7 +120,6 @@ impl Picker for TwcsPicker {
         let CompactionRequest {
             current_version,
             access_layer,
-            compaction_time_window,
             request_sender,
             waiters,
             file_purger,
@@ -138,6 +137,9 @@ impl Picker for TwcsPicker {
             expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
 
+        let compaction_time_window = current_version
+            .compaction_time_window
+            .map(|window| window.as_secs() as i64);
         let time_window_size = compaction_time_window
             .or(self.time_window_seconds)
             .unwrap_or_else(|| {
@@ -169,7 +171,7 @@ impl Picker for TwcsPicker {
             outputs,
             expired_ssts,
             sst_write_buffer_size: ReadableSize::mb(4),
-            compaction_time_window: None,
+            compaction_time_window: Some(time_window_size),
             request_sender,
             waiters,
             file_purger,
@@ -357,6 +359,9 @@ impl CompactionTask for TwcsCompactionTask {
                     compacted_files: deleted,
                     senders: std::mem::take(&mut self.waiters),
                     file_purger: self.file_purger.clone(),
+                    compaction_time_window: self
+                        .compaction_time_window
+                        .map(|seconds| Duration::from_secs(seconds as u64)),
                 })
             }
             Err(e) => {

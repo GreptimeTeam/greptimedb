@@ -198,7 +198,6 @@ impl Value {
     /// Cast Value to timestamp. Return None if value is not a valid timestamp data type.
     pub fn as_timestamp(&self) -> Option<Timestamp> {
         match self {
-            Value::Int64(v) => Some(Timestamp::new_millisecond(*v)),
             Value::Timestamp(t) => Some(*t),
             _ => None,
         }
@@ -388,7 +387,6 @@ pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue
 /// Return `None` if given scalar value cannot be converted to a valid timestamp.
 pub fn scalar_value_to_timestamp(scalar: &ScalarValue) -> Option<Timestamp> {
     match scalar {
-        ScalarValue::Int64(val) => val.map(Timestamp::new_millisecond),
         ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s) {
             Ok(t) => Some(t),
             Err(e) => {

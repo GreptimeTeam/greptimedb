@@ -79,7 +79,6 @@ impl RegionRequest {
                         engine: create.engine,
                         column_metadatas,
                         primary_key: create.primary_key,
-                        create_if_not_exists: create.create_if_not_exists,
                         options: create.options,
                         region_dir,
                     }),
@@ -150,9 +149,6 @@ pub struct RegionCreateRequest {
     pub column_metadatas: Vec<ColumnMetadata>,
     /// Columns in the primary key.
     pub primary_key: Vec<ColumnId>,
-    /// Create region if not exists.
-    // TODO(yingwen): Remove this.
-    pub create_if_not_exists: bool,
     /// Options of the created region.
     pub options: HashMap<String, String>,
     /// Directory for region's data home. Usually is composed by catalog and table id

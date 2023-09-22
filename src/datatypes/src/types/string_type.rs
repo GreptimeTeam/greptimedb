@@ -54,10 +54,6 @@ impl DataType for StringType {
         Box::new(StringVectorBuilder::with_capacity(capacity))
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
     fn try_cast(&self, from: Value) -> Option<Value> {
         if from.logical_type_id() == self.logical_type_id() {
             return Some(from);

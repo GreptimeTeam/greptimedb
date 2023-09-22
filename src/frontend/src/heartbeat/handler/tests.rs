@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use api::v1::meta::HeartbeatResponse;
-use catalog::kvbackend::KvCacheInvalidator;
+use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };

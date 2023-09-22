@@ -179,6 +179,10 @@ impl ConcreteDataType {
         )
     }
 
+    pub fn is_timestamp(&self) -> bool {
+        matches!(self, ConcreteDataType::Timestamp(_))
+    }
+
     pub fn numerics() -> Vec<ConcreteDataType> {
         vec![
             ConcreteDataType::int8_datatype(),
@@ -217,9 +221,6 @@ impl ConcreteDataType {
     /// Try to cast data type as a [`TimestampType`].
     pub fn as_timestamp(&self) -> Option<TimestampType> {
         match self {
-            ConcreteDataType::Int64(_) => {
-                Some(TimestampType::Millisecond(TimestampMillisecondType))
-            }
             ConcreteDataType::Timestamp(t) => Some(*t),
             _ => None,
         }
@@ -473,10 +474,6 @@ pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Creates a mutable vector with given `capacity` of this type.
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector>;
 
-    /// Returns true if the data type is compatible with timestamp type so we can
-    /// use it as a timestamp.
-    fn is_timestamp_compatible(&self) -> bool;
-
     /// Casts the value to specific DataType.
     /// Return None if cast failed.
     fn try_cast(&self, from: Value) -> Option<Value>;
@@ -594,41 +591,6 @@ mod tests {
             ConcreteDataType::timestamp_second_datatype(),
             ConcreteDataType::from_arrow_time_unit(&ArrowTimeUnit::Second)
         );
-    }
-
-    #[test]
-    fn test_is_timestamp_compatible() {
-        assert!(ConcreteDataType::timestamp_datatype(TimeUnit::Second).is_timestamp_compatible());
-        assert!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond).is_timestamp_compatible()
-        );
-        assert!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Microsecond).is_timestamp_compatible()
-        );
-        assert!(
-            ConcreteDataType::timestamp_datatype(TimeUnit::Nanosecond).is_timestamp_compatible()
-        );
-        assert!(ConcreteDataType::timestamp_second_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_millisecond_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_microsecond_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::timestamp_nanosecond_datatype().is_timestamp_compatible());
-        assert!(ConcreteDataType::int64_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::null_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::binary_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::boolean_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::date_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::datetime_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::string_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::int32_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::uint64_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::time_second_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::time_millisecond_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::time_microsecond_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::time_nanosecond_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::duration_second_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::duration_millisecond_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::duration_microsecond_datatype().is_timestamp_compatible());
-        assert!(!ConcreteDataType::duration_nanosecond_datatype().is_timestamp_compatible());
     }
 
     #[test]
