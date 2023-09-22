@@ -50,10 +50,6 @@ impl DataType for DateTimeType {
         Box::new(DateTimeVectorBuilder::with_capacity(capacity))
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),

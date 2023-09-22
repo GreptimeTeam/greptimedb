@@ -382,9 +382,7 @@ impl Batch {
     fn get_timestamp(&self, index: usize) -> Timestamp {
         match self.timestamps.get_ref(index) {
             ValueRef::Timestamp(timestamp) => timestamp,
-            // Int64 is always millisecond.
-            // TODO(yingwen): Don't allow using int64 as time index.
-            ValueRef::Int64(v) => Timestamp::new_millisecond(v),
+
             // We have check the data type is timestamp compatible in the [BatchBuilder] so it's safe to panic.
             value => panic!("{:?} is not a timestamp", value),
         }
@@ -483,9 +481,9 @@ impl BatchBuilder {
     pub fn timestamps_array(&mut self, array: ArrayRef) -> Result<&mut Self> {
         let vector = Helper::try_into_vector(array).context(ConvertVectorSnafu)?;
         ensure!(
-            vector.data_type().is_timestamp_compatible(),
+            vector.data_type().is_timestamp(),
             InvalidBatchSnafu {
-                reason: format!("{:?} is a timestamp type", vector.data_type()),
+                reason: format!("{:?} is not a timestamp type", vector.data_type()),
             }
         );
 

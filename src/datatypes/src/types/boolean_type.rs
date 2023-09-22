@@ -54,10 +54,6 @@ impl DataType for BooleanType {
         Box::new(BooleanVectorBuilder::with_capacity(capacity))
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Boolean(v) => Some(Value::Boolean(v)),

@@ -26,7 +26,6 @@ use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use datatypes::arrow::datatypes::FieldRef;
-use datatypes::prelude::DataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -355,13 +354,10 @@ impl RegionMetadata {
     fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
-                column_metadata
-                    .column_schema
-                    .data_type
-                    .is_timestamp_compatible(),
+                column_metadata.column_schema.data_type.is_timestamp(),
                 InvalidMetaSnafu {
                     reason: format!(
-                        "{} is not timestamp compatible",
+                        "column `{}` is not timestamp type",
                         column_metadata.column_schema.name
                     ),
                 }
@@ -675,7 +671,8 @@ mod test {
         builder.push_column_metadata(col);
         let err = builder.build().unwrap_err();
         assert!(
-            err.to_string().contains("ts is not timestamp compatible"),
+            err.to_string()
+                .contains("column `ts` is not timestamp type"),
             "unexpected err: {err}",
         );
     }
