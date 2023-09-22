@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -29,7 +30,7 @@ use meta_client::client::{HeartbeatSender, MetaClient, MetaClientBuilder};
 use meta_client::MetaClientOptions;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, Notify};
-use tokio::time::Instant;
+use tokio::time::{timeout, Instant};
 
 use self::handler::RegionHeartbeatResponseHandler;
 use crate::alive_keeper::RegionAliveKeeper;
