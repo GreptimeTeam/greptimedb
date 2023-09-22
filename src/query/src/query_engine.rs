@@ -28,7 +28,6 @@ use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use datatypes::schema::Schema;
 use session::context::QueryContextRef;
-use sql::statements::statement::Statement;
 use table::TableRef;
 
 use crate::dataframe::DataFrame;
@@ -40,8 +39,6 @@ pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
 
-pub type SqlStatementExecutorRef = Arc<dyn SqlStatementExecutor>;
-
 /// Describe statement result
 #[derive(Debug)]
 pub struct DescribeResult {
@@ -49,11 +46,6 @@ pub struct DescribeResult {
     pub schema: Schema,
     /// The logical plan for statement
     pub logical_plan: LogicalPlan,
-}
-
-#[async_trait]
-pub trait SqlStatementExecutor: Send + Sync {
-    async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]
