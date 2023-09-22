@@ -20,11 +20,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
 use crate::util::{format_utc_datetime, local_datetime_to_utc};
+use crate::Date;
 
 const DATETIME_FORMAT: &str = "%F %T";
 const DATETIME_FORMAT_WITH_TZ: &str = "%F %T%z";
 
-/// [DateTime] represents the **seconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
+/// [DateTime] represents the **milliseconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch)**.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
@@ -32,7 +33,7 @@ pub struct DateTime(i64);
 
 impl Display for DateTime {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(abs_time) = NaiveDateTime::from_timestamp_opt(self.0, 0) {
+        if let Some(abs_time) = NaiveDateTime::from_timestamp_millis(self.0) {
             write!(
                 f,
                 "{}",
@@ -52,7 +53,7 @@ impl From<DateTime> for serde_json::Value {
 
 impl From<NaiveDateTime> for DateTime {
     fn from(value: NaiveDateTime) -> Self {
-        DateTime::from(value.timestamp())
+        DateTime::from(value.timestamp_millis())
     }
 }
 
@@ -61,26 +62,33 @@ impl FromStr for DateTime {
 
     fn from_str(s: &str) -> Result<Self> {
         let s = s.trim();
-        let timestamp = if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
+        let timestamp_millis = if let Ok(d) = NaiveDateTime::parse_from_str(s, DATETIME_FORMAT) {
             match local_datetime_to_utc(&d) {
                 LocalResult::None => {
                     return InvalidDateStrSnafu { raw: s }.fail();
                 }
-                LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.timestamp(),
+                LocalResult::Single(d) | LocalResult::Ambiguous(d, _) => d.timestamp_millis(),
             }
         } else if let Ok(v) = chrono::DateTime::parse_from_str(s, DATETIME_FORMAT_WITH_TZ) {
-            v.timestamp()
+            v.timestamp_millis()
         } else {
             return InvalidDateStrSnafu { raw: s }.fail();
         };
 
-        Ok(Self(timestamp))
+        Ok(Self(timestamp_millis))
     }
 }
 
 impl From<i64> for DateTime {
     fn from(v: i64) -> Self {
         Self(v)
+    }
+}
+
+impl From<Date> for DateTime {
+    fn from(value: Date) -> Self {
+        // It's safe, i32 * 86400000 won't be overflow
+        Self(value.to_secs() * 1000)
     }
 }
 
@@ -96,6 +104,10 @@ impl DateTime {
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         NaiveDateTime::from_timestamp_opt(self.0, 0)
     }
+
+    pub fn date(&self) -> Option<Date> {
+        self.to_chrono_datetime().map(|d| Date::from(d.date()))
+    }
 }
 
 #[cfg(test)]
@@ -106,8 +118,8 @@ mod tests {
     pub fn test_new_date_time() {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!("1970-01-01 08:00:00+0800", DateTime::new(0).to_string());
-        assert_eq!("1970-01-01 08:00:01+0800", DateTime::new(1).to_string());
-        assert_eq!("1970-01-01 07:59:59+0800", DateTime::new(-1).to_string());
+        assert_eq!("1970-01-01 08:00:01+0800", DateTime::new(1000).to_string());
+        assert_eq!("1970-01-01 07:59:59+0800", DateTime::new(-1000).to_string());
     }
 
     #[test]
@@ -130,7 +142,7 @@ mod tests {
     fn test_parse_local_date_time() {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
-            -28800,
+            -28800000,
             DateTime::from_str("1970-01-01 00:00:00").unwrap().val()
         );
         assert_eq!(0, DateTime::from_str("1970-01-01 08:00:00").unwrap().val());
@@ -141,6 +153,6 @@ mod tests {
         let ts = DateTime::from_str("1970-01-01 08:00:00+0000")
             .unwrap()
             .val();
-        assert_eq!(28800, ts);
+        assert_eq!(28800000, ts);
     }
 }
