@@ -20,10 +20,8 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use api::v1::meta::RegionStat;
-use common_telemetry::warn;
 use futures::future::BoxFuture;
-use table::metadata::{TableId, TableType};
+use table::metadata::TableId;
 use table::requests::CreateTableRequest;
 use table::TableRef;
 
@@ -123,67 +121,4 @@ pub struct DeregisterSchemaRequest {
 pub struct RegisterSchemaRequest {
     pub catalog: String,
     pub schema: String,
-}
-
-/// The stat of regions in the datanode node.
-/// The number of regions can be got from len of vec.
-///
-/// Ignores any errors occurred during iterating regions. The intention of this method is to
-/// collect region stats that will be carried in Datanode's heartbeat to Metasrv, so it's a
-/// "try our best" job.
-pub async fn datanode_stat(catalog_manager: &CatalogManagerRef) -> (u64, Vec<RegionStat>) {
-    let mut region_number: u64 = 0;
-    let mut region_stats = Vec::new();
-
-    let Ok(catalog_names) = catalog_manager.catalog_names().await else {
-        return (region_number, region_stats);
-    };
-    for catalog_name in catalog_names {
-        let Ok(schema_names) = catalog_manager.schema_names(&catalog_name).await else {
-            continue;
-        };
-        for schema_name in schema_names {
-            let Ok(table_names) = catalog_manager
-                .table_names(&catalog_name, &schema_name)
-                .await
-            else {
-                continue;
-            };
-            for table_name in table_names {
-                let Ok(Some(table)) = catalog_manager
-                    .table(&catalog_name, &schema_name, &table_name)
-                    .await
-                else {
-                    continue;
-                };
-
-                if table.table_type() != TableType::Base {
-                    continue;
-                }
-
-                let table_info = table.table_info();
-                let region_numbers = &table_info.meta.region_numbers;
-                region_number += region_numbers.len() as u64;
-
-                let engine = &table_info.meta.engine;
-
-                match table.region_stats() {
-                    Ok(stats) => {
-                        let stats = stats.into_iter().map(|stat| RegionStat {
-                            region_id: stat.region_id,
-                            approximate_bytes: stat.disk_usage_bytes as i64,
-                            engine: engine.clone(),
-                            ..Default::default()
-                        });
-
-                        region_stats.extend(stats);
-                    }
-                    Err(e) => {
-                        warn!("Failed to get region status, err: {:?}", e);
-                    }
-                };
-            }
-        }
-    }
-    (region_number, region_stats)
 }
