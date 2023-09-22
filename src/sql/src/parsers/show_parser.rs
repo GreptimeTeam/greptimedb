@@ -30,10 +30,16 @@ impl<'a> ParserContext<'a> {
             self.parse_show_databases()
         } else if self.matches_keyword(Keyword::TABLES) {
             let _ = self.parser.next_token();
-            self.parse_show_tables()
+            self.parse_show_tables(false)
         } else if self.consume_token("CREATE") {
             if self.consume_token("TABLE") {
                 self.parse_show_create_table()
+            } else {
+                self.unsupported(self.peek_token_as_string())
+            }
+        } else if self.consume_token("FULL") {
+            if self.consume_token("TABLES") {
+                self.parse_show_tables(true)
             } else {
                 self.unsupported(self.peek_token_as_string())
             }
@@ -61,12 +67,13 @@ impl<'a> ParserContext<'a> {
         Ok(Statement::ShowCreateTable(ShowCreateTable { table_name }))
     }
 
-    fn parse_show_tables(&mut self) -> Result<Statement> {
+    fn parse_show_tables(&mut self, full: bool) -> Result<Statement> {
         let database = match self.parser.peek_token().token {
             Token::EOF | Token::SemiColon => {
                 return Ok(Statement::ShowTables(ShowTables {
                     kind: ShowKind::All,
                     database: None,
+                    full,
                 }));
             }
 
@@ -126,7 +133,11 @@ impl<'a> ParserContext<'a> {
             _ => return self.unsupported(self.peek_token_as_string()),
         };
 
-        Ok(Statement::ShowTables(ShowTables { kind, database }))
+        Ok(Statement::ShowTables(ShowTables {
+            kind,
+            database,
+            full,
+        }))
     }
 
     /// Parses `SHOW DATABASES` statement.
@@ -234,6 +245,7 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::All,
                 database: None,
+                full: false
             })
         );
     }
@@ -253,6 +265,7 @@ mod tests {
                     quote_style: None,
                 }),
                 database: None,
+                full: false
             })
         );
 
@@ -269,6 +282,7 @@ mod tests {
                     quote_style: None,
                 }),
                 database: Some(_),
+                full: false
             })
         );
     }
@@ -285,6 +299,7 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: None,
+                full: false
             })
         );
 
@@ -298,6 +313,76 @@ mod tests {
             Statement::ShowTables(ShowTables {
                 kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
                 database: Some(_),
+                full: false
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_full_tables() {
+        let sql = "SHOW FULL TABLES";
+        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+        assert_matches!(&stmts[0], Statement::ShowTables { .. });
+        match &stmts[0] {
+            Statement::ShowTables(show) => {
+                assert!(show.full);
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    #[test]
+    pub fn test_show_full_tables_where() {
+        let sql = "SHOW FULL TABLES IN test_db WHERE Tables LIKE test_table";
+        let stmts = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Where(sqlparser::ast::Expr::Like { .. }),
+                database: Some(_),
+                full: true
+            })
+        );
+    }
+
+    #[test]
+    pub fn test_show_full_tables_like() {
+        let sql = "SHOW FULL TABLES LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: None,
+                full: true
+            })
+        );
+
+        let sql = "SHOW FULL TABLES in test_db LIKE test_table";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let stmts = result.unwrap();
+        assert_eq!(1, stmts.len());
+
+        assert_matches!(
+            &stmts[0],
+            Statement::ShowTables(ShowTables {
+                kind: ShowKind::Like(sqlparser::ast::Ident {
+                    value: _,
+                    quote_style: None,
+                }),
+                database: Some(_),
+                full: true
             })
         );
     }

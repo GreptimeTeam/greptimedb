@@ -144,42 +144,86 @@ pub async fn show_tables(
     catalog_manager: CatalogManagerRef,
     query_ctx: QueryContextRef,
 ) -> Result<Output> {
-    let schema = if let Some(database) = stmt.database {
+    let schema_name = if let Some(database) = stmt.database {
         database
     } else {
         query_ctx.current_schema().to_owned()
     };
     // TODO(sunng87): move this function into query_ctx
     let mut tables = catalog_manager
-        .table_names(query_ctx.current_catalog(), &schema)
+        .table_names(query_ctx.current_catalog(), &schema_name)
         .await
         .context(error::CatalogSnafu)?;
 
     // TODO(dennis): Specify the order of the results in schema provider API
     tables.sort();
-    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+
+    let table_types: Option<Arc<dyn Vector>> = {
+        if stmt.full {
+            Some(
+                get_table_types(
+                    &tables,
+                    catalog_manager.clone(),
+                    query_ctx.clone(),
+                    &schema_name,
+                )
+                .await?,
+            )
+        } else {
+            None
+        }
+    };
+
+    let mut column_schema = vec![ColumnSchema::new(
         TABLES_COLUMN,
         ConcreteDataType::string_datatype(),
         false,
-    )]));
+    )];
+    if table_types.is_some() {
+        column_schema.push(ColumnSchema::new(
+            "Table_type",
+            ConcreteDataType::string_datatype(),
+            false,
+        ));
+    }
+
+    let schema = Arc::new(Schema::new(column_schema));
+
     match stmt.kind {
         ShowKind::All => {
             let tables = Arc::new(StringVector::from(tables)) as _;
-            let records = RecordBatches::try_from_columns(schema, vec![tables])
+            let mut columns = vec![tables];
+            if let Some(table_types) = table_types {
+                columns.push(table_types)
+            }
+
+            let records = RecordBatches::try_from_columns(schema, columns)
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
         }
         ShowKind::Where(filter) => {
-            let columns = vec![Arc::new(StringVector::from(tables)) as _];
+            let mut columns = vec![Arc::new(StringVector::from(tables)) as _];
+            if let Some(table_types) = table_types {
+                columns.push(table_types)
+            }
             let record_batch =
                 RecordBatch::new(schema, columns).context(error::CreateRecordBatchSnafu)?;
             let result = execute_show_with_filter(record_batch, Some(filter)).await?;
             Ok(result)
         }
         ShowKind::Like(ident) => {
-            let tables =
-                Helper::like_utf8(tables, &ident.value).context(error::VectorComputationSnafu)?;
-            let records = RecordBatches::try_from_columns(schema, vec![tables])
+            let (tables, filter) = Helper::like_utf8_filter(tables, &ident.value)
+                .context(error::VectorComputationSnafu)?;
+            let mut columns = vec![tables];
+
+            if let Some(table_types) = table_types {
+                let table_types = table_types
+                    .filter(&filter)
+                    .context(error::VectorComputationSnafu)?;
+                columns.push(table_types)
+            }
+
+            let records = RecordBatches::try_from_columns(schema, columns)
                 .context(error::CreateRecordBatchSnafu)?;
             Ok(Output::RecordBatches(records))
         }
@@ -450,6 +494,25 @@ fn parse_file_table_format(options: &HashMap<String, String>) -> Result<Box<dyn 
             Format::Orc(format) => Box::new(format),
         },
     )
+}
+
+async fn get_table_types(
+    tables: &[String],
+    catalog_manager: CatalogManagerRef,
+    query_ctx: QueryContextRef,
+    schema_name: &str,
+) -> Result<Arc<dyn Vector>> {
+    let mut table_types = Vec::with_capacity(tables.len());
+    for table_name in tables {
+        if let Some(table) = catalog_manager
+            .table(query_ctx.current_catalog(), schema_name, table_name)
+            .await
+            .context(error::CatalogSnafu)?
+        {
+            table_types.push(table.table_type().to_string());
+        }
+    }
+    Ok(Arc::new(StringVector::from(table_types)) as _)
 }
 
 #[cfg(test)]
