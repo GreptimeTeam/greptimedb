@@ -246,6 +246,8 @@ impl HeartbeatTask {
                             Ok(new_tx) => {
                                 info!("Reconnected to metasrv");
                                 tx = new_tx;
+                                // Triggers to send heartbeat immediately.
+                                sleep.as_mut().reset(Instant::now());
                             }
                             Err(e) => {
                                 error!(e;"Failed to reconnect to metasrv!");
