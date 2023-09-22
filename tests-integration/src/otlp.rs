@@ -92,7 +92,7 @@ mod test {
 
         let mut output = instance
             .do_query(
-                "SELECT greptime_le, greptime_value FROM my_test_histo_bucket order by greptime_le",
+                "SELECT le, greptime_value FROM my_test_histo_bucket order by le",
                 ctx.clone(),
             )
             .await;
@@ -101,17 +101,16 @@ mod test {
             unreachable!()
         };
         let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
-        dbg!(&recordbatches);
         assert_eq!(
             recordbatches.pretty_print().unwrap(),
             "\
-+-------------+----------------+
-| greptime_le | greptime_value |
-+-------------+----------------+
-| 1           | 1.0            |
-| 5           | 3.0            |
-| inf         | 4.0            |
-+-------------+----------------+",
++-----+----------------+
+| le  | greptime_value |
++-----+----------------+
+| 1   | 1.0            |
+| 5   | 3.0            |
+| inf | 4.0            |
++-----+----------------+",
         );
 
         let mut output = instance

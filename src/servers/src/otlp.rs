@@ -232,7 +232,7 @@ fn encode_sum(
     Ok(())
 }
 
-const HISTOGRAM_LE_COLUMN: &str = "greptime_le";
+const HISTOGRAM_LE_COLUMN: &str = "le";
 
 /// Encode histogram data. This function returns 3 insert requests for 3 tables.
 ///
