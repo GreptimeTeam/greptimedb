@@ -358,7 +358,7 @@ impl RegionMetadata {
                 column_metadata.column_schema.data_type.is_timestamp(),
                 InvalidMetaSnafu {
                     reason: format!(
-                        "column:{} is not timestamp type",
+                        "column `{}` is not timestamp type",
                         column_metadata.column_schema.name
                     ),
                 }
@@ -672,7 +672,7 @@ mod test {
         builder.push_column_metadata(col);
         let err = builder.build().unwrap_err();
         assert!(
-            err.to_string().contains("column:ts is not timestamp type"),
+            err.to_string().contains("column `ts` is not timestamp type"),
             "unexpected err: {err}",
         );
     }
