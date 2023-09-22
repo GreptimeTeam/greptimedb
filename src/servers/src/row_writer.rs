@@ -62,6 +62,11 @@ impl TableData {
         self.rows.push(Row { values })
     }
 
+    #[allow(dead_code)]
+    pub fn columns(&self) -> &Vec<ColumnSchema> {
+        &self.schema
+    }
+
     pub fn into_schema_and_rows(self) -> (Vec<ColumnSchema>, Vec<Row>) {
         (self.schema, self.rows)
     }
@@ -98,6 +103,11 @@ impl MultiTableData {
     pub fn add_table_data(&mut self, table_name: impl ToString, table_data: TableData) {
         self.table_data_map
             .insert(table_name.to_string(), table_data);
+    }
+
+    #[allow(dead_code)]
+    pub fn num_tables(&self) -> usize {
+        self.table_data_map.len()
     }
 
     /// Returns the request and number of rows in it.
