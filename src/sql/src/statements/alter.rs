@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_query::AddColumnLocation;
-use sqlparser_derive::{Visit, VisitMut};
 use sqlparser::ast::{ColumnDef, Ident, ObjectName, SqlOption, TableConstraint};
+use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut)]
 pub struct AlterTable {
