@@ -52,10 +52,6 @@ impl DataType for NullType {
         Box::<NullVectorBuilder>::default()
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
     // Unconditional cast other type to Value::Null
     fn try_cast(&self, _from: Value) -> Option<Value> {
         Some(Value::Null)

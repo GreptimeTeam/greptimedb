@@ -271,9 +271,6 @@ macro_rules! define_non_timestamp_primitive {
                 Box::new(PrimitiveVectorBuilder::<$DataType>::with_capacity(capacity))
             }
 
-            fn is_timestamp_compatible(&self) -> bool {
-                false
-            }
 
             fn try_cast(&self, from: Value) -> Option<Value> {
                 match from {
@@ -373,10 +370,6 @@ impl DataType for Int64Type {
         Box::new(PrimitiveVectorBuilder::<Int64Type>::with_capacity(capacity))
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        true
-    }
-
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Boolean(v) => bool_to_numeric(v).map(Value::Int64),
@@ -422,10 +415,6 @@ impl DataType for Int32Type {
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
         Box::new(PrimitiveVectorBuilder::<Int32Type>::with_capacity(capacity))
-    }
-
-    fn is_timestamp_compatible(&self) -> bool {
-        false
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {

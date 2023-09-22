@@ -23,7 +23,6 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
-use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
@@ -162,7 +161,6 @@ fn decode_timestamp_range_inner(
     let mut end = i64::MIN;
 
     let unit = match ts_datatype {
-        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
         ConcreteDataType::Timestamp(type_) => type_.unit(),
         _ => {
             return DecodeParquetTimeRangeSnafu {
@@ -358,6 +356,7 @@ mod tests {
     use api::v1::OpType;
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
+    use common_time::timestamp::TimeUnit;
     use datatypes::arrow::array::{Array, UInt64Array, UInt8Array};
     use datatypes::prelude::{ScalarVector, Vector};
     use datatypes::types::{TimestampMillisecondType, TimestampType};
