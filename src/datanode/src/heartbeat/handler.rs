@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -49,12 +47,13 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(OpenRegion {
                 region_ident,
                 region_storage_path,
+                options,
             }) => {
                 let region_id = Self::region_ident_to_region_id(&region_ident);
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
                     engine: region_ident.engine,
                     region_dir: region_dir(&region_storage_path, region_id),
-                    options: HashMap::new(),
+                    options,
                 });
                 Ok((region_id, open_region_req))
             }

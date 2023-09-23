@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatResponse;
@@ -79,6 +80,7 @@ fn open_region_instruction() -> Instruction {
             engine: "mito2".to_string(),
         },
         "path/dir",
+        HashMap::new(),
     ))
 }
 

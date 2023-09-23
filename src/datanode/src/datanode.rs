@@ -14,7 +14,6 @@
 
 //! Datanode implementation.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -288,6 +287,7 @@ impl DatanodeBuilder {
                     RegionId::new(table_value.table_id, region_number),
                     table_value.engine.clone(),
                     table_value.region_storage_path.clone(),
+                    table_value.region_options.clone(),
                 ));
             }
         }
@@ -296,7 +296,7 @@ impl DatanodeBuilder {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
         let mut tasks = vec![];
 
-        for (region_id, engine, store_path) in regions {
+        for (region_id, engine, store_path, options) in regions {
             let region_dir = region_dir(&store_path, region_id);
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
@@ -307,7 +307,7 @@ impl DatanodeBuilder {
                         RegionRequest::Open(RegionOpenRequest {
                             engine: engine.clone(),
                             region_dir,
-                            options: HashMap::new(),
+                            options,
                         }),
                     )
                     .await?;

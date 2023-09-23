@@ -55,7 +55,7 @@ pub mod table_region;
 #[allow(deprecated)]
 pub mod table_route;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -256,6 +256,7 @@ impl TableMetadataManager {
             .table_name_manager()
             .build_create_txn(&table_name, table_id)?;
 
+        let region_options = (&table_info.meta.options).into();
         // Creates table info.
         let table_info_value = TableInfoValue::new(table_info);
         let (create_table_info_txn, on_create_table_info_failure) = self
@@ -268,6 +269,7 @@ impl TableMetadataManager {
             table_id,
             &engine,
             &region_storage_path,
+            region_options,
             distribution,
         )?;
 
@@ -450,6 +452,10 @@ impl TableMetadataManager {
         region_storage_path: &str,
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
+        (current_region_options, new_region_options): (
+            HashMap<String, String>,
+            HashMap<String, String>,
+        ),
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
@@ -462,6 +468,7 @@ impl TableMetadataManager {
             region_storage_path,
             current_region_distribution,
             new_region_distribution,
+            (current_region_options, new_region_options),
         )?;
 
         // Updates the table_route.
@@ -553,7 +560,7 @@ impl_optional_meta_value! {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     use datatypes::prelude::ConcreteDataType;
@@ -898,6 +905,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                (HashMap::new(), HashMap::new()),
             )
             .await
             .unwrap();
@@ -911,6 +919,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                (HashMap::new(), HashMap::new()),
             )
             .await
             .unwrap();
@@ -925,6 +934,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                (HashMap::new(), HashMap::new()),
             )
             .await
             .unwrap();
@@ -944,7 +954,8 @@ mod tests {
                 engine,
                 &region_storage_path,
                 wrong_table_route_value,
-                new_region_routes
+                new_region_routes,
+                (HashMap::new(), HashMap::new())
             )
             .await
             .is_err());

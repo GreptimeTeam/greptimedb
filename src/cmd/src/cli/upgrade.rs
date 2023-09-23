@@ -407,6 +407,7 @@ impl MigrateTableMetadata {
                         regions,
                         engine.to_string(),
                         region_storage_path.clone(),
+                        (&value.table_info.meta.options).into(),
                     ),
                 )
             })

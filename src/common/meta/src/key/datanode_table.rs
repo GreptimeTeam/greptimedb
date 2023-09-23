@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream::BoxStream;
@@ -89,6 +90,8 @@ pub struct DatanodeTableValue {
     pub engine: String,
     #[serde(default)]
     pub region_storage_path: String,
+    #[serde(default)]
+    pub region_options: HashMap<String, String>,
     version: u64,
 }
 
@@ -98,12 +101,14 @@ impl DatanodeTableValue {
         regions: Vec<RegionNumber>,
         engine: String,
         region_storage_path: String,
+        region_options: HashMap<String, String>,
     ) -> Self {
         Self {
             table_id,
             regions,
             engine,
             region_storage_path,
+            region_options,
             version: 0,
         }
     }
@@ -156,6 +161,7 @@ impl DatanodeTableManager {
         table_id: TableId,
         engine: &str,
         region_storage_path: &str,
+        region_options: HashMap<String, String>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
@@ -167,6 +173,7 @@ impl DatanodeTableManager {
                     regions,
                     engine.to_string(),
                     region_storage_path.to_string(),
+                    region_options.clone(),
                 );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
@@ -186,6 +193,10 @@ impl DatanodeTableManager {
         region_storage_path: &str,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
+        (current_region_options, new_region_options): (
+            HashMap<String, String>,
+            HashMap<String, String>,
+        ),
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
@@ -197,11 +208,11 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
-
+        let need_update_options = current_region_options != new_region_options;
         for (datanode, regions) in new_region_distribution.into_iter() {
             if let Some(current_region) = current_region_distribution.get(&datanode) {
                 // Updates if need.
-                if *current_region != regions {
+                if *current_region != regions || need_update_options {
                     let key = DatanodeTableKey::new(datanode, table_id);
                     let raw_key = key.as_raw_key();
                     let val = DatanodeTableValue::new(
@@ -209,6 +220,7 @@ impl DatanodeTableManager {
                         regions,
                         engine.to_string(),
                         region_storage_path.to_string(),
+                        new_region_options.clone(),
                     )
                     .try_as_raw_value()?;
                     opts.push(TxnOp::Put(raw_key, val));
@@ -222,6 +234,7 @@ impl DatanodeTableManager {
                     regions,
                     engine.to_string(),
                     region_storage_path.to_string(),
+                    new_region_options.clone(),
                 )
                 .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
@@ -273,8 +286,9 @@ mod tests {
             engine: Default::default(),
             region_storage_path: Default::default(),
             version: 1,
+            region_options: HashMap::new(),
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
