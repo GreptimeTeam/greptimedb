@@ -42,7 +42,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .context(AuthSnafu)?;
         let (requests, rows) = otlp::to_grpc_insert_requests(request)?;
         let _ = self
-            .handle_inserts(requests, ctx)
+            .handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;

@@ -27,13 +27,13 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{IncompatibleSchemaSnafu, InfluxdbLinesWriteSnafu, Result, TimePrecisionSnafu};
 
-pub struct TableData<'a> {
+pub struct TableData {
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
-    column_indexes: HashMap<&'a str, usize>,
+    column_indexes: HashMap<String, usize>,
 }
 
-impl TableData<'_> {
+impl TableData {
     pub fn new(num_columns: usize, num_rows: usize) -> Self {
         Self {
             schema: Vec::with_capacity(num_columns),
@@ -62,16 +62,27 @@ impl TableData<'_> {
         self.rows.push(Row { values })
     }
 
+    #[allow(dead_code)]
+    pub fn columns(&self) -> &Vec<ColumnSchema> {
+        &self.schema
+    }
+
     pub fn into_schema_and_rows(self) -> (Vec<ColumnSchema>, Vec<Row>) {
         (self.schema, self.rows)
     }
 }
 
-pub struct MultiTableData<'a> {
-    table_data_map: HashMap<&'a str, TableData<'a>>,
+pub struct MultiTableData {
+    table_data_map: HashMap<String, TableData>,
 }
 
-impl<'a> MultiTableData<'a> {
+impl Default for MultiTableData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultiTableData {
     pub fn new() -> Self {
         Self {
             table_data_map: HashMap::new(),
@@ -80,13 +91,23 @@ impl<'a> MultiTableData<'a> {
 
     pub fn get_or_default_table_data(
         &mut self,
-        table_name: &'a str,
+        table_name: impl ToString,
         num_columns: usize,
         num_rows: usize,
-    ) -> &mut TableData<'a> {
+    ) -> &mut TableData {
         self.table_data_map
-            .entry(table_name)
+            .entry(table_name.to_string())
             .or_insert_with(|| TableData::new(num_columns, num_rows))
+    }
+
+    pub fn add_table_data(&mut self, table_name: impl ToString, table_data: TableData) {
+        self.table_data_map
+            .insert(table_name.to_string(), table_data);
+    }
+
+    #[allow(dead_code)]
+    pub fn num_tables(&self) -> usize {
+        self.table_data_map.len()
     }
 
     /// Returns the request and number of rows in it.
@@ -106,7 +127,7 @@ impl<'a> MultiTableData<'a> {
                 }
 
                 RowInsertRequest {
-                    table_name: table_name.to_string(),
+                    table_name,
                     rows: Some(Rows { schema, rows }),
                 }
             })
@@ -117,9 +138,9 @@ impl<'a> MultiTableData<'a> {
     }
 }
 
-pub fn write_tags<'a>(
-    table_data: &mut TableData<'a>,
-    kvs: impl Iterator<Item = (&'a str, &'a str)>,
+pub fn write_tags(
+    table_data: &mut TableData,
+    kvs: impl Iterator<Item = (String, impl ToString)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let ktv_iter = kvs.map(|(k, v)| {
@@ -132,31 +153,53 @@ pub fn write_tags<'a>(
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
 
-pub fn write_fields<'a>(
-    table_data: &mut TableData<'a>,
-    fields: impl Iterator<Item = (&'a str, ColumnDataType, ValueData)>,
+pub fn write_fields(
+    table_data: &mut TableData,
+    fields: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     write_by_semantic_type(table_data, SemanticType::Field, fields, one_row)
 }
 
-pub fn write_f64<'a>(
-    table_data: &mut TableData<'a>,
-    name: &'a str,
+pub fn write_tag(
+    table_data: &mut TableData,
+    name: impl ToString,
+    value: impl ToString,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    write_by_semantic_type(
+        table_data,
+        SemanticType::Tag,
+        std::iter::once((
+            name.to_string(),
+            ColumnDataType::String,
+            ValueData::StringValue(value.to_string()),
+        )),
+        one_row,
+    )
+}
+
+pub fn write_f64(
+    table_data: &mut TableData,
+    name: impl ToString,
     value: f64,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     write_fields(
         table_data,
-        std::iter::once((name, ColumnDataType::Float64, ValueData::F64Value(value))),
+        std::iter::once((
+            name.to_string(),
+            ColumnDataType::Float64,
+            ValueData::F64Value(value),
+        )),
         one_row,
     )
 }
 
-fn write_by_semantic_type<'a>(
-    table_data: &mut TableData<'a>,
+fn write_by_semantic_type(
+    table_data: &mut TableData,
     semantic_type: SemanticType,
-    ktv_iter: impl Iterator<Item = (&'a str, ColumnDataType, ValueData)>,
+    ktv_iter: impl Iterator<Item = (String, ColumnDataType, ValueData)>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     let TableData {
@@ -166,7 +209,7 @@ fn write_by_semantic_type<'a>(
     } = table_data;
 
     for (name, datatype, value) in ktv_iter {
-        let index = column_indexes.entry(name).or_insert(schema.len());
+        let index = column_indexes.entry(name.clone()).or_insert(schema.len());
         if *index == schema.len() {
             schema.push(ColumnSchema {
                 column_name: name.to_string(),
@@ -183,18 +226,18 @@ fn write_by_semantic_type<'a>(
     Ok(())
 }
 
-pub fn write_ts_millis<'a>(
-    table_data: &mut TableData<'a>,
-    name: &'a str,
+pub fn write_ts_millis(
+    table_data: &mut TableData,
+    name: impl ToString,
     ts: Option<i64>,
     one_row: &mut Vec<Value>,
 ) -> Result<()> {
     write_ts_precision(table_data, name, ts, Precision::Millisecond, one_row)
 }
 
-pub fn write_ts_precision<'a>(
-    table_data: &mut TableData<'a>,
-    name: &'a str,
+pub fn write_ts_precision(
+    table_data: &mut TableData,
+    name: impl ToString,
     ts: Option<i64>,
     precision: Precision,
     one_row: &mut Vec<Value>,
@@ -204,6 +247,7 @@ pub fn write_ts_precision<'a>(
         column_indexes,
         ..
     } = table_data;
+    let name = name.to_string();
 
     let ts = match ts {
         Some(timestamp) => writer::to_ms_ts(precision, timestamp),
@@ -219,10 +263,10 @@ pub fn write_ts_precision<'a>(
         }
     };
 
-    let index = column_indexes.entry(name).or_insert(schema.len());
+    let index = column_indexes.entry(name.clone()).or_insert(schema.len());
     if *index == schema.len() {
         schema.push(ColumnSchema {
-            column_name: name.to_string(),
+            column_name: name,
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
         });
