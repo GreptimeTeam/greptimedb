@@ -53,7 +53,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
 
             // tags
             if let Some(tags) = tags {
-                let kvs = tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+                let kvs = tags.iter().map(|(k, v)| (k.to_string(), v.as_str()));
                 row_writer::write_tags(table_data, kvs, &mut one_row)?;
             }
 
@@ -69,7 +69,7 @@ impl TryFrom<InfluxdbRequest> for RowInsertRequests {
                     ),
                     FieldValue::Boolean(v) => (ColumnDataType::Boolean, ValueData::BoolValue(*v)),
                 };
-                (k.as_str(), datatype, value)
+                (k.to_string(), datatype, value)
             });
             row_writer::write_fields(table_data, fields, &mut one_row)?;
 
