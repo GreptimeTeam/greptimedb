@@ -57,11 +57,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Open region from specific region dir.
         let region = RegionOpener::new(
             region_id,
+            &request.region_dir,
             self.memtable_builder.clone(),
             self.object_store.clone(),
             self.scheduler.clone(),
         )
-        .region_dir(&request.region_dir)
         .options(request.options)
         .open(&self.config, &self.wal)
         .await?;
