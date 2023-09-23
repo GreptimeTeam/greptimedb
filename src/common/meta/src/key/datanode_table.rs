@@ -194,8 +194,8 @@ impl DatanodeTableManager {
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         (current_region_options, new_region_options): (
-            HashMap<String, String>,
-            HashMap<String, String>,
+            &HashMap<String, String>,
+            &HashMap<String, String>,
         ),
     ) -> Result<Txn> {
         let mut opts = Vec::new();

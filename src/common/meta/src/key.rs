@@ -453,8 +453,8 @@ impl TableMetadataManager {
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
         (current_region_options, new_region_options): (
-            HashMap<String, String>,
-            HashMap<String, String>,
+            &HashMap<String, String>,
+            &HashMap<String, String>,
         ),
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
@@ -905,7 +905,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
-                (HashMap::new(), HashMap::new()),
+                (&HashMap::new(), &HashMap::new()),
             )
             .await
             .unwrap();
@@ -919,7 +919,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
-                (HashMap::new(), HashMap::new()),
+                (&HashMap::new(), &HashMap::new()),
             )
             .await
             .unwrap();
@@ -934,7 +934,7 @@ mod tests {
                 &region_storage_path,
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
-                (HashMap::new(), HashMap::new()),
+                (&HashMap::new(), &HashMap::new()),
             )
             .await
             .unwrap();
@@ -955,7 +955,7 @@ mod tests {
                 &region_storage_path,
                 wrong_table_route_value,
                 new_region_routes,
-                (HashMap::new(), HashMap::new())
+                (&HashMap::new(), &HashMap::new()),
             )
             .await
             .is_err());
