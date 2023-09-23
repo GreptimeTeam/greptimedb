@@ -8,7 +8,7 @@ interval_millis = 5000
 retry_interval_millis = 5000
 
 # HTTP server options, see `standalone.example.toml`.
-[http_options]
+[http]
 addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MB"
