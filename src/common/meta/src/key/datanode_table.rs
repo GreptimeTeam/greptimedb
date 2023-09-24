@@ -33,6 +33,11 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
+pub struct UpdateDatanodeTableContext<'a> {
+    pub engine: &'a str,
+    pub region_storage_path: &'a str,
+    pub region_options: &'a HashMap<String, String>,
+}
 pub struct DatanodeTableKey {
     datanode_id: DatanodeId,
     table_id: TableId,
@@ -189,14 +194,14 @@ impl DatanodeTableManager {
     pub(crate) fn build_update_txn(
         &self,
         table_id: TableId,
-        engine: &str,
-        region_storage_path: &str,
+        UpdateDatanodeTableContext {
+            engine,
+            region_storage_path,
+            region_options: current_region_options,
+        }: UpdateDatanodeTableContext<'_>,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
-        (current_region_options, new_region_options): (
-            &HashMap<String, String>,
-            &HashMap<String, String>,
-        ),
+        new_region_options: &HashMap<String, String>,
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 

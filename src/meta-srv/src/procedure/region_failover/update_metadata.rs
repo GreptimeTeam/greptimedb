@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use common_meta::key::datanode_table::UpdateDatanodeTableContext;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
@@ -98,11 +99,14 @@ impl UpdateRegionMetadata {
         ctx.table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &self.region_storage_path,
+                UpdateDatanodeTableContext {
+                    engine,
+                    region_storage_path: &self.region_storage_path,
+                    region_options: &self.region_options,
+                },
                 table_route_value,
                 new_region_routes,
-                (&self.region_options, &self.region_options),
+                &self.region_options,
             )
             .await
             .context(error::UpdateTableRouteSnafu)?;
