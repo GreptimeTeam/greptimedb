@@ -39,6 +39,7 @@ humantime-serde = { workspace = true }
 lazy_static = "1.4"
 memcomparable = "0.2"
 metrics.workspace = true
+moka.workspace = true
 object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true

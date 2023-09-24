@@ -50,7 +50,7 @@ meta-client = { workspace = true }
 raft-engine = { workspace = true }
 # Although it is not used, please do not delete it.
 metrics.workspace = true
-moka = { version = "0.9", features = ["future"] }
+moka = { workspace = true, features = ["future"] }
 object-store = { workspace = true }
 openmetrics-parser = "0.4"
 opentelemetry-proto.workspace = true

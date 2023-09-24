@@ -1266,7 +1266,7 @@ dependencies = [
  "log-store",
  "meta-client",
  "metrics",
- "moka 0.11.3",
+ "moka",
  "object-store",
  "parking_lot 0.12.1",
  "partition",
@@ -1544,7 +1544,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "enum_dispatch",
  "futures-util",
- "moka 0.9.9",
+ "moka",
  "parking_lot 0.12.1",
  "prost",
  "rand",
@@ -3347,7 +3347,7 @@ dependencies = [
  "meta-client",
  "meta-srv",
  "metrics",
- "moka 0.9.9",
+ "moka",
  "object-store",
  "openmetrics-parser",
  "opentelemetry-proto",
@@ -5571,32 +5571,6 @@ dependencies = [
 
 [[package]]
 name = "moka"
-version = "0.9.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b28455ac4363046076054a7e9cfbd7f168019c29dba32a625f59fc0aeffaaea4"
-dependencies = [
- "async-io",
- "async-lock",
- "crossbeam-channel",
- "crossbeam-epoch",
- "crossbeam-utils",
- "futures-util",
- "num_cpus",
- "once_cell",
- "parking_lot 0.12.1",
- "quanta 0.11.1",
- "rustc_version",
- "scheduled-thread-pool",
- "skeptic",
- "smallvec",
- "tagptr",
- "thiserror",
- "triomphe",
- "uuid",
-]
-
-[[package]]
-name = "moka"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa6e72583bf6830c956235bff0d5afec8cf2952f579ebad18ae7821a917d950f"
@@ -6511,7 +6485,7 @@ dependencies = [
  "datafusion-expr",
  "datatypes",
  "meta-client",
- "moka 0.9.9",
+ "moka",
  "serde",
  "serde_json",
  "snafu",

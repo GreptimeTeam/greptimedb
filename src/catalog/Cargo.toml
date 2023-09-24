@@ -30,7 +30,7 @@ futures-util.workspace = true
 lazy_static.workspace = true
 meta-client = { workspace = true }
 metrics.workspace = true
-moka = { version = "0.11", features = ["future"] }
+moka = { workspace = true, features = ["future"] }
 parking_lot = "0.12"
 partition.workspace = true
 regex.workspace = true
