@@ -10,6 +10,8 @@ select "A";
 
 select * where "a" = "A";
 
+select GREATEST('1999-01-30', '2023-03-01');
+
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
 select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
@@ -31,4 +33,3 @@ select b from test_unixtime;
 select TO_UNIXTIME(b) from test_unixtime;
 
 DROP TABLE test_unixtime;
-
