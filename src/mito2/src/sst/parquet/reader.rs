@@ -14,17 +14,22 @@
 
 //! Parquet reader.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_compat::CompatExt;
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_time::range::TimestampRange;
 use datatypes::arrow::record_batch::RecordBatch;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
+use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use parquet::errors::ParquetError;
+use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
@@ -129,8 +134,12 @@ impl ParquetReaderBuilder {
             .await
             .context(OpenDalSnafu)?
             .compat();
-        let buf_reader = BufReader::new(reader);
-        let mut builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
+        let reader = BufReader::new(reader);
+        let reader = AsyncFileReaderCache {
+            reader,
+            cache: self.cache_manager.clone(),
+        };
+        let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
             .await
             .context(ReadParquetSnafu { path: file_path })?;
 
@@ -257,5 +266,29 @@ impl ParquetReader {
     /// Returns the metadata of the SST.
     pub fn metadata(&self) -> &RegionMetadataRef {
         self.read_format.metadata()
+    }
+}
+
+/// Cache layer for parquet's [AsyncFileReader].
+struct AsyncFileReaderCache<T> {
+    reader: T,
+    cache: Option<CacheManagerRef>,
+}
+
+impl<T: AsyncFileReader> AsyncFileReader for AsyncFileReaderCache<T> {
+    fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, Result<Bytes, ParquetError>> {
+        self.reader.get_bytes(range)
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<usize>>,
+    ) -> BoxFuture<'_, Result<Vec<Bytes>, ParquetError>> {
+        self.reader.get_byte_ranges(ranges)
+    }
+
+    fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>, ParquetError>> {
+        // TODO(yingwen): cache metadata.
+        self.reader.get_metadata()
     }
 }
