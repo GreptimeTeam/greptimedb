@@ -1,0 +1,22 @@
+create schema test;
+
+Affected Rows: 1
+
+create table test.tbl(a int, b timestamp time index);
+
+Affected Rows: 0
+
+insert into test.tbl values (1,1), (2,2), (3,3);
+
+Affected Rows: 3
+
+select test.tbl.a from test.tbl;
+
++---+
+| a |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
