@@ -65,7 +65,7 @@ impl SeqScan {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
-            cache_manager,
+            cache_manager: None,
         }
     }
 
@@ -139,6 +139,7 @@ impl SeqScan {
                 .predicate(self.predicate.clone())
                 .time_range(self.time_range)
                 .projection(Some(self.mapper.column_ids().to_vec()))
+                .cache(self.cache_manager.clone())
                 .build()
                 .await?;
             if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {

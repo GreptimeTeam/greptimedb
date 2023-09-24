@@ -32,6 +32,7 @@ use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
+use crate::cache::CacheManagerRef;
 use crate::error::{
     InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
 };
@@ -55,6 +56,8 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     projection: Option<Vec<ColumnId>>,
+    /// Manager that caches SST data.
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl ParquetReaderBuilder {
@@ -71,6 +74,7 @@ impl ParquetReaderBuilder {
             predicate: None,
             time_range: None,
             projection: None,
+            cache_manager: None,
         }
     }
 
@@ -91,6 +95,12 @@ impl ParquetReaderBuilder {
     /// The reader only applies the projection to fields.
     pub fn projection(mut self, projection: Option<Vec<ColumnId>>) -> ParquetReaderBuilder {
         self.projection = projection;
+        self
+    }
+
+    /// Attaches the cache to the builder.
+    pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
+        self.cache_manager = cache;
         self
     }
 
