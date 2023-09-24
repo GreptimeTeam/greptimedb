@@ -25,6 +25,7 @@ use snafu::ResultExt;
 use table::predicate::Predicate;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::memtable::MemtableRef;
 use crate::read::compat::{self, CompatReader};
@@ -49,6 +50,8 @@ pub struct SeqScan {
     memtables: Vec<MemtableRef>,
     /// Handles to SST files to scan.
     files: Vec<FileHandle>,
+    /// Cache.
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl SeqScan {
@@ -62,34 +65,41 @@ impl SeqScan {
             predicate: None,
             memtables: Vec::new(),
             files: Vec::new(),
+            cache_manager,
         }
     }
 
-    /// Set time range filter for time index.
+    /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
         self.time_range = time_range;
         self
     }
 
-    /// Set predicate to push down.
+    /// Sets predicate to push down.
     #[must_use]
     pub(crate) fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
         self.predicate = predicate;
         self
     }
 
-    /// Set memtables to read.
+    /// Sets memtables to read.
     #[must_use]
     pub(crate) fn with_memtables(mut self, memtables: Vec<MemtableRef>) -> Self {
         self.memtables = memtables;
         self
     }
 
-    /// Set files to read.
+    /// Sets files to read.
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Sets cache for this query.
+    pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
+        self.cache_manager = cache;
         self
     }
 

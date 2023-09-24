@@ -39,6 +39,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::CompactionScheduler;
 use crate::config::MitoConfig;
 use crate::error::{JoinSnafu, Result, WorkerStoppedSnafu};
@@ -95,8 +96,12 @@ pub(crate) const DROPPING_MARKER_FILE: &str = ".dropping";
 /// Chan1 --> WorkerThread1
 /// ```
 pub(crate) struct WorkerGroup {
+    /// Workers of the group.
     workers: Vec<RegionWorker>,
+    /// Global background job scheduelr.
     scheduler: SchedulerRef,
+    /// Cache.
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl WorkerGroup {
@@ -114,6 +119,7 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let cache_manager = CacheManager::new(config.cache_size.as_bytes() as usize).map(Arc::new);
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -130,7 +136,11 @@ impl WorkerGroup {
             })
             .collect();
 
-        WorkerGroup { workers, scheduler }
+        WorkerGroup {
+            workers,
+            scheduler,
+            cache_manager,
+        }
     }
 
     /// Stops the worker group.
@@ -166,6 +176,11 @@ impl WorkerGroup {
         self.worker(region_id).get_region(region_id)
     }
 
+    /// Returns cache of the group.
+    pub(crate) fn cache_manager(&self) -> Option<CacheManagerRef> {
+        self.cache_manager.clone()
+    }
+
     /// Get worker for specific `region_id`.
     fn worker(&self, region_id: RegionId) -> &RegionWorker {
         let mut hasher = DefaultHasher::new();
@@ -193,6 +208,7 @@ impl WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
+        let cache_manager = CacheManager::new(config.cache_size.as_bytes() as usize).map(Arc::new);
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -209,7 +225,11 @@ impl WorkerGroup {
             })
             .collect();
 
-        WorkerGroup { workers, scheduler }
+        WorkerGroup {
+            workers,
+            scheduler,
+            cache_manager,
+        }
     }
 }
 
@@ -376,7 +396,7 @@ impl StalledRequests {
 
 /// Background worker loop to handle requests.
 struct RegionWorkerLoop<S> {
-    // Id of the worker.
+    /// Id of the worker.
     id: WorkerId,
     /// Engine config.
     config: Arc<MitoConfig>,

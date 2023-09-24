@@ -56,6 +56,10 @@ pub struct MitoConfig {
     pub global_write_buffer_size: ReadableSize,
     /// Global write buffer size threshold to reject write requests (default 2G).
     pub global_write_buffer_reject_size: ReadableSize,
+
+    // Cache configs:
+    /// Total size for cache (default 512MB). Setting it to 0 to disable cache.
+    pub cache_size: ReadableSize,
 }
 
 impl Default for MitoConfig {
@@ -70,6 +74,7 @@ impl Default for MitoConfig {
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
+            cache_size: ReadableSize::mb(512),
         }
     }
 }
