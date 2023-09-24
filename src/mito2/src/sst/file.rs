@@ -118,6 +118,12 @@ impl FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger)),
         }
     }
+
+    /// Returns the region id of the file.
+    pub fn region_id(&self) -> RegionId {
+        self.inner.meta.region_id
+    }
+
     /// Returns the file id.
     pub fn file_id(&self) -> FileId {
         self.inner.meta.file_id

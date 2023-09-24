@@ -16,6 +16,11 @@
 
 use std::sync::Arc;
 
+use parquet::file::metadata::ParquetMetaData;
+use store_api::storage::RegionId;
+
+use crate::sst::file::FileId;
+
 /// Manages cached data for the engine.
 pub struct CacheManager {}
 
@@ -30,5 +35,25 @@ impl CacheManager {
         } else {
             Some(CacheManager {})
         }
+    }
+
+    /// Gets cached [ParquetMetaData].
+    pub fn get_parquet_meta_data(
+        &self,
+        _region_id: RegionId,
+        _file_id: FileId,
+    ) -> Option<Arc<ParquetMetaData>> {
+        // TODO(yingwen): Implements it.
+        None
+    }
+
+    /// Puts [ParquetMetaData] into the cache.
+    pub fn put_parquet_meta_data(
+        &self,
+        _region_id: RegionId,
+        _file_id: FileId,
+        _metadata: Arc<ParquetMetaData>,
+    ) {
+        // TODO(yingwen): Implements it.
     }
 }

@@ -24,7 +24,7 @@ use common_time::range::TimestampRange;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::TryStreamExt;
+use futures::{FutureExt, TryStreamExt};
 use object_store::ObjectStore;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
@@ -33,7 +33,7 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::format::KeyValue;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, RegionId};
 use table::predicate::Predicate;
 use tokio::io::BufReader;
 
@@ -42,7 +42,7 @@ use crate::error::{
     InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu, Result,
 };
 use crate::read::{Batch, BatchReader};
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 
@@ -137,7 +137,10 @@ impl ParquetReaderBuilder {
         let reader = BufReader::new(reader);
         let reader = AsyncFileReaderCache {
             reader,
+            metadata: None,
             cache: self.cache_manager.clone(),
+            region_id: self.file_handle.region_id(),
+            file_id: self.file_handle.file_id(),
         };
         let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
             .await
@@ -271,8 +274,16 @@ impl ParquetReader {
 
 /// Cache layer for parquet's [AsyncFileReader].
 struct AsyncFileReaderCache<T> {
+    /// Underlying async file reader.
     reader: T,
+    /// Parquet metadata cached locally.
+    metadata: Option<Arc<ParquetMetaData>>,
+    /// Global cache.
     cache: Option<CacheManagerRef>,
+    /// Id of the region.
+    region_id: RegionId,
+    /// Id of the file to read.
+    file_id: FileId,
 }
 
 impl<T: AsyncFileReader> AsyncFileReader for AsyncFileReaderCache<T> {
@@ -288,7 +299,30 @@ impl<T: AsyncFileReader> AsyncFileReader for AsyncFileReaderCache<T> {
     }
 
     fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>, ParquetError>> {
-        // TODO(yingwen): cache metadata.
-        self.reader.get_metadata()
+        async {
+            // Tries to get from local cache.
+            if let Some(metadata) = &self.metadata {
+                return Ok(metadata.clone());
+            }
+
+            // Tries to get from global cache.
+            if let Some(metadata) = self
+                .cache
+                .as_ref()
+                .and_then(|cache| cache.get_parquet_meta_data(self.region_id, self.file_id))
+            {
+                return Ok(metadata);
+            }
+
+            // Cache miss.
+            let metadata = self.reader.get_metadata().await?;
+            // Cache the metadata.
+            if let Some(cache) = &self.cache {
+                cache.put_parquet_meta_data(self.region_id, self.file_id, metadata.clone());
+            }
+
+            Ok(metadata)
+        }
+        .boxed()
     }
 }
