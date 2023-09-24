@@ -401,7 +401,7 @@ async fn test_config() {
     let toml_str = r#"
             mode = "distributed"
 
-            [http_options]
+            [http]
             addr = "127.0.0.1:4000"
             timeout = "30s"
             body_limit = "2GB"
