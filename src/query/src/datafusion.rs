@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_error::ext::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
@@ -69,11 +69,11 @@ use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
-    plugins: Arc<Plugins>,
+    plugins: PluginsRef,
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(state: Arc<QueryEngineState>, plugins: Arc<Plugins>) -> Self {
+    pub fn new(state: Arc<QueryEngineState>, plugins: PluginsRef) -> Self {
         Self { state, plugins }
     }
 

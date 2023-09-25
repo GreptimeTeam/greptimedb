@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use auth::UserProviderRef;
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::error::Error::InternalIo;
@@ -47,7 +47,7 @@ impl Services {
     pub(crate) async fn build<T>(
         opts: &FrontendOptions,
         instance: Arc<T>,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
     ) -> Result<ServerHandlers>
     where
         T: FrontendInstance,

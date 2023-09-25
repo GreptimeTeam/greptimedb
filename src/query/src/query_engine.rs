@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
 use common_query::prelude::ScalarUdf;
@@ -94,7 +94,7 @@ impl QueryEngineFactory {
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
         with_dist_planner: bool,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,

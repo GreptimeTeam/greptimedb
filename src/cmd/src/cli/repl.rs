@@ -19,7 +19,7 @@ use std::time::Instant;
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
@@ -257,7 +257,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         cached_meta_backend.clone(),
         datanode_clients,
     );
-    let plugins: Arc<Plugins> = Default::default();
+    let plugins: PluginsRef = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
         None,

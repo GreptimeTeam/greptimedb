@@ -21,7 +21,7 @@ use std::sync::Arc;
 use catalog::kvbackend::MetaKvBackend;
 use catalog::memory::MemoryCatalogManager;
 use common_base::readable_size::ReadableSize;
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
@@ -76,7 +76,7 @@ pub struct Datanode {
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
-    plugins: Arc<Plugins>,
+    plugins: PluginsRef,
 }
 
 impl Datanode {
@@ -143,14 +143,14 @@ impl Datanode {
         self.region_server.clone()
     }
 
-    pub fn plugins(&self) -> Arc<Plugins> {
+    pub fn plugins(&self) -> PluginsRef {
         self.plugins.clone()
     }
 }
 
 pub struct DatanodeBuilder {
     opts: DatanodeOptions,
-    plugins: Arc<Plugins>,
+    plugins: PluginsRef,
     meta_client: Option<MetaClient>,
     kv_backend: Option<KvBackendRef>,
 }
@@ -161,7 +161,7 @@ impl DatanodeBuilder {
     pub fn new(
         opts: DatanodeOptions,
         kv_backend: Option<KvBackendRef>,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
     ) -> Self {
         Self {
             opts,
@@ -336,7 +336,7 @@ impl DatanodeBuilder {
 
     async fn new_region_server(
         opts: &DatanodeOptions,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
         log_store: Arc<RaftEngineLogStore>,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {

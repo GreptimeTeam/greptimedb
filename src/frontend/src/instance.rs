@@ -30,7 +30,7 @@ use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
-use common_base::Plugins;
+use common_base::PluginsRef;
 use common_config::KvStoreConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -124,7 +124,7 @@ pub struct Instance {
     query_engine: QueryEngineRef,
     /// plugins: this map holds extensions to customize query or auth
     /// behaviours.
-    plugins: Arc<Plugins>,
+    plugins: PluginsRef,
     servers: Arc<ServerHandlers>,
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
@@ -132,10 +132,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn try_new_distributed(
-        opts: &FrontendOptions,
-        plugins: Arc<Plugins>,
-    ) -> Result<Self> {
+    pub async fn try_new_distributed(opts: &FrontendOptions, plugins: PluginsRef) -> Result<Self> {
         let meta_client = Self::create_meta_client(opts).await?;
 
         let datanode_clients = Arc::new(DatanodeClients::default());
@@ -146,7 +143,7 @@ impl Instance {
     pub async fn try_new_distributed_with(
         meta_client: Arc<MetaClient>,
         datanode_clients: Arc<DatanodeClients>,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
         opts: &FrontendOptions,
     ) -> Result<Self> {
         let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
@@ -292,7 +289,7 @@ impl Instance {
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
         catalog_manager: CatalogManagerRef,
-        plugins: Arc<Plugins>,
+        plugins: PluginsRef,
         region_server: RegionServer,
     ) -> Result<Self> {
         let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
@@ -370,7 +367,7 @@ impl Instance {
         &self.catalog_manager
     }
 
-    pub fn plugins(&self) -> Arc<Plugins> {
+    pub fn plugins(&self) -> PluginsRef {
         self.plugins.clone()
     }
 
@@ -586,7 +583,7 @@ impl PrometheusHandler for Instance {
 }
 
 pub fn check_permission(
-    plugins: Arc<Plugins>,
+    plugins: PluginsRef,
     stmt: &Statement,
     query_ctx: &QueryContextRef,
 ) -> Result<()> {
@@ -657,6 +654,7 @@ fn validate_param(name: &ObjectName, query_ctx: &QueryContextRef) -> Result<()> 
 mod tests {
     use std::collections::HashMap;
 
+    use common_base::Plugins;
     use query::query_engine::options::QueryOptions;
     use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
@@ -667,7 +665,7 @@ mod tests {
     #[test]
     fn test_exec_validation() {
         let query_ctx = QueryContext::arc();
-        let plugins = Plugins::new();
+        let plugins: Plugins = Plugins::new();
         plugins.insert(QueryOptions {
             disallow_cross_schema_query: true,
         });
@@ -697,7 +695,7 @@ mod tests {
             re.unwrap();
         }
 
-        fn replace_test(template_sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef) {
+        fn replace_test(template_sql: &str, plugins: PluginsRef, query_ctx: &QueryContextRef) {
             // test right
             let right = vec![("", ""), ("", "public."), ("greptime.", "public.")];
             for (catalog, schema) in right {
@@ -725,7 +723,7 @@ mod tests {
             template.format(&vars).unwrap()
         }
 
-        fn do_test(sql: &str, plugins: Arc<Plugins>, query_ctx: &QueryContextRef, is_ok: bool) {
+        fn do_test(sql: &str, plugins: PluginsRef, query_ctx: &QueryContextRef, is_ok: bool) {
             let stmt = &parse_stmt(sql, &GreptimeDbDialect {}).unwrap()[0];
             let re = check_permission(plugins, stmt, query_ctx);
             if is_ok {

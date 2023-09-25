@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use auth::UserProviderRef;
-use common_base::Plugins;
+use common_base::{Plugins, PluginsRef};
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
@@ -23,6 +23,6 @@ pub async fn setup_frontend_plugins(opts: FrontendOptions) -> Result<OptPlugins<
     })
 }
 
-pub async fn start_frontend_plugins(_plugins: Arc<Plugins>) -> Result<()> {
+pub async fn start_frontend_plugins(_plugins: PluginsRef) -> Result<()> {
     Ok(())
 }

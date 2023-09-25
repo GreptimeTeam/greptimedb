@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use common_base::Plugins;
+use common_base::{Plugins, PluginsRef};
 use datanode::config::DatanodeOptions;
 use datanode::error::Result;
 
@@ -13,6 +13,6 @@ pub async fn setup_datanode_plugins(opts: DatanodeOptions) -> Result<OptPlugins<
     })
 }
 
-pub async fn start_datanode_plugins(_plugins: Arc<Plugins>) -> Result<()> {
+pub async fn start_datanode_plugins(_plugins: PluginsRef) -> Result<()> {
     Ok(())
 }
