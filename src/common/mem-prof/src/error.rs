@@ -25,7 +25,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(""))]
+    #[snafu(display("Internal error"))]
     Internal { source: BoxedError },
 
     #[snafu(display("Memory profiling is not supported"))]

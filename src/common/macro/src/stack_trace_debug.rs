@@ -47,7 +47,6 @@ pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenS
 
         #debug_impl
     }
-    .into()
 }
 
 /// Generate `debug_fmt` fn.
@@ -157,16 +156,6 @@ impl ErrorVariant {
             if attr.path().is_ident("cfg") {
                 cfg_attr = Some(attr);
             }
-
-            // if attr.path().is_ident("snafu") {
-            //     if let Meta::List(meta_list) = attr.meta {
-            //         if meta_list.path.is_ident("display") {
-            //             // let tokens = meta_list.tokens.into();
-            //             // display = Some(parse_macro_input!(tokens as Punctuated<Expr, Comma>));
-            //             display = Some(meta_list.tokens);
-            //         }
-            //     }
-            // }
         }
 
         let field_ident = variant
@@ -213,7 +202,7 @@ impl ErrorVariant {
             (true, true) => quote_spanned! {
                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),*, } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
-                    (&*source).debug_fmt(layer + 1, buf);
+                    source.debug_fmt(layer + 1, buf);
                 },
             },
             (true, false) => quote_spanned! {
@@ -224,7 +213,7 @@ impl ErrorVariant {
             (false, true) => quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
-                    (&*source).debug_fmt(layer + 1, buf);
+                    source.debug_fmt(layer + 1, buf);
                 },
             },
             (false, false) => quote_spanned! {
@@ -247,7 +236,7 @@ impl ErrorVariant {
         if self.has_source {
             quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
-                    Some((&*source))
+                    Some(source)
                 },
             }
         } else {
