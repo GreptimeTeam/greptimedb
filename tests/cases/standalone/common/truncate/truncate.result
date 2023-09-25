@@ -1,3 +1,7 @@
+TRUNCATE TABLE not_exits_table;
+
+Error: 4001(TableNotFound), Table not found: greptime.public.not_exits_table
+
 CREATE TABLE monitor (host STRING, ts TIMESTAMP, cpu DOUBLE DEFAULT 0, memory DOUBLE, TIME INDEX (ts), PRIMARY KEY(host));
 
 Affected Rows: 0

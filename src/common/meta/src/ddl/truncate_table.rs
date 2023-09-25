@@ -16,8 +16,6 @@ use api::v1::region::{
     region_request, RegionRequest, RegionRequestHeader, TruncateRequest as PbTruncateRegionRequest,
 };
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
@@ -142,35 +140,38 @@ impl TruncateTableProcedure {
         let mut truncate_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
-            let clients = self.context.datanode_manager.clone();
+            let requester = self.context.datanode_manager.datanode(&datanode).await;
             let regions = find_leader_regions(region_routes, &datanode);
-            let region_ids = regions
-                .iter()
-                .map(|region_number| RegionId::new(table_id, *region_number))
-                .collect::<Vec<_>>();
 
-            truncate_region_tasks.push(async move {
-                for region_id in region_ids {
-                    debug!("Truncating region {region_id} on Datanode {datanode:?}");
+            for region in regions {
+                let region_id = RegionId::new(table_id, region);
+                debug!(
+                    "Truncating table {} region {} on Datanode {:?}",
+                    self.data.table_ref(),
+                    region_id,
+                    datanode
+                );
 
-                    let request = RegionRequest {
-                        header: Some(RegionRequestHeader {
-                            trace_id: 0,
-                            span_id: 0,
-                        }),
-                        body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
-                            region_id: region_id.as_u64(),
-                        })),
-                    };
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        trace_id: 0,
+                        span_id: 0,
+                    }),
+                    body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
+                        region_id: region_id.as_u64(),
+                    })),
+                };
 
-                    if let Err(err) = clients.datanode(&datanode).await.handle(request).await {
-                        if err.status_code() != StatusCode::RegionNotFound {
-                            return Err(handle_operate_region_error(datanode)(err));
-                        }
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+
+                truncate_region_tasks.push(async move {
+                    if let Err(err) = requester.handle(request).await {
+                        return Err(handle_operate_region_error(datanode)(err));
                     }
-                }
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
 
         join_all(truncate_region_tasks)
