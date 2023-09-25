@@ -1682,6 +1682,7 @@ version = "0.4.0-nightly"
 dependencies = [
  "chrono",
  "common-error",
+ "common-macro",
  "serde",
  "serde_json",
  "snafu",
@@ -1707,6 +1708,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "common-error",
+ "common-macro",
  "common-runtime",
  "common-test-util",
  "datafusion",
@@ -1835,6 +1837,7 @@ dependencies = [
  "snafu",
  "static_assertions",
  "syn 1.0.109",
+ "syn 2.0.29",
 ]
 
 [[package]]

@@ -35,6 +35,12 @@ pub trait ErrorExt: std::error::Error {
     fn as_any(&self) -> &dyn Any;
 }
 
+pub trait StackError {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>);
+
+    fn next(&self) -> Option<&dyn StackError>;
+}
+
 /// An opaque boxed error based on errors that implement [ErrorExt] trait.
 pub struct BoxedError {
     inner: Box<dyn crate::ext::ErrorExt + Send + Sync>,
