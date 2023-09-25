@@ -10,6 +10,16 @@ insert into test.tbl values (1,1), (2,2), (3,3);
 
 Affected Rows: 3
 
+select test.tbl.* from test.tbl;
+
++---+-------------------------+
+| a | b                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
++---+-------------------------+
+
 select test.tbl.a from test.tbl;
 
 +---+
@@ -19,4 +29,121 @@ select test.tbl.a from test.tbl;
 | 2 |
 | 3 |
 +---+
+
+select test.tbl.b from test.tbl;
+
++-------------------------+
+| b                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+select test.t.a from test.tbl t;
+
++---+
+| a |
++---+
+| 1 |
+| 2 |
+| 3 |
++---+
+
+select test.tbl.a from test.tbl t;
+
+Error: 3000(PlanQuery), No field named test.tbl.a. Valid fields are t.a, t.b.
+
+-- check how ties are resolved
+-- we create a table called "t" in a schema called "t" with a column called "t" that has a field called "t"
+create schema t;
+
+Affected Rows: 1
+
+-- unsupported
+-- create table t.t(t ROW(t int), b timestamp time index);
+-- unsupported
+drop schema t cascade;
+
+Error: 1001(Unsupported), SQL statement is not supported: drop schema t cascade;, keyword: schema
+
+-- test multiple tables with the same name but a different schema
+-- we allow this (duplicate alias in query)
+create schema s1;
+
+Affected Rows: 1
+
+create schema s2;
+
+Affected Rows: 1
+
+create table s1.t1(
+    a int,
+    b timestamp time index,
+);
+
+Affected Rows: 0
+
+insert into s1.t1 values (1,1);
+
+Affected Rows: 1
+
+create table s2.t1(
+    a int,
+    b timestamp time index,
+);
+
+Affected Rows: 0
+
+insert into s2.t1 values (2,1);
+
+Affected Rows: 1
+
+-- statement ok
+select t1.a from s1.t1,s2.t1;
+
++---+
+| a |
++---+
+| 1 |
++---+
+
+-- statement ok
+select s1.t1.a from s1.t1,s2.t1;
+
++---+
+| a |
++---+
+| 1 |
++---+
+
+-- statement error
+select s2.t1.a from s1.t1,s2.t1;
+
+Error: 1003(Internal), Invalid argument error: must either specify a row count or at least one column
+
+-- statement ok
+select s2.t1.a from s2.t1, s1.t1;
+
++---+
+| a |
++---+
+| 2 |
++---+
+
+-- test various failures
+-- statement error
+select testX.tbl.a from test.tbl;
+
+Error: 3000(PlanQuery), No field named testx.tbl.a. Valid fields are test.tbl.a, test.tbl.b.
+
+-- statement error
+select test.tblX.a from test.tbl;
+
+Error: 3000(PlanQuery), No field named test.tblx.a. Valid fields are test.tbl.a, test.tbl.b.
+
+-- statement error
+select test.tbl.aX from test.tbl;
+
+Error: 3000(PlanQuery), No field named test.tbl.ax. Valid fields are test.tbl.a, test.tbl.b.
 
