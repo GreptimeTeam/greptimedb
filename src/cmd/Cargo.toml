@@ -38,12 +38,14 @@ datanode = { workspace = true }
 datatypes = { workspace = true }
 either = "1.8"
 etcd-client.workspace = true
+file-engine = { workspace = true }
 frontend = { workspace = true }
 futures.workspace = true
 lazy_static.workspace = true
 meta-client = { workspace = true }
 meta-srv = { workspace = true }
 metrics.workspace = true
+mito2 = { workspace = true }
 nu-ansi-term = "0.46"
 partition = { workspace = true }
 plugins.workspace = true

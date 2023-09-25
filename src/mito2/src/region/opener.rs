@@ -21,7 +21,7 @@ use std::sync::Arc;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
-use object_store::util::join_dir;
+use object_store::util::{join_dir, normalize_dir};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
@@ -57,6 +57,7 @@ impl RegionOpener {
     /// Returns a new opener.
     pub(crate) fn new(
         region_id: RegionId,
+        region_dir: &str,
         memtable_builder: MemtableBuilderRef,
         object_store: ObjectStore,
         scheduler: SchedulerRef,
@@ -66,7 +67,7 @@ impl RegionOpener {
             metadata: None,
             memtable_builder,
             object_store,
-            region_dir: String::new(),
+            region_dir: normalize_dir(region_dir),
             scheduler,
             options: HashMap::new(),
         }
@@ -75,12 +76,6 @@ impl RegionOpener {
     /// Sets metadata of the region to create.
     pub(crate) fn metadata(mut self, metadata: RegionMetadata) -> Self {
         self.metadata = Some(metadata);
-        self
-    }
-
-    /// Sets the region dir.
-    pub(crate) fn region_dir(mut self, value: &str) -> Self {
-        self.region_dir = value.to_string();
         self
     }
 

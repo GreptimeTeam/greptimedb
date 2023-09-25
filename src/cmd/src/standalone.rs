@@ -24,14 +24,16 @@ use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
-use datanode::config::{DatanodeOptions, ProcedureConfig, StorageConfig};
+use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
+use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
+use mito2::config::MitoConfig;
 use plugins::OptPlugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
@@ -85,18 +87,20 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
-    pub http_options: HttpOptions,
-    pub grpc_options: GrpcOptions,
-    pub mysql_options: MysqlOptions,
-    pub postgres_options: PostgresOptions,
-    pub opentsdb_options: OpentsdbOptions,
-    pub influxdb_options: InfluxdbOptions,
-    pub prom_store_options: PromStoreOptions,
+    pub http: HttpOptions,
+    pub grpc: GrpcOptions,
+    pub mysql: MysqlOptions,
+    pub postgres: PostgresOptions,
+    pub opentsdb: OpentsdbOptions,
+    pub influxdb: InfluxdbOptions,
+    pub prom_store: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
     pub kv_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
+    /// Options for different store engines.
+    pub region_engine: Vec<RegionEngineConfig>,
 }
 
 impl Default for StandaloneOptions {
@@ -104,18 +108,22 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
-            http_options: HttpOptions::default(),
-            grpc_options: GrpcOptions::default(),
-            mysql_options: MysqlOptions::default(),
-            postgres_options: PostgresOptions::default(),
-            opentsdb_options: OpentsdbOptions::default(),
-            influxdb_options: InfluxdbOptions::default(),
-            prom_store_options: PromStoreOptions::default(),
+            http: HttpOptions::default(),
+            grpc: GrpcOptions::default(),
+            mysql: MysqlOptions::default(),
+            postgres: PostgresOptions::default(),
+            opentsdb: OpentsdbOptions::default(),
+            influxdb: InfluxdbOptions::default(),
+            prom_store: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
             kv_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            region_engine: vec![
+                RegionEngineConfig::Mito(MitoConfig::default()),
+                RegionEngineConfig::File(FileEngineConfig::default()),
+            ],
         }
     }
 }
@@ -124,13 +132,13 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
-            http: self.http_options,
-            grpc: self.grpc_options,
-            mysql: self.mysql_options,
-            postgres: self.postgres_options,
-            opentsdb: self.opentsdb_options,
-            influxdb: self.influxdb_options,
-            prom_store: self.prom_store_options,
+            http: self.http,
+            grpc: self.grpc,
+            mysql: self.mysql,
+            postgres: self.postgres,
+            opentsdb: self.opentsdb,
+            influxdb: self.influxdb,
+            prom_store: self.prom_store,
             meta_client: None,
             logging: self.logging,
             ..Default::default()
@@ -143,6 +151,7 @@ impl StandaloneOptions {
             enable_telemetry: self.enable_telemetry,
             wal: self.wal,
             storage: self.storage,
+            region_engine: self.region_engine,
             ..Default::default()
         }
     }
@@ -232,7 +241,7 @@ impl StartCommand {
         );
 
         if let Some(addr) = &self.http_addr {
-            opts.http_options.addr = addr.clone()
+            opts.http.addr = addr.clone()
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -246,42 +255,42 @@ impl StartCommand {
                 }
                 .fail();
             }
-            opts.grpc_options.addr = addr.clone()
+            opts.grpc.addr = addr.clone()
         }
 
         if let Some(addr) = &self.mysql_addr {
-            opts.mysql_options.enable = true;
-            opts.mysql_options.addr = addr.clone();
-            opts.mysql_options.tls = tls_opts.clone();
+            opts.mysql.enable = true;
+            opts.mysql.addr = addr.clone();
+            opts.mysql.tls = tls_opts.clone();
         }
 
         if let Some(addr) = &self.postgres_addr {
-            opts.postgres_options.enable = true;
-            opts.postgres_options.addr = addr.clone();
-            opts.postgres_options.tls = tls_opts;
+            opts.postgres.enable = true;
+            opts.postgres.addr = addr.clone();
+            opts.postgres.tls = tls_opts;
         }
 
         if let Some(addr) = &self.opentsdb_addr {
-            opts.opentsdb_options.enable = true;
-            opts.opentsdb_options.addr = addr.clone();
+            opts.opentsdb.enable = true;
+            opts.opentsdb.addr = addr.clone();
         }
 
         if self.influxdb_enable {
-            opts.influxdb_options.enable = self.influxdb_enable;
+            opts.influxdb.enable = self.influxdb_enable;
         }
-        let kv_store_cfg = opts.kv_store.clone();
-        let procedure_cfg = opts.procedure.clone();
-        let fe_opts = opts.clone().frontend_options();
-        let logging_opts = opts.logging.clone();
-        let dn_opts = opts.datanode_options();
+        let kv_store = opts.kv_store.clone();
+        let procedure = opts.procedure.clone();
+        let frontend = opts.clone().frontend_options();
+        let logging = opts.logging.clone();
+        let datanode = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
-            procedure_cfg,
-            kv_store_cfg,
-            data_home: dn_opts.storage.data_home.to_string(),
-            fe_opts,
-            dn_opts,
-            logging_opts,
+            procedure,
+            kv_store,
+            data_home: datanode.storage.data_home.to_string(),
+            frontend,
+            datanode,
+            logging,
         })))
     }
 
@@ -292,11 +301,11 @@ impl StartCommand {
         let OptPlugins {
             opts: fe_opts,
             plugins: fe_plugins,
-        } = plugins::setup_frontend_plugins(opts.fe_opts)
+        } = plugins::setup_frontend_plugins(opts.frontend)
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.dn_opts;
+        let dn_opts = opts.datanode;
 
         info!("Standalone start command: {:#?}", self);
         info!(
@@ -305,13 +314,10 @@ impl StartCommand {
         );
 
         let kv_dir = kv_store_dir(&opts.data_home);
-        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
-            kv_dir,
-            opts.kv_store_cfg,
-            opts.procedure_cfg,
-        )
-        .await
-        .context(StartFrontendSnafu)?;
+        let (kv_store, procedure_manager) =
+            FeInstance::try_build_standalone_components(kv_dir, opts.kv_store, opts.procedure)
+                .await
+                .context(StartFrontendSnafu)?;
 
         let datanode =
             DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), Default::default())
@@ -442,9 +448,9 @@ mod tests {
             checkpoint_margin = 9
             gc_duration = '7s'
 
-            [http_options]
+            [http]
             addr = "127.0.0.1:4000"
-            timeout = "30s"
+            timeout = "33s"
             body_limit = "128MB"
 
             [logging]
@@ -462,12 +468,12 @@ mod tests {
         else {
             unreachable!()
         };
-        let fe_opts = options.fe_opts;
-        let dn_opts = options.dn_opts;
-        let logging_opts = options.logging_opts;
+        let fe_opts = options.frontend;
+        let dn_opts = options.datanode;
+        let logging_opts = options.logging;
         assert_eq!(Mode::Standalone, fe_opts.mode);
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
-        assert_eq!(Duration::from_secs(30), fe_opts.http.timeout);
+        assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
         assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
         assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.addr);
         assert!(fe_opts.mysql.enable);
@@ -509,8 +515,8 @@ mod tests {
             unreachable!()
         };
 
-        assert_eq!("/tmp/greptimedb/test/logs", opts.logging_opts.dir);
-        assert_eq!("debug", opts.logging_opts.level.unwrap());
+        assert_eq!("/tmp/greptimedb/test/logs", opts.logging.dir);
+        assert_eq!("debug", opts.logging.level.unwrap());
     }
 
     #[test]
@@ -554,7 +560,7 @@ mod tests {
                     // http.addr = 127.0.0.1:24000
                     [
                         env_prefix.to_string(),
-                        "http_options".to_uppercase(),
+                        "http".to_uppercase(),
                         "addr".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -579,17 +585,17 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.logging_opts.dir, "/other/log/dir");
+                assert_eq!(opts.logging.dir, "/other/log/dir");
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.logging_opts.level.as_ref().unwrap(), "debug");
+                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.fe_opts.http.addr, "127.0.0.1:14000");
-                assert_eq!(ReadableSize::mb(64), opts.fe_opts.http.body_limit);
+                assert_eq!(opts.frontend.http.addr, "127.0.0.1:14000");
+                assert_eq!(ReadableSize::mb(64), opts.frontend.http.body_limit);
 
                 // Should be default value.
-                assert_eq!(opts.fe_opts.grpc.addr, GrpcOptions::default().addr);
+                assert_eq!(opts.frontend.grpc.addr, GrpcOptions::default().addr);
             },
         );
     }

@@ -115,7 +115,7 @@ impl TryFrom<HeartbeatRequest> for Stat {
                 })
             }
             _ => InvalidHeartbeatRequestSnafu {
-                err_msg: "missing header, peer or node_stat",
+                err_msg: "missing header or peer",
             }
             .fail(),
         }
