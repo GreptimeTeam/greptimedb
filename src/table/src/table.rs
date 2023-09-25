@@ -24,14 +24,10 @@ use async_trait::async_trait;
 use common_query::logical_plan::Expr;
 use common_recordbatch::SendableRecordBatchStream;
 use datatypes::schema::SchemaRef;
-use store_api::storage::{RegionNumber, ScanRequest};
+use store_api::storage::ScanRequest;
 
-use crate::error::{Result, UnsupportedSnafu};
+use crate::error::Result;
 use crate::metadata::{FilterPushDownType, TableId, TableInfoRef, TableType};
-use crate::requests::{AlterTableRequest, DeleteRequest, InsertRequest};
-use crate::stats::TableStatistics;
-
-pub type AlterContext = anymap::Map<dyn Any + Send + Sync>;
 
 /// Table abstraction.
 #[async_trait]
@@ -49,83 +45,12 @@ pub trait Table: Send + Sync {
     /// Get the type of this table for metadata/catalog purposes.
     fn table_type(&self) -> TableType;
 
-    /// Insert values into table.
-    ///
-    /// Returns number of inserted rows.
-    async fn insert(&self, _request: InsertRequest) -> Result<usize> {
-        UnsupportedSnafu {
-            operation: "INSERT",
-        }
-        .fail()?
-    }
-
     async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     /// Tests whether the table provider can make use of any or all filter expressions
     /// to optimise data retrieval.
     fn supports_filters_pushdown(&self, filters: &[&Expr]) -> Result<Vec<FilterPushDownType>> {
         Ok(vec![FilterPushDownType::Unsupported; filters.len()])
-    }
-
-    /// Alter table.
-    async fn alter(&self, _context: AlterContext, _request: &AlterTableRequest) -> Result<()> {
-        UnsupportedSnafu {
-            operation: "ALTER TABLE",
-        }
-        .fail()?
-    }
-
-    /// Delete rows in the table.
-    ///
-    /// Returns number of deleted rows.
-    async fn delete(&self, _request: DeleteRequest) -> Result<usize> {
-        UnsupportedSnafu {
-            operation: "DELETE",
-        }
-        .fail()?
-    }
-
-    /// Flush table.
-    ///
-    /// Options:
-    /// - region_number: specify region to flush.
-    /// - wait: Whether to wait until flush is done.
-    async fn flush(&self, region_number: Option<RegionNumber>, wait: Option<bool>) -> Result<()> {
-        let _ = (region_number, wait);
-        UnsupportedSnafu { operation: "FLUSH" }.fail()?
-    }
-
-    /// Close the table.
-    async fn close(&self, _regions: &[RegionNumber]) -> Result<()> {
-        Ok(())
-    }
-
-    /// Return true if contains the region
-    fn contains_region(&self, _region: RegionNumber) -> Result<bool> {
-        UnsupportedSnafu {
-            operation: "contain_region",
-        }
-        .fail()?
-    }
-
-    /// Get statistics for this table, if available
-    fn statistics(&self) -> Option<TableStatistics> {
-        None
-    }
-
-    async fn compact(&self, region_number: Option<RegionNumber>, wait: Option<bool>) -> Result<()> {
-        let _ = (region_number, wait);
-        UnsupportedSnafu {
-            operation: "COMPACTION",
-        }
-        .fail()?
-    }
-
-    async fn truncate(&self) -> Result<()> {
-        UnsupportedSnafu {
-            operation: "TRUNCATE",
-        }
-        .fail()?
     }
 }
 
