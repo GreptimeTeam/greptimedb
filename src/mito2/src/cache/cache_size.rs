@@ -107,16 +107,26 @@ fn row_group_meta_heap_size(meta: &RowGroupMetaData) -> usize {
 
 /// Returns estimated size of [ParquetColumnIndex] allocated from heap.
 fn parquet_column_index_heap_size(column_index: &ParquetColumnIndex) -> usize {
-    column_index.iter().map(|index| index.len()).sum::<usize>() * mem::size_of::<Index>()
+    column_index
+        .iter()
+        .map(|row_group| row_group.len() * mem::size_of::<Index>() + mem::size_of_val(row_group))
+        .sum()
 }
 
 /// Returns estimated size of [ParquetOffsetIndex] allocated from heap.
 fn parquet_offset_index_heap_size(offset_index: &ParquetOffsetIndex) -> usize {
     offset_index
         .iter()
-        .map(|index| index.iter().map(|index| index.len()).sum::<usize>())
-        .sum::<usize>()
-        * mem::size_of::<PageLocation>()
+        .map(|row_group| {
+            row_group
+                .iter()
+                .map(|column| {
+                    column.len() * mem::size_of::<PageLocation>() + mem::size_of_val(column)
+                })
+                .sum::<usize>()
+                + mem::size_of_val(row_group)
+        })
+        .sum()
 }
 
 #[cfg(test)]
