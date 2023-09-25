@@ -155,4 +155,11 @@ mod tests {
             .val();
         assert_eq!(28800000, ts);
     }
+
+    #[test]
+    fn test_from_max_date() {
+        let date = Date::new(i32::MAX);
+        let datetime = DateTime::from(date);
+        assert_eq!(datetime.val(), 185542587100800000);
+    }
 }
