@@ -106,7 +106,7 @@ impl CacheValue {
     /// Returns memory used by the value (estimated).
     fn estimated_size(&self) -> usize {
         let inner_size = match self {
-            CacheValue::ParquetMeta(meta) => parquet_meta_size(&meta),
+            CacheValue::ParquetMeta(meta) => parquet_meta_size(meta),
         };
         inner_size + mem::size_of::<CacheValue>()
     }

@@ -186,7 +186,8 @@ impl ScanRegion {
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
-            .with_files(files);
+            .with_files(files)
+            .with_cache(self.cache_manager);
 
         Ok(seq_scan)
     }

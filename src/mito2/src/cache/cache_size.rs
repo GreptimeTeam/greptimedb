@@ -17,8 +17,7 @@
 use std::mem;
 
 use parquet::file::metadata::{
-    ColumnChunkMetaData, FileMetaData, ParquetColumnIndex, ParquetMetaData, ParquetOffsetIndex,
-    RowGroupMetaData,
+    FileMetaData, ParquetColumnIndex, ParquetMetaData, ParquetOffsetIndex, RowGroupMetaData,
 };
 use parquet::file::page_index::index::Index;
 use parquet::format::{ColumnOrder, KeyValue, PageLocation};
@@ -34,17 +33,17 @@ pub fn parquet_meta_size(meta: &ParquetMetaData) -> usize {
     size += meta
         .row_groups()
         .iter()
-        .map(|row_group| row_group_meta_heap_size(row_group))
+        .map(row_group_meta_heap_size)
         .sum::<usize>();
     // column_index
     size += meta
         .column_index()
-        .map(|index| parquet_column_index_heap_size(index))
+        .map(parquet_column_index_heap_size)
         .unwrap_or(0);
     // offset_index
     size += meta
         .offset_index()
-        .map(|index| parquet_offset_index_heap_size(index))
+        .map(parquet_offset_index_heap_size)
         .unwrap_or(0);
 
     size
@@ -87,7 +86,7 @@ fn schema_descr_heap_size(descr: &SchemaDescriptor) -> usize {
     size += descr
         .columns()
         .iter()
-        .map(|descr| mem::size_of::<ColumnDescriptor>() + column_descr_heap_size(&descr))
+        .map(|descr| mem::size_of::<ColumnDescriptor>() + column_descr_heap_size(descr))
         .sum::<usize>();
     // leaf_to_base
     size += descr.num_columns() * mem::size_of::<usize>();
@@ -102,7 +101,7 @@ fn column_descr_heap_size(descr: &ColumnDescriptor) -> usize {
 
 /// Returns estimated size of [ColumnDescriptor] allocated from heap.
 fn row_group_meta_heap_size(meta: &RowGroupMetaData) -> usize {
-    meta.columns().len() * mem::size_of::<ColumnChunkMetaData>()
+    mem::size_of_val(meta.columns())
 }
 
 /// Returns estimated size of [ParquetColumnIndex] allocated from heap.
