@@ -14,17 +14,21 @@
 
 //! Cache for the engine.
 
+mod cache_size;
+
+use std::mem;
 use std::sync::Arc;
 
 use moka::sync::Cache;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
+use crate::cache::cache_size::parquet_meta_size;
 use crate::sst::file::FileId;
 
 /// Manages cached data for the engine.
 pub struct CacheManager {
-    cache: Cache<String, CacheValue>,
+    cache: Cache<CacheKey, CacheValue>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -38,31 +42,53 @@ impl CacheManager {
         } else {
             let cache = Cache::builder()
                 .max_capacity(capacity)
+                .weigher(|k: &CacheKey, v: &CacheValue| {
+                    (k.estimated_size() + v.estimated_size()) as u32
+                })
                 .build();
-            Some(CacheManager {
-                cache,
-            })
+            Some(CacheManager { cache })
         }
     }
 
     /// Gets cached [ParquetMetaData].
     pub fn get_parquet_meta_data(
         &self,
-        _region_id: RegionId,
-        _file_id: FileId,
+        region_id: RegionId,
+        file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        // TODO(yingwen): Implements it.
-        None
+        self.cache
+            .get(&CacheKey::ParquetMeta(region_id, file_id))
+            .map(|v| {
+                // Safety: key and value have the same type.
+                v.into_parquet_meta().unwrap()
+            })
     }
 
     /// Puts [ParquetMetaData] into the cache.
     pub fn put_parquet_meta_data(
         &self,
-        _region_id: RegionId,
-        _file_id: FileId,
-        _metadata: Arc<ParquetMetaData>,
+        region_id: RegionId,
+        file_id: FileId,
+        metadata: Arc<ParquetMetaData>,
     ) {
-        // TODO(yingwen): Implements it.
+        self.cache.insert(
+            CacheKey::ParquetMeta(region_id, file_id),
+            CacheValue::ParquetMeta(metadata),
+        );
+    }
+}
+
+/// Cache key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CacheKey {
+    /// Parquet meta data.
+    ParquetMeta(RegionId, FileId),
+}
+
+impl CacheKey {
+    /// Returns memory used by the key (estimated).
+    fn estimated_size(&self) -> usize {
+        mem::size_of::<CacheKey>()
     }
 }
 
@@ -72,4 +98,21 @@ impl CacheManager {
 enum CacheValue {
     /// Parquet meta data.
     ParquetMeta(Arc<ParquetMetaData>),
+}
+
+impl CacheValue {
+    /// Returns memory used by the value (estimated).
+    fn estimated_size(&self) -> usize {
+        let inner_size = match self {
+            CacheValue::ParquetMeta(meta) => parquet_meta_size(&meta),
+        };
+        inner_size + mem::size_of::<CacheValue>()
+    }
+
+    /// Convert to parquet meta.
+    fn into_parquet_meta(self) -> Option<Arc<ParquetMetaData>> {
+        match self {
+            CacheValue::ParquetMeta(meta) => Some(meta),
+        }
+    }
 }
