@@ -118,3 +118,16 @@ fn parquet_offset_index_heap_size(offset_index: &ParquetOffsetIndex) -> usize {
         .sum::<usize>()
         * mem::size_of::<PageLocation>()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::test_util::parquet_meta;
+
+    #[test]
+    fn test_parquet_meta_size() {
+        let metadata = parquet_meta();
+
+        assert_eq!(948, parquet_meta_size(&metadata));
+    }
+}

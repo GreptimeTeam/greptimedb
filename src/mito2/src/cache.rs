@@ -15,6 +15,8 @@
 //! Cache for the engine.
 
 mod cache_size;
+#[cfg(test)]
+pub(crate) mod test_util;
 
 use std::mem;
 use std::sync::Arc;
@@ -114,5 +116,27 @@ impl CacheValue {
         match self {
             CacheValue::ParquetMeta(meta) => Some(meta),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::test_util::parquet_meta;
+
+    #[test]
+    fn test_capacity_zero() {
+        assert!(CacheManager::new(0).is_none());
+    }
+
+    #[test]
+    fn test_parquet_meta_cache() {
+        let cache = CacheManager::new(2000).unwrap();
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+        let metadata = parquet_meta();
+        cache.put_parquet_meta_data(region_id, file_id, metadata);
+        assert!(cache.get_parquet_meta_data(region_id, file_id).is_some());
     }
 }
