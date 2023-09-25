@@ -52,7 +52,7 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, ErrorCompat, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
@@ -315,7 +315,7 @@ impl JsonResponse {
                 },
                 Err(e) => {
                     return Self::with_error(
-                        format!("Query engine output error: {e}"),
+                        e.iter_chain().last().unwrap().to_string(),
                         e.status_code(),
                     );
                 }
