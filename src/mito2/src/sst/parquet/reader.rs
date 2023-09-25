@@ -103,7 +103,7 @@ impl ParquetReaderBuilder {
 
         Ok(ParquetReader {
             file_path,
-            file_handle: self.file_handle,
+            _file_handle: self.file_handle,
             stream,
             read_format,
             batches: Vec::new(),
@@ -208,7 +208,7 @@ pub struct ParquetReader {
     /// SST file to read.
     ///
     /// Holds the file handle to avoid the file purge purge it.
-    file_handle: FileHandle,
+    _file_handle: FileHandle,
     /// Inner parquet record batch stream.
     stream: BoxedRecordBatchStream,
     /// Helper to read record batches.
