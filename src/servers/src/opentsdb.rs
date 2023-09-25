@@ -132,7 +132,7 @@ pub fn data_point_to_grpc_row_insert_requests(
 ) -> Result<(RowInsertRequests, usize)> {
     let mut multi_table_data = MultiTableData::new();
     let table_name = data_point.metric();
-    let tags = data_point.tags();
+    let tags = data_point.tags().clone();
     let value = data_point.value();
     let timestamp = data_point.ts_millis();
     let num_columns = tags.len() + 1;
@@ -141,8 +141,7 @@ pub fn data_point_to_grpc_row_insert_requests(
     let mut one_row = table_data.alloc_one_row();
 
     //tags
-    let kvs = tags.iter().map(|(k, v)| (k.as_str(), v.as_str()));
-    row_writer::write_tags(table_data, kvs, &mut one_row)?;
+    row_writer::write_tags(table_data, tags.into_iter(), &mut one_row)?;
 
     // value
     row_writer::write_f64(table_data, FIELD_COLUMN_NAME, value, &mut one_row)?;
