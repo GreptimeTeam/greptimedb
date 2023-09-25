@@ -137,6 +137,7 @@ impl ParquetReaderBuilder {
         let reader = BufReader::new(reader);
         let reader = AsyncFileReaderCache {
             reader,
+            // TODO(yingwen): Sets the metadata when we implement row group level reader.
             metadata: None,
             cache: self.cache_manager.clone(),
             region_id: self.file_handle.region_id(),

@@ -5551,6 +5551,7 @@ dependencies = [
  "log-store",
  "memcomparable",
  "metrics",
+ "moka",
  "object-store",
  "parquet",
  "paste",

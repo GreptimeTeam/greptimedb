@@ -16,24 +16,32 @@
 
 use std::sync::Arc;
 
+use moka::sync::Cache;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
 use crate::sst::file::FileId;
 
 /// Manages cached data for the engine.
-pub struct CacheManager {}
+pub struct CacheManager {
+    cache: Cache<String, CacheValue>,
+}
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
     /// Creates a new manager with specific cache capacity in bytes.
     /// Returns `None` if `capacity` is 0.
-    pub fn new(capacity: usize) -> Option<CacheManager> {
+    pub fn new(capacity: u64) -> Option<CacheManager> {
         if capacity == 0 {
             None
         } else {
-            Some(CacheManager {})
+            let cache = Cache::builder()
+                .max_capacity(capacity)
+                .build();
+            Some(CacheManager {
+                cache,
+            })
         }
     }
 
@@ -56,4 +64,12 @@ impl CacheManager {
     ) {
         // TODO(yingwen): Implements it.
     }
+}
+
+/// Cached value.
+/// It can hold different kinds of data.
+#[derive(Clone)]
+enum CacheValue {
+    /// Parquet meta data.
+    ParquetMeta(Arc<ParquetMetaData>),
 }

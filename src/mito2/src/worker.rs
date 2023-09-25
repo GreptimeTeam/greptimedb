@@ -119,7 +119,7 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = CacheManager::new(config.cache_size.as_bytes() as usize).map(Arc::new);
+        let cache_manager = CacheManager::new(config.cache_size.as_bytes()).map(Arc::new);
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -208,7 +208,7 @@ impl WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = CacheManager::new(config.cache_size.as_bytes() as usize).map(Arc::new);
+        let cache_manager = CacheManager::new(config.cache_size.as_bytes()).map(Arc::new);
 
         let workers = (0..config.num_workers)
             .map(|id| {
