@@ -105,7 +105,7 @@ impl DateTime {
         NaiveDateTime::from_timestamp_opt(self.0, 0)
     }
 
-    pub fn date(&self) -> Option<Date> {
+    pub fn to_date(&self) -> Option<Date> {
         self.to_chrono_datetime().map(|d| Date::from(d.date()))
     }
 }
