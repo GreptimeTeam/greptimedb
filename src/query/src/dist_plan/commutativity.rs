@@ -58,6 +58,8 @@ impl Categorizer {
                     if Self::check_partition(&aggr.group_expr, &partition_cols) {
                         return Commutativity::Commutative;
                     }
+                } else {
+                    return Commutativity::Commutative;
                 }
 
                 // check all children exprs and uses the strictest level
