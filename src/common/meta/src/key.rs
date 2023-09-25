@@ -80,7 +80,7 @@ use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
 
-const NAME_PATTERN: &str = "[a-zA-Z_:-][a-zA-Z0-9_:-]*";
+const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_INFO_KEY_PREFIX: &str = "__table_info";

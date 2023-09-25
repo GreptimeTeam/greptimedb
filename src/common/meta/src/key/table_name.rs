@@ -268,6 +268,7 @@ mod tests {
         test_ok("my_table");
         test_ok("cpu:metrics");
         test_ok(":cpu:metrics");
+        test_ok("sys.cpu.system");
     }
 
     #[test]
