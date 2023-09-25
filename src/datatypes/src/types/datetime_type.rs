@@ -122,7 +122,7 @@ mod tests {
         );
 
         // cast from Timestamp
-        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29.042+0800").unwrap());
+        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29+0800").unwrap());
         let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,
