@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
@@ -138,14 +137,10 @@ impl PlanRewriter {
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
         if DFLogicalSubstraitConvertor.encode(plan).is_err() {
-            info!(
-                "substrait error: {:?}",
-                DFLogicalSubstraitConvertor.encode(plan)
-            );
             return true;
         }
 
-        match Categorizer::check_plan(plan) {
+        match Categorizer::check_plan(plan,self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {

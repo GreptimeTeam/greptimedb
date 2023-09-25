@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use datafusion_expr::utils::exprlist_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -37,7 +39,7 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
-    pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
+    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<Vec<String>>) -> Commutativity {
         match plan {
             LogicalPlan::Projection(proj) => {
                 for expr in &proj.expr {
@@ -51,7 +53,13 @@ impl Categorizer {
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
-            LogicalPlan::Aggregate(_) => {
+            LogicalPlan::Aggregate(aggr) => {
+                if let Some(partition_cols) = partition_cols {
+                    if Self::check_partition(&aggr.group_expr, &partition_cols) {
+                        return Commutativity::Commutative;
+                    }
+                }
+
                 // check all children exprs and uses the strictest level
                 Commutativity::Unimplemented
             }
@@ -141,6 +149,26 @@ impl Categorizer {
             | Expr::Placeholder(_)
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
         }
+    }
+
+    /// Return true if the given expr and partition cols satisified the rule.
+    /// In this case the plan can be treated as fully commutative.
+    fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
+        let mut ref_cols = HashSet::new();
+        if exprlist_to_columns(exprs, &mut ref_cols).is_err() {
+            return false;
+        }
+        let ref_cols = ref_cols
+            .into_iter()
+            .map(|c| c.flat_name())
+            .collect::<HashSet<_>>();
+        for col in partition_cols {
+            if !ref_cols.contains(col) {
+                return false;
+            }
+        }
+
+        true
     }
 }
 
