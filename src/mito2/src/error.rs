@@ -18,6 +18,7 @@ use std::sync::Arc;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
@@ -29,33 +30,38 @@ use store_api::storage::RegionId;
 use crate::sst::file::FileId;
 use crate::worker::WorkerId;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
         path: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Fail to decompress object by {}, path: {}", compress_type, path))]
     DecompressObject {
         compress_type: CompressionType,
         path: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to ser/de json object"))]
     SerdeJson {
         location: Location,
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
     },
 
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
@@ -68,7 +74,8 @@ pub enum Error {
     #[snafu(display("Invalid UTF-8 content"))]
     Utf8 {
         location: Location,
-        source: std::str::Utf8Error,
+        #[snafu(source)]
+        error: std::str::Utf8Error,
     },
 
     #[snafu(display("Cannot find RegionMetadata"))]
@@ -76,7 +83,8 @@ pub enum Error {
 
     #[snafu(display("Failed to join handle"))]
     Join {
-        source: common_runtime::JoinError,
+        #[snafu(source)]
+        error: common_runtime::JoinError,
         location: Location,
     },
 
@@ -85,7 +93,8 @@ pub enum Error {
 
     #[snafu(display("Failed to recv result"))]
     Recv {
-        source: tokio::sync::oneshot::error::RecvError,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
 
@@ -107,7 +116,8 @@ pub enum Error {
     #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
         location: Location,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("Failed to write to buffer"))]
@@ -120,13 +130,15 @@ pub enum Error {
     WriteParquet {
         path: String,
         location: Location,
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
         location: Location,
     },
 
@@ -173,7 +185,8 @@ pub enum Error {
     EncodeWal {
         region_id: RegionId,
         location: Location,
-        source: EncodeError,
+        #[snafu(source)]
+        error: EncodeError,
     },
 
     #[snafu(display("Failed to write WAL"))]
@@ -193,7 +206,8 @@ pub enum Error {
     DecodeWal {
         region_id: RegionId,
         location: Location,
-        source: DecodeError,
+        #[snafu(source)]
+        error: DecodeError,
     },
 
     #[snafu(display("Failed to delete WAL, region_id: {}", region_id))]
@@ -212,7 +226,8 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize field"))]
     SerializeField {
-        source: memcomparable::Error,
+        #[snafu(source)]
+        error: memcomparable::Error,
         location: Location,
     },
 
@@ -227,7 +242,8 @@ pub enum Error {
 
     #[snafu(display("Failed to deserialize field"))]
     DeserializeField {
-        source: memcomparable::Error,
+        #[snafu(source)]
+        error: memcomparable::Error,
         location: Location,
     },
 
@@ -253,7 +269,8 @@ pub enum Error {
     #[snafu(display("Failed to compute arrow arrays"))]
     ComputeArrow {
         location: Location,
-        source: datatypes::arrow::error::ArrowError,
+        #[snafu(source)]
+        error: datatypes::arrow::error::ArrowError,
     },
 
     #[snafu(display("Failed to compute vector"))]
@@ -277,7 +294,8 @@ pub enum Error {
 
     #[snafu(display("Failed to stop scheduler"))]
     StopScheduler {
-        source: JoinError,
+        #[snafu(source)]
+        error: JoinError,
         location: Location,
     },
 
@@ -290,7 +308,8 @@ pub enum Error {
     #[snafu(display("Failed to delete SST file, file id: {}", file_id))]
     DeleteSst {
         file_id: FileId,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         location: Location,
     },
 
@@ -358,9 +377,10 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid options, source: {}", source))]
+    #[snafu(display("Invalid options"))]
     JsonOptions {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 

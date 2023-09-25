@@ -14,6 +14,7 @@ arrow-schema.workspace = true
 arrow.workspace = true
 common-base = { workspace = true }
 common-error = { workspace = true }
+common-macro = { workspace = true }
 common-telemetry = { workspace = true }
 common-time = { workspace = true }
 datafusion-common.workspace = true

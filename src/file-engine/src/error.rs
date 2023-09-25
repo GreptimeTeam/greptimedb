@@ -16,14 +16,16 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported operation: {}", operation))]
     Unsupported {
@@ -56,38 +58,44 @@ pub enum Error {
     CheckObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to encode object into json"))]
     EncodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Fail to decode object from json"))]
     DecodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Failed to store region manifest, region_id: {}", region_id))]
     StoreRegionManifest {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         region_id: RegionId,
         location: Location,
     },
 
     #[snafu(display("Failed to load region manifest, region_id: {}", region_id))]
     LoadRegionManifest {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         region_id: RegionId,
         location: Location,
     },
 
     #[snafu(display("Failed to delete region manifest, region_id: {},", region_id))]
     DeleteRegionManifest {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         region_id: RegionId,
         location: Location,
     },
@@ -106,19 +114,22 @@ pub enum Error {
 
     #[snafu(display("Failed to build csv config"))]
     BuildCsvConfig {
-        source: common_datasource::file_format::csv::CsvConfigBuilderError,
+        #[snafu(source)]
+        error: common_datasource::file_format::csv::CsvConfigBuilderError,
         location: Location,
     },
 
     #[snafu(display("Failed to build stream"))]
     BuildStream {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
     #[snafu(display("Failed to project schema"))]
     ProjectArrowSchema {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 
@@ -142,7 +153,8 @@ pub enum Error {
 
     #[snafu(display("Failed to generate parquet scan plan"))]
     ParquetScanPlan {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -159,7 +171,8 @@ pub enum Error {
 
     #[snafu(display("Failed to extract column from filter"))]
     ExtractColumnFromFilter {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 

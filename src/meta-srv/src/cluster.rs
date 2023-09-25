@@ -256,8 +256,8 @@ fn check_resp_header(header: &Option<ResponseHeader>, ctx: Context) -> Result<()
 fn need_retry(error: &error::Error) -> bool {
     match error {
         error::Error::IsNotLeader { .. } => true,
-        error::Error::Range { source, .. } | error::Error::BatchGet { source, .. } => {
-            match_for_io_error(source).is_some()
+        error::Error::Range { error, .. } | error::Error::BatchGet { error, .. } => {
+            match_for_io_error(error).is_some()
         }
         _ => false,
     }

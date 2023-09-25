@@ -14,10 +14,10 @@
 
 //! implement `::common_error::ext::StackError`
 
-use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{quote, quote_spanned};
 use syn2::spanned::Spanned;
-use syn2::{parenthesized, Ident, ItemEnum, Variant};
+use syn2::{parenthesized, Attribute, Ident, ItemEnum, Variant};
 
 pub fn stack_trace_style_impl(args: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let input_cloned: TokenStream2 = input.clone();
@@ -115,11 +115,14 @@ struct ErrorVariant {
     has_location: bool,
     has_source: bool,
     display: TokenStream2,
+    span: Span,
+    cfg_attr: Option<Attribute>,
 }
 
 impl ErrorVariant {
     /// Construct self from [Variant]
     fn from_enum_variant(variant: Variant) -> Self {
+        let span = variant.span();
         let mut has_location = false;
         let mut has_source = false;
 
@@ -134,10 +137,9 @@ impl ErrorVariant {
         }
 
         let mut display = None;
+        let mut cfg_attr = None;
         for attr in variant.attrs {
-            eprintln!("attribute: {:?}", attr);
             if attr.path().is_ident("snafu") {
-                // display = Some(attr.parse_args::<Punctuated<Expr, Comma>>().unwrap());
                 attr.parse_nested_meta(|meta| {
                     if meta.path.is_ident("display") {
                         let content;
@@ -151,6 +153,11 @@ impl ErrorVariant {
                 })
                 .unwrap(); // TODO: report error?
             }
+
+            if attr.path().is_ident("cfg") {
+                cfg_attr = Some(attr);
+            }
+
             // if attr.path().is_ident("snafu") {
             //     if let Meta::List(meta_list) = attr.meta {
             //         if meta_list.path.is_ident("display") {
@@ -174,6 +181,8 @@ impl ErrorVariant {
             has_location,
             has_source,
             display: display.unwrap(),
+            span,
+            cfg_attr,
         }
     }
 
@@ -194,27 +203,32 @@ impl ErrorVariant {
         let name = &self.name;
         let fields = &self.fields;
         let display = &self.display;
+        let cfg = if let Some(cfg) = &self.cfg_attr {
+            quote_spanned!(cfg.span() => #cfg)
+        } else {
+            quote! {}
+        };
 
         match (self.has_location, self.has_source) {
-            (true, true) => quote! {
-                #name { #(#fields),*, } => {
+            (true, true) => quote_spanned! {
+               self.span => #cfg #name { #(#fields),*, } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
-                    source.debug_fmt(layer + 1, buf);
+                    (&*source).debug_fmt(layer + 1, buf);
                 },
             },
-            (true, false) => quote! {
-                #name { #(#fields),* } => {
+            (true, false) => quote_spanned! {
+                self.span => #cfg #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
                 },
             },
-            (false, true) => quote! {
-                #name { #(#fields),* } => {
+            (false, true) => quote_spanned! {
+                self.span => #cfg #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
-                    source.debug_fmt(layer + 1, buf);
+                    (&*source).debug_fmt(layer + 1, buf);
                 },
             },
-            (false, false) => quote! {
-                #name { #(#fields),* } => {
+            (false, false) => quote_spanned! {
+                self.span => #cfg #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
                 },
             },
@@ -224,16 +238,21 @@ impl ErrorVariant {
     fn to_next_match_arm(&self) -> TokenStream2 {
         let name = &self.name;
         let fields = &self.fields;
+        let cfg = if let Some(cfg) = &self.cfg_attr {
+            quote_spanned!(cfg.span() => #cfg)
+        } else {
+            quote! {}
+        };
 
         if self.has_source {
-            quote! {
-                #name { #(#fields),* } => {
-                    Some(source)
+            quote_spanned! {
+                self.span => #cfg #name { #(#fields),* } => {
+                    Some((&*source))
                 },
             }
         } else {
-            quote! {
-                #name { #(#fields),* } =>{
+            quote_spanned! {
+                self.span => #cfg #name { #(#fields),* } =>{
                     None
                 }
             }

@@ -17,13 +17,18 @@ use std::path::PathBuf;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to read OPT_PROF"))]
-    ReadOptProf { source: tikv_jemalloc_ctl::Error },
+    ReadOptProf {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+    },
 
     #[snafu(display("Memory profiling is not enabled"))]
     ProfilingNotEnabled,
@@ -34,13 +39,15 @@ pub enum Error {
     #[snafu(display("Failed to open temp file: {}", path))]
     OpenTempFile {
         path: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to dump profiling data to temp file: {:?}", path))]
     DumpProfileData {
         path: PathBuf,
-        source: tikv_jemalloc_ctl::Error,
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
     },
 }
 

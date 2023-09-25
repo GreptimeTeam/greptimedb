@@ -50,6 +50,7 @@ mod tests {
     use snafu::{GenerateImplicitData, Location};
 
     use super::*;
+    use crate::ext::StackError;
 
     #[derive(Debug, Snafu)]
     #[snafu(display("This is a leaf error"))]
@@ -62,6 +63,14 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    impl StackError for Leaf {
+        fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+        fn next(&self) -> Option<&dyn StackError> {
+            None
         }
     }
 
@@ -81,6 +90,14 @@ mod tests {
         }
     }
 
+    impl StackError for LeafWithLocation {
+        fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+        fn next(&self) -> Option<&dyn StackError> {
+            None
+        }
+    }
+
     #[derive(Debug, Snafu)]
     #[snafu(display("Internal error"))]
     struct Internal {
@@ -96,6 +113,17 @@ mod tests {
 
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    impl StackError for Internal {
+        fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+            buf.push(format!("{}: Internal error, at {}", layer, self.location));
+            self.source.debug_fmt(layer + 1, buf);
+        }
+
+        fn next(&self) -> Option<&dyn StackError> {
+            Some(&self.source)
         }
     }
 

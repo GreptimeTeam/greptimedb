@@ -145,7 +145,7 @@ impl Services {
                     opts.tls
                         .setup()
                         .map_err(|e| StartServer {
-                            source: InternalIo { source: e },
+                            source: InternalIo { error: e },
                         })?
                         .map(Arc::new),
                     opts.reject_no_database.unwrap_or(false),

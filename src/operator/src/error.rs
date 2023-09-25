@@ -17,14 +17,16 @@ use std::any::Any;
 use common_datasource::file_format::Format;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::parquet;
 use datatypes::arrow::error::ArrowError;
 use datatypes::value::Value;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
@@ -109,7 +111,8 @@ pub enum Error {
 
     #[snafu(display("Failed to join task"))]
     JoinTask {
-        source: common_runtime::JoinError,
+        #[snafu(source)]
+        error: common_runtime::JoinError,
         location: Location,
     },
 
@@ -200,7 +203,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
-        source: datafusion_common::DataFusionError,
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
         location: Location,
     },
 
@@ -213,7 +217,8 @@ pub enum Error {
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         table_name: String,
-        source: table::metadata::TableMetaBuilderError,
+        #[snafu(source)]
+        error: table::metadata::TableMetaBuilderError,
         location: Location,
     },
 
@@ -262,7 +267,8 @@ pub enum Error {
     #[snafu(display("Failed to build regex"))]
     BuildRegex {
         location: Location,
-        source: regex::Error,
+        #[snafu(source)]
+        error: regex::Error,
     },
 
     #[snafu(display("Failed to copy table: {}", table_name))]
@@ -315,7 +321,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build csv config"))]
     BuildCsvConfig {
-        source: common_datasource::file_format::csv::CsvConfigBuilderError,
+        #[snafu(source)]
+        error: common_datasource::file_format::csv::CsvConfigBuilderError,
         location: Location,
     },
 
@@ -330,18 +337,21 @@ pub enum Error {
     ReadObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Failed to read record batch"))]
     ReadDfRecordBatch {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 
     #[snafu(display("Failed to read parquet file"))]
     ReadParquet {
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
         location: Location,
     },
 
@@ -354,13 +364,15 @@ pub enum Error {
     #[snafu(display("Failed to build parquet record batch stream"))]
     BuildParquetRecordBatchStream {
         location: Location,
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to build file stream"))]
     BuildFileStream {
         location: Location,
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
     },
 
     #[snafu(display("Failed to write parquet file"))]
@@ -384,13 +396,15 @@ pub enum Error {
 
     #[snafu(display("Failed to project schema"))]
     ProjectSchema {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 

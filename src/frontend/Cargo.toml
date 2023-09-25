@@ -28,6 +28,7 @@ common-error = { workspace = true }
 common-function = { workspace = true }
 common-grpc = { workspace = true }
 common-grpc-expr = { workspace = true }
+common-macro = { workspace = true }
 common-meta = { workspace = true }
 common-procedure = { workspace = true }
 common-query = { workspace = true }

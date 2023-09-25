@@ -17,12 +17,14 @@ use std::any::Any;
 use common_datasource::file_format::Format;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
@@ -75,7 +77,8 @@ pub enum Error {
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
-        source: std::net::AddrParseError,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
     },
 
     #[snafu(display("Failed to parse SQL"))]

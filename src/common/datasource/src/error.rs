@@ -17,12 +17,14 @@ use std::any::Any;
 use arrow_schema::ArrowError;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::parquet::errors::ParquetError;
 use snafu::{Location, Snafu};
 use url::ParseError;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported compression type: {}", compression_type))]
     UnsupportedCompressionType {
@@ -45,83 +47,96 @@ pub enum Error {
     #[snafu(display("Invalid url: {}", url))]
     InvalidUrl {
         url: String,
-        source: ParseError,
+        #[snafu(source)]
+        error: ParseError,
         location: Location,
     },
 
     #[snafu(display("Failed to build backend"))]
     BuildBackend {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to build orc reader"))]
     OrcReader {
         location: Location,
-        source: orc_rust::error::Error,
+        #[snafu(source)]
+        error: orc_rust::error::Error,
     },
 
     #[snafu(display("Failed to read object from path: {}", path))]
     ReadObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Failed to write object to path: {}", path))]
     WriteObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Failed to write"))]
     AsyncWrite {
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to write record batch"))]
     WriteRecordBatch {
         location: Location,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("Failed to encode record batch"))]
     EncodeRecordBatch {
         location: Location,
-        source: ParquetError,
+        #[snafu(source)]
+        error: ParquetError,
     },
 
     #[snafu(display("Failed to read record batch"))]
     ReadRecordBatch {
         location: Location,
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
     },
 
     #[snafu(display("Failed to read parquet"))]
     ReadParquetSnafu {
         location: Location,
-        source: datafusion::parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: datafusion::parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to convert parquet to schema"))]
     ParquetToSchema {
         location: Location,
-        source: datafusion::parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: datafusion::parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to infer schema from file"))]
     InferSchema {
         location: Location,
-        source: arrow_schema::ArrowError,
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
     },
 
     #[snafu(display("Failed to list object in path: {}", path))]
     ListObjects {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Invalid connection: {}", msg))]
@@ -130,7 +145,8 @@ pub enum Error {
     #[snafu(display("Failed to join handle"))]
     JoinHandle {
         location: Location,
-        source: tokio::task::JoinError,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
     },
 
     #[snafu(display("Failed to parse format {} with value: {}", key, value))]
@@ -142,7 +158,8 @@ pub enum Error {
 
     #[snafu(display("Failed to merge schema"))]
     MergeSchema {
-        source: arrow_schema::ArrowError,
+        #[snafu(source)]
+        error: arrow_schema::ArrowError,
         location: Location,
     },
 
