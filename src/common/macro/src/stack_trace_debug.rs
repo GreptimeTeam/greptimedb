@@ -211,24 +211,24 @@ impl ErrorVariant {
 
         match (self.has_location, self.has_source) {
             (true, true) => quote_spanned! {
-               self.span => #cfg #name { #(#fields),*, } => {
+               self.span => #cfg #[allow(unused_variables)] #name { #(#fields),*, } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
                     (&*source).debug_fmt(layer + 1, buf);
                 },
             },
             (true, false) => quote_spanned! {
-                self.span => #cfg #name { #(#fields),* } => {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
                 },
             },
             (false, true) => quote_spanned! {
-                self.span => #cfg #name { #(#fields),* } => {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
                     (&*source).debug_fmt(layer + 1, buf);
                 },
             },
             (false, false) => quote_spanned! {
-                self.span => #cfg #name { #(#fields),* } => {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
                 },
             },
@@ -246,13 +246,13 @@ impl ErrorVariant {
 
         if self.has_source {
             quote_spanned! {
-                self.span => #cfg #name { #(#fields),* } => {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     Some((&*source))
                 },
             }
         } else {
             quote_spanned! {
-                self.span => #cfg #name { #(#fields),* } =>{
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } =>{
                     None
                 }
             }
