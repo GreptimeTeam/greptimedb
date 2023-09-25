@@ -26,4 +26,8 @@ INSERT INTO monitor(ts, host, cpu, memory) VALUES
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
+TRUNCATE monitor;
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
 DROP TABLE monitor;

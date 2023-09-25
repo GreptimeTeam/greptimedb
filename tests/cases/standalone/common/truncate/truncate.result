@@ -61,6 +61,15 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 | 2023-09-20T13:47:44 | host3 | 88.8 | 4096.0 |
 +---------------------+-------+------+--------+
 
+TRUNCATE monitor;
+
+Affected Rows: 0
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
+
+++
+++
+
 DROP TABLE monitor;
 
 Affected Rows: 1
