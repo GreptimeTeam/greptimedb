@@ -29,10 +29,6 @@ pub(crate) struct CompactionOutput {
     pub output_file_id: FileId,
     /// Compaction output file level.
     pub output_level: Level,
-    /// The left bound of time window.
-    pub time_window_bound: i64,
-    /// Time window size in seconds.
-    pub time_window_sec: i64,
     /// Compaction input files.
     pub inputs: Vec<FileHandle>,
 }
