@@ -22,10 +22,13 @@ use crate::error::Result;
 
 pub type AffectedRows = usize;
 
+/// A trait for handling table mutations in `QueryEngine`.
 #[async_trait]
 pub trait TableMutationHandler: Send + Sync {
+    /// Inserts rows into the table.
     async fn insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
 
+    /// Delete rows from the table.
     async fn delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
 }
 
