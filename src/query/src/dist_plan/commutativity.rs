@@ -39,6 +39,8 @@ pub struct Categorizer {}
 
 impl Categorizer {
     pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<Vec<String>>) -> Commutativity {
+        let partition_cols = partition_cols.unwrap_or_default();
+
         match plan {
             LogicalPlan::Projection(proj) => {
                 for expr in &proj.expr {
@@ -53,18 +55,22 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                if let Some(partition_cols) = partition_cols {
-                    if Self::check_partition(&aggr.group_expr, &partition_cols) {
-                        return Commutativity::Commutative;
-                    }
-                } else {
+                if Self::check_partition(&aggr.group_expr, &partition_cols) {
                     return Commutativity::Commutative;
                 }
 
                 // check all children exprs and uses the strictest level
                 Commutativity::Unimplemented
             }
-            LogicalPlan::Sort(_) => Commutativity::Unimplemented,
+            LogicalPlan::Sort(_) => {
+                if partition_cols.is_empty() {
+                    return Commutativity::Commutative;
+                }
+
+                // sort plan needs to consider column priority
+                // We can implement a merge-sort on partial ordered data
+                Commutativity::Unimplemented
+            }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
@@ -177,4 +183,24 @@ pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
     Some(plan.clone())
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion_expr::{LogicalPlanBuilder, Sort};
+
+    use super::*;
+
+    #[test]
+    fn sort_on_empty_partition() {
+        let plan = LogicalPlan::Sort(Sort {
+            expr: vec![],
+            input: Arc::new(LogicalPlanBuilder::empty(false).build().unwrap()),
+            fetch: None,
+        });
+        assert!(matches!(
+            Categorizer::check_plan(&plan, Some(vec![])),
+            Commutativity::Commutative
+        ));
+    }
 }
