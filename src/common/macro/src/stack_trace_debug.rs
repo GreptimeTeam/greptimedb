@@ -154,7 +154,7 @@ impl ErrorVariant {
                         Err(meta.error("unrecognized repr"))
                     }
                 })
-                .unwrap(); // TODO: report error?
+                .expect("Each error should contains a display attribute");
             }
 
             if attr.path().is_ident("cfg") {
@@ -233,7 +233,6 @@ impl ErrorVariant {
                     buf.push(format!("{}: {:?}", layer + 1, error));
                 },
             },
-
             (false, false, false) => quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
@@ -242,6 +241,17 @@ impl ErrorVariant {
         }
     }
 
+    /// Convert self into an match arm that will be used in [build_next_impl].
+    ///
+    /// The generated match arm will be like:
+    /// ```rust, ignore
+    ///     ErrorKindWithSource { source, .. } => {
+    ///         Some(source)
+    ///     },
+    ///     ErrorKindWithoutSource { .. } => {
+    ///        None
+    ///     }
+    /// ```
     fn to_next_match_arm(&self) -> TokenStream2 {
         let name = &self.name;
         let fields = &self.fields;

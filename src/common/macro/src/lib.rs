@@ -103,6 +103,7 @@ pub fn print_caller(args: TokenStream, input: TokenStream) -> TokenStream {
 ///   and should not include `location` and `source`.
 /// - Only our internal error can be named `source`.
 ///   All external error should be `error` with an `#[snafu(source)]` annotation.
+/// - `common_error` crate must be accessible.
 #[proc_macro_attribute]
 pub fn stack_trace_debug(args: TokenStream, input: TokenStream) -> TokenStream {
     stack_trace_debug::stack_trace_style_impl(args.into(), input.into()).into()
