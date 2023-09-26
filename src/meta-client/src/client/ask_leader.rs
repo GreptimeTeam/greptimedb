@@ -13,13 +13,16 @@
 // limitations under the License.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{AskLeaderRequest, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_telemetry::warn;
 use rand::seq::SliceRandom;
 use snafu::{OptionExt, ResultExt};
+use tokio::time::timeout;
 use tonic::transport::Channel;
 
 use crate::client::Id;
@@ -73,29 +76,44 @@ impl AskLeader {
         };
         peers.shuffle(&mut rand::thread_rng());
 
-        let header = RequestHeader::new(self.id, self.role);
-        let mut leader = None;
+        let req = AskLeaderRequest {
+            header: Some(RequestHeader::new(self.id, self.role)),
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(peers.len());
+
         for addr in &peers {
-            let req = AskLeaderRequest {
-                header: Some(header.clone()),
-            };
             let mut client = self.create_asker(addr)?;
-            match client.ask_leader(req).await {
-                Ok(res) => {
-                    let Some(endpoint) = res.into_inner().leader else {
-                        warn!("No leader from: {addr}");
-                        continue;
-                    };
-                    leader = Some(endpoint.addr);
-                    break;
+            let tx_clone = tx.clone();
+            let req = req.clone();
+            let addr = addr.to_string();
+            tokio::spawn(async move {
+                match client.ask_leader(req).await {
+                    Ok(res) => {
+                        if let Some(endpoint) = res.into_inner().leader {
+                            let _ = tx_clone.send(endpoint.addr).await;
+                        } else {
+                            warn!("No leader from: {addr}");
+                        };
+                    }
+                    Err(status) => {
+                        warn!("Failed to ask leader from: {addr}, {status}");
+                    }
                 }
-                Err(status) => {
-                    warn!("Failed to ask leader from: {addr}, {status}");
-                }
-            }
+            });
         }
 
-        let leader = leader.context(error::NoLeaderSnafu)?;
+        let leader = timeout(
+            self.channel_manager
+                .config()
+                .timeout
+                .unwrap_or(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS)),
+            rx.recv(),
+        )
+        .await
+        .context(error::AskLeaderTimeoutSnafu)?
+        .context(error::NoLeaderSnafu)?;
+
         let mut leadership_group = self.leadership_group.write().unwrap();
         leadership_group.leader = Some(leader.clone());
 

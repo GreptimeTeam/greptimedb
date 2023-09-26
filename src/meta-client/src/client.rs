@@ -62,6 +62,7 @@ pub struct MetaClientBuilder {
     enable_ddl: bool,
     channel_manager: Option<ChannelManager>,
     ddl_channel_manager: Option<ChannelManager>,
+    heartbeat_channel_manager: Option<ChannelManager>,
 }
 
 impl MetaClientBuilder {
@@ -122,6 +123,13 @@ impl MetaClientBuilder {
         }
     }
 
+    pub fn heartbeat_channel_manager(self, channel_manager: ChannelManager) -> Self {
+        Self {
+            heartbeat_channel_manager: Some(channel_manager),
+            ..self
+        }
+    }
+
     pub fn build(self) -> MetaClient {
         let mut client = if let Some(mgr) = self.channel_manager {
             MetaClient::with_channel_manager(self.id, mgr)
@@ -136,10 +144,11 @@ impl MetaClientBuilder {
         let mgr = client.channel_manager.clone();
 
         if self.enable_heartbeat {
+            let mgr = self.heartbeat_channel_manager.unwrap_or(mgr.clone());
             client.heartbeat = Some(HeartbeatClient::new(
                 self.id,
                 self.role,
-                mgr.clone(),
+                mgr,
                 DEFAULT_ASK_LEADER_MAX_RETRY,
             ));
         }
