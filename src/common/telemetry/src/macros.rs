@@ -38,35 +38,19 @@ macro_rules! error {
 
     // error!(e; target: "my_target", "a {} event", "log")
     ($e:expr; target: $target:expr, $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             target: $target,
             $crate::logging::Level::ERROR,
-            err.msg = %stacks,
-            err.code = %$e.status_code(),
+            err.msg = ?$e,
             $($arg)+
         )
     });
 
     // error!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             $crate::logging::Level::ERROR,
-            err.msg = %stacks,
-            err.code = %$e.status_code(),
+            err.msg = ?$e,
             $($arg)+
         )
     });
@@ -87,17 +71,9 @@ macro_rules! warn {
 
     // warn!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             $crate::logging::Level::WARN,
-            err.msg = %$e,
-            err.code = %$e.status_code(),
+            err.msg = ?$e,
             $($arg)+
         )
     });
