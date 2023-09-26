@@ -29,3 +29,9 @@ pub const REGION_LEASE_SECS: u64 =
 /// When creating table or region failover, a target node needs to be selected.
 /// If the node's lease has expired, the `Selector` will not select it.
 pub const DATANODE_LEASE_SECS: u64 = REGION_LEASE_SECS;
+
+/// The lease seconds of metasrv leader.
+pub const META_LEASE_SECS: u64 = 3;
+
+// In a lease, there are two opportunities for renewal.
+pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;

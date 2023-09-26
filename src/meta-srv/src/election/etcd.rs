@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_meta::distributed_time_constants::{META_KEEP_ALIVE_INTERVAL_SECS, META_LEASE_SECS};
 use common_telemetry::{error, info, warn};
 use etcd_client::Client;
 use snafu::{OptionExt, ResultExt};
@@ -23,9 +24,7 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 
-use crate::election::{
-    Election, LeaderChangeMessage, ELECTION_KEY, KEEP_ALIVE_PERIOD_SECS, LEASE_SECS,
-};
+use crate::election::{Election, LeaderChangeMessage, ELECTION_KEY};
 use crate::error;
 use crate::error::Result;
 use crate::metasrv::{ElectionRef, LeaderValue};
@@ -114,7 +113,7 @@ impl Election for EtcdElection {
         let mut lease_client = self.client.lease_client();
         let mut election_client = self.client.election_client();
         let res = lease_client
-            .grant(LEASE_SECS, None)
+            .grant(META_LEASE_SECS as i64, None)
             .await
             .context(error::EtcdFailedSnafu)?;
         let lease_id = res.id();
@@ -140,7 +139,7 @@ impl Election for EtcdElection {
                 .context(error::EtcdFailedSnafu)?;
 
             let mut keep_alive_interval =
-                tokio::time::interval(Duration::from_secs(KEEP_ALIVE_PERIOD_SECS));
+                tokio::time::interval(Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS));
             loop {
                 let _ = keep_alive_interval.tick().await;
                 keeper.keep_alive().await.context(error::EtcdFailedSnafu)?;
