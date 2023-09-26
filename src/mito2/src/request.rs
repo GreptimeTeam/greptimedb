@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
@@ -124,7 +125,7 @@ impl WriteRequest {
     }
 
     /// Gets column index by name.
-    pub(crate) fn column_index_by_name(&self, name: &str) -> Option<usize> {
+    pub fn column_index_by_name(&self, name: &str) -> Option<usize> {
         self.name_to_index.get(name).copied()
     }
 
@@ -412,11 +413,6 @@ impl OptionOutputTx {
         }
     }
 
-    /// Takes the sender.
-    pub(crate) fn take(&mut self) -> OptionOutputTx {
-        OptionOutputTx(self.0.take())
-    }
-
     /// Takes the inner sender.
     pub(crate) fn take_inner(&mut self) -> Option<OutputTx> {
         self.0.take()
@@ -640,6 +636,8 @@ pub(crate) struct CompactionFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
+    /// Inferred Compaction time window.
+    pub(crate) compaction_time_window: Option<Duration>,
 }
 
 impl CompactionFinished {

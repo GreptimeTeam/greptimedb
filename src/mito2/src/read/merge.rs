@@ -223,6 +223,9 @@ impl BatchMerger {
         // rows by sequence for simplicity and performance reason.
         batch.filter_deleted()?;
 
+        // Reset merger.
+        self.is_sorted = true;
+
         Ok(Some(batch))
     }
 }
@@ -479,5 +482,50 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[test]
+    fn test_batch_merger_empty() {
+        let mut merger = BatchMerger::new();
+        assert!(merger.merge_batches().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_batch_merger_unsorted() {
+        let mut merger = BatchMerger::new();
+        merger.push(new_batch(
+            b"k1",
+            &[1, 3, 5],
+            &[10, 10, 10],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 23, 25],
+        ));
+        assert!(merger.is_sorted);
+        merger.push(new_batch(
+            b"k1",
+            &[2, 4],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[22, 24],
+        ));
+        assert!(!merger.is_sorted);
+        let batch = merger.merge_batches().unwrap().unwrap();
+        assert_eq!(
+            batch,
+            new_batch(
+                b"k1",
+                &[1, 2, 3, 4, 5],
+                &[10, 11, 10, 11, 10],
+                &[
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put
+                ],
+                &[21, 22, 23, 24, 25]
+            )
+        );
+        assert!(merger.is_sorted);
     }
 }

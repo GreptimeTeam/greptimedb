@@ -107,12 +107,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} already exists", region_id))]
-    RegionExists {
-        region_id: RegionId,
-        location: Location,
-    },
-
     #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
         location: Location,
@@ -425,7 +419,6 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
-            RegionExists { .. } => StatusCode::RegionAlreadyExists,
             InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }

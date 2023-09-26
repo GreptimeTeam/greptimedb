@@ -35,6 +35,13 @@ pub enum Error {
     #[snafu(display("No leader, should ask leader first"))]
     NoLeader { location: Location },
 
+    #[snafu(display("Ask leader timeout"))]
+    AskLeaderTimeout {
+        location: Location,
+        #[snafu(source)]
+        error: tokio::time::error::Elapsed,
+    },
+
     #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
         location: Location,
@@ -85,6 +92,7 @@ impl ErrorExt for Error {
             Error::IllegalGrpcClientState { .. }
             | Error::AskLeader { .. }
             | Error::NoLeader { .. }
+            | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }

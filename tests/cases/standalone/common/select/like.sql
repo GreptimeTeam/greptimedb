@@ -10,6 +10,7 @@ INSERT INTO TABLE host VALUES
     (2, 'a', 3.0),
     (3, 'c', 4.0);
 
+-- SQLNESS SORT_RESULT 3 1
 SELECT * FROM host WHERE host LIKE '%+%';
 
 DROP TABLE host;

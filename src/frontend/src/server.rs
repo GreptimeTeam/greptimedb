@@ -22,7 +22,7 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::configurator::ConfiguratorRef;
 use servers::error::InternalIoSnafu;
-use servers::grpc::GrpcServer;
+use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -68,7 +68,12 @@ impl Services {
                     .context(error::RuntimeResourceSnafu)?,
             );
 
+            let grpc_config = GrpcServerConfig {
+                max_recv_message_size: opts.max_recv_message_size,
+                max_send_message_size: opts.max_send_message_size,
+            };
             let grpc_server = GrpcServer::new(
+                Some(grpc_config),
                 Some(ServerGrpcQueryHandlerAdaptor::arc(instance.clone())),
                 Some(instance.clone()),
                 None,

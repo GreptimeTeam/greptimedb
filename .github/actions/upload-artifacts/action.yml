@@ -37,7 +37,7 @@ inputs:
   upload-retry-timeout:
     description: Timeout for uploading artifacts to S3
     required: false
-    default: "10" # minutes
+    default: "30" # minutes
   working-dir:
     description: Working directory to upload the artifacts
     required: false

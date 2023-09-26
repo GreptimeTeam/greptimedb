@@ -29,19 +29,3 @@ pub trait CompactionTask: Debug + Send + Sync + 'static {
 pub trait Picker: Debug + Send + 'static {
     fn pick(&self, req: CompactionRequest) -> Option<Box<dyn CompactionTask>>;
 }
-
-pub struct PickerContext {
-    compaction_time_window: Option<i64>,
-}
-
-impl PickerContext {
-    pub fn with(compaction_time_window: Option<i64>) -> Self {
-        Self {
-            compaction_time_window,
-        }
-    }
-
-    pub fn compaction_time_window(&self) -> Option<i64> {
-        self.compaction_time_window
-    }
-}

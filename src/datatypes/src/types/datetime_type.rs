@@ -50,10 +50,6 @@ impl DataType for DateTimeType {
         Box::new(DateTimeVectorBuilder::with_capacity(capacity))
     }
 
-    fn is_timestamp_compatible(&self) -> bool {
-        false
-    }
-
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Int64(v) => Some(Value::DateTime(DateTime::from(v))),
@@ -126,7 +122,7 @@ mod tests {
         );
 
         // cast from Timestamp
-        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29.042+0800").unwrap());
+        let val = Value::Timestamp(Timestamp::from_str("2020-09-08 21:42:29+0800").unwrap());
         let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(
             dt,

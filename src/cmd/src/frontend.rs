@@ -383,7 +383,7 @@ mod tests {
                     Some("11"),
                 ),
                 (
-                    // http_options.addr = 127.0.0.1:24000
+                    // http.addr = 127.0.0.1:24000
                     [
                         env_prefix.to_string(),
                         "http".to_uppercase(),

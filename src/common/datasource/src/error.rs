@@ -32,10 +32,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Unsupported backend protocol: {}", protocol))]
+    #[snafu(display("Unsupported backend protocol: {}, url: {}", protocol, url))]
     UnsupportedBackendProtocol {
         protocol: String,
         location: Location,
+        url: String,
     },
 
     #[snafu(display("Unsupported format protocol: {}", format))]

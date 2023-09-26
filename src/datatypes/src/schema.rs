@@ -23,7 +23,6 @@ use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
 use snafu::{ensure, ResultExt};
 
-use crate::data_type::DataType;
 use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
@@ -269,7 +268,7 @@ fn validate_timestamp_index(column_schemas: &[ColumnSchema], timestamp_index: us
 
     let column_schema = &column_schemas[timestamp_index];
     ensure!(
-        column_schema.data_type.is_timestamp_compatible(),
+        column_schema.data_type.is_timestamp(),
         error::InvalidTimestampIndexSnafu {
             index: timestamp_index,
         }

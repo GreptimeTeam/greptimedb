@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
+use common_meta::cache_invalidator::KvCacheInvalidator;
 use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
@@ -28,12 +29,11 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_telemetry::timer;
+use common_telemetry::{debug, timer};
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{OptionExt, ResultExt};
 
-use super::KvCacheInvalidator;
 use crate::metrics::{METRIC_CATALOG_KV_GET, METRIC_CATALOG_KV_REMOTE_GET};
 
 const CACHE_MAX_CAPACITY: u64 = 10000;
@@ -197,7 +197,8 @@ impl KvBackend for CachedMetaKvBackend {
 #[async_trait::async_trait]
 impl KvCacheInvalidator for CachedMetaKvBackend {
     async fn invalidate_key(&self, key: &[u8]) {
-        self.cache.invalidate(key).await
+        self.cache.invalidate(key).await;
+        debug!("invalidated cache key: {}", String::from_utf8_lossy(key));
     }
 }
 

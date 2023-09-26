@@ -42,7 +42,6 @@ use crate::sst::file_purger::FilePurgerRef;
 pub struct CompactionRequest {
     pub(crate) current_version: VersionRef,
     pub(crate) access_layer: AccessLayerRef,
-    pub(crate) compaction_time_window: Option<i64>,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequest>,
     /// Waiters of the compaction request.
@@ -101,24 +100,21 @@ impl CompactionScheduler {
         file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
     ) -> Result<()> {
-        let status = self.region_status.entry(region_id).or_insert_with(|| {
-            CompactionStatus::new(
-                region_id,
-                version_control.clone(),
-                access_layer.clone(),
-                file_purger.clone(),
-            )
-        });
-        if status.compacting {
+        if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
             status.merge_waiter(waiter);
             return Ok(());
         }
 
         // The region can compact directly.
+        let mut status = CompactionStatus::new(
+            region_id,
+            version_control.clone(),
+            access_layer.clone(),
+            file_purger.clone(),
+        );
         let request = status.new_compaction_request(self.request_sender.clone(), waiter);
-        // Mark the region as compacting.
-        status.compacting = true;
+        self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
     }
 
@@ -127,7 +123,6 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
-        status.compacting = false;
         // We should always try to compact the region until picker returns None.
         let request =
             status.new_compaction_request(self.request_sender.clone(), OptionOutputTx::none());
@@ -252,8 +247,6 @@ struct CompactionStatus {
     access_layer: AccessLayerRef,
     /// File purger of the region.
     file_purger: FilePurgerRef,
-    /// Whether a compaction task is running.
-    compacting: bool,
     /// Compaction pending to schedule.
     ///
     /// For simplicity, we merge all pending compaction requests into one.
@@ -273,7 +266,6 @@ impl CompactionStatus {
             version_control,
             access_layer,
             file_purger,
-            compacting: false,
             pending_compaction: None,
         }
     }
@@ -306,8 +298,6 @@ impl CompactionStatus {
         let mut req = CompactionRequest {
             current_version,
             access_layer: self.access_layer.clone(),
-            // TODO(hl): get persisted region compaction time window
-            compaction_time_window: None,
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
@@ -324,12 +314,15 @@ impl CompactionStatus {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use common_query::Output;
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::schedule::scheduler::{Job, Scheduler};
     use crate::test_util::scheduler_util::SchedulerEnv;
-    use crate::test_util::version_util::VersionControlBuilder;
+    use crate::test_util::version_util::{apply_edit, VersionControlBuilder};
 
     #[tokio::test]
     async fn test_schedule_empty() {
@@ -372,5 +365,124 @@ mod tests {
         let output = output_rx.await.unwrap().unwrap();
         assert!(matches!(output, Output::AffectedRows(0)));
         assert!(scheduler.region_status.is_empty());
+    }
+
+    #[derive(Default)]
+    struct VecScheduler {
+        jobs: Mutex<Vec<Job>>,
+    }
+
+    impl VecScheduler {
+        fn num_jobs(&self) -> usize {
+            self.jobs.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Scheduler for VecScheduler {
+        fn schedule(&self, job: Job) -> Result<()> {
+            self.jobs.lock().unwrap().push(job);
+            Ok(())
+        }
+
+        async fn stop(&self, _await_termination: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_schedule_on_finished() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let purger = builder.file_purger();
+        let region_id = builder.region_id();
+
+        // 5 files to compact.
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        // Should schedule 1 compaction.
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        let data = version_control.current();
+        let file_metas: Vec<_> = data.version.ssts.levels()[0]
+            .files
+            .values()
+            .map(|file| file.meta())
+            .collect();
+
+        // 5 files for next compaction and removes old files.
+        apply_edit(
+            &version_control,
+            &[(0, end), (20, end), (40, end), (60, end), (80, end)],
+            &file_metas,
+            purger.clone(),
+        );
+        // The task is pending.
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        assert!(scheduler
+            .region_status
+            .get(&builder.region_id())
+            .unwrap()
+            .pending_compaction
+            .is_some());
+
+        // On compaction finished and schedule next compaction.
+        scheduler.on_compaction_finished(region_id);
+        assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(2, job_scheduler.num_jobs());
+        // 5 files for next compaction.
+        apply_edit(
+            &version_control,
+            &[(0, end), (20, end), (40, end), (60, end), (80, end)],
+            &[],
+            purger.clone(),
+        );
+        // The task is pending.
+        scheduler
+            .schedule_compaction(
+                region_id,
+                &version_control,
+                &env.access_layer,
+                &purger,
+                OptionOutputTx::none(),
+            )
+            .unwrap();
+        assert_eq!(2, job_scheduler.num_jobs());
+        assert!(scheduler
+            .region_status
+            .get(&builder.region_id())
+            .unwrap()
+            .pending_compaction
+            .is_some());
     }
 }

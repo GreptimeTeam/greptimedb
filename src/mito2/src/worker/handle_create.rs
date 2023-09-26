@@ -58,12 +58,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
+            &request.region_dir,
             self.memtable_builder.clone(),
             self.object_store.clone(),
             self.scheduler.clone(),
         )
         .metadata(metadata)
-        .region_dir(&request.region_dir)
         .options(request.options)
         .create_or_open(&self.config, &self.wal)
         .await?;

@@ -89,6 +89,65 @@ mod test {
 | greptimedb | otel  | java               | testsevrer | 1970-01-01T00:00:00 | 100.0          |
 +------------+-------+--------------------+------------+---------------------+----------------+",
         );
+
+        let mut output = instance
+            .do_query(
+                "SELECT le, greptime_value FROM my_test_histo_bucket order by le",
+                ctx.clone(),
+            )
+            .await;
+        let output = output.remove(0).unwrap();
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().unwrap(),
+            "\
++-----+----------------+
+| le  | greptime_value |
++-----+----------------+
+| 1   | 1.0            |
+| 5   | 3.0            |
+| inf | 4.0            |
++-----+----------------+",
+        );
+
+        let mut output = instance
+            .do_query("SELECT * FROM my_test_histo_sum", ctx.clone())
+            .await;
+        let output = output.remove(0).unwrap();
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().unwrap(),
+            "\
++------------+-------+--------------------+------------+---------------------+----------------+
+| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp  | greptime_value |
++------------+-------+--------------------+------------+---------------------+----------------+
+| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00 | 51.0           |
++------------+-------+--------------------+------------+---------------------+----------------+",
+        );
+
+        let mut output = instance
+            .do_query("SELECT * FROM my_test_histo_count", ctx.clone())
+            .await;
+        let output = output.remove(0).unwrap();
+        let Output::Stream(stream) = output else {
+            unreachable!()
+        };
+        let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            recordbatches.pretty_print().unwrap(),
+            "\
++------------+-------+--------------------+------------+---------------------+----------------+
+| resource   | scope | telemetry_sdk_name | host       | greptime_timestamp  | greptime_value |
++------------+-------+--------------------+------------+---------------------+----------------+
+| greptimedb | otel  | java               | testserver | 1970-01-01T00:00:00 | 4.0            |
++------------+-------+--------------------+------------+---------------------+----------------+",
+        );
     }
 
     fn build_request() -> ExportMetricsServiceRequest {
@@ -108,15 +167,38 @@ mod test {
         ];
         let gauge = Gauge { data_points };
 
+        let histo_data_points = vec![HistogramDataPoint {
+            attributes: vec![keyvalue("host", "testserver")],
+            time_unix_nano: 100,
+            count: 4,
+            bucket_counts: vec![1, 2, 1],
+            explicit_bounds: vec![1.0f64, 5.0f64],
+            sum: Some(51f64),
+            ..Default::default()
+        }];
+
+        let histo = Histogram {
+            data_points: histo_data_points,
+            aggregation_temporality: 0,
+        };
+
         ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics {
                 scope_metrics: vec![ScopeMetrics {
-                    metrics: vec![Metric {
-                        name: "my.test.metric".into(),
-                        description: "my ignored desc".into(),
-                        unit: "my ignored unit".into(),
-                        data: Some(metric::Data::Gauge(gauge)),
-                    }],
+                    metrics: vec![
+                        Metric {
+                            name: "my.test.metric".into(),
+                            description: "my ignored desc".into(),
+                            unit: "my ignored unit".into(),
+                            data: Some(metric::Data::Gauge(gauge)),
+                        },
+                        Metric {
+                            name: "my.test.histo".into(),
+                            description: "my ignored desc".into(),
+                            unit: "my ignored unit".into(),
+                            data: Some(metric::Data::Histogram(histo)),
+                        },
+                    ],
                     scope: Some(InstrumentationScope {
                         attributes: vec![
                             keyvalue("scope", "otel"),

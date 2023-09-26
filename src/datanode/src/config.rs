@@ -18,6 +18,9 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_config::WalConfig;
+use common_grpc::channel_manager::{
+    DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+};
 pub use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -324,6 +327,10 @@ pub struct DatanodeOptions {
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
+    // Max gRPC receiving(decoding) message size
+    pub rpc_max_recv_message_size: usize,
+    // Max gRPC sending(encoding) message size
+    pub rpc_max_send_message_size: usize,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
@@ -344,6 +351,8 @@ impl Default for DatanodeOptions {
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
+            rpc_max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            rpc_max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             http: HttpOptions::default(),
             meta_client: None,
             wal: WalConfig::default(),

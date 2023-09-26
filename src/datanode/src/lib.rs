@@ -15,8 +15,6 @@
 #![feature(assert_matches)]
 #![feature(trait_upcasting)]
 
-use query::query_engine::SqlStatementExecutor;
-
 pub mod alive_keeper;
 pub mod config;
 pub mod datanode;
@@ -31,17 +29,3 @@ mod store;
 #[cfg(test)]
 #[allow(dead_code)]
 mod tests;
-
-// TODO(ruihang): remove this
-pub struct Instance;
-
-#[async_trait::async_trait]
-impl SqlStatementExecutor for Instance {
-    async fn execute_sql(
-        &self,
-        _stmt: sql::statements::statement::Statement,
-        _query_ctx: session::context::QueryContextRef,
-    ) -> query::error::Result<common_query::Output> {
-        unreachable!()
-    }
-}

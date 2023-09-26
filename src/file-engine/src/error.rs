@@ -42,12 +42,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Region {} already exists", region_id))]
-    RegionExists {
-        region_id: RegionId,
-        location: Location,
-    },
-
     #[snafu(display("Region not found, region_id: {}", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -204,7 +198,6 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | MissingColumnNoDefault { .. } => StatusCode::InvalidArguments,
 
-            RegionExists { .. } => StatusCode::RegionAlreadyExists,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
 
             BuildBackend { source, .. } => source.status_code(),

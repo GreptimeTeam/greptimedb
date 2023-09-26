@@ -334,7 +334,7 @@ pub fn to_grpc_row_insert_requests(request: WriteRequest) -> Result<(RowInsertRe
                 if label.name == METRIC_NAME_LABEL {
                     None
                 } else {
-                    Some((label.name.as_str(), label.value.as_str()))
+                    Some((label.name.to_string(), label.value.as_str()))
                 }
             });
             row_writer::write_tags(table_data, kvs, &mut one_row)?;

@@ -31,7 +31,8 @@ use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsCon
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_GRPC_CONNECT_TIMEOUT_SECS: u64 = 10;
-pub const DEFAULT_MAX_GRPC_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
 
 lazy_static! {
     static ref ID: AtomicU64 = AtomicU64::new(0);
@@ -248,9 +249,10 @@ pub struct ChannelConfig {
     pub tcp_keepalive: Option<Duration>,
     pub tcp_nodelay: bool,
     pub client_tls: Option<ClientTlsOption>,
-    // Max gRPC message size
-    // TODO(dennis): make it configurable
-    pub max_message_size: usize,
+    // Max gRPC receiving(decoding) message size
+    pub max_recv_message_size: usize,
+    // Max gRPC sending(encoding) message size
+    pub max_send_message_size: usize,
 }
 
 impl Default for ChannelConfig {
@@ -269,7 +271,8 @@ impl Default for ChannelConfig {
             tcp_keepalive: None,
             tcp_nodelay: true,
             client_tls: None,
-            max_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
         }
     }
 }
@@ -534,7 +537,8 @@ mod tests {
                 tcp_keepalive: None,
                 tcp_nodelay: true,
                 client_tls: None,
-                max_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+                max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+                max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             },
             default_cfg
         );
@@ -577,7 +581,8 @@ mod tests {
                     client_cert_path: "some_cert_path".to_string(),
                     client_key_path: "some_key_path".to_string(),
                 }),
-                max_message_size: DEFAULT_MAX_GRPC_MESSAGE_SIZE,
+                max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+                max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             },
             cfg
         );

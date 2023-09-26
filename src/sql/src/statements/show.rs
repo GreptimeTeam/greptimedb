@@ -54,6 +54,7 @@ impl ShowDatabases {
 pub struct ShowTables {
     pub kind: ShowKind,
     pub database: Option<String>,
+    pub full: bool,
 }
 
 /// SQL structure for `SHOW CREATE TABLE`.

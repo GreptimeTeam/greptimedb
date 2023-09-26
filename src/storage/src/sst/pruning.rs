@@ -15,10 +15,10 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    PrimitiveArray, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
-use arrow::datatypes::{DataType, Int64Type};
+use arrow::datatypes::DataType;
 use arrow::error::ArrowError;
 use arrow_array::{Array, BooleanArray, RecordBatch};
 use common_time::range::TimestampRange;
@@ -45,7 +45,6 @@ pub(crate) fn build_row_filter(
     let ts_col_idx = store_schema.timestamp_index();
     let ts_col = store_schema.columns().get(ts_col_idx)?;
     let ts_col_unit = match &ts_col.desc.data_type {
-        ConcreteDataType::Int64(_) => TimeUnit::Millisecond,
         ConcreteDataType::Timestamp(ts_type) => ts_type.unit(),
         _ => unreachable!(),
     };
@@ -205,7 +204,6 @@ impl ArrowPredicate for FastTimestampRowFilter {
                     downcast_and_compute!(TimestampNanosecondArray)
                 }
             },
-            DataType::Int64 => downcast_and_compute!(PrimitiveArray<Int64Type>),
             _ => {
                 unreachable!()
             }
@@ -270,9 +268,6 @@ impl ArrowPredicate for PlainTimestampRowFilter {
                     downcast_and_compute!(TimestampNanosecondArray, Nanosecond)
                 }
             },
-            DataType::Int64 => {
-                downcast_and_compute!(PrimitiveArray<Int64Type>, Millisecond)
-            }
             _ => {
                 unreachable!()
             }

@@ -350,6 +350,15 @@ impl Helper {
         let result = compute::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
         Helper::try_into_vector(result)
     }
+
+    pub fn like_utf8_filter(names: Vec<String>, s: &str) -> Result<(VectorRef, BooleanVector)> {
+        let array = StringArray::from(names);
+        let filter = comparison::like_utf8_scalar(&array, s).context(error::ArrowComputeSnafu)?;
+        let result = compute::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
+        let vector = Helper::try_into_vector(result)?;
+
+        Ok((vector, BooleanVector::from(filter)))
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +470,37 @@ mod tests {
 
         let ret = Helper::like_utf8(names, "%").unwrap();
         assert_vector(vec!["greptime", "hello", "public", "world"], &ret);
+    }
+
+    #[test]
+    fn test_like_utf8_filter() {
+        fn assert_vector(expected: Vec<&str>, actual: &VectorRef) {
+            let actual = actual.as_any().downcast_ref::<StringVector>().unwrap();
+            assert_eq!(*actual, StringVector::from(expected));
+        }
+
+        fn assert_filter(array: Vec<String>, s: &str, expected_filter: &BooleanVector) {
+            let array = StringArray::from(array);
+            let actual_filter = comparison::like_utf8_scalar(&array, s).unwrap();
+            assert_eq!(BooleanVector::from(actual_filter), *expected_filter);
+        }
+
+        let names: Vec<String> = vec!["greptime", "timeseries", "cloud", "database"]
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect();
+
+        let (table, filter) = Helper::like_utf8_filter(names.clone(), "%ti%").unwrap();
+        assert_vector(vec!["greptime", "timeseries"], &table);
+        assert_filter(names.clone(), "%ti%", &filter);
+
+        let (tables, filter) = Helper::like_utf8_filter(names.clone(), "%lou").unwrap();
+        assert_vector(vec![], &tables);
+        assert_filter(names.clone(), "%lou", &filter);
+
+        let (tables, filter) = Helper::like_utf8_filter(names.clone(), "%d%").unwrap();
+        assert_vector(vec!["cloud", "database"], &tables);
+        assert_filter(names.clone(), "%d%", &filter);
     }
 
     fn check_try_into_vector(array: impl Array + 'static) {

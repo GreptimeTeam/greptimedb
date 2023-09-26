@@ -1617,12 +1617,14 @@ dependencies = [
  "datatypes",
  "either",
  "etcd-client",
+ "file-engine",
  "frontend",
  "futures",
  "lazy_static",
  "meta-client",
  "meta-srv",
  "metrics",
+ "mito2",
  "nu-ansi-term",
  "partition",
  "prost",
@@ -1720,6 +1722,7 @@ dependencies = [
  "datafusion",
  "derive_builder 0.12.0",
  "futures",
+ "lazy_static",
  "object-store",
  "orc-rust",
  "paste",
@@ -4207,7 +4210,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9#9d3f28d07d29607d0e3c1823f4a4d2bc229d05b9"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=115c1080773be8a819e50b257fece9f839a0c836#115c1080773be8a819e50b257fece9f839a0c836"
 dependencies = [
  "prost",
  "serde",
@@ -6078,8 +6081,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.39.0"
-source = "git+https://github.com/apache/incubator-opendal.git?rev=7d5524f35f29f7eda8131e8b0873590b7cbe34ab#7d5524f35f29f7eda8131e8b0873590b7cbe34ab"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddba7299bab261d3ae2f37617fb7f45b19ed872752bb4e22cf93a69d979366c5"
 dependencies = [
  "anyhow",
  "async-compat",
