@@ -113,12 +113,11 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 | logical_plan | Dml: op=[Insert] table=[other]                                    |
 |              |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j |
 |              |     Inner Join: integers.i = __scalar_sq_1.MAX(integers.i)        |
-|              |       Projection: integers.i                                      |
-|              |         MergeScan [is_placeholder=false]                          |
+|              |       TableScan: integers projection=[i]                          |
 |              |       SubqueryAlias: __scalar_sq_1                                |
-|              |         Aggregate: groupBy=[[]], aggr=[[MAX(integers.i)]]         |
-|              |           Projection: integers.i                                  |
-|              |             MergeScan [is_placeholder=false]                      |
+|              |         Projection: MAX(integers.i)                               |
+|              |           Aggregate: groupBy=[[]], aggr=[[MAX(integers.i)]]       |
+|              |             TableScan: integers projection=[i]                    |
 +--------------+-------------------------------------------------------------------+
 
 drop table other;
