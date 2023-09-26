@@ -140,7 +140,6 @@ impl fmt::Debug for RegionMetadata {
         f.debug_struct("RegionMetadata")
             .field("column_metadatas", &self.column_metadatas)
             .field("time_index", &self.time_index)
-            .field("id_to_index", &self.id_to_index)
             .field("primary_key", &self.primary_key)
             .field("region_id", &self.region_id)
             .field("schema_version", &self.schema_version)
