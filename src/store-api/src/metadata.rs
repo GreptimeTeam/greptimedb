@@ -18,6 +18,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -105,7 +106,7 @@ impl ColumnMetadata {
 /// RegionMetadata o-- ColumnMetadata
 /// ColumnMetadata o-- SemanticType
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
@@ -132,6 +133,19 @@ pub struct RegionMetadata {
     ///
     /// The version starts from 0. Altering the schema bumps the version.
     pub schema_version: u64,
+}
+
+impl fmt::Debug for RegionMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RegionMetadata")
+            .field("column_metadatas", &self.column_metadatas)
+            .field("time_index", &self.time_index)
+            .field("id_to_index", &self.id_to_index)
+            .field("primary_key", &self.primary_key)
+            .field("region_id", &self.region_id)
+            .field("schema_version", &self.schema_version)
+            .finish()
+    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
