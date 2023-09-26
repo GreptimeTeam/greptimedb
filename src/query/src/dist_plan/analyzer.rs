@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
