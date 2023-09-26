@@ -102,7 +102,7 @@ impl DateTime {
     }
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_opt(self.0 / 1000, 0)
+        NaiveDateTime::from_timestamp_millis(self.0)
     }
 
     pub fn to_date(&self) -> Option<Date> {
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_conversion_between_datetime_and_chrono_datetime() {
-        let cases = [1000, 100000, 1000000];
+        let cases = [1, 10, 100, 1000, 100000];
         for case in cases {
             let dt = DateTime::new(case);
             let ndt = dt.to_chrono_datetime().unwrap();
