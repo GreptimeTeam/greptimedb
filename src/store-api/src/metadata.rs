@@ -39,7 +39,7 @@ use crate::storage::{ColumnId, RegionId};
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
 /// Metadata of a column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
     pub column_schema: ColumnSchema,
@@ -47,6 +47,17 @@ pub struct ColumnMetadata {
     pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
     pub column_id: ColumnId,
+}
+
+impl fmt::Debug for ColumnMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let formatted = format!(
+            "[{:?} {:?} {:?}]",
+            self.column_schema, self.semantic_type, self.column_id,
+        );
+        // Write the formatted string to the formatter
+        write!(f, "{}", formatted)
+    }
 }
 
 impl ColumnMetadata {

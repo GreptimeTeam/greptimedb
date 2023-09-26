@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ pub const COMMENT_KEY: &str = "greptime:storage:comment";
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
 /// Schema of a column, used as an immutable struct.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
@@ -41,6 +42,34 @@ pub struct ColumnSchema {
     is_time_index: bool,
     default_constraint: Option<ColumnDefaultConstraint>,
     metadata: Metadata,
+}
+
+impl fmt::Debug for ColumnSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut formatted = format!(
+            "{} {} {}",
+            self.name,
+            self.data_type,
+            if self.is_nullable {
+                "nullable"
+            } else {
+                "not null"
+            },
+        );
+
+        // Add default constraint if present
+        if let Some(default_constraint) = &self.default_constraint {
+            formatted.push_str(&format!(" default={:?}", default_constraint));
+        }
+
+        // Add metadata if present
+        if !self.metadata.is_empty() {
+            formatted.push_str(&format!(" metadata={:?}", self.metadata));
+        }
+
+        // Write the formatted string to the formatter
+        write!(f, "{}", formatted)
+    }
 }
 
 impl ColumnSchema {
