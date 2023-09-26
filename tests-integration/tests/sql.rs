@@ -135,12 +135,12 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
 
-    assert!(sqlx::query(
+    sqlx::query(
         "create table demo(i bigint, ts timestamp time index, d date, dt datetime, b blob)",
     )
     .execute(&pool)
     .await
-    .is_ok());
+    .unwrap();
     for i in 0..10 {
         let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
             NaiveDateTime::from_timestamp_opt(60, i).unwrap(),
@@ -149,7 +149,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         let d = NaiveDate::from_yo_opt(2015, 100).unwrap();
         let hello = format!("hello{i}");
         let bytes = hello.as_bytes();
-        assert!(sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
+        sqlx::query("insert into demo values(?, ?, ?, ?, ?)")
             .bind(i)
             .bind(i)
             .bind(d)
@@ -157,7 +157,7 @@ pub async fn test_mysql_crud(store_type: StorageType) {
             .bind(bytes)
             .execute(&pool)
             .await
-            .is_ok());
+            .unwrap();
     }
 
     let rows = sqlx::query("select i, d, dt, b from demo")
