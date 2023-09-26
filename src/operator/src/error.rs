@@ -48,52 +48,52 @@ pub enum Error {
 
     #[snafu(display("external error"))]
     External {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to insert data"))]
     RequestInserts {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to delete data"))]
     RequestDeletes {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to parse SQL"))]
     ParseSql {
-        #[snafu(backtrace)]
+        location: Location,
         source: sql::error::Error,
     },
 
     #[snafu(display("Failed to convert value to sql value: {}", value))]
     ConvertSqlValue {
         value: Value,
-        #[snafu(backtrace)]
+        location: Location,
         source: sql::error::Error,
     },
 
     #[snafu(display("Column datatype error"))]
     ColumnDataType {
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Invalid column proto definition, column: {}", column))]
     InvalidColumnDef {
         column: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: api::error::Error,
     },
 
     #[snafu(display("Failed to convert column default constraint, column: {}", column_name))]
     ConvertColumnDefaultConstraint {
         column_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
@@ -118,14 +118,14 @@ pub enum Error {
 
     #[snafu(display("General catalog error"))]
     Catalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to find table partition rule for table {}", table_name))]
     FindTablePartitionRule {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: partition::error::Error,
     },
 
@@ -149,13 +149,13 @@ pub enum Error {
 
     #[snafu(display("Failed to create table info"))]
     CreateTableInfo {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to build CreateExpr on insertion"))]
     BuildCreateExprOnInsertion {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc_expr::error::Error,
     },
 
@@ -170,7 +170,7 @@ pub enum Error {
 
     #[snafu(display("Table occurs error"))]
     Table {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -179,25 +179,25 @@ pub enum Error {
 
     #[snafu(display("Failed to execute statement"))]
     ExecuteStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to plan statement"))]
     PlanStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to parse query"))]
     ParseQuery {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to execute logical plan"))]
     ExecLogicalPlan {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
@@ -210,7 +210,7 @@ pub enum Error {
 
     #[snafu(display("Failed to convert AlterExpr to AlterRequest"))]
     AlterExprToRequest {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc_expr::error::Error,
     },
 
@@ -227,25 +227,25 @@ pub enum Error {
 
     #[snafu(display("Failed to find new columns on insertion"))]
     FindNewColumnsOnInsertion {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_grpc_expr::error::Error,
     },
 
     #[snafu(display("Failed to convert into vectors"))]
     IntoVectors {
-        #[snafu(backtrace)]
+        location: Location,
         source: datatypes::error::Error,
     },
 
     #[snafu(display("Failed to deserialize partition in meta to partition def"))]
     DeserializePartition {
-        #[snafu(backtrace)]
+        location: Location,
         source: partition::error::Error,
     },
 
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
@@ -254,7 +254,7 @@ pub enum Error {
 
     #[snafu(display("Unrecognized table option"))]
     UnrecognizedTableOption {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -274,20 +274,20 @@ pub enum Error {
     #[snafu(display("Failed to copy table: {}", table_name))]
     CopyTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to parse data source url"))]
     ParseUrl {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
@@ -296,26 +296,26 @@ pub enum Error {
 
     #[snafu(display("Failed to parse file format"))]
     ParseFileFormat {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
     #[snafu(display("Failed to build data source backend"))]
     BuildBackend {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
     #[snafu(display("Failed to list objects"))]
     ListObjects {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
     #[snafu(display("Failed to infer schema from path: {}", path))]
     InferSchema {
         path: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
@@ -329,7 +329,7 @@ pub enum Error {
     #[snafu(display("Failed to write stream to path: {}", path))]
     WriteStreamToFile {
         path: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: common_datasource::error::Error,
     },
 
@@ -377,7 +377,7 @@ pub enum Error {
 
     #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
-        #[snafu(backtrace)]
+        location: Location,
         source: storage::error::Error,
     },
 
@@ -410,7 +410,7 @@ pub enum Error {
 
     #[snafu(display("Failed to prepare immutable table"))]
     PrepareImmutableTable {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
@@ -471,19 +471,19 @@ pub enum Error {
 
     #[snafu(display("Failed to prepare file table"))]
     PrepareFileTable {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to infer file table schema"))]
     InferFileTableSchema {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("The schema of the file table is incompatible with the table schema"))]
     SchemaIncompatible {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 }
@@ -516,7 +516,7 @@ impl ErrorExt for Error {
 
             Error::TableMetadataManager { source, .. } => source.status_code(),
 
-            Error::ConvertSqlValue { source, .. } | Error::ParseSql { source } => {
+            Error::ConvertSqlValue { source, .. } | Error::ParseSql { source, .. } => {
                 source.status_code()
             }
 
@@ -526,18 +526,18 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            Error::Table { source }
+            Error::Table { source, .. }
             | Error::CopyTable { source, .. }
             | Error::Insert { source, .. } => source.status_code(),
 
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::CreateTableInfo { source }
-            | Error::IntoVectors { source } => source.status_code(),
+            | Error::CreateTableInfo { source, .. }
+            | Error::IntoVectors { source, .. } => source.status_code(),
 
-            Error::RequestInserts { source } => source.status_code(),
-            Error::RequestDeletes { source } => source.status_code(),
+            Error::RequestInserts { source, .. } => source.status_code(),
+            Error::RequestDeletes { source, .. } => source.status_code(),
 
-            Error::ColumnDataType { source } | Error::InvalidColumnDef { source, .. } => {
+            Error::ColumnDataType { source, .. } | Error::InvalidColumnDef { source, .. } => {
                 source.status_code()
             }
 
@@ -560,18 +560,18 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::BuildCreateExprOnInsertion { source }
-            | Error::FindNewColumnsOnInsertion { source } => source.status_code(),
+            Error::BuildCreateExprOnInsertion { source, .. }
+            | Error::FindNewColumnsOnInsertion { source, .. } => source.status_code(),
 
             Error::ExecuteStatement { source, .. }
-            | Error::PlanStatement { source }
-            | Error::ParseQuery { source }
-            | Error::ExecLogicalPlan { source }
-            | Error::DescribeStatement { source } => source.status_code(),
+            | Error::PlanStatement { source, .. }
+            | Error::ParseQuery { source, .. }
+            | Error::ExecLogicalPlan { source, .. }
+            | Error::DescribeStatement { source, .. } => source.status_code(),
 
             Error::AlterExprToRequest { source, .. } => source.status_code(),
 
-            Error::External { source } => source.status_code(),
+            Error::External { source, .. } => source.status_code(),
             Error::DeserializePartition { source, .. }
             | Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
@@ -584,9 +584,9 @@ impl ErrorExt for Error {
                 StatusCode::StorageUnavailable
             }
 
-            Error::ListObjects { source }
-            | Error::ParseUrl { source }
-            | Error::BuildBackend { source } => source.status_code(),
+            Error::ListObjects { source, .. }
+            | Error::ParseUrl { source, .. }
+            | Error::BuildBackend { source, .. } => source.status_code(),
 
             Error::WriteParquet { source, .. } => source.status_code(),
             Error::ExecuteDdl { source, .. } => source.status_code(),

@@ -21,7 +21,7 @@ use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
 use servers::configurator::ConfiguratorRef;
-use servers::error::Error::InternalIo;
+use servers::error::InternalIoSnafu;
 use servers::grpc::GrpcServer;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
@@ -33,8 +33,7 @@ use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
 use servers::server::Server;
 use snafu::ResultExt;
 
-use crate::error::Error::StartServer;
-use crate::error::{self, Result};
+use crate::error::{self, Result, StartServerSnafu};
 use crate::frontend::FrontendOptions;
 use crate::instance::FrontendInstance;
 
@@ -144,9 +143,8 @@ impl Services {
                     opts.tls.should_force_tls(),
                     opts.tls
                         .setup()
-                        .map_err(|e| StartServer {
-                            source: InternalIo { error: e },
-                        })?
+                        .context(InternalIoSnafu)
+                        .context(StartServerSnafu)?
                         .map(Arc::new),
                     opts.reject_no_database.unwrap_or(false),
                 )),
