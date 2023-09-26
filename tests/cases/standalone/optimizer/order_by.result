@@ -13,8 +13,7 @@ explain select * from numbers order by number desc;
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | plan_type     | plan                                                                                                                                                                                    |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: numbers.number DESC NULLS FIRST                                                                                                                                                   |
-|               |   MergeScan [is_placeholder=false]                                                                                                                                                      |
+| logical_plan  | MergeScan [is_placeholder=false]                                                                                                                                                        |
 | physical_plan | SortExec: expr=[number@0 DESC]                                                                                                                                                          |
 |               |   StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
 |               |                                                                                                                                                                                         |
@@ -25,8 +24,7 @@ explain select * from numbers order by number asc;
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 | plan_type     | plan                                                                                                                                                                                    |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Sort: numbers.number ASC NULLS LAST                                                                                                                                                     |
-|               |   MergeScan [is_placeholder=false]                                                                                                                                                      |
+| logical_plan  | MergeScan [is_placeholder=false]                                                                                                                                                        |
 | physical_plan | SortExec: expr=[number@0 ASC NULLS LAST]                                                                                                                                                |
 |               |   StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
 |               |                                                                                                                                                                                         |
@@ -34,29 +32,29 @@ explain select * from numbers order by number asc;
 
 explain select * from numbers order by number desc limit 10;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                      |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Limit: skip=0, fetch=10                                                                                                                                                                   |
-|               |   Sort: numbers.number DESC NULLS FIRST, fetch=10                                                                                                                                         |
-|               |     MergeScan [is_placeholder=false]                                                                                                                                                      |
-| physical_plan | GlobalLimitExec: skip=0, fetch=10                                                                                                                                                         |
-|               |   SortExec: fetch=10, expr=[number@0 DESC]                                                                                                                                                |
-|               |     StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
-|               |                                                                                                                                                                                           |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                        |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Limit: skip=0, fetch=10                                                                                                                                                                     |
+|               |   MergeScan [is_placeholder=false]                                                                                                                                                          |
+| physical_plan | GlobalLimitExec: skip=0, fetch=10                                                                                                                                                           |
+|               |   GlobalLimitExec: skip=0, fetch=10                                                                                                                                                         |
+|               |     SortExec: fetch=10, expr=[number@0 DESC]                                                                                                                                                |
+|               |       StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
+|               |                                                                                                                                                                                             |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 explain select * from numbers order by number asc limit 10;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                      |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Limit: skip=0, fetch=10                                                                                                                                                                   |
-|               |   Sort: numbers.number ASC NULLS LAST, fetch=10                                                                                                                                           |
-|               |     MergeScan [is_placeholder=false]                                                                                                                                                      |
-| physical_plan | GlobalLimitExec: skip=0, fetch=10                                                                                                                                                         |
-|               |   SortExec: fetch=10, expr=[number@0 ASC NULLS LAST]                                                                                                                                      |
-|               |     StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
-|               |                                                                                                                                                                                           |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                        |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Limit: skip=0, fetch=10                                                                                                                                                                     |
+|               |   MergeScan [is_placeholder=false]                                                                                                                                                          |
+| physical_plan | GlobalLimitExec: skip=0, fetch=10                                                                                                                                                           |
+|               |   GlobalLimitExec: skip=0, fetch=10                                                                                                                                                         |
+|               |     SortExec: fetch=10, expr=[number@0 ASC NULLS LAST]                                                                                                                                      |
+|               |       StreamScanAdapter { stream: "<SendableRecordBatchStream>", schema: [Field { name: "number", data_type: UInt32, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }] } |
+|               |                                                                                                                                                                                             |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
