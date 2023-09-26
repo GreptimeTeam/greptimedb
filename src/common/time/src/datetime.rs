@@ -102,7 +102,7 @@ impl DateTime {
     }
 
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
-        NaiveDateTime::from_timestamp_opt(self.0, 0)
+        NaiveDateTime::from_timestamp_opt(self.0 / 1000, 0)
     }
 
     pub fn to_date(&self) -> Option<Date> {
@@ -161,5 +161,16 @@ mod tests {
         let date = Date::new(i32::MAX);
         let datetime = DateTime::from(date);
         assert_eq!(datetime.val(), 185542587100800000);
+    }
+
+    #[test]
+    fn test_convertion_between_datetime_and_chrono_datetime() {
+        let cases = [1000, 100000, 1000000];
+        for case in cases {
+            let dt = DateTime::new(case);
+            let ndt = dt.to_chrono_datetime().unwrap();
+            let dt2 = DateTime::from(ndt);
+            assert_eq!(dt, dt2);
+        }
     }
 }
