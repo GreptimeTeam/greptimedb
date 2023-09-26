@@ -38,7 +38,7 @@ mod tests {
     #[test]
     fn test_datetime_vector() {
         std::env::set_var("TZ", "Asia/Shanghai");
-        let v = DateTimeVector::new(PrimitiveArray::from(vec![1, 2, 3]));
+        let v = DateTimeVector::new(PrimitiveArray::from(vec![1000, 2000, 3000]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());
         assert_eq!("DateTimeVector", v.vector_type_name());
@@ -47,19 +47,19 @@ mod tests {
             v.to_arrow_array().data_type()
         );
 
-        assert_eq!(Some(DateTime::new(1)), v.get_data(0));
-        assert_eq!(Value::DateTime(DateTime::new(1)), v.get(0));
-        assert_eq!(ValueRef::DateTime(DateTime::new(1)), v.get_ref(0));
+        assert_eq!(Some(DateTime::new(1000)), v.get_data(0));
+        assert_eq!(Value::DateTime(DateTime::new(1000)), v.get(0));
+        assert_eq!(ValueRef::DateTime(DateTime::new(1000)), v.get_ref(0));
 
         let mut iter = v.iter_data();
-        assert_eq!(Some(DateTime::new(1)), iter.next().unwrap());
-        assert_eq!(Some(DateTime::new(2)), iter.next().unwrap());
-        assert_eq!(Some(DateTime::new(3)), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(1000)), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(2000)), iter.next().unwrap());
+        assert_eq!(Some(DateTime::new(3000)), iter.next().unwrap());
         assert!(!v.is_null(0));
         assert_eq!(24, v.memory_size());
 
         if let Value::DateTime(d) = v.get(0) {
-            assert_eq!(1, d.val());
+            assert_eq!(1000, d.val());
         } else {
             unreachable!()
         }

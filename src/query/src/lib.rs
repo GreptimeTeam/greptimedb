@@ -32,6 +32,7 @@ pub mod query_engine;
 mod range_select;
 pub mod region_query;
 pub mod sql;
+pub mod table_mutation;
 
 pub use crate::datafusion::DfContextProviderAdapter;
 pub use crate::query_engine::{

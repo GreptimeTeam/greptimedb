@@ -42,15 +42,21 @@ pub type MemtableId = u32;
 
 #[derive(Debug, Default)]
 pub struct MemtableStats {
-    /// The  estimated bytes allocated by this memtable from heap.
+    /// The estimated bytes allocated by this memtable from heap.
     estimated_bytes: usize,
     /// The time range that this memtable contains.
     time_range: Option<(Timestamp, Timestamp)>,
 }
 
 impl MemtableStats {
+    /// Returns the estimated bytes allocated by this memtable.
     pub fn bytes_allocated(&self) -> usize {
         self.estimated_bytes
+    }
+
+    /// Returns the time range of the memtable.
+    pub fn time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        self.time_range
     }
 }
 

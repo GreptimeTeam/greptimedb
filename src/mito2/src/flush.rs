@@ -22,6 +22,7 @@ use common_query::Output;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use strum::AsRefStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
@@ -97,7 +98,7 @@ impl WriteBufferManagerImpl {
     }
 
     /// Returns memory usage of mutable memtables.
-    pub(crate) fn mutable_usage(&self) -> usize {
+    pub fn mutable_usage(&self) -> usize {
         self.memory_active.load(Ordering::Relaxed)
     }
 
@@ -162,6 +163,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 }
 
 /// Reason of a flush task.
+#[derive(Debug, AsRefStr)]
 pub enum FlushReason {
     /// Other reasons.
     Others,
@@ -302,8 +304,10 @@ impl RegionFlushTask {
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
         info!(
-            "Successfully flush memtables, region: {}, files: {:?}",
-            version.metadata.region_id, file_ids
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}",
+            version.metadata.region_id,
+            self.reason.as_ref(),
+            file_ids
         );
 
         Ok(file_metas)
