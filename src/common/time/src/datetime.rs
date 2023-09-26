@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn test_convertion_between_datetime_and_chrono_datetime() {
+    fn test_conversion_between_datetime_and_chrono_datetime() {
         let cases = [1000, 100000, 1000000];
         for case in cases {
             let dt = DateTime::new(case);
