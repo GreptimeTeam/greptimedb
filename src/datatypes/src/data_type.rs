@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::compute::cast as arrow_array_cast;
@@ -37,7 +38,7 @@ use crate::types::{
 use crate::value::Value;
 use crate::vectors::MutableVector;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[enum_dispatch::enum_dispatch(DataType)]
 pub enum ConcreteDataType {
     Null(NullType),
