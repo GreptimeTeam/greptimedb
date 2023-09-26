@@ -14,15 +14,22 @@
 
 use std::sync::Arc;
 
-use api::v1::region::QueryRequest;
 use async_trait::async_trait;
-use common_recordbatch::SendableRecordBatchStream;
+use session::context::QueryContextRef;
+use table::requests::{DeleteRequest, InsertRequest};
 
 use crate::error::Result;
 
+pub type AffectedRows = usize;
+
+/// A trait for handling table mutations in `QueryEngine`.
 #[async_trait]
-pub trait RegionQueryHandler: Send + Sync {
-    async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
+pub trait TableMutationHandler: Send + Sync {
+    /// Inserts rows into the table.
+    async fn insert(&self, request: InsertRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
+
+    /// Delete rows from the table.
+    async fn delete(&self, request: DeleteRequest, ctx: QueryContextRef) -> Result<AffectedRows>;
 }
 
-pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;
+pub type TableMutationHandlerRef = Arc<dyn TableMutationHandler>;

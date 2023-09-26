@@ -261,6 +261,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
         None,
+        None,
         false,
         plugins.clone(),
     ));

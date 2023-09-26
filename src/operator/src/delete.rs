@@ -98,7 +98,7 @@ impl Deleter {
         &self,
         request: TableDeleteRequest,
         ctx: QueryContextRef,
-    ) -> Result<AffectedRows> {
+    ) -> Result<usize> {
         let catalog = request.catalog_name.as_str();
         let schema = request.schema_name.as_str();
         let table = request.table_name.as_str();
@@ -108,7 +108,9 @@ impl Deleter {
         let deletes = TableToRegion::new(&table_info, &self.partition_manager)
             .convert(request)
             .await?;
-        self.do_request(deletes, ctx.trace_id(), 0).await
+
+        let affected_rows = self.do_request(deletes, ctx.trace_id(), 0).await?;
+        Ok(affected_rows as _)
     }
 }
 
