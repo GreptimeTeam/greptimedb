@@ -41,7 +41,7 @@ macro_rules! error {
         $crate::log!(
             target: $target,
             $crate::logging::Level::ERROR,
-            err.msg = ?$e,
+            err = ?$e,
             $($arg)+
         )
     });
@@ -51,7 +51,7 @@ macro_rules! error {
         $crate::log!(
             target: $target,
             $crate::logging::Level::ERROR,
-            err.msg = %$e,
+            err = %$e,
             $($arg)+
         )
     });
@@ -60,7 +60,7 @@ macro_rules! error {
     ($e:expr; $($arg:tt)+) => ({
         $crate::log!(
             $crate::logging::Level::ERROR,
-            err.msg = ?$e,
+            err = ?$e,
             $($arg)+
         )
     });
@@ -69,7 +69,7 @@ macro_rules! error {
     (%$e:expr; $($arg:tt)+) => ({
         $crate::log!(
             $crate::logging::Level::ERROR,
-            err.msg = %$e,
+            err = %$e,
             $($arg)+
         )
     });
@@ -92,7 +92,7 @@ macro_rules! warn {
     ($e:expr; $($arg:tt)+) => ({
         $crate::log!(
             $crate::logging::Level::WARN,
-            err.msg = ?$e,
+            err = ?$e,
             $($arg)+
         )
     });
@@ -101,7 +101,7 @@ macro_rules! warn {
     (%$e:expr; $($arg:tt)+) => ({
         $crate::log!(
             $crate::logging::Level::WARN,
-            err.msg = %$e,
+            err = %$e,
             $($arg)+
         )
     });
