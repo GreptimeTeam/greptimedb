@@ -453,14 +453,13 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use common_error::ext::PlainError;
+    use common_error::ext::{ErrorExt, PlainError};
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_test_util::temp_dir::create_temp_dir;
     use futures_util::future::BoxFuture;
     use futures_util::FutureExt;
     use object_store::ObjectStore;
-    use snafu::ErrorCompat;
 
     use super::*;
     use crate::local::test_util;
@@ -943,14 +942,7 @@ mod tests {
 
         // Run the runner and execute the procedure.
         runner.run().await;
-        let err = meta
-            .state()
-            .error()
-            .unwrap()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string();
+        let err = meta.state().error().unwrap().output_msg();
         assert!(err.contains("subprocedure failed"), "{err}");
     }
 }

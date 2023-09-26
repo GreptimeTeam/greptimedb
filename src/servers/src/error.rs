@@ -27,7 +27,7 @@ use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{ErrorCompat, Location, Snafu};
+use snafu::{Location, Snafu};
 use tonic::Code;
 
 #[derive(Snafu)]
@@ -548,7 +548,7 @@ impl From<std::io::Error> for Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let error_msg = self.iter_chain().last().unwrap().to_string();
+        let error_msg = self.output_msg();
         let status = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }

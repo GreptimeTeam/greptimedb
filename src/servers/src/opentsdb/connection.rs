@@ -116,7 +116,7 @@ mod tests {
     use std::io::Write;
 
     use bytes::BufMut;
-    use snafu::ErrorCompat;
+    use common_error::ext::ErrorExt;
     use tokio_test::io::Builder;
 
     use super::*;
@@ -187,7 +187,7 @@ mod tests {
         buffer.writer().write_all(b"Hello Wor\xffld.\r\n").unwrap();
         let result = conn.parse_line();
         assert!(result.is_err());
-        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        let err = result.unwrap_err().output_msg();
         assert!(err.contains("invalid utf-8 sequence"));
     }
 

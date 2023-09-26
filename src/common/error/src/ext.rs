@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::status_code::StatusCode;
 
 /// Extension to [`Error`](std::error::Error) in std.
-pub trait ErrorExt: std::error::Error + StackError {
+pub trait ErrorExt: StackError {
     /// Map this error to [StatusCode].
     fn status_code(&self) -> StatusCode {
         StatusCode::Unknown
@@ -34,9 +34,26 @@ pub trait ErrorExt: std::error::Error + StackError {
     /// Returns the error as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
+
+    fn output_msg(&self) -> String {
+        let error = self.last();
+        if let Some(external_error) = error.source() {
+            format!("{error}: {external_error}")
+        } else {
+            format!("{error}")
+        }
+    }
+
+    fn last(&self) -> &dyn StackError {
+        let mut result = *self.as_any().downcast_ref::<&dyn StackError>().unwrap();
+        while let Some(err) = self.next() {
+            result = err;
+        }
+        result
+    }
 }
 
-pub trait StackError {
+pub trait StackError: std::error::Error {
     fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>);
 
     fn next(&self) -> Option<&dyn StackError>;
@@ -52,7 +69,7 @@ impl<T: ?Sized + StackError> StackError for Arc<T> {
     }
 }
 
-impl<T: ?Sized + StackError> StackError for Box<T> {
+impl<T: StackError> StackError for Box<T> {
     fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
         self.as_ref().debug_fmt(layer, buf)
     }

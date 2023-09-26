@@ -837,7 +837,7 @@ mod tests {
     use std::collections::HashMap;
 
     use common_catalog::consts::FILE_ENGINE;
-    use snafu::ErrorCompat;
+    use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
 
     use super::*;
@@ -1401,10 +1401,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("sql parser error: Expected BY, found: RANGE"));
 
         let sql = r"
@@ -1418,10 +1415,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("sql parser error: Expected LESS, found: THAN"));
 
         let sql = r"
@@ -1435,10 +1429,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("Expected a concrete value, found: MAXVALU"));
     }
 
@@ -1547,7 +1538,7 @@ ENGINE=mito";
     fn test_invalid_column_name() {
         let sql = "create table foo(user string, i timestamp time index)";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        let err = result.unwrap_err().output_msg();
         assert!(err.contains("Cannot use keyword 'user' as column name"));
 
         // If column name is quoted, it's valid even same with keyword.

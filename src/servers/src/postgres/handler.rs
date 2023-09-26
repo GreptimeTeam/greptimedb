@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
@@ -31,7 +32,6 @@ use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::query_engine::DescribeResult;
 use session::Session;
-use snafu::ErrorCompat;
 use sql::dialect::PostgreSqlDialect;
 use sql::parser::ParserContext;
 
@@ -91,7 +91,7 @@ fn output_to_query_response<'a>(
         Err(e) => Ok(Response::Error(Box::new(ErrorInfo::new(
             "ERROR".to_string(),
             "XX000".to_string(),
-            e.iter_chain().last().unwrap().to_string(),
+            e.output_msg(),
         )))),
     }
 }
