@@ -43,10 +43,6 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         _config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        if !Self::is_query(&plan) {
-            return Ok(plan);
-        }
-
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         let result = plan.rewrite(&mut rewriter)?;
@@ -56,38 +52,6 @@ impl AnalyzerRule for DistPlannerAnalyzer {
 }
 
 impl DistPlannerAnalyzer {
-    fn is_query(plan: &LogicalPlan) -> bool {
-        match plan {
-            LogicalPlan::Projection(_)
-            | LogicalPlan::Filter(_)
-            | LogicalPlan::Window(_)
-            | LogicalPlan::Aggregate(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Join(_)
-            | LogicalPlan::CrossJoin(_)
-            | LogicalPlan::Repartition(_)
-            | LogicalPlan::Union(_)
-            | LogicalPlan::TableScan(_)
-            | LogicalPlan::Subquery(_)
-            | LogicalPlan::SubqueryAlias(_)
-            | LogicalPlan::Limit(_)
-            | LogicalPlan::Explain(_)
-            | LogicalPlan::Analyze(_)
-            | LogicalPlan::Extension(_)
-            | LogicalPlan::Distinct(_)
-            | LogicalPlan::Unnest(_) => true,
-
-            // empty relation and plain values are also counted as non-query here
-            LogicalPlan::EmptyRelation(_)
-            | LogicalPlan::Values(_)
-            | LogicalPlan::Statement(_)
-            | LogicalPlan::Prepare(_)
-            | LogicalPlan::Dml(_)
-            | LogicalPlan::Ddl(_)
-            | LogicalPlan::DescribeTable(_) => false,
-        }
-    }
-
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
         let exprs = plan
             .expressions()
