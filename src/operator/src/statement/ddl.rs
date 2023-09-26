@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::{column_def, AlterExpr, CreateTableExpr, TruncateTableExpr};
+use api::v1::{column_def, AlterExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -169,15 +169,8 @@ impl StatementExecutor {
             .with_context(|| TableNotFoundSnafu {
                 table_name: table_name.to_string(),
             })?;
-        let table_id = table.table_info().ident.table_id;
-
-        let expr = TruncateTableExpr {
-            catalog_name: table_name.catalog_name.clone(),
-            schema_name: table_name.schema_name.clone(),
-            table_name: table_name.table_name.clone(),
-            table_id: Some(api::v1::TableId { id: table_id }),
-        };
-        self.truncate_table_procedure(&expr).await?;
+        let table_id = table.table_info().table_id();
+        self.truncate_table_procedure(&table_name, table_id).await?;
 
         Ok(Output::AffectedRows(0))
     }
@@ -312,10 +305,16 @@ impl StatementExecutor {
 
     async fn truncate_table_procedure(
         &self,
-        truncate_table: &TruncateTableExpr,
+        table_name: &TableName,
+        table_id: TableId,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
-            task: DdlTask::new_truncate_table(truncate_table.clone()),
+            task: DdlTask::new_truncate_table(
+                table_name.catalog_name.to_string(),
+                table_name.schema_name.to_string(),
+                table_name.table_name.to_string(),
+                table_id,
+            ),
         };
 
         self.ddl_executor
