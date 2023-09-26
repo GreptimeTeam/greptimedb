@@ -24,7 +24,7 @@ use datatypes::arrow::array::Date32Array;
 use datatypes::arrow::compute::kernels::comparison::gt_dyn;
 use datatypes::arrow::compute::kernels::zip;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{Helper, StringVector, Vector, VectorRef};
+use datatypes::vectors::{DateVector, Helper, StringVector, Vector, VectorRef};
 use snafu::{ensure, ResultExt};
 
 use crate::scalars::function::{Function, FunctionContext};
@@ -34,17 +34,32 @@ pub struct GreatestFunction;
 
 const NAME: &str = "greatest";
 
-pub fn convert_to_date(arg: &str) -> Option<i32> {
+fn convert_to_date(arg: &str) -> Option<i32> {
     match Date::from_str(arg) {
         Ok(ts) => Some(ts.val()),
         Err(_err) => None,
     }
 }
 
-fn to_primitive_array(column: &VectorRef) -> Date32Array {
+fn string_vector_to_date32_array(column: &VectorRef) -> Date32Array {
     let column = StringVector::try_from_arrow_array(column.to_arrow_array()).unwrap();
     let column = (0..column.len())
         .map(|idx| convert_to_date(&column.get(idx).to_string()))
+        .collect::<Vec<_>>();
+    Date32Array::from_iter(column)
+}
+
+fn date_vector_to_date32_array(column: &VectorRef) -> Date32Array {
+    let column = DateVector::try_from_arrow_array(column.to_arrow_array()).unwrap();
+    let column = (0..column.len())
+        .map(|idx| {
+            column
+                .get(idx)
+                .as_value_ref()
+                .as_date()
+                .unwrap()
+                .map(|x| x.val())
+        })
         .collect::<Vec<_>>();
     Date32Array::from_iter(column)
 }
@@ -61,7 +76,10 @@ impl Function for GreatestFunction {
     fn signature(&self) -> Signature {
         Signature::uniform(
             2,
-            vec![ConcreteDataType::string_datatype()],
+            vec![
+                ConcreteDataType::string_datatype(),
+                ConcreteDataType::date_datatype(),
+            ],
             Volatility::Immutable,
         )
     }
@@ -71,15 +89,23 @@ impl Function for GreatestFunction {
             columns.len() == 2,
             InvalidFuncArgsSnafu {
                 err_msg: format!(
-                    "The length of the args is not correct, expect exactly one, have: {}",
+                    "The length of the args is not correct, expect exactly two, have: {}",
                     columns.len()
                 ),
             }
         );
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
-                let column1 = to_primitive_array(&columns[0]);
-                let column2 = to_primitive_array(&columns[1]);
+                let column1 = string_vector_to_date32_array(&columns[0]);
+                let column2 = string_vector_to_date32_array(&columns[1]);
+                let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
+                let result =
+                    zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
+                Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
+            }
+            ConcreteDataType::Date(_) => {
+                let column1 = date_vector_to_date32_array(&columns[0]);
+                let column2 = date_vector_to_date32_array(&columns[1]);
                 let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
@@ -116,7 +142,7 @@ mod tests {
     use crate::scalars::Function;
 
     #[test]
-    fn test_greatest() {
+    fn test_greatest_takes_string_vector() {
         let function = GreatestFunction;
         assert_eq!(
             function.return_type(&[]).unwrap(),
@@ -143,6 +169,31 @@ mod tests {
         assert_eq!(
             result.get(1),
             Value::Date(Date::from_str("2012-12-23").unwrap())
+        );
+    }
+
+    #[test]
+    fn test_greatest_takes_date_vector() {
+        let function = GreatestFunction;
+        assert_eq!(
+            function.return_type(&[]).unwrap(),
+            ConcreteDataType::Date(DateType)
+        );
+        let columns = vec![
+            Arc::new(DateVector::from_slice(vec![-1, 2])) as _,
+            Arc::new(DateVector::from_slice(vec![0, 1])) as _,
+        ];
+
+        let result = function.eval(FunctionContext::default(), &columns).unwrap();
+        let result = result.as_any().downcast_ref::<DateVector>().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get(0),
+            Value::Date(Date::from_str("1970-01-01").unwrap())
+        );
+        assert_eq!(
+            result.get(1),
+            Value::Date(Date::from_str("1970-01-03").unwrap())
         );
     }
 }
