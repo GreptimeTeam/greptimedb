@@ -113,6 +113,7 @@ struct ErrorVariant {
     fields: Vec<Ident>,
     has_location: bool,
     has_source: bool,
+    has_external_cause: bool,
     display: TokenStream2,
     span: Span,
     cfg_attr: Option<Attribute>,
@@ -124,6 +125,7 @@ impl ErrorVariant {
         let span = variant.span();
         let mut has_location = false;
         let mut has_source = false;
+        let mut has_external_cause = false;
 
         for field in &variant.fields {
             if let Some(ident) = &field.ident {
@@ -131,6 +133,8 @@ impl ErrorVariant {
                     has_location = true;
                 } else if ident == "source" {
                     has_source = true;
+                } else if ident == "error" {
+                    has_external_cause = true;
                 }
             }
         }
@@ -169,6 +173,7 @@ impl ErrorVariant {
             fields: field_ident,
             has_location,
             has_source,
+            has_external_cause,
             display: display.unwrap(),
             span,
             cfg_attr,
@@ -198,25 +203,38 @@ impl ErrorVariant {
             quote! {}
         };
 
-        match (self.has_location, self.has_source) {
-            (true, true) => quote_spanned! {
+        match (self.has_location, self.has_source, self.has_external_cause) {
+            (true, true, _) => quote_spanned! {
                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),*, } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
                     source.debug_fmt(layer + 1, buf);
                 },
             },
-            (true, false) => quote_spanned! {
+            (true, false, true) => quote_spanned! {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
+                    buf.push(format!("{layer}: {}, at {}", format!(#display), location));
+                    buf.push(format!("{}: {:?}", layer + 1, error));
+                },
+            },
+            (true, false, false) => quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}, at {}", format!(#display), location));
                 },
             },
-            (false, true) => quote_spanned! {
+            (false, true, _) => quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
                     source.debug_fmt(layer + 1, buf);
                 },
             },
-            (false, false) => quote_spanned! {
+            (false, false, true) => quote_spanned! {
+                self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
+                    buf.push(format!("{layer}: {}", format!(#display)));
+                    buf.push(format!("{}: {:?}", layer + 1, error));
+                },
+            },
+
+            (false, false, false) => quote_spanned! {
                 self.span => #cfg #[allow(unused_variables)] #name { #(#fields),* } => {
                     buf.push(format!("{layer}: {}", format!(#display)));
                 },
