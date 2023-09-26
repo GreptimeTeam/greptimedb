@@ -12,10 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_trait::async_trait;
+use common_error::ext::BoxedError;
+use query::error as query_error;
+use query::error::Result as QueryResult;
+use query::table_mutation::{AffectedRows, TableMutationHandler};
 use session::context::QueryContextRef;
+use snafu::ResultExt;
 use sqlparser::ast::ObjectName;
+use table::requests::{DeleteRequest as TableDeleteRequest, InsertRequest as TableInsertRequest};
 
+use crate::delete::DeleterRef;
 use crate::error::{InvalidSqlSnafu, Result};
+use crate::insert::InserterRef;
 
 // TODO(LFC): Refactor consideration: move this function to some helper mod,
 // could be done together or after `TableReference`'s refactoring, when issue #559 is resolved.
@@ -45,5 +54,43 @@ pub fn table_idents_to_full_name(
                 "expect table name to be <catalog>.<schema>.<table>, <schema>.<table> or <table>, actual: {obj_name}",
             ),
         }.fail(),
+    }
+}
+
+pub struct TableMutationOperator {
+    inserter: InserterRef,
+    deleter: DeleterRef,
+}
+
+impl TableMutationOperator {
+    pub fn new(inserter: InserterRef, deleter: DeleterRef) -> Self {
+        Self { inserter, deleter }
+    }
+}
+
+#[async_trait]
+impl TableMutationHandler for TableMutationOperator {
+    async fn insert(
+        &self,
+        request: TableInsertRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.inserter
+            .handle_table_insert(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
+    }
+
+    async fn delete(
+        &self,
+        request: TableDeleteRequest,
+        ctx: QueryContextRef,
+    ) -> QueryResult<AffectedRows> {
+        self.deleter
+            .handle_table_delete(request, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::TableMutationSnafu)
     }
 }

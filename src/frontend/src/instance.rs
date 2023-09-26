@@ -53,7 +53,7 @@ use meta_client::client::{MetaClient, MetaClientBuilder};
 use operator::delete::{Deleter, DeleterRef};
 use operator::insert::{Inserter, InserterRef};
 use operator::statement::StatementExecutor;
-use operator::table::table_idents_to_full_name;
+use operator::table::{table_idents_to_full_name, TableMutationOperator};
 use partition::manager::PartitionRuleManager;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
@@ -163,14 +163,6 @@ impl Instance {
             catalog_manager.datanode_manager().clone(),
         );
 
-        let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            Some(region_query_handler.clone()),
-            true,
-            plugins.clone(),
-        )
-        .query_engine();
-
         let inserter = Arc::new(Inserter::new(
             catalog_manager.clone(),
             partition_manager.clone(),
@@ -182,6 +174,20 @@ impl Instance {
             datanode_clients,
         ));
 
+        let table_mutation_handler = Arc::new(TableMutationOperator::new(
+            inserter.clone(),
+            deleter.clone(),
+        ));
+
+        let query_engine = QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            Some(region_query_handler.clone()),
+            Some(table_mutation_handler),
+            true,
+            plugins.clone(),
+        )
+        .query_engine();
+
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),
             query_engine.clone(),
@@ -189,7 +195,6 @@ impl Instance {
             meta_backend.clone(),
             catalog_manager.clone(),
             inserter.clone(),
-            deleter.clone(),
         ));
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
@@ -301,9 +306,25 @@ impl Instance {
         let region_query_handler =
             FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
 
+        let inserter = Arc::new(Inserter::new(
+            catalog_manager.clone(),
+            partition_manager.clone(),
+            datanode_manager.clone(),
+        ));
+        let deleter = Arc::new(Deleter::new(
+            catalog_manager.clone(),
+            partition_manager,
+            datanode_manager.clone(),
+        ));
+        let table_mutation_handler = Arc::new(TableMutationOperator::new(
+            inserter.clone(),
+            deleter.clone(),
+        ));
+
         let query_engine = QueryEngineFactory::new_with_plugins(
             catalog_manager.clone(),
             Some(region_query_handler),
+            Some(table_mutation_handler),
             true,
             plugins.clone(),
         )
@@ -317,23 +338,10 @@ impl Instance {
         let cache_invalidator = Arc::new(DummyCacheInvalidator);
         let ddl_executor = Arc::new(DdlManager::new(
             procedure_manager,
-            datanode_manager.clone(),
+            datanode_manager,
             cache_invalidator.clone(),
             table_metadata_manager.clone(),
             Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
-        ));
-
-        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
-
-        let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
-            partition_manager.clone(),
-            datanode_manager.clone(),
-        ));
-        let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
-            partition_manager,
-            datanode_manager,
         ));
 
         let statement_executor = Arc::new(StatementExecutor::new(
@@ -343,7 +351,6 @@ impl Instance {
             kv_backend.clone(),
             cache_invalidator,
             inserter.clone(),
-            deleter.clone(),
         ));
 
         Ok(Instance {

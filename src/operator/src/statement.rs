@@ -48,7 +48,6 @@ use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use table::TableRef;
 
-use crate::delete::DeleterRef;
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, PlanStatementSnafu,
     Result, TableNotFoundSnafu,
@@ -66,7 +65,6 @@ pub struct StatementExecutor {
     partition_manager: PartitionRuleManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     inserter: InserterRef,
-    deleter: DeleterRef,
 }
 
 impl StatementExecutor {
@@ -77,7 +75,6 @@ impl StatementExecutor {
         kv_backend: KvBackendRef,
         cache_invalidator: CacheInvalidatorRef,
         inserter: InserterRef,
-        deleter: DeleterRef,
     ) -> Self {
         Self {
             catalog_manager,
@@ -87,7 +84,6 @@ impl StatementExecutor {
             partition_manager: Arc::new(PartitionRuleManager::new(kv_backend)),
             cache_invalidator,
             inserter,
-            deleter,
         }
     }
 
@@ -104,13 +100,11 @@ impl StatementExecutor {
 
     pub async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
-            Statement::Query(_) | Statement::Explain(_) => {
+            Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
             Statement::Insert(insert) => self.insert(insert, query_ctx).await,
-
-            Statement::Delete(delete) => self.delete(delete, query_ctx).await,
 
             Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
 
