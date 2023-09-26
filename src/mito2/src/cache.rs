@@ -98,9 +98,15 @@ mod tests {
     use crate::cache::test_util::parquet_meta;
 
     #[test]
-    fn test_capacity_zero() {
+    fn test_disable_meta_cache() {
         let cache = CacheManager::new(0);
         assert!(cache.sst_meta_cache.is_none());
+
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+        let metadata = parquet_meta();
+        cache.put_parquet_meta_data(region_id, file_id, metadata);
+        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
     }
 
     #[test]
