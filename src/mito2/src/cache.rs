@@ -77,6 +77,13 @@ impl CacheManager {
             cache.insert(SstMetaKey(region_id, file_id), metadata);
         }
     }
+
+    /// Removes [ParquetMetaData] from the cache.
+    pub fn remove_parquet_meta_data(&self, region_id: RegionId, file_id: FileId) {
+        if let Some(cache) = &self.sst_meta_cache {
+            cache.remove(&SstMetaKey(region_id, file_id));
+        }
+    }
 }
 
 /// Cache key for SST meta.
@@ -118,5 +125,7 @@ mod tests {
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_some());
+        cache.remove_parquet_meta_data(region_id, file_id);
+        assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
     }
 }

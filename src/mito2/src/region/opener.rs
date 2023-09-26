@@ -29,6 +29,7 @@ use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::storage::{ColumnId, RegionId};
 
 use crate::access_layer::AccessLayer;
+use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, RegionCorruptedSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -51,6 +52,7 @@ pub(crate) struct RegionOpener {
     region_dir: String,
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl RegionOpener {
@@ -70,6 +72,7 @@ impl RegionOpener {
             region_dir: normalize_dir(region_dir),
             scheduler,
             options: HashMap::new(),
+            cache_manager: None,
         }
     }
 
@@ -82,6 +85,12 @@ impl RegionOpener {
     /// Sets options for the region.
     pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
         self.options = value;
+        self
+    }
+
+    /// Sets the cache manager for the region.
+    pub(crate) fn cache(mut self, cache_manager: Option<CacheManagerRef>) -> Self {
+        self.cache_manager = cache_manager;
         self
     }
 
@@ -145,7 +154,11 @@ impl RegionOpener {
             version_control,
             access_layer: access_layer.clone(),
             manifest_manager,
-            file_purger: Arc::new(LocalFilePurger::new(self.scheduler, access_layer)),
+            file_purger: Arc::new(LocalFilePurger::new(
+                self.scheduler,
+                access_layer,
+                self.cache_manager,
+            )),
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
@@ -205,6 +218,7 @@ impl RegionOpener {
         let file_purger = Arc::new(LocalFilePurger::new(
             self.scheduler.clone(),
             access_layer.clone(),
+            self.cache_manager.clone(),
         ));
         let mutable = self.memtable_builder.build(&metadata);
         let options = RegionOptions::try_from(&self.options)?;

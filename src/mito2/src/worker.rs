@@ -131,6 +131,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::default(),
+                    cache_manager: cache_manager.clone(),
                 }
                 .start()
             })
@@ -220,6 +221,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
+                    cache_manager: cache_manager.clone(),
                 }
                 .start()
             })
@@ -246,6 +248,7 @@ struct WorkerStarter<S> {
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
     listener: WorkerListener,
+    cache_manager: CacheManagerRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -274,6 +277,7 @@ impl<S: LogStore> WorkerStarter<S> {
             compaction_scheduler: CompactionScheduler::new(self.scheduler, sender.clone()),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
+            cache_manager: self.cache_manager,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -428,6 +432,8 @@ struct RegionWorkerLoop<S> {
     stalled_requests: StalledRequests,
     /// Event listener for tests.
     listener: WorkerListener,
+    /// Cache.
+    cache_manager: CacheManagerRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
