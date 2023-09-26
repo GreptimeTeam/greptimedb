@@ -16,10 +16,12 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal delete request, reason: {reason}"))]
     IllegalDeleteRequest { reason: String, location: Location },

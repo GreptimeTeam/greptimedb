@@ -17,19 +17,22 @@ use std::io;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Invalid client tls config, {}", msg))]
     InvalidTlsConfig { msg: String },
 
     #[snafu(display("Invalid config file path"))]
     InvalidConfigFilePath {
-        source: io::Error,
+        #[snafu(source)]
+        error: io::Error,
         location: Location,
     },
 
@@ -48,7 +51,8 @@ pub enum Error {
 
     #[snafu(display("Failed to create gRPC channel"))]
     CreateChannel {
-        source: tonic::transport::Error,
+        #[snafu(source)]
+        error: tonic::transport::Error,
         location: Location,
     },
 
@@ -63,7 +67,8 @@ pub enum Error {
 
     #[snafu(display("Failed to decode FlightData"))]
     DecodeFlightData {
-        source: api::DecodeError,
+        #[snafu(source)]
+        error: api::DecodeError,
         location: Location,
     },
 

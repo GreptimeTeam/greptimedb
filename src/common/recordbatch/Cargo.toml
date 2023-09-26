@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 common-error = { workspace = true }
+common-macro = { workspace = true }
 datafusion-common.workspace = true
 datafusion.workspace = true
 datatypes = { workspace = true }

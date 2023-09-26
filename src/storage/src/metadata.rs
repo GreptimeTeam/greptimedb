@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Metadata, COMMENT_KEY};
 use serde::{Deserialize, Serialize};
@@ -35,8 +36,9 @@ use crate::manifest::action::{RawColumnFamiliesMetadata, RawColumnsMetadata, Raw
 use crate::schema::{RegionSchema, RegionSchemaRef};
 
 /// Error for handling metadata.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Column name {} already exists", name))]
     ColNameExists { name: String, location: Location },
@@ -95,7 +97,8 @@ pub enum Error {
     ParseMetaInt {
         // Store key and value in one string to reduce the enum size.
         key_value: String,
-        source: std::num::ParseIntError,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
         location: Location,
     },
 
@@ -104,7 +107,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build column descriptor"))]
     BuildColumnDescriptor {
-        source: ColumnDescriptorBuilderError,
+        #[snafu(source)]
+        error: ColumnDescriptorBuilderError,
         location: Location,
     },
 

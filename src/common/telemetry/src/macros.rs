@@ -39,93 +39,36 @@ macro_rules! error {
     // error!(e; target: "my_target", "a {} event", "log")
     ($e:expr; target: $target:expr, $($arg:tt)+) => ({
         use $crate::common_error::ext::ErrorExt;
-        use std::error::Error;
-        match ($e.source(), $e.location_opt()) {
-            (Some(source), Some(location)) => {
-                $crate::log!(
-                    target: $target,
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (Some(source), None) => {
-                $crate::log!(
-                    target: $target,
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    $($arg)+
-                )
-            },
-            (None, Some(location)) => {
-                $crate::log!(
-                    target: $target,
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (None, None) => {
-                $crate::log!(
-                    target: $target,
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    $($arg)+
-                )
-            }
-        }
+        use $crate::common_error::ext::StackError;
+
+        let mut stacks = vec![];
+        $e.debug_fmt(0, &mut stacks);
+        let stacks = stacks.join("\n");
+
+        $crate::log!(
+            target: $target,
+            $crate::logging::Level::ERROR,
+            err.msg = %stacks,
+            err.code = %$e.status_code(),
+            $($arg)+
+        )
     });
 
     // error!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use std::error::Error;
         use $crate::common_error::ext::ErrorExt;
-        match ($e.source(), $e.location_opt()) {
-            (Some(source), Some(location)) => {
-                $crate::log!(
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (Some(source), None) => {
-                $crate::log!(
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    $($arg)+
-                )
-            },
-            (None, Some(location)) => {
-                $crate::log!(
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (None, None) => {
-                $crate::log!(
-                    $crate::logging::Level::ERROR,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    $($arg)+
-                )
-            }
-        }
+        use $crate::common_error::ext::StackError;
+
+        let mut stacks = vec![];
+        $e.debug_fmt(0, &mut stacks);
+        let stacks = stacks.join("\n");
+
+        $crate::log!(
+            $crate::logging::Level::ERROR,
+            err.msg = %stacks,
+            err.code = %$e.status_code(),
+            $($arg)+
+        )
     });
 
     // error!("a {} event", "log")
@@ -144,46 +87,19 @@ macro_rules! warn {
 
     // warn!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use std::error::Error;
         use $crate::common_error::ext::ErrorExt;
-        match ($e.source(), $e.location_opt()) {
-            (Some(source), Some(location)) => {
-                $crate::log!(
-                    $crate::logging::Level::WARN,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (Some(source), None) => {
-                $crate::log!(
-                    $crate::logging::Level::WARN,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.source = source,
-                    $($arg)+
-                )
-            },
-            (None, Some(location)) => {
-                $crate::log!(
-                    $crate::logging::Level::WARN,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    err.location = %location,
-                    $($arg)+
-                )
-            },
-            (None, None) => {
-                $crate::log!(
-                    $crate::logging::Level::WARN,
-                    err.msg = %$e,
-                    err.code = %$e.status_code(),
-                    $($arg)+
-                )
-            }
-        }
+        use $crate::common_error::ext::StackError;
+
+        let mut stacks = vec![];
+        $e.debug_fmt(0, &mut stacks);
+        let stacks = stacks.join("\n");
+
+        $crate::log!(
+            $crate::logging::Level::WARN,
+            err.msg = %$e,
+            err.code = %$e.status_code(),
+            $($arg)+
+        )
     });
 
     // warn!("a {} event", "log")

@@ -10,6 +10,7 @@ async-trait = "0.1"
 chrono.workspace = true
 common-error = { workspace = true }
 common-grpc = { workspace = true }
+common-macro = { workspace = true }
 common-meta = { workspace = true }
 common-telemetry = { workspace = true }
 etcd-client.workspace = true

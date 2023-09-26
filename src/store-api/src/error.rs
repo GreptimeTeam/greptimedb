@@ -14,12 +14,14 @@
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
 use crate::storage::ColumnDescriptorBuilderError;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Invalid raw region request: {err}"))]
     InvalidRawRegionRequest { err: String, location: Location },
@@ -33,7 +35,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build column descriptor: "))]
     BuildColumnDescriptor {
-        source: ColumnDescriptorBuilderError,
+        #[snafu(source)]
+        error: ColumnDescriptorBuilderError,
         location: Location,
     },
 }

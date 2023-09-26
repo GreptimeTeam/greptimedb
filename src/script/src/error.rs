@@ -16,10 +16,12 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to find column in scripts table, name: {}", name))]
     FindColumnInScriptsTable { name: String, location: Location },
@@ -62,7 +64,8 @@ pub enum Error {
 
     #[snafu(display("Failed to build DataFusion logical plan"))]
     BuildDfLogicalPlan {
-        source: datafusion_common::DataFusionError,
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
         location: Location,
     },
 

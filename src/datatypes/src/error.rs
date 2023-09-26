@@ -16,20 +16,24 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to serialize data"))]
     Serialize {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to deserialize data, json: {}", json))]
     Deserialize {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
         json: String,
     },
@@ -63,7 +67,8 @@ pub enum Error {
     #[snafu(display("Failed to parse version in schema meta, value: {}", value))]
     ParseSchemaVersion {
         value: String,
-        source: std::num::ParseIntError,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
         location: Location,
     },
 
@@ -75,19 +80,22 @@ pub enum Error {
 
     #[snafu(display("Failed to cast arrow time i32 type into i64"))]
     CastTimeType {
-        source: std::num::TryFromIntError,
+        #[snafu(source)]
+        error: std::num::TryFromIntError,
         location: Location,
     },
 
     #[snafu(display("Arrow failed to compute"))]
     ArrowCompute {
-        source: arrow::error::ArrowError,
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
         location: Location,
     },
 
     #[snafu(display("Failed to project arrow schema"))]
     ProjectArrowSchema {
-        source: arrow::error::ArrowError,
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
         location: Location,
     },
 

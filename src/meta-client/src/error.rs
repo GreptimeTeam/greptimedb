@@ -15,11 +15,13 @@
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use tonic::Status;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Illegal GRPC client state: {}", err_msg))]
     IllegalGrpcClientState { err_msg: String, location: Location },
@@ -36,7 +38,8 @@ pub enum Error {
     #[snafu(display("Ask leader timeout"))]
     AskLeaderTimeout {
         location: Location,
-        source: tokio::time::error::Elapsed,
+        #[snafu(source)]
+        error: tokio::time::error::Elapsed,
     },
 
     #[snafu(display("Failed to create gRPC channel"))]
