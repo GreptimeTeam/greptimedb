@@ -230,7 +230,7 @@ impl MitoEngine {
         mut config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
-        write_buffer_manager: crate::flush::WriteBufferManagerRef,
+        write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {
         config.sanitize();

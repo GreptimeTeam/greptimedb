@@ -270,7 +270,7 @@ async fn test_engine_truncate_during_flush() {
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
-            write_buffer_manager.clone(),
+            Some(write_buffer_manager),
             Some(listener.clone()),
         )
         .await;
