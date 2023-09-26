@@ -18,13 +18,15 @@ use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
 use crate::procedure::ProcedureId;
 
 /// Procedure error.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to execute procedure due to external error"))]
     External { source: BoxedError },
@@ -34,7 +36,8 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize to json"))]
     ToJson {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 
@@ -54,7 +57,8 @@ pub enum Error {
     #[snafu(display("Failed to delete {}", key))]
     DeleteState {
         key: String,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Failed to delete keys: '{keys}'"))]
@@ -73,7 +77,8 @@ pub enum Error {
 
     #[snafu(display("Failed to deserialize from json"))]
     FromJson {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 
@@ -85,7 +90,8 @@ pub enum Error {
 
     #[snafu(display("Failed to wait watcher"))]
     WaitWatcher {
-        source: tokio::sync::watch::error::RecvError,
+        #[snafu(source)]
+        error: tokio::sync::watch::error::RecvError,
         location: Location,
     },
 
@@ -102,7 +108,10 @@ pub enum Error {
     },
 
     #[snafu(display("Corrupted data, error: "))]
-    CorruptedData { source: FromUtf8Error },
+    CorruptedData {
+        #[snafu(source)]
+        error: FromUtf8Error,
+    },
 
     #[snafu(display("Failed to start the remove_outdated_meta method, error"))]
     StartRemoveOutdatedMetaTask {

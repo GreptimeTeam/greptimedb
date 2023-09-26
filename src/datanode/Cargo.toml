@@ -23,6 +23,7 @@ common-function = { workspace = true }
 common-greptimedb-telemetry = { workspace = true }
 common-grpc = { workspace = true }
 common-grpc-expr = { workspace = true }
+common-macro = { workspace = true }
 common-meta = { workspace = true }
 common-procedure = { workspace = true }
 common-query = { workspace = true }

@@ -19,7 +19,7 @@ use std::fmt;
 
 use snafu::Location;
 
-use crate::ext::ErrorExt;
+use crate::ext::{ErrorExt, StackError};
 use crate::status_code::StatusCode;
 
 /// A mock error mainly for test.
@@ -67,5 +67,13 @@ impl ErrorExt for MockError {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl StackError for MockError {
+    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+    fn next(&self) -> Option<&dyn StackError> {
+        None
     }
 }

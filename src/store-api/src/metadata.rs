@@ -25,6 +25,7 @@ use api::v1::region::RegionColumnDef;
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
 use serde::de::Error;
@@ -558,8 +559,9 @@ impl SkippedFields {
     }
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum MetadataError {
     #[snafu(display("Invalid schema"))]
     InvalidSchema {
@@ -573,7 +575,8 @@ pub enum MetadataError {
     #[snafu(display("Failed to ser/de json object"))]
     SerdeJson {
         location: Location,
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
     },
 
     #[snafu(display("Failed to convert struct from datatypes"))]

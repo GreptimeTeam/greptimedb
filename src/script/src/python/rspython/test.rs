@@ -253,16 +253,12 @@ def calc_rvs(open_time, close):
     )
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
-    if let Err(Error::PyParse {
-        location: _,
-        source,
-    }) = ret
-    {
+    if let Err(Error::PyParse { location: _, error }) = ret {
         let res = visualize_loc(
             python_source,
-            &source.location,
+            &error.location,
             "unknown tokens",
-            source.error.to_string().as_str(),
+            error.error.to_string().as_str(),
             0,
             "copr.py",
         );
@@ -303,16 +299,12 @@ def a(cpu, mem):
     )
     .unwrap();
     let ret = exec_coprocessor(python_source, &Some(rb));
-    if let Err(Error::PyParse {
-        location: _,
-        source,
-    }) = ret
-    {
+    if let Err(Error::PyParse { location: _, error }) = ret {
         let res = visualize_loc(
             python_source,
-            &source.location,
+            &error.location,
             "unknown tokens",
-            source.error.to_string().as_str(),
+            error.error.to_string().as_str(),
             0,
             "copr.py",
         );

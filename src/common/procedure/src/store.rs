@@ -224,7 +224,7 @@ impl ProcedureStore {
         serde_json::from_slice(value)
             .map_err(|e| {
                 // `e` doesn't impl ErrorExt so we print it as normal error.
-                logging::error!("Failed to parse value, key: {:?}, source: {}", key, e);
+                logging::error!("Failed to parse value, key: {:?}, source: {:?}", key, e);
                 e
             })
             .ok()
