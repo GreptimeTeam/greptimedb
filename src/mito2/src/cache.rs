@@ -30,26 +30,29 @@ use crate::sst::file::FileId;
 
 /// Manages cached data for the engine.
 pub struct CacheManager {
-    cache: Cache<CacheKey, CacheValue>,
+    /// Cache for SST metadata.
+    sst_meta_cache: Option<SstMetaCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
-    /// Creates a new manager with specific cache capacity in bytes.
-    /// Returns `None` if `capacity` is 0.
-    pub fn new(capacity: u64) -> Option<CacheManager> {
-        if capacity == 0 {
+    /// Creates a new manager with specific cache size in bytes.
+    pub fn new(sst_meta_cache_size: u64) -> CacheManager {
+        let sst_meta_cache = if sst_meta_cache_size == 0 {
             None
         } else {
             let cache = Cache::builder()
-                .max_capacity(capacity)
-                .weigher(|k: &CacheKey, v: &CacheValue| {
-                    (k.estimated_size() + v.estimated_size()) as u32
+                .max_capacity(sst_meta_cache_size)
+                .weigher(|k: &SstMetaKey, v: &Arc<ParquetMetaData>| {
+                    // We ignore the size of `Arc`.
+                    (k.estimated_size() + parquet_meta_size(v)) as u32
                 })
                 .build();
-            Some(CacheManager { cache })
-        }
+            Some(cache)
+        };
+
+        CacheManager { sst_meta_cache }
     }
 
     /// Gets cached [ParquetMetaData].
@@ -58,12 +61,9 @@ impl CacheManager {
         region_id: RegionId,
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.cache
-            .get(&CacheKey::ParquetMeta(region_id, file_id))
-            .map(|v| {
-                // Safety: key and value have the same type.
-                v.into_parquet_meta().unwrap()
-            })
+        self.sst_meta_cache
+            .as_ref()
+            .and_then(|sst_meta_cache| sst_meta_cache.get(&SstMetaKey(region_id, file_id)))
     }
 
     /// Puts [ParquetMetaData] into the cache.
@@ -73,51 +73,24 @@ impl CacheManager {
         file_id: FileId,
         metadata: Arc<ParquetMetaData>,
     ) {
-        self.cache.insert(
-            CacheKey::ParquetMeta(region_id, file_id),
-            CacheValue::ParquetMeta(metadata),
-        );
-    }
-}
-
-/// Cache key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum CacheKey {
-    /// Parquet meta data.
-    ParquetMeta(RegionId, FileId),
-}
-
-impl CacheKey {
-    /// Returns memory used by the key (estimated).
-    fn estimated_size(&self) -> usize {
-        mem::size_of::<CacheKey>()
-    }
-}
-
-/// Cached value.
-/// It can hold different kinds of data.
-#[derive(Clone)]
-enum CacheValue {
-    /// Parquet meta data.
-    ParquetMeta(Arc<ParquetMetaData>),
-}
-
-impl CacheValue {
-    /// Returns memory used by the value (estimated).
-    fn estimated_size(&self) -> usize {
-        let inner_size = match self {
-            CacheValue::ParquetMeta(meta) => parquet_meta_size(meta),
-        };
-        inner_size + mem::size_of::<CacheValue>()
-    }
-
-    /// Convert to parquet meta.
-    fn into_parquet_meta(self) -> Option<Arc<ParquetMetaData>> {
-        match self {
-            CacheValue::ParquetMeta(meta) => Some(meta),
+        if let Some(cache) = &self.sst_meta_cache {
+            cache.insert(SstMetaKey(region_id, file_id), metadata);
         }
     }
 }
+
+/// Cache key for SST meta.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SstMetaKey(RegionId, FileId);
+
+impl SstMetaKey {
+    /// Returns memory used by the key (estimated).
+    fn estimated_size(&self) -> usize {
+        mem::size_of::<SstMetaKey>()
+    }
+}
+
+type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 
 #[cfg(test)]
 mod tests {
@@ -126,12 +99,13 @@ mod tests {
 
     #[test]
     fn test_capacity_zero() {
-        assert!(CacheManager::new(0).is_none());
+        let cache = CacheManager::new(0);
+        assert!(cache.sst_meta_cache.is_none());
     }
 
     #[test]
     fn test_parquet_meta_cache() {
-        let cache = CacheManager::new(2000).unwrap();
+        let cache = CacheManager::new(2000);
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());

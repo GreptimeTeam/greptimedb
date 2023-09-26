@@ -146,8 +146,12 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
-        let scan_region =
-            ScanRegion::new(version, region.access_layer.clone(), request, cache_manager);
+        let scan_region = ScanRegion::new(
+            version,
+            region.access_layer.clone(),
+            request,
+            Some(cache_manager),
+        );
 
         scan_region.scanner()
     }

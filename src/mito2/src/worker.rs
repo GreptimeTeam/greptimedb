@@ -101,7 +101,7 @@ pub(crate) struct WorkerGroup {
     /// Global background job scheduelr.
     scheduler: SchedulerRef,
     /// Cache.
-    cache_manager: Option<CacheManagerRef>,
+    cache_manager: CacheManagerRef,
 }
 
 impl WorkerGroup {
@@ -119,7 +119,7 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = CacheManager::new(config.cache_size.as_bytes()).map(Arc::new);
+        let cache_manager = Arc::new(CacheManager::new(config.sst_meta_cache_size.as_bytes()));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -177,7 +177,7 @@ impl WorkerGroup {
     }
 
     /// Returns cache of the group.
-    pub(crate) fn cache_manager(&self) -> Option<CacheManagerRef> {
+    pub(crate) fn cache_manager(&self) -> CacheManagerRef {
         self.cache_manager.clone()
     }
 
@@ -208,7 +208,7 @@ impl WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = CacheManager::new(config.cache_size.as_bytes()).map(Arc::new);
+        let cache_manager = Arc::new(CacheManager::new(config.sst_meta_cache_size.as_bytes()));
 
         let workers = (0..config.num_workers)
             .map(|id| {
