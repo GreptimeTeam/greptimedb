@@ -22,6 +22,7 @@ use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::error::{BuildPredicateSnafu, Result};
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
@@ -113,6 +114,8 @@ pub(crate) struct ScanRegion {
     access_layer: AccessLayerRef,
     /// Scan request.
     request: ScanRequest,
+    /// Cache.
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl ScanRegion {
@@ -121,11 +124,13 @@ impl ScanRegion {
         version: VersionRef,
         access_layer: AccessLayerRef,
         request: ScanRequest,
+        cache_manager: Option<CacheManagerRef>,
     ) -> ScanRegion {
         ScanRegion {
             version,
             access_layer,
             request,
+            cache_manager,
         }
     }
 
@@ -181,7 +186,8 @@ impl ScanRegion {
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
-            .with_files(files);
+            .with_files(files)
+            .with_cache(self.cache_manager);
 
         Ok(seq_scan)
     }
