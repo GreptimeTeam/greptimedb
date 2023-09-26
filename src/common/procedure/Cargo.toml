@@ -9,6 +9,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 backon = "0.4"
 common-error = { workspace = true }
+common-macro = { workspace = true }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 futures.workspace = true

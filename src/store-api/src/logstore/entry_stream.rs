@@ -33,6 +33,7 @@ mod tests {
     use std::any::Any;
     use std::task::{Context, Poll};
 
+    use common_error::ext::StackError;
     use futures::StreamExt;
     use snafu::Snafu;
 
@@ -60,6 +61,14 @@ mod tests {
     impl ErrorExt for Error {
         fn as_any(&self) -> &dyn Any {
             self
+        }
+    }
+
+    impl StackError for Error {
+        fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+        fn next(&self) -> Option<&dyn StackError> {
+            None
         }
     }
 

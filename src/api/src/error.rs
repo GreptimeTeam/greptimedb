@@ -16,14 +16,16 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::prelude::*;
 use snafu::Location;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unknown proto column datatype: {}", datatype))]
     UnknownColumnDataType { datatype: i32, location: Location },

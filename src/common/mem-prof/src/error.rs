@@ -16,14 +16,16 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::Snafu;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(""))]
+    #[snafu(display("Internal error"))]
     Internal { source: BoxedError },
 
     #[snafu(display("Memory profiling is not supported"))]

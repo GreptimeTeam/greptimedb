@@ -17,14 +17,16 @@ use std::time::Duration;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
@@ -106,20 +108,23 @@ pub enum Error {
     #[snafu(display("Failed to parse timestamp `{}`", raw))]
     ParseTimestamp {
         raw: String,
-        source: chrono::ParseError,
+        #[snafu(source)]
+        error: chrono::ParseError,
         location: Location,
     },
 
     #[snafu(display("Failed to parse float number `{}`", raw))]
     ParseFloat {
         raw: String,
-        source: std::num::ParseFloatError,
+        #[snafu(source)]
+        error: std::num::ParseFloatError,
         location: Location,
     },
 
     #[snafu(display("DataFusion error"))]
     DataFusion {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -138,7 +143,8 @@ pub enum Error {
     #[snafu(display("Cannot plan SQL: {}", sql))]
     PlanSql {
         sql: String,
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -194,7 +200,8 @@ pub enum Error {
     #[snafu(display("Failed to regex"))]
     BuildRegex {
         location: Location,
-        source: regex::Error,
+        #[snafu(source)]
+        error: regex::Error,
     },
 
     #[snafu(display("Failed to build data source backend"))]

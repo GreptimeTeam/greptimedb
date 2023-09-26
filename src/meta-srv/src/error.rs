@@ -14,6 +14,7 @@
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_meta::peer::Peer;
 use common_runtime::JoinError;
 use servers::define_into_tonic_status;
@@ -24,8 +25,9 @@ use tonic::codegen::http;
 
 use crate::pubsub::Message;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
@@ -74,7 +76,8 @@ pub enum Error {
     #[snafu(display("Failed to join a future"))]
     Join {
         location: Location,
-        source: JoinError,
+        #[snafu(source)]
+        error: JoinError,
     },
 
     #[snafu(display("Failed to execute transaction: {}", msg))]
@@ -110,7 +113,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to send shutdown signal"))]
-    SendShutdownSignal { source: SendError<()> },
+    SendShutdownSignal {
+        #[snafu(source)]
+        error: SendError<()>,
+    },
 
     #[snafu(display("Failed to shutdown {} server", server))]
     ShutdownServer {
@@ -124,26 +130,30 @@ pub enum Error {
 
     #[snafu(display("Failed to execute via Etcd"))]
     EtcdFailed {
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to connect to Etcd"))]
     ConnectEtcd {
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to start gRPC server"))]
     StartGrpc {
-        source: tonic::transport::Error,
+        #[snafu(source)]
+        error: tonic::transport::Error,
         location: Location,
     },
     #[snafu(display("Failed to start http server"))]
@@ -154,7 +164,8 @@ pub enum Error {
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
-        source: std::net::AddrParseError,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
     },
     #[snafu(display("Empty table name"))]
     EmptyTableName { location: Location },
@@ -170,52 +181,60 @@ pub enum Error {
 
     #[snafu(display("Failed to parse datanode lease key from utf8"))]
     LeaseKeyFromUtf8 {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Failed to parse datanode lease value from utf8"))]
     LeaseValueFromUtf8 {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Failed to parse datanode stat key from utf8"))]
     StatKeyFromUtf8 {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Failed to parse datanode stat value from utf8"))]
     StatValueFromUtf8 {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Failed to parse invalid region key from utf8"))]
     InvalidRegionKeyFromUtf8 {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Failed to serialize to json: {}", input))]
     SerializeToJson {
         input: String,
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to deserialize from json: {}", input))]
     DeserializeFromJson {
         input: String,
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to parse number: {}", err_msg))]
     ParseNum {
         err_msg: String,
-        source: std::num::ParseIntError,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
         location: Location,
     },
 
@@ -239,7 +258,8 @@ pub enum Error {
 
     #[snafu(display("Failed to decode table route"))]
     DecodeTableRoute {
-        source: prost::DecodeError,
+        #[snafu(source)]
+        error: prost::DecodeError,
         location: Location,
     },
 
@@ -294,13 +314,15 @@ pub enum Error {
 
     #[snafu(display("Failed to batch get KVs from leader's in_memory kv store"))]
     BatchGet {
-        source: tonic::Status,
+        #[snafu(source)]
+        error: tonic::Status,
         location: Location,
     },
 
     #[snafu(display("Failed to batch range KVs from leader's in_memory kv store"))]
     Range {
-        source: tonic::Status,
+        #[snafu(source)]
+        error: tonic::Status,
         location: Location,
     },
 
@@ -315,7 +337,8 @@ pub enum Error {
 
     #[snafu(display("Invalid http body"))]
     InvalidHttpBody {
-        source: http::Error,
+        #[snafu(source)]
+        error: http::Error,
         location: Location,
     },
 
@@ -332,19 +355,22 @@ pub enum Error {
 
     #[snafu(display("Failed to lock based on etcd"))]
     Lock {
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to unlock based on etcd"))]
     Unlock {
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to grant lease"))]
     LeaseGrant {
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 
@@ -353,7 +379,8 @@ pub enum Error {
 
     #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
-        source: std::string::FromUtf8Error,
+        #[snafu(source)]
+        error: std::string::FromUtf8Error,
         location: Location,
     },
 
@@ -494,7 +521,8 @@ pub enum Error {
 
     #[snafu(display("Failed to publish message"))]
     PublishMessage {
-        source: SendError<Message>,
+        #[snafu(source)]
+        error: SendError<Message>,
         location: Location,
     },
 

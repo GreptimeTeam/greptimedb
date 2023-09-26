@@ -19,6 +19,7 @@ use std::str::Utf8Error;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
@@ -33,8 +34,9 @@ use tokio::task::JoinError;
 use crate::metadata::Error as MetadataError;
 use crate::write_batch;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Invalid region descriptor, region: {}", region))]
     InvalidRegionDesc {
@@ -48,7 +50,8 @@ pub enum Error {
 
     #[snafu(display("Failed to write parquet file"))]
     WriteParquet {
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
         location: Location,
     },
 
@@ -61,67 +64,77 @@ pub enum Error {
     #[snafu(display("Failed to create RecordBatch from vectors"))]
     NewRecordBatch {
         location: Location,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("Fail to read object from path: {}", path))]
     ReadObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to write object into path: {}", path))]
     WriteObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to delete object from path: {}", path))]
     DeleteObject {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
         path: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Fail to decompress object by {}, path: {}", compress_type, path))]
     DecompressObject {
         compress_type: CompressionType,
         path: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Fail to list objects in path: {}", path))]
     ListObjects {
         path: String,
         location: Location,
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
     },
 
     #[snafu(display("Fail to create str from bytes"))]
     Utf8 {
         location: Location,
-        source: Utf8Error,
+        #[snafu(source)]
+        error: Utf8Error,
     },
 
     #[snafu(display("Fail to encode object into json "))]
     EncodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Fail to decode object from json "))]
     DecodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Invalid scan index, start: {}, end: {}", start, end))]
@@ -141,19 +154,22 @@ pub enum Error {
     #[snafu(display("Failed to encode WAL header"))]
     EncodeWalHeader {
         location: Location,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to decode WAL header"))]
     DecodeWalHeader {
         location: Location,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to wait flushing, region_id: {}", region_id))]
     WaitFlush {
         region_id: RegionId,
-        source: tokio::sync::oneshot::error::RecvError,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
         location: Location,
     },
 
@@ -183,12 +199,16 @@ pub enum Error {
     DecodeMetaActionList { msg: String, location: Location },
 
     #[snafu(display("Failed to read line, err"))]
-    Readline { source: IoError },
+    Readline {
+        #[snafu(source)]
+        error: IoError,
+    },
 
     #[snafu(display("Failed to read Parquet file: {}", file))]
     ReadParquet {
         file: String,
-        source: parquet::errors::ParquetError,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
         location: Location,
     },
 
@@ -385,13 +405,15 @@ pub enum Error {
     #[snafu(display("Failed to decode arrow data"))]
     DecodeArrow {
         location: Location,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("Failed to encode arrow data"))]
     EncodeArrow {
         location: Location,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("Failed to parse schema"))]
@@ -426,13 +448,15 @@ pub enum Error {
 
     #[snafu(display("Failed to stop scheduler"))]
     StopScheduler {
-        source: JoinError,
+        #[snafu(source)]
+        error: JoinError,
         location: Location,
     },
 
     #[snafu(display("Failed to delete SST file"))]
     DeleteSst {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         location: Location,
     },
 
@@ -448,7 +472,8 @@ pub enum Error {
     #[snafu(display("The compaction task is cancelled, region_id: {}", region_id))]
     CompactTaskCancel {
         region_id: RegionId,
-        source: tokio::sync::oneshot::error::RecvError,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
     },
 
     #[snafu(display(
@@ -476,13 +501,15 @@ pub enum Error {
 
     #[snafu(display("Failed to convert columns to rows"))]
     ConvertColumnsToRows {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 
     #[snafu(display("Failed to sort arrays"))]
     SortArrays {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 
@@ -494,7 +521,8 @@ pub enum Error {
 
     #[snafu(display("Failed to join spawned tasks"))]
     JoinError {
-        source: JoinError,
+        #[snafu(source)]
+        error: JoinError,
         location: Location,
     },
 }
@@ -505,8 +533,8 @@ impl Error {
     /// Returns true if the error is the object path to delete
     /// doesn't exist.
     pub(crate) fn is_object_to_delete_not_found(&self) -> bool {
-        if let Error::DeleteObject { source, .. } = self {
-            source.kind() == ErrorKind::NotFound
+        if let Error::DeleteObject { error, .. } = self {
+            error.kind() == ErrorKind::NotFound
         } else {
             false
         }

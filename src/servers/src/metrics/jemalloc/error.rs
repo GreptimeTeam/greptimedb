@@ -16,14 +16,17 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to update jemalloc metrics"))]
     UpdateJemallocMetrics {
-        source: tikv_jemalloc_ctl::Error,
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
         location: Location,
     },
 }

@@ -15,17 +15,20 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 use tokio::task::JoinError;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to build runtime"))]
     BuildRuntime {
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 
@@ -35,7 +38,8 @@ pub enum Error {
     #[snafu(display("Failed to wait for repeated task {} to stop", name))]
     WaitGcTaskStop {
         name: String,
-        source: JoinError,
+        #[snafu(source)]
+        error: JoinError,
         location: Location,
     },
 }

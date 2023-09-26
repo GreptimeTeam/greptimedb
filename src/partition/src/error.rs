@@ -16,14 +16,16 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_query::prelude::Expr;
 use datafusion_common::ScalarValue;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Table route manager error"))]
     TableRouteManager {
@@ -66,13 +68,15 @@ pub enum Error {
 
     #[snafu(display("Failed to serialize value to json"))]
     SerializeJson {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to deserialize value from json"))]
     DeserializeJson {
-        source: serde_json::Error,
+        #[snafu(source)]
+        error: serde_json::Error,
         location: Location,
     },
 

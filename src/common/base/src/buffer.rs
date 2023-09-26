@@ -17,11 +17,13 @@ use std::io::{Read, Write};
 
 use bytes::{Buf, BufMut, BytesMut};
 use common_error::ext::ErrorExt;
+use common_macro::stack_trace_debug;
 use paste::paste;
 use snafu::{ensure, Location, ResultExt, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display(
         "Destination buffer overflow, src_len: {}, dst_len: {}",
@@ -39,7 +41,8 @@ pub enum Error {
 
     #[snafu(display("IO operation reach EOF"))]
     Eof {
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 }
