@@ -31,7 +31,6 @@ pub enum Commutativity {
     TransformedCommutative(Option<Transformer>),
     NonCommutative,
     Unimplemented,
-    CheckPartition,
     /// For unrelated plans like DDL
     Unsupported,
 }

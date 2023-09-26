@@ -159,7 +159,6 @@ impl PlanRewriter {
                     self.stage.push(plan)
                 }
             },
-            Commutativity::CheckPartition
             | Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
