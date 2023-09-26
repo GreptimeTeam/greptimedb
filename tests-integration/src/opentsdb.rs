@@ -87,7 +87,7 @@ mod tests {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print().unwrap();
                 let expected = vec![
-                    "+-------+-------+----------------+---------------------+-------+"
+                    "+-------+-------+----------------+---------------------+-------+",
                     "| tagk1 | tagk2 | greptime_value | greptime_timestamp  | tagk3 |",
                     "+-------+-------+----------------+---------------------+-------+",
                     "| tagv1 | tagv2 | 1.0            | 1970-01-01T00:00:01 |       |",
