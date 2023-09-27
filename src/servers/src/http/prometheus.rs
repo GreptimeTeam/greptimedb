@@ -162,7 +162,7 @@ impl PrometheusJsonResponse {
                         ..Default::default()
                     }))
                 } else {
-                    Self::error(err.status_code().to_string(), err.to_string())
+                    Self::error(err.status_code().to_string(), err.output_msg())
                 }
             }
         }
@@ -323,7 +323,7 @@ pub async fn instant_query(
     let (metric_name, result_type) = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Ok((metric_name, result_type)) => (metric_name.unwrap_or_default(), result_type),
         Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
         }
     };
     PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
@@ -357,7 +357,7 @@ pub async fn range_query(
     let result = handler.do_query(&prom_query, query_ctx).await;
     let metric_name = match retrieve_metric_name_and_result_type(&prom_query.query) {
         Err(err) => {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string())
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
         }
         Ok((metric_name, _)) => metric_name.unwrap_or_default(),
     };
@@ -430,7 +430,7 @@ pub async fn labels_query(
                 return PrometheusJsonResponse::success(PrometheusResponse::Labels(labels))
             }
             Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string())
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg())
             }
         }
     }
@@ -466,7 +466,7 @@ pub async fn labels_query(
             {
                 return PrometheusJsonResponse::error(
                     err.status_code().to_string(),
-                    err.to_string(),
+                    err.output_msg(),
                 );
             }
         }
@@ -690,7 +690,7 @@ pub async fn label_values_query(
         let mut table_names = match handler.catalog_manager().table_names(catalog, schema).await {
             Ok(table_names) => table_names,
             Err(e) => {
-                return PrometheusJsonResponse::error(e.status_code().to_string(), e.to_string());
+                return PrometheusJsonResponse::error(e.status_code().to_string(), e.output_msg());
             }
         };
         table_names.sort_unstable();
@@ -723,7 +723,7 @@ pub async fn label_values_query(
             {
                 return PrometheusJsonResponse::error(
                     err.status_code().to_string(),
-                    err.to_string(),
+                    err.output_msg(),
                 );
             }
         }
@@ -837,7 +837,7 @@ pub async fn series_query(
         let result = handler.do_query(&prom_query, query_ctx.clone()).await;
         if let Err(err) = retrieve_series_from_query_result(result, &mut series, &table_name).await
         {
-            return PrometheusJsonResponse::error(err.status_code().to_string(), err.to_string());
+            return PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg());
         }
     }
     PrometheusJsonResponse::success(PrometheusResponse::Series(series))

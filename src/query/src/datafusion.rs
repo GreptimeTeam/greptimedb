@@ -277,9 +277,7 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(DataFrame::DataFusion(
             self.state
                 .read_table(table)
-                .context(error::DatafusionSnafu {
-                    msg: "Fail to create dataframe for table",
-                })
+                .context(error::DatafusionSnafu)
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?,
         ))
@@ -295,9 +293,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
                     .state
                     .session_state()
                     .optimize(df_plan)
-                    .context(error::DatafusionSnafu {
-                        msg: "Fail to optimize logical plan",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
@@ -321,9 +317,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                 let physical_plan = state
                     .create_physical_plan(df_plan)
                     .await
-                    .context(error::DatafusionSnafu {
-                        msg: "Fail to create physical plan",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
@@ -394,9 +388,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 assert_eq!(1, plan.output_partitioning().partition_count());
                 let df_stream = plan
                     .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu {
-                        msg: "Failed to execute DataFusion merge exec",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 let stream = RecordBatchStreamAdapter::try_new(df_stream)
@@ -447,35 +439,27 @@ pub async fn execute_show_with_filter(
     let context = SessionContext::new();
     context
         .register_batch(table_name, record_batch.into_df_record_batch())
-        .context(error::DatafusionSnafu {
-            msg: "Fail to register a record batch as a table",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     let mut dataframe = context
         .sql(&format!("SELECT * FROM {table_name}"))
         .await
-        .context(error::DatafusionSnafu {
-            msg: "Fail to execute a sql",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     if let Some(filter) = filter {
         let filter = convert_filter_to_df_filter(filter)?;
         dataframe = dataframe
             .filter(filter)
-            .context(error::DatafusionSnafu {
-                msg: "Fail to filter",
-            })
+            .context(error::DatafusionSnafu)
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?
     }
     let df_batches = dataframe
         .collect()
         .await
-        .context(error::DatafusionSnafu {
-            msg: "Fail to collect the record batches",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     let mut batches = Vec::with_capacity(df_batches.len());

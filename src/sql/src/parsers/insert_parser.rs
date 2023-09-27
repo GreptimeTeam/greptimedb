@@ -24,10 +24,7 @@ use crate::statements::statement::Statement;
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_insert(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
-        let spstatement = self
-            .parser
-            .parse_insert()
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let spstatement = self.parser.parse_insert().context(error::SyntaxSnafu)?;
 
         match spstatement {
             SpStatement::Insert { .. } => {

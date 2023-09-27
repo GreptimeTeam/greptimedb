@@ -27,7 +27,7 @@ use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{ErrorCompat, Location, Snafu};
+use snafu::{Location, Snafu};
 use tonic::Code;
 
 #[derive(Snafu)]
@@ -511,7 +511,6 @@ macro_rules! define_into_tonic_status {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
                 use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
-                use snafu::ErrorCompat;
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
 
@@ -521,16 +520,16 @@ macro_rules! define_into_tonic_status {
                 // (which is a very rare case), just ignore. Client will use Tonic status code and message.
                 let status_code = err.status_code();
                 headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
-                let root_error = err.iter_chain().last().unwrap();
+                let root_error = err.output_msg();
 
-                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
+                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.as_bytes()) {
                     let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
                 }
 
                 let metadata = MetadataMap::from_headers(headers);
                 tonic::Status::with_metadata(
                     $crate::error::status_to_tonic_code(status_code),
-                    err.to_string(),
+                    root_error,
                     metadata,
                 )
             }
@@ -548,7 +547,7 @@ impl From<std::io::Error> for Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let error_msg = self.iter_chain().last().unwrap().to_string();
+        let error_msg = self.output_msg();
         let status = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }

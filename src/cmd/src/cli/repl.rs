@@ -35,7 +35,7 @@ use query::QueryEngine;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 use session::context::QueryContext;
-use snafu::{ErrorCompat, ResultExt};
+use snafu::ResultExt;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::cli::cmd::ReplCommand;
@@ -148,7 +148,7 @@ impl Repl {
             .await
             .map_err(|e| {
                 let status_code = e.status_code();
-                let root_cause = e.iter_chain().last().unwrap();
+                let root_cause = e.output_msg();
                 println!("Error: {}({status_code}), {root_cause}", status_code as u32)
             })
             .is_ok()
