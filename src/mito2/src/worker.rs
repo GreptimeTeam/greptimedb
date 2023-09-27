@@ -28,6 +28,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
@@ -203,11 +204,16 @@ impl WorkerGroup {
         config: MitoConfig,
         log_store: Arc<S>,
         object_store: ObjectStore,
-        write_buffer_manager: WriteBufferManagerRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
+        let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
+            Arc::new(WriteBufferManagerImpl::new(
+                config.global_write_buffer_size.as_bytes() as usize,
+            ))
+        });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
         let cache_manager = Arc::new(CacheManager::new(config.sst_meta_cache_size.as_bytes()));
 
@@ -607,6 +613,27 @@ impl WorkerListener {
         }
         // Avoid compiler warning.
         let _ = region_id;
+    }
+
+    pub(crate) fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            return listener.on_later_drop_begin(region_id);
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
+        None
+    }
+
+    /// On later drop task is finished.
+    pub(crate) fn on_later_drop_end(&self, region_id: RegionId, removed: bool) {
+        #[cfg(test)]
+        if let Some(listener) = &self.listener {
+            listener.on_later_drop_end(region_id, removed);
+        }
+        // Avoid compiler warning.
+        let _ = region_id;
+        let _ = removed;
     }
 }
 
