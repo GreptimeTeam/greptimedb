@@ -216,7 +216,7 @@ pub enum Error {
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
 
-    #[snafu(display("msg: {}", msg))]
+    #[snafu(display(""))]
     Datafusion {
         msg: String,
         #[snafu(source)]
