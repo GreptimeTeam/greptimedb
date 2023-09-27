@@ -213,25 +213,15 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
-        let need_update_options = current_region_options != new_region_options;
         for (datanode, regions) in new_region_distribution.into_iter() {
-            if let Some(current_region) = current_region_distribution.get(&datanode) {
-                // Updates if need.
-                if *current_region != regions || need_update_options {
-                    let key = DatanodeTableKey::new(datanode, table_id);
-                    let raw_key = key.as_raw_key();
-                    let val = DatanodeTableValue::new(
-                        table_id,
-                        regions,
-                        engine.to_string(),
-                        region_storage_path.to_string(),
-                        new_region_options.clone(),
-                    )
-                    .try_as_raw_value()?;
-                    opts.push(TxnOp::Put(raw_key, val));
-                }
-            } else {
-                // New datanodes
+            let update_needed =
+                if let Some(current_region) = current_region_distribution.get(&datanode) {
+                    // Updates if need.
+                    *current_region != regions || current_region_options != new_region_options
+                } else {
+                    true
+                };
+            if update_needed {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
                 let val = DatanodeTableValue::new(

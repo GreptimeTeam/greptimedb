@@ -449,11 +449,7 @@ impl TableMetadataManager {
     pub async fn update_table_route(
         &self,
         table_id: TableId,
-        UpdateDatanodeTableContext {
-            engine,
-            region_storage_path,
-            region_options: current_region_options,
-        }: UpdateDatanodeTableContext<'_>,
+        update_ctx: UpdateDatanodeTableContext<'_>,
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
@@ -465,11 +461,7 @@ impl TableMetadataManager {
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
-            UpdateDatanodeTableContext {
-                engine,
-                region_storage_path,
-                region_options: current_region_options,
-            },
+            update_ctx,
             current_region_distribution,
             new_region_distribution,
             new_region_options,
