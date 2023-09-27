@@ -38,35 +38,38 @@ macro_rules! error {
 
     // error!(e; target: "my_target", "a {} event", "log")
     ($e:expr; target: $target:expr, $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             target: $target,
             $crate::logging::Level::ERROR,
-            err.msg = %stacks,
-            err.code = %$e.status_code(),
+            err = ?$e,
+            $($arg)+
+        )
+    });
+
+    // error!(%e; target: "my_target", "a {} event", "log")
+    (%$e:expr; target: $target:expr, $($arg:tt)+) => ({
+        $crate::log!(
+            target: $target,
+            $crate::logging::Level::ERROR,
+            err = %$e,
             $($arg)+
         )
     });
 
     // error!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             $crate::logging::Level::ERROR,
-            err.msg = %stacks,
-            err.code = %$e.status_code(),
+            err = ?$e,
+            $($arg)+
+        )
+    });
+
+    // error!(%e; "a {} event", "log")
+    (%$e:expr; $($arg:tt)+) => ({
+        $crate::log!(
+            $crate::logging::Level::ERROR,
+            err = %$e,
             $($arg)+
         )
     });
@@ -87,17 +90,18 @@ macro_rules! warn {
 
     // warn!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
-        use $crate::common_error::ext::ErrorExt;
-        use $crate::common_error::ext::StackError;
-
-        let mut stacks = vec![];
-        $e.debug_fmt(0, &mut stacks);
-        let stacks = stacks.join("\n");
-
         $crate::log!(
             $crate::logging::Level::WARN,
-            err.msg = %$e,
-            err.code = %$e.status_code(),
+            err = ?$e,
+            $($arg)+
+        )
+    });
+
+    // warn!(%e; "a {} event", "log")
+    (%$e:expr; $($arg:tt)+) => ({
+        $crate::log!(
+            $crate::logging::Level::WARN,
+            err = %$e,
             $($arg)+
         )
     });
@@ -221,8 +225,10 @@ mod tests {
         error!(target: "my_target", "hello {}", "world");
         // Supports both owned and reference type.
         error!(err; target: "my_target", "hello {}", "world");
+        error!(%err; target: "my_target", "hello {}", "world");
         error!(err_ref; target: "my_target", "hello {}", "world");
         error!(err_ref2; "hello {}", "world");
+        error!(%err_ref2; "hello {}", "world");
         error!("hello {}", "world");
 
         let root_err = MockError::with_source(err);
