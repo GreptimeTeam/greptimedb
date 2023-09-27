@@ -16,7 +16,7 @@ use std::fmt::{self};
 use std::str::FromStr;
 
 use common_query::error::{
-    self, ArrowComputeSnafu, FromArrowArraySnafu, InvalidFuncArgsSnafu, Result,
+    self, ArrowComputeSnafu, DowncastVectorSnafu, InvalidFuncArgsSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
@@ -25,8 +25,8 @@ use datatypes::arrow::array::Date32Array;
 use datatypes::arrow::compute::kernels::comparison::gt_dyn;
 use datatypes::arrow::compute::kernels::zip;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::vectors::{DateVector, Helper, StringVector, Vector, VectorRef};
-use snafu::{ensure, ResultExt};
+use datatypes::vectors::{ConstantVector, DateVector, Helper, StringVector, Vector, VectorRef};
+use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::scalars::function::{Function, FunctionContext};
 
@@ -43,8 +43,29 @@ fn convert_to_date(arg: &str) -> Option<i32> {
 }
 
 fn string_vector_to_date32_array(column: &VectorRef) -> Result<Date32Array> {
-    let column =
-        StringVector::try_from_arrow_array(column.to_arrow_array()).context(FromArrowArraySnafu)?;
+    let column = if column.is_const() {
+        let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+        column
+            .inner()
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .context(DowncastVectorSnafu {
+                err_msg: format!(
+                    "expect StringVector, got vector type {}",
+                    column.vector_type_name()
+                ),
+            })?
+    } else {
+        column
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .context(DowncastVectorSnafu {
+                err_msg: format!(
+                    "expect StringVector, got vector type {}",
+                    column.vector_type_name()
+                ),
+            })?
+    };
     let column = (0..column.len())
         .map(|idx| convert_to_date(&column.get(idx).to_string()))
         .collect::<Vec<_>>();
@@ -52,8 +73,29 @@ fn string_vector_to_date32_array(column: &VectorRef) -> Result<Date32Array> {
 }
 
 fn date_vector_to_date32_array(column: &VectorRef) -> Result<Date32Array> {
-    let column =
-        DateVector::try_from_arrow_array(column.to_arrow_array()).context(FromArrowArraySnafu)?;
+    let column = if column.is_const() {
+        let column: &ConstantVector = unsafe { Helper::static_cast(column) };
+        column
+            .inner()
+            .as_any()
+            .downcast_ref::<DateVector>()
+            .context(DowncastVectorSnafu {
+                err_msg: format!(
+                    "expect DateVector, got vector type {}",
+                    column.vector_type_name()
+                ),
+            })?
+    } else {
+        column
+            .as_any()
+            .downcast_ref::<DateVector>()
+            .context(DowncastVectorSnafu {
+                err_msg: format!(
+                    "expect DateVector, got vector type {}",
+                    column.vector_type_name()
+                ),
+            })?
+    };
     let column = (0..column.len())
         .map(|idx| {
             column
