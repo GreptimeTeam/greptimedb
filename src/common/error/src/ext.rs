@@ -41,10 +41,12 @@ pub trait ErrorExt: StackError {
     {
         let error = self.last();
         if let Some(external_error) = error.source() {
-            if error.to_string().len() == 0 {
-                format!("{external_error}")
+            let external_root = external_error.sources().last().unwrap();
+
+            if error.to_string().is_empty() {
+                format!("{external_root}")
             } else {
-                format!("{error}: {external_error}")
+                format!("{error}: {external_root}")
             }
         } else {
             format!("{error}")
