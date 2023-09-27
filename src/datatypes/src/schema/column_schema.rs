@@ -430,7 +430,7 @@ mod tests {
 
         let formatted_int8 = format!("{:?}", column_schema_int8);
         let formatted_int32 = format!("{:?}", column_schema_int32);
-        assert_eq!(formatted_int8, "test_column_1 Int8 nullable");
+        assert_eq!(formatted_int8, "test_column_1 Int8 null");
         assert_eq!(formatted_int32, "test_column_2 Int32 not null");
     }
 }
