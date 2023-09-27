@@ -82,7 +82,17 @@ impl Categorizer {
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
             LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
-            LogicalPlan::Limit(_) => Commutativity::PartialCommutative,
+            LogicalPlan::Limit(limit) => {
+                // Only execute `fetch` on remote nodes.
+                // wait for https://github.com/apache/arrow-datafusion/pull/7669
+                if partition_cols.is_empty() && limit.fetch.is_some() {
+                    Commutativity::Commutative
+                } else if limit.skip == 0 && limit.fetch.is_some() {
+                    Commutativity::PartialCommutative
+                } else {
+                    Commutativity::Unimplemented
+                }
+            }
             LogicalPlan::Extension(extension) => {
                 Self::check_extension_plan(extension.node.as_ref() as _)
             }
