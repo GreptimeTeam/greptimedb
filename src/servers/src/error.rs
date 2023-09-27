@@ -511,7 +511,6 @@ macro_rules! define_into_tonic_status {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
                 use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
-                use snafu::ErrorCompat;
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
 
@@ -521,9 +520,9 @@ macro_rules! define_into_tonic_status {
                 // (which is a very rare case), just ignore. Client will use Tonic status code and message.
                 let status_code = err.status_code();
                 headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
-                let root_error = err.iter_chain().last().unwrap();
+                let root_error = err.output_msg();
 
-                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
+                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.as_bytes()) {
                     let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
                 }
 
