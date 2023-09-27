@@ -199,8 +199,8 @@ impl CreateTableProcedure {
             for request in requests {
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: 0,
-                        span_id: 0,
+                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        ..Default::default()
                     }),
                     body: Some(request),
                 };

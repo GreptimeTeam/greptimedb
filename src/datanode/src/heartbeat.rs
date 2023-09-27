@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutorRef,
@@ -97,6 +98,7 @@ impl HeartbeatTask {
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
         mut notify: Option<Arc<Notify>>,
+        quit_signal: Arc<Notify>,
     ) -> Result<HeartbeatSender> {
         let client_id = meta_client.id();
 
@@ -123,7 +125,8 @@ impl HeartbeatTask {
                     info!("Heartbeat task shutdown");
                 }
             }
-            info!("Heartbeat handling loop exit.")
+            quit_signal.notify_one();
+            info!("Heartbeat handling loop exit.");
         });
         Ok(tx)
     }
@@ -167,12 +170,15 @@ impl HeartbeatTask {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(16);
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
+        let quit_signal = Arc::new(tokio::sync::Notify::new());
+
         let mut tx = Self::create_streams(
             &meta_client,
             running.clone(),
             handler_executor.clone(),
             mailbox.clone(),
             notify,
+            quit_signal.clone(),
         )
         .await?;
 
@@ -187,7 +193,6 @@ impl HeartbeatTask {
         common_runtime::spawn_bg(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
             tokio::pin!(sleep);
-
             loop {
                 if !running.load(Ordering::Relaxed) {
                     info!("shutdown heartbeat task");
@@ -228,6 +233,11 @@ impl HeartbeatTask {
                         sleep.as_mut().reset(now + Duration::from_millis(interval));
                         Some(req)
                     }
+                    // If the heartbeat stream is broken, send a dummy heartbeat request to re-create the heartbeat stream.
+                    _ = quit_signal.notified() => {
+                        let req = HeartbeatRequest::default();
+                        Some(req)
+                    }
                 };
                 if let Some(req) = req {
                     debug!("Sending heartbeat request: {:?}", req);
@@ -239,14 +249,24 @@ impl HeartbeatTask {
                             handler_executor.clone(),
                             mailbox.clone(),
                             None,
+                            quit_signal.clone(),
                         )
                         .await
                         {
                             Ok(new_tx) => {
                                 info!("Reconnected to metasrv");
                                 tx = new_tx;
+                                // Triggers to send heartbeat immediately.
+                                sleep.as_mut().reset(Instant::now());
                             }
                             Err(e) => {
+                                // Before the META_LEASE_SECS expires,
+                                // any retries are meaningless, it always reads the old meta leader address.
+                                // Triggers to retry after META_KEEP_ALIVE_INTERVAL_SECS.
+                                sleep.as_mut().reset(
+                                    Instant::now()
+                                        + Duration::from_secs(META_KEEP_ALIVE_INTERVAL_SECS),
+                                );
                                 error!(e;"Failed to reconnect to metasrv!");
                             }
                         }
@@ -315,13 +335,19 @@ pub async fn new_metasrv_client(
         .timeout(Duration::from_millis(meta_config.timeout_millis))
         .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
         .tcp_nodelay(meta_config.tcp_nodelay);
-    let channel_manager = ChannelManager::with_config(config);
+    let channel_manager = ChannelManager::with_config(config.clone());
+    let heartbeat_channel_manager = ChannelManager::with_config(
+        config
+            .timeout(Duration::from_millis(meta_config.heartbeat_timeout_millis))
+            .connect_timeout(Duration::from_millis(meta_config.heartbeat_timeout_millis)),
+    );
 
     let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)
         .enable_heartbeat()
         .enable_router()
         .enable_store()
         .channel_manager(channel_manager)
+        .heartbeat_channel_manager(heartbeat_channel_manager)
         .build();
     meta_client
         .start(&meta_config.metasrv_addrs)

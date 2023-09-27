@@ -42,14 +42,14 @@ async fn run() {
         .insert(vec![to_insert_request(weather_records_1())])
         .await
     {
-        error!("Error: {e}");
+        error!("Error: {e:?}");
     }
 
     if let Err(e) = stream_inserter
         .insert(vec![to_insert_request(weather_records_2())])
         .await
     {
-        error!("Error: {e}");
+        error!("Error: {e:?}");
     }
 
     let result = stream_inserter.finish().await;
@@ -59,7 +59,7 @@ async fn run() {
             info!("Rows written: {rows}");
         }
         Err(e) => {
-            error!("Error: {e}");
+            error!("Error: {e:?}");
         }
     };
 }

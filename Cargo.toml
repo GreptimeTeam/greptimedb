@@ -78,10 +78,11 @@ datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git
 derive_builder = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "115c1080773be8a819e50b257fece9f839a0c836" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "693128abe9adc70ba636010a172c9da55b206bba" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
+moka = { version = "0.11" }
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }
 parquet = "43.0"

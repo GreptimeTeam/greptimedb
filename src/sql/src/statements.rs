@@ -602,7 +602,7 @@ mod tests {
         assert!(v.is_err());
         assert!(
             format!("{v:?}").contains(
-                "column_name: \"a\", expect: Float64(Float64Type), actual: Boolean(BooleanType)"
+                "Column a expect type: Float64(Float64Type), actual: Boolean(BooleanType))"
             ),
             "v is {v:?}",
         );

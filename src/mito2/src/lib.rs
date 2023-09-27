@@ -21,28 +21,22 @@
 #[cfg(any(test, feature = "test"))]
 pub mod test_util;
 
-// TODO(yingwen): Remove all `allow(dead_code)` after finish refactoring mito.
 mod access_layer;
-#[allow(dead_code)]
+mod cache;
 mod compaction;
 pub mod config;
 pub mod engine;
 pub mod error;
-#[allow(dead_code)]
-mod flush;
+pub mod flush;
 pub mod manifest;
-#[allow(dead_code)]
 pub mod memtable;
 mod metrics;
-#[allow(dead_code)]
 pub mod read;
 pub mod region;
 mod region_write_ctx;
-#[allow(dead_code)]
 pub mod request;
 mod row_converter;
 pub(crate) mod schedule;
-#[allow(dead_code)]
 pub mod sst;
 pub mod wal;
 mod worker;

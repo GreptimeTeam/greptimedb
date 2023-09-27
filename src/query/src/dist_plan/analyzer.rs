@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_telemetry::info;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
@@ -46,7 +45,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     ) -> datafusion_common::Result<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
-        plan.rewrite(&mut rewriter)
+        let result = plan.rewrite(&mut rewriter)?;
+
+        Ok(result)
     }
 }
 
@@ -138,10 +139,6 @@ impl PlanRewriter {
     /// Return true if should stop and expand. The input plan is the parent node of current node
     fn should_expand(&mut self, plan: &LogicalPlan) -> bool {
         if DFLogicalSubstraitConvertor.encode(plan).is_err() {
-            info!(
-                "substrait error: {:?}",
-                DFLogicalSubstraitConvertor.encode(plan)
-            );
             return true;
         }
 
@@ -247,6 +244,13 @@ impl TreeNodeRewriter for PlanRewriter {
     fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
         // only expand once on each ascending
         if self.is_expanded() {
+            self.pop_stack();
+            return Ok(node);
+        }
+
+        // only expand when the leaf is table scan
+        if node.inputs().is_empty() && !matches!(node, LogicalPlan::TableScan(_)) {
+            self.set_expanded();
             self.pop_stack();
             return Ok(node);
         }

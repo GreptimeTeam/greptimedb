@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
 use serde_json::error::Error as JsonError;
 use servers::define_into_tonic_status;
@@ -24,8 +25,9 @@ use store_api::storage::RegionId;
 use table::error::Error as TableError;
 
 /// Business error of datanode.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
@@ -170,14 +172,23 @@ pub enum Error {
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
-        source: std::net::AddrParseError,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
     },
 
     #[snafu(display("Failed to create directory {}", dir))]
-    CreateDir { dir: String, source: std::io::Error },
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 
     #[snafu(display("Failed to remove directory {}", dir))]
-    RemoveDir { dir: String, source: std::io::Error },
+    RemoveDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 
     #[snafu(display("Failed to open log store"))]
     OpenLogStore {
@@ -187,7 +198,8 @@ pub enum Error {
 
     #[snafu(display("Failed to init backend"))]
     InitBackend {
-        source: object_store::Error,
+        #[snafu(source)]
+        error: object_store::Error,
         location: Location,
     },
 
@@ -340,7 +352,8 @@ pub enum Error {
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Payload not exist"))]
@@ -351,7 +364,8 @@ pub enum Error {
 
     #[snafu(display("Failed to join task"))]
     JoinTask {
-        source: common_runtime::JoinError,
+        #[snafu(source)]
+        error: common_runtime::JoinError,
         location: Location,
     },
 

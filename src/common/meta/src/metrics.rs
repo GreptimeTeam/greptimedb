@@ -19,3 +19,4 @@ pub(crate) const METRIC_META_CREATE_SCHEMA: &str = "meta.create_schema";
 pub(crate) const METRIC_META_PROCEDURE_CREATE_TABLE: &str = "meta.procedure.create_table";
 pub(crate) const METRIC_META_PROCEDURE_DROP_TABLE: &str = "meta.procedure.drop_table";
 pub(crate) const METRIC_META_PROCEDURE_ALTER_TABLE: &str = "meta.procedure.alter_table";
+pub(crate) const METRIC_META_PROCEDURE_TRUNCATE_TABLE: &str = "meta.procedure.truncate_table";

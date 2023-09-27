@@ -14,6 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use console::{style, Style};
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
@@ -31,8 +32,9 @@ pub(crate) fn ret_other_error_with(reason: String) -> OtherSnafu<String> {
     OtherSnafu { reason }
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub(crate)))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Datatype error"))]
     TypeCast {
@@ -49,13 +51,15 @@ pub enum Error {
     #[snafu(display("Failed to parse script"))]
     PyParse {
         location: SnafuLocation,
-        source: ParseError,
+        #[snafu(source)]
+        error: ParseError,
     },
 
     #[snafu(display("Failed to compile script"))]
     PyCompile {
         location: SnafuLocation,
-        source: CodegenError,
+        #[snafu(source)]
+        error: CodegenError,
     },
 
     /// rustpython problem, using python virtual machines' backtrace instead
@@ -68,13 +72,15 @@ pub enum Error {
     #[snafu(display("Arrow error"))]
     Arrow {
         location: SnafuLocation,
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
     },
 
     #[snafu(display("DataFusion error"))]
     DataFusion {
         location: SnafuLocation,
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
     },
 
     /// errors in coprocessors' parse check for types and etc.
@@ -116,7 +122,10 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
     #[snafu(display("Failed to create tokio task"))]
-    TokioJoin { source: tokio::task::JoinError },
+    TokioJoin {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+    },
 }
 
 impl ErrorExt for Error {
@@ -210,8 +219,8 @@ pub fn get_error_reason_loc(err: &Error) -> (String, Option<Location>) {
         Error::CoprParse { reason, loc, .. } => (reason.clone(), *loc),
         Error::Other { reason, .. } => (reason.clone(), None),
         Error::PyRuntime { msg, .. } => (msg.clone(), None),
-        Error::PyParse { source, .. } => (source.error.to_string(), Some(source.location)),
-        Error::PyCompile { source, .. } => (source.error.to_string(), Some(source.location)),
+        Error::PyParse { error, .. } => (error.error.to_string(), Some(error.location)),
+        Error::PyCompile { error, .. } => (error.error.to_string(), Some(error.location)),
         _ => (format!("Unknown error: {err:?}"), None),
     }
 }

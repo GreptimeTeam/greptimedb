@@ -15,6 +15,7 @@
 //! Engine event listener for tests.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_telemetry::info;
@@ -32,6 +33,19 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the region starts to do flush.
     async fn on_flush_begin(&self, region_id: RegionId);
+
+    /// Notifies the listener that the later drop task starts running.
+    /// Returns the gc interval if we want to override the default one.
+    fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {
+        let _ = region_id;
+        None
+    }
+
+    /// Notifies the listener that the later drop task of the region is finished.
+    fn on_later_drop_end(&self, region_id: RegionId, removed: bool) {
+        let _ = region_id;
+        let _ = removed;
+    }
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
@@ -102,7 +116,7 @@ impl EventListener for StallListener {
 
 /// Listener to watch begin flush events.
 ///
-/// Crate a background thread to execute flush region, and the main thread calls `wait_truncate()`
+/// Creates a background thread to execute flush region, and the main thread calls `wait_truncate()`
 /// to block and wait for `on_flush_region()`.
 /// When the background thread calls `on_flush_begin()`, the main thread is notified to truncate
 /// region, and background thread thread blocks and waits for `notify_flush()` to continue flushing.
@@ -148,5 +162,45 @@ impl EventListener for FlushTruncateListener {
         );
         self.notify_truncate.notify_one();
         self.notify_flush.notified().await;
+    }
+}
+
+/// Listener on dropping.
+pub struct DropListener {
+    gc_duration: Duration,
+    notify: Notify,
+}
+
+impl DropListener {
+    /// Creates a new listener with specific `gc_duration`.
+    pub fn new(gc_duration: Duration) -> Self {
+        DropListener {
+            gc_duration,
+            notify: Notify::new(),
+        }
+    }
+
+    /// Waits until later drop task is done.
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
+}
+
+#[async_trait]
+impl EventListener for DropListener {
+    fn on_flush_success(&self, _region_id: RegionId) {}
+
+    fn on_write_stall(&self) {}
+
+    async fn on_flush_begin(&self, _region_id: RegionId) {}
+
+    fn on_later_drop_begin(&self, _region_id: RegionId) -> Option<Duration> {
+        Some(self.gc_duration)
+    }
+
+    fn on_later_drop_end(&self, _region_id: RegionId, removed: bool) {
+        // Asserts result.
+        assert!(removed);
+        self.notify.notify_one();
     }
 }

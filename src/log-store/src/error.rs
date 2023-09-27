@@ -15,11 +15,13 @@
 use std::any::Any;
 
 use common_error::ext::ErrorExt;
+use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to start log store gc task"))]
     StartGcTask {
@@ -35,13 +37,15 @@ pub enum Error {
 
     #[snafu(display("Failed to add entry to LogBatch"))]
     AddEntryLogBatch {
-        source: raft_engine::Error,
+        #[snafu(source)]
+        error: raft_engine::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to perform raft-engine operation"))]
     RaftEngine {
-        source: raft_engine::Error,
+        #[snafu(source)]
+        error: raft_engine::Error,
         location: Location,
     },
 
@@ -63,7 +67,8 @@ pub enum Error {
         start: u64,
         end: u64,
         max_size: usize,
-        source: raft_engine::Error,
+        #[snafu(source)]
+        error: raft_engine::Error,
         location: Location,
     },
 

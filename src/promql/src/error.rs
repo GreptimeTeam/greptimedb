@@ -16,12 +16,14 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use promql_parser::parser::{Expr as PromExpr, TokenType};
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
@@ -34,7 +36,8 @@ pub enum Error {
 
     #[snafu(display("Internal error during building DataFusion plan"))]
     DataFusionPlanning {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 
@@ -73,7 +76,8 @@ pub enum Error {
 
     #[snafu(display("Failed to deserialize"))]
     Deserialize {
-        source: prost::DecodeError,
+        #[snafu(source)]
+        error: prost::DecodeError,
         location: Location,
     },
 

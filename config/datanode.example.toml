@@ -13,17 +13,19 @@ rpc_runtime_size = 8
 require_lease_before_startup = false
 
 [heartbeat]
-# Interval for sending heartbeat messages to the Metasrv in milliseconds, 5000 by default.
-interval_millis = 5000
+# Interval for sending heartbeat messages to the Metasrv in milliseconds, 3000 by default.
+interval_millis = 3000
 
 # Metasrv client options.
 [meta_client]
 # Metasrv address list.
 metasrv_addrs = ["127.0.0.1:3002"]
+# Heartbeat timeout in milliseconds, 500 by default.
+heartbeat_timeout_millis = 500
 # Operation timeout in milliseconds, 3000 by default.
 timeout_millis = 3000
 # Connect server timeout in milliseconds, 5000 by default.
-connect_timeout_millis = 5000
+connect_timeout_millis = 1000
 # `TCP_NODELAY` option for accepted connections, true by default.
 tcp_nodelay = true
 

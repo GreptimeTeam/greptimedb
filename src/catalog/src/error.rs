@@ -17,14 +17,16 @@ use std::fmt::Debug;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 use table::metadata::TableId;
 use tokio::task::JoinError;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to list catalogs"))]
     ListCatalogs {
@@ -92,7 +94,8 @@ pub enum Error {
 
     #[snafu(display("Failed to deserialize value"))]
     ValueDeserialize {
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 
@@ -142,7 +145,10 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to open table in parallel"))]
-    ParallelOpenTable { source: JoinError },
+    ParallelOpenTable {
+        #[snafu(source)]
+        error: JoinError,
+    },
 
     #[snafu(display("Table not found while opening table, table info: {}", table_info))]
     TableNotFound {
@@ -213,7 +219,8 @@ pub enum Error {
     #[snafu(display("msg: {}", msg))]
     Datafusion {
         msg: String,
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 

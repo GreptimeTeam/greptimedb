@@ -22,7 +22,6 @@ use crate::error::Result;
 
 #[async_trait]
 pub trait RegionQueryHandler: Send + Sync {
-    // TODO(ruihang): add trace id and span id in the request.
     async fn do_get(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
 }
 
