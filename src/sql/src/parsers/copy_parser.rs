@@ -57,7 +57,7 @@ impl<'a> ParserContext<'a> {
 
         self.parser
             .expect_keyword(Keyword::TO)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let (with, connection, location) = self.parse_copy_to()?;
         Ok(CopyDatabaseArgument {
@@ -89,7 +89,7 @@ impl<'a> ParserContext<'a> {
         } else {
             self.parser
                 .expect_keyword(Keyword::FROM)
-                .context(error::SyntaxSnafu { sql: self.sql })?;
+                .context(error::SyntaxSnafu)?;
             Ok(CopyTable::From(self.parse_copy_table_from(table_name)?))
         }
     }
@@ -107,7 +107,7 @@ impl<'a> ParserContext<'a> {
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let with = options
             .into_iter()
@@ -119,7 +119,7 @@ impl<'a> ParserContext<'a> {
         let connection_options = self
             .parser
             .parse_options(Keyword::CONNECTION)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let connection = connection_options
             .into_iter()
@@ -148,7 +148,7 @@ impl<'a> ParserContext<'a> {
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let with = options
             .into_iter()
@@ -160,7 +160,7 @@ impl<'a> ParserContext<'a> {
         let connection_options = self
             .parser
             .parse_options(Keyword::CONNECTION)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let connection = connection_options
             .into_iter()

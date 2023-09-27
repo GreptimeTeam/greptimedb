@@ -37,7 +37,7 @@ impl<'a> ParserContext<'a> {
 
         let parser = Parser::new(dialect)
             .try_with_sql(sql)
-            .context(SyntaxSnafu { sql })?;
+            .context(SyntaxSnafu)?;
         let mut parser_ctx = ParserContext { sql, parser };
 
         let mut expecting_statement_delimiter = false;
@@ -67,12 +67,12 @@ impl<'a> ParserContext<'a> {
     pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
             .try_with_sql(sql)
-            .context(SyntaxSnafu { sql })?;
+            .context(SyntaxSnafu)?;
 
-        let function_name = parser.parse_identifier().context(SyntaxSnafu { sql })?;
+        let function_name = parser.parse_identifier().context(SyntaxSnafu)?;
         parser
             .parse_function(ObjectName(vec![function_name]))
-            .context(SyntaxSnafu { sql })
+            .context(SyntaxSnafu)
     }
 
     /// Parses parser context to a set of statements.
@@ -143,7 +143,7 @@ impl<'a> ParserContext<'a> {
         Err(ParserError::ParserError(format!(
             "Expected {expected}, found: {found}",
         )))
-        .context(SyntaxSnafu { sql: self.sql })
+        .context(SyntaxSnafu)
     }
 
     pub fn matches_keyword(&mut self, expected: Keyword) -> bool {

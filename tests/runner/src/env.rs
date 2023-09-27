@@ -28,7 +28,6 @@ use client::{
     Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
 };
 use common_error::ext::ErrorExt;
-use common_error::snafu::ErrorCompat;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use serde::Serialize;
@@ -365,10 +364,10 @@ impl Database for GreptimeDB {
                     Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
                     Err(e) => {
                         let status_code = e.status_code();
-                        let source_error = e.iter_chain().last().unwrap();
+                        let msg = e.output_msg();
                         result = ServerSnafu {
                             code: status_code,
-                            msg: source_error.to_string(),
+                            msg,
                         }
                         .fail();
                     }
@@ -453,7 +452,7 @@ impl Display for ResultDisplayer {
             },
             Err(e) => {
                 let status_code = e.status_code();
-                let root_cause = e.iter_chain().last().unwrap();
+                let root_cause = e.output_msg();
                 write!(
                     f,
                     "Error: {}({status_code}), {root_cause}",

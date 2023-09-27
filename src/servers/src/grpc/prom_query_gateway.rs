@@ -124,7 +124,7 @@ impl PrometheusGatewayService {
                 Err(err) => {
                     return PrometheusJsonResponse::error(
                         err.status_code().to_string(),
-                        err.to_string(),
+                        err.output_msg(),
                     )
                     .0
                 }

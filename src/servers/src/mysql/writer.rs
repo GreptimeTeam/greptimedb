@@ -14,7 +14,7 @@
 
 use std::ops::Deref;
 
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -26,7 +26,6 @@ use opensrv_mysql::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
-use snafu::ErrorCompat;
 use tokio::io::AsyncWrite;
 
 use crate::error::{self, Error, OtherSnafu, Result};
@@ -205,14 +204,14 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         Ok(())
     }
 
-    async fn write_query_error(error: Error, w: QueryResultWriter<'a, W>) -> Result<()> {
+    async fn write_query_error(error: impl ErrorExt, w: QueryResultWriter<'a, W>) -> Result<()> {
         increment_counter!(
             METRIC_ERROR_COUNTER,
             &[(METRIC_PROTOCOL_LABEL, METRIC_ERROR_COUNTER_LABEL_MYSQL)]
         );
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
-        let error = error.iter_chain().last().unwrap().to_string();
+        let error = error.output_msg();
         w.error(kind, error.as_bytes()).await?;
         Ok(())
     }
