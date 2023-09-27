@@ -16,7 +16,8 @@ use std::fmt::{self};
 use std::str::FromStr;
 
 use common_query::error::{
-    self, ArrowComputeSnafu, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu,
+    self, ArrowComputeSnafu, FromArrowArraySnafu, InvalidFuncArgsSnafu, Result,
+    UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
 use common_time::Date;
@@ -41,16 +42,18 @@ fn convert_to_date(arg: &str) -> Option<i32> {
     }
 }
 
-fn string_vector_to_date32_array(column: &VectorRef) -> Date32Array {
-    let column = StringVector::try_from_arrow_array(column.to_arrow_array()).unwrap();
+fn string_vector_to_date32_array(column: &VectorRef) -> Result<Date32Array> {
+    let column =
+        StringVector::try_from_arrow_array(column.to_arrow_array()).context(FromArrowArraySnafu)?;
     let column = (0..column.len())
         .map(|idx| convert_to_date(&column.get(idx).to_string()))
         .collect::<Vec<_>>();
-    Date32Array::from_iter(column)
+    Ok(Date32Array::from_iter(column))
 }
 
-fn date_vector_to_date32_array(column: &VectorRef) -> Date32Array {
-    let column = DateVector::try_from_arrow_array(column.to_arrow_array()).unwrap();
+fn date_vector_to_date32_array(column: &VectorRef) -> Result<Date32Array> {
+    let column =
+        DateVector::try_from_arrow_array(column.to_arrow_array()).context(FromArrowArraySnafu)?;
     let column = (0..column.len())
         .map(|idx| {
             column
@@ -61,7 +64,7 @@ fn date_vector_to_date32_array(column: &VectorRef) -> Date32Array {
                 .map(|x| x.val())
         })
         .collect::<Vec<_>>();
-    Date32Array::from_iter(column)
+    Ok(Date32Array::from_iter(column))
 }
 
 impl Function for GreatestFunction {
@@ -96,16 +99,16 @@ impl Function for GreatestFunction {
         );
         match columns[0].data_type() {
             ConcreteDataType::String(_) => {
-                let column1 = string_vector_to_date32_array(&columns[0]);
-                let column2 = string_vector_to_date32_array(&columns[1]);
+                let column1 = string_vector_to_date32_array(&columns[0])?;
+                let column2 = string_vector_to_date32_array(&columns[1])?;
                 let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
                 Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
             }
             ConcreteDataType::Date(_) => {
-                let column1 = date_vector_to_date32_array(&columns[0]);
-                let column2 = date_vector_to_date32_array(&columns[1]);
+                let column1 = date_vector_to_date32_array(&columns[0])?;
+                let column2 = date_vector_to_date32_array(&columns[1])?;
                 let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
