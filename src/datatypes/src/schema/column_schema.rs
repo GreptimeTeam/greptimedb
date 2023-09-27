@@ -46,7 +46,8 @@ pub struct ColumnSchema {
 
 impl fmt::Debug for ColumnSchema {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut formatted = format!(
+        write!(
+            f,
             "{} {} {}",
             self.name,
             self.data_type,
@@ -55,20 +56,19 @@ impl fmt::Debug for ColumnSchema {
             } else {
                 "not null"
             },
-        );
+        )?;
 
         // Add default constraint if present
         if let Some(default_constraint) = &self.default_constraint {
-            formatted.push_str(&format!(" default={:?}", default_constraint));
+            write!(f, " default={:?}", default_constraint)?;
         }
 
         // Add metadata if present
         if !self.metadata.is_empty() {
-            formatted.push_str(&format!(" metadata={:?}", self.metadata));
+            write!(f, " metadata={:?}", self.metadata)?;
         }
 
-        // Write the formatted string to the formatter
-        write!(f, "{}", formatted)
+        Ok(())
     }
 }
 
@@ -422,5 +422,13 @@ mod tests {
     fn test_column_schema_single_no_default() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
         assert!(column_schema.create_default().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_debug_for_column_schema() {
+        let column_schema = ColumnSchema::new("test_column", ConcreteDataType::int32_datatype(), false);
+
+        let formated = format!("{:?}", column_schema);
+        assert_eq!(formated, "test_column Int32 not null");
     }
 }
