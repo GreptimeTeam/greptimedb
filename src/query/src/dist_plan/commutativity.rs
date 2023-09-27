@@ -168,7 +168,7 @@ impl Categorizer {
         }
     }
 
-    /// Return true if the given expr and partition cols satisified the rule.
+    /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
     fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
         let mut ref_cols = HashSet::new();
