@@ -160,7 +160,7 @@ impl MysqlServer {
             if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?
-                warn!("Internal error occurred during query exec, server actively close the channel to let client try next time: {}.", e)
+                warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time")
             }
             decrement_gauge!(crate::metrics::METRIC_MYSQL_CONNECTIONS, 1.0);
         });

@@ -108,7 +108,7 @@ impl Categorizer {
                 || name == SeriesDivide::name()
                 || name == MergeScanLogicalPlan::name() =>
             {
-                Commutativity::Commutative
+                Commutativity::Unimplemented
             }
             _ => Commutativity::Unsupported,
         }
