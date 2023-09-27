@@ -350,11 +350,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = [
-            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
-            "  MergeScan [is_placeholder=false]",
-        ]
-        .join("\n");
+        let expected = "MergeScan [is_placeholder=false]";
         assert_eq!(expected, format!("{:?}", result));
     }
 
@@ -401,11 +397,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = [
-            "Limit: skip=0, fetch=1",
-            "  MergeScan [is_placeholder=false]",
-        ]
-        .join("\n");
+        let expected = "MergeScan [is_placeholder=false]";
         assert_eq!(expected, format!("{:?}", result));
     }
 
