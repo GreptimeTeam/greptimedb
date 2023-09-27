@@ -45,7 +45,7 @@ impl Default for MetaClientOptions {
             timeout_millis: 3_000u64,
             heartbeat_timeout_millis: default_heartbeat_timeout_millis(),
             ddl_timeout_millis: default_ddl_timeout_millis(),
-            connect_timeout_millis: 5_000u64,
+            connect_timeout_millis: 1_000u64,
             tcp_nodelay: true,
         }
     }

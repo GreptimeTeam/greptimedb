@@ -30,7 +30,7 @@ use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsCon
 
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
-pub const DEFAULT_GRPC_CONNECT_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_GRPC_CONNECT_TIMEOUT_SECS: u64 = 1;
 pub const DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
 pub const DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
 
