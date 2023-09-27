@@ -45,7 +45,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     ) -> datafusion_common::Result<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
-        plan.rewrite(&mut rewriter)
+        let result = plan.rewrite(&mut rewriter)?;
+
+        Ok(result)
     }
 }
 
@@ -241,6 +243,13 @@ impl TreeNodeRewriter for PlanRewriter {
     fn mutate(&mut self, node: Self::N) -> DfResult<Self::N> {
         // only expand once on each ascending
         if self.is_expanded() {
+            self.pop_stack();
+            return Ok(node);
+        }
+
+        // only expand when the leaf is table scan
+        if node.inputs().is_empty() && !matches!(node, LogicalPlan::TableScan(_)) {
+            self.set_expanded();
             self.pop_stack();
             return Ok(node);
         }

@@ -276,7 +276,7 @@ impl Database {
                 source: BoxedError::new(ServerSnafu { code, msg }.build()),
             };
             logging::error!(
-                "Failed to do Flight get, addr: {}, code: {}, source: {}",
+                "Failed to do Flight get, addr: {}, code: {}, source: {:?}",
                 client.addr(),
                 tonic_code,
                 error

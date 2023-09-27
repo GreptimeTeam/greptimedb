@@ -229,7 +229,7 @@ impl ManagerContext {
         let procedure = loader(&message.data)
             .map_err(|e| {
                 logging::error!(
-                    "Failed to load procedure data, key: {}, source: {}",
+                    "Failed to load procedure data, key: {}, source: {:?}",
                     procedure_id,
                     e
                 );

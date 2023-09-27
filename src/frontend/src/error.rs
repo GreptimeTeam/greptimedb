@@ -17,12 +17,14 @@ use std::any::Any;
 use common_datasource::file_format::Format;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
@@ -44,43 +46,44 @@ pub enum Error {
 
     #[snafu(display(""))]
     External {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
     #[snafu(display("Failed to query"))]
     RequestQuery {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_meta::error::Error,
     },
 
     #[snafu(display("Runtime resource error"))]
     RuntimeResource {
-        #[snafu(backtrace)]
+        location: Location,
         source: common_runtime::error::Error,
     },
 
     #[snafu(display("Failed to start server"))]
     StartServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
 
     #[snafu(display("Failed to shutdown server"))]
     ShutdownServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
 
     #[snafu(display("Failed to parse address {}", addr))]
     ParseAddr {
         addr: String,
-        source: std::net::AddrParseError,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
     },
 
     #[snafu(display("Failed to parse SQL"))]
     ParseSql {
-        #[snafu(backtrace)]
+        location: Location,
         source: sql::error::Error,
     },
 
@@ -113,13 +116,13 @@ pub enum Error {
 
     #[snafu(display("General catalog error"))]
     Catalog {
-        #[snafu(backtrace)]
+        location: Location,
         source: catalog::error::Error,
     },
 
     #[snafu(display("Failed to start Meta client"))]
     StartMetaClient {
-        #[snafu(backtrace)]
+        location: Location,
         source: meta_client::error::Error,
     },
 
@@ -132,7 +135,7 @@ pub enum Error {
     #[snafu(display("Failed to find table route for table id {}", table_id))]
     FindTableRoute {
         table_id: u32,
-        #[snafu(backtrace)]
+        location: Location,
         source: partition::error::Error,
     },
 
@@ -141,7 +144,7 @@ pub enum Error {
 
     #[snafu(display("Table occurs error"))]
     Table {
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -150,26 +153,26 @@ pub enum Error {
 
     #[snafu(display("Failed to plan statement"))]
     PlanStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to read table: {table_name}"))]
     ReadTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display("Failed to execute logical plan"))]
     ExecLogicalPlan {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
     #[snafu(display(""))]
     InvokeRegionServer {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
 
@@ -190,7 +193,7 @@ pub enum Error {
 
     #[snafu(display("SQL execution intercepted"))]
     SqlExecIntercepted {
-        #[snafu(backtrace)]
+        location: Location,
         source: BoxedError,
     },
 
@@ -198,19 +201,19 @@ pub enum Error {
     #[snafu(display("Failed to execute PromQL query {}", query))]
     ExecutePromql {
         query: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
 
     #[snafu(display("Failed to create logical plan for prometheus query"))]
     PromStoreRemoteQueryPlan {
-        #[snafu(backtrace)]
+        location: Location,
         source: servers::error::Error,
     },
 
     #[snafu(display("Failed to describe schema for given statement"))]
     DescribeStatement {
-        #[snafu(backtrace)]
+        location: Location,
         source: query::error::Error,
     },
 
@@ -219,21 +222,21 @@ pub enum Error {
 
     #[snafu(display("Failed to start script manager"))]
     StartScriptManager {
-        #[snafu(backtrace)]
+        location: Location,
         source: script::error::Error,
     },
 
     #[snafu(display("Failed to copy table: {}", table_name))]
     CopyTable {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
     #[snafu(display("Failed to insert value into table: {}", table_name))]
     Insert {
         table_name: String,
-        #[snafu(backtrace)]
+        location: Location,
         source: table::error::Error,
     },
 
@@ -293,7 +296,7 @@ impl ErrorExt for Error {
 
             Error::Permission { source, .. } => source.status_code(),
 
-            Error::DescribeStatement { source } => source.status_code(),
+            Error::DescribeStatement { source, .. } => source.status_code(),
 
             Error::HandleHeartbeatResponse { source, .. }
             | Error::TableMetadataManager { source, .. } => source.status_code(),
@@ -306,17 +309,17 @@ impl ErrorExt for Error {
             Error::StartServer { source, .. } => source.status_code(),
             Error::ShutdownServer { source, .. } => source.status_code(),
 
-            Error::ParseSql { source } => source.status_code(),
+            Error::ParseSql { source, .. } => source.status_code(),
 
             Error::InvalidateTableCache { source, .. } => source.status_code(),
 
-            Error::Table { source }
+            Error::Table { source, .. }
             | Error::CopyTable { source, .. }
             | Error::Insert { source, .. } => source.status_code(),
 
             Error::OpenRaftEngineBackend { .. } => StatusCode::StorageUnavailable,
 
-            Error::RequestQuery { source } => source.status_code(),
+            Error::RequestQuery { source, .. } => source.status_code(),
 
             Error::FindDatanode { .. }
             | Error::VectorToGrpcColumn { .. }
@@ -330,22 +333,21 @@ impl ErrorExt for Error {
 
             Error::Catalog { source, .. } => source.status_code(),
 
-            Error::StartMetaClient { source } | Error::CreateMetaHeartbeatStream { source, .. } => {
-                source.status_code()
-            }
+            Error::StartMetaClient { source, .. }
+            | Error::CreateMetaHeartbeatStream { source, .. } => source.status_code(),
 
-            Error::PlanStatement { source }
+            Error::PlanStatement { source, .. }
             | Error::ReadTable { source, .. }
-            | Error::ExecLogicalPlan { source } => source.status_code(),
+            | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
             Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
-            Error::InvokeRegionServer { source } => source.status_code(),
+            Error::InvokeRegionServer { source, .. } => source.status_code(),
 
-            Error::External { source } => source.status_code(),
+            Error::External { source, .. } => source.status_code(),
             Error::FindTableRoute { source, .. } => source.status_code(),
 
-            Error::StartScriptManager { source } => source.status_code(),
+            Error::StartScriptManager { source, .. } => source.status_code(),
 
             Error::TableOperation { source, .. } => source.status_code(),
         }

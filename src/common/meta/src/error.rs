@@ -16,6 +16,7 @@ use std::str::Utf8Error;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
@@ -23,8 +24,9 @@ use table::metadata::TableId;
 
 use crate::peer::Peer;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
@@ -83,7 +85,8 @@ pub enum Error {
     #[snafu(display("Failed to build table meta for table: {}", table_name))]
     BuildTableMeta {
         table_name: String,
-        source: table::metadata::TableMetaBuilderError,
+        #[snafu(source)]
+        error: table::metadata::TableMetaBuilderError,
         location: Location,
     },
 
@@ -102,19 +105,22 @@ pub enum Error {
     #[snafu(display("Failed to decode protobuf"))]
     DecodeProto {
         location: Location,
-        source: prost::DecodeError,
+        #[snafu(source)]
+        error: prost::DecodeError,
     },
 
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Failed to decode object from json"))]
     DecodeJson {
         location: Location,
-        source: JsonError,
+        #[snafu(source)]
+        error: JsonError,
     },
 
     #[snafu(display("Payload not exist"))]
@@ -125,7 +131,8 @@ pub enum Error {
 
     #[snafu(display("Failed to serde json"))]
     SerdeJson {
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 
@@ -177,7 +184,8 @@ pub enum Error {
     #[snafu(display("Failed to convert raw key to str"))]
     ConvertRawKey {
         location: Location,
-        source: Utf8Error,
+        #[snafu(source)]
+        error: Utf8Error,
     },
 
     #[snafu(display("Table nod found, table: {}", table_name))]

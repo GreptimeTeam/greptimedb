@@ -16,13 +16,15 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported physical plan: {}", name))]
     UnsupportedPlan { name: String, location: Location },
@@ -41,13 +43,15 @@ pub enum Error {
 
     #[snafu(display("Failed to decode substrait relation"))]
     DecodeRel {
-        source: DecodeError,
+        #[snafu(source)]
+        error: DecodeError,
         location: Location,
     },
 
     #[snafu(display("Failed to encode substrait relation"))]
     EncodeRel {
-        source: EncodeError,
+        #[snafu(source)]
+        error: EncodeError,
         location: Location,
     },
 
@@ -69,7 +73,8 @@ pub enum Error {
 
     #[snafu(display("Internal error from DataFusion"))]
     DFInternal {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -110,13 +115,15 @@ pub enum Error {
 
     #[snafu(display("Failed to encode DataFusion plan"))]
     EncodeDfPlan {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 
     #[snafu(display("Failed to decode DataFusion plan"))]
     DecodeDfPlan {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 }

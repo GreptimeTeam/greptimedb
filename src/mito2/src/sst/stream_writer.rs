@@ -32,7 +32,6 @@ use crate::error::WriteParquetSnafu;
 /// storage by chunks to reduce memory consumption.
 pub struct BufferedWriter {
     inner: InnerBufferedWriter,
-    arrow_schema: SchemaRef,
 }
 
 type InnerBufferedWriter = LazyBufferedWriter<
@@ -79,7 +78,6 @@ impl BufferedWriter {
                     })
                 }),
             ),
-            arrow_schema,
         })
     }
 

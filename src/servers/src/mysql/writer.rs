@@ -26,6 +26,7 @@ use opensrv_mysql::{
 };
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use snafu::ErrorCompat;
 use tokio::io::AsyncWrite;
 
 use crate::error::{self, Error, OtherSnafu, Result};
@@ -211,7 +212,8 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         );
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
-        w.error(kind, error.to_string().as_bytes()).await?;
+        let error = error.iter_chain().last().unwrap().to_string();
+        w.error(kind, error.as_bytes()).await?;
         Ok(())
     }
 }

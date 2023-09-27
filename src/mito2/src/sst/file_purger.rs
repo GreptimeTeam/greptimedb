@@ -19,6 +19,7 @@ use common_telemetry::{error, info};
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::FileId;
 
@@ -39,10 +40,11 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
 
 pub type FilePurgerRef = Arc<dyn FilePurger>;
 
+/// Purger that purges file for current region.
 pub struct LocalFilePurger {
     scheduler: SchedulerRef,
-
     sst_layer: AccessLayerRef,
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl fmt::Debug for LocalFilePurger {
@@ -54,10 +56,16 @@ impl fmt::Debug for LocalFilePurger {
 }
 
 impl LocalFilePurger {
-    pub fn new(scheduler: SchedulerRef, sst_layer: AccessLayerRef) -> Self {
+    /// Creates a new purger.
+    pub fn new(
+        scheduler: SchedulerRef,
+        sst_layer: AccessLayerRef,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
         Self {
             scheduler,
             sst_layer,
+            cache_manager,
         }
     }
 }
@@ -67,6 +75,11 @@ impl FilePurger for LocalFilePurger {
         let file_id = request.file_id;
         let region_id = request.region_id;
         let sst_layer = self.sst_layer.clone();
+
+        // Remove meta of the file from cache.
+        if let Some(cache) = &self.cache_manager {
+            cache.remove_parquet_meta_data(region_id, file_id);
+        }
 
         if let Err(e) = self.scheduler.schedule(Box::pin(async move {
             if let Err(e) = sst_layer.delete_sst(file_id).await {
@@ -113,7 +126,7 @@ mod tests {
         let scheduler = Arc::new(LocalScheduler::new(3));
         let layer = Arc::new(AccessLayer::new(sst_dir, object_store.clone()));
 
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer));
+        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
 
         {
             let handle = FileHandle::new(
