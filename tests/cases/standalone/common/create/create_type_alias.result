@@ -76,5 +76,5 @@ DESC TABLE data_types;
 
 DROP TABLE data_types;
 
-Affected Rows: 1
+Affected Rows: 0
 

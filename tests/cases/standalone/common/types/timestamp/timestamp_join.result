@@ -24,9 +24,9 @@ select count(*) from timestamp2 inner join timestamp1 on (timestamp1.i = timesta
 
 DROP TABLE timestamp1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE timestamp2;
 
-Affected Rows: 1
+Affected Rows: 0
 

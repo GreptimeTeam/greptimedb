@@ -31,7 +31,7 @@ Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqual
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- DOUBLE type
 CREATE TABLE doubles(d DOUBLE, ts TIMESTAMP TIME INDEX);
@@ -64,5 +64,5 @@ Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqua
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

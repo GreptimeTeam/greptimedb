@@ -63,5 +63,5 @@ SELECT DISTINCT integers.i FROM integers ORDER BY integers.i DESC;
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

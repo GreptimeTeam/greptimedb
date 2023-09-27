@@ -60,5 +60,5 @@ Error: 2000(InvalidSyntax), Failed to parse value: Failed to parse 1900-1-1 00-0
 
 DROP TABLE timestamp;
 
-Affected Rows: 1
+Affected Rows: 0
 

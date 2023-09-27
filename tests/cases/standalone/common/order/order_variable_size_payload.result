@@ -392,41 +392,41 @@ ORDER BY "Sort", "EmployeeID";
 
 DROP TABLE t0;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test0;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test4;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE tpch_q1_agg;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test5;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test6;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP table test7;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP table test8;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE DirectReports;
 
-Affected Rows: 1
+Affected Rows: 0
 

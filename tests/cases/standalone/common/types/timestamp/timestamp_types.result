@@ -372,9 +372,9 @@ select '2008-01-01 00:00:11'::TIMESTAMP_NS = '2008-01-01 00:00:11'::TIMESTAMP_S;
 
 DROP TABLE timestamp;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE timestamp_two;
 
-Affected Rows: 1
+Affected Rows: 0
 

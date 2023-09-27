@@ -59,7 +59,7 @@ tql eval (60, 60, '1s') stddev_over_time((metric[1m]));
 
 drop table metric;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- load 10s
 --   metric 1.5990505637277868 1.5990505637277868 1.5990505637277868
@@ -97,7 +97,7 @@ tql eval (60, 60, '1s') stddev_over_time(metric[1m]);
 
 drop table metric;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- Port from functions.test L632 - L680, commit 001ee2620e094970e5657ce39275b2fccdbd1359
 -- Include quantile over time
@@ -163,7 +163,7 @@ Affected Rows: 8
 -- tql eval (60, 60, '1s') (quantile_over_time(2, (data[1m])));
 drop table data;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- Port from functions.test L773 - L802, commit 001ee2620e094970e5657ce39275b2fccdbd1359
 -- Include max/min/last over time
@@ -219,5 +219,5 @@ Affected Rows: 15
 -- tql eval (60, 60, '1s') last_over_time(data[1m]);
 drop table data;
 
-Affected Rows: 1
+Affected Rows: 0
 

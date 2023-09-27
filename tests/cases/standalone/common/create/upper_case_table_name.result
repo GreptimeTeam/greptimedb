@@ -29,7 +29,7 @@ select * from "system_Metric";
 
 drop table system_Metric;
 
-Affected Rows: 1
+Affected Rows: 0
 
 use public;
 

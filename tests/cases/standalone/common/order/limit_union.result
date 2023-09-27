@@ -30,5 +30,5 @@ SELECT COUNT(*) FROM (SELECT * FROM integers UNION ALL SELECT * FROM integers LI
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

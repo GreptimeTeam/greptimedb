@@ -173,5 +173,5 @@ Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '100
 
 DROP TABLE timestamp;
 
-Affected Rows: 1
+Affected Rows: 0
 

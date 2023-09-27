@@ -153,7 +153,7 @@ impl StatementExecutor {
             .await
             .context(error::InvalidateTableCacheSnafu)?;
 
-        Ok(Output::AffectedRows(1))
+        Ok(Output::AffectedRows(0))
     }
 
     pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
@@ -181,9 +181,8 @@ impl StatementExecutor {
         table_info: Arc<TableInfo>,
         expr: AlterExpr,
     ) -> Result<()> {
-        let request: table::requests::AlterTableRequest =
-            common_grpc_expr::alter_expr_to_request(table_id, expr)
-                .context(AlterExprToRequestSnafu)?;
+        let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
+            .context(AlterExprToRequestSnafu)?;
 
         let AlterTableRequest { table_name, .. } = &request;
 

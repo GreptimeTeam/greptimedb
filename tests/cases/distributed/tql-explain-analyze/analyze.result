@@ -29,5 +29,5 @@ TQL ANALYZE (0, 10, '5s') test;
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 

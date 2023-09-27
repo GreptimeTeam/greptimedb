@@ -16,7 +16,7 @@ SELECT COUNT(*) FROM integers;
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE integers(i BIGINT, j INTEGER, ts TIMESTAMP TIME INDEX);
 
@@ -37,5 +37,5 @@ SELECT * FROM integers;
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

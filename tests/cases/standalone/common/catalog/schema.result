@@ -37,7 +37,7 @@ Affected Rows: 0
 
 DROP TABLE hello;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE hello(i TIMESTAMP TIME INDEX);
 
@@ -83,7 +83,7 @@ SHOW TABLES;
 
 DROP TABLE hello;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE hello;
 

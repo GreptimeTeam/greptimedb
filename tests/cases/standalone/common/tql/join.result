@@ -94,9 +94,9 @@ tql eval(0, 10, '5s') sum(completion / 1000) + sum(completion / 1000);
 
 drop table completion;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table prompt;
 
-Affected Rows: 1
+Affected Rows: 0
 

@@ -166,41 +166,41 @@ limit 1;
 
 drop table t_1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_2;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_3;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_4;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_5;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_6;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_7;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_8;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_9;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t_10;
 
-Affected Rows: 1
+Affected Rows: 0
 

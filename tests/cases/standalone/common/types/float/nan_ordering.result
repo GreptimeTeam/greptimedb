@@ -96,7 +96,7 @@ SELECT COUNT(*) FROM floats WHERE f < 0;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- DOUBLE type
 -- storing nan in a table
@@ -195,5 +195,5 @@ SELECT COUNT(*) FROM doubles WHERE d < 0;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

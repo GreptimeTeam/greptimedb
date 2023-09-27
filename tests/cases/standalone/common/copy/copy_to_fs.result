@@ -20,5 +20,5 @@ Affected Rows: 2
 
 drop table demo;
 
-Affected Rows: 1
+Affected Rows: 0
 

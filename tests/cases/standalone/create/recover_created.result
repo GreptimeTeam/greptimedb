@@ -8,11 +8,11 @@ Affected Rows: 0
 
 drop table t1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table t2;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- SQLNESS ARG restart=true
 show tables;
@@ -37,5 +37,5 @@ desc table t3;
 
 drop table t3;
 
-Affected Rows: 1
+Affected Rows: 0
 
