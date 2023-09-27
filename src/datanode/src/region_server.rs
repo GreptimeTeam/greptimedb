@@ -36,7 +36,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionState;
 use datafusion_common::DataFusionError;
-use datafusion_expr::{Expr as DfExpr, TableType};
+use datafusion_expr::{Expr as DfExpr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
 use futures_util::future::try_join_all;
 use prost::Message;
@@ -497,5 +497,12 @@ impl TableProvider for DummyTableProvider {
         Ok(Arc::new(DfPhysicalPlanAdapter(Arc::new(
             StreamScanAdapter::new(stream),
         ))))
+    }
+
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&DfExpr],
+    ) -> DfResult<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 }
