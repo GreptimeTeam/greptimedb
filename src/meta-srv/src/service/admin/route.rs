@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use common_catalog::parse_full_table_name;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use snafu::{OptionExt, ResultExt};
@@ -35,15 +34,15 @@ impl HttpHandler for RouteHandler {
         _path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let table_name =
-            params
-                .get("full_table_name")
-                .context(error::MissingRequiredParameterSnafu {
-                    param: "full_table_name",
-                })?;
-
-        let (catalog, schema, table) =
-            parse_full_table_name(table_name).context(error::InvalidFullTableNameSnafu)?;
+        let catalog = params
+            .get("catalog")
+            .context(error::MissingRequiredParameterSnafu { param: "catalog" })?;
+        let schema = params
+            .get("schema")
+            .context(error::MissingRequiredParameterSnafu { param: "schema" })?;
+        let table = params
+            .get("table")
+            .context(error::MissingRequiredParameterSnafu { param: "table" })?;
 
         let key = TableNameKey::new(catalog, schema, table);
 
@@ -54,7 +53,7 @@ impl HttpHandler for RouteHandler {
             .await
             .context(error::TableMetadataManagerSnafu)?
             .map(|x| x.table_id())
-            .context(TableNotFoundSnafu { name: table_name })?;
+            .context(TableNotFoundSnafu { name: table })?;
 
         let table_route_value = self
             .table_metadata_manager

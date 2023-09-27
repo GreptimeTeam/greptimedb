@@ -269,6 +269,7 @@ mod tests {
         test_ok("cpu:metrics");
         test_ok(":cpu:metrics");
         test_ok("sys.cpu.system");
+        test_ok("foo-bar");
     }
 
     #[test]

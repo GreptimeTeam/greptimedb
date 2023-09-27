@@ -13,9 +13,6 @@
 // limitations under the License.
 
 use consts::DEFAULT_CATALOG_NAME;
-use snafu::ensure;
-
-use crate::error::Result;
 
 pub mod consts;
 pub mod error;
@@ -24,17 +21,6 @@ pub mod error;
 #[inline]
 pub fn format_full_table_name(catalog: &str, schema: &str, table: &str) -> String {
     format!("{catalog}.{schema}.{table}")
-}
-
-pub fn parse_full_table_name(table_name: &str) -> Result<(&str, &str, &str)> {
-    let result = table_name.split('.').collect::<Vec<_>>();
-
-    ensure!(
-        result.len() == 3,
-        error::InvalidFullTableNameSnafu { table_name }
-    );
-
-    Ok((result[0], result[1], result[2]))
 }
 
 /// Build db name from catalog and schema string
