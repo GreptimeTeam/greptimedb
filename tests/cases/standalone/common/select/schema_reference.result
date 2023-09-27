@@ -1,0 +1,21 @@
+-- statement ok
+create schema s1;
+
+Affected Rows: 1
+
+-- statement ok
+create table s1.tbl(i int, b timestamp time index);
+
+Affected Rows: 0
+
+-- statement ok
+select s1.tbl.i from s1.tbl;
+
+++
+++
+
+-- statement error
+select s2.tbl.i from s1.tbl;
+
+Error: 3000(PlanQuery), No field named s2.tbl.i. Valid fields are s1.tbl.i, s1.tbl.b.
+
