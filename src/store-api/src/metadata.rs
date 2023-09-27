@@ -1133,7 +1133,7 @@ mod test {
     #[test]
     fn test_debug_for_column_metadata() {
         let region_metadata = build_test_region_metadata();
-        let formated = format!("{:?}", region_metadata);
-        assert_eq!(formated, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c Timestamp not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
+        let formatted = format!("{:?}", region_metadata);
+        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c Timestamp not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
     }
 }

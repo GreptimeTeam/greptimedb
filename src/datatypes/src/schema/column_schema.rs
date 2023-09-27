@@ -426,9 +426,15 @@ mod tests {
 
     #[test]
     fn test_debug_for_column_schema() {
-        let column_schema = ColumnSchema::new("test_column", ConcreteDataType::int32_datatype(), false);
+        let column_schema_int8 =
+            ColumnSchema::new("test_column_1", ConcreteDataType::int8_datatype(), true);
 
-        let formated = format!("{:?}", column_schema);
-        assert_eq!(formated, "test_column Int32 not null");
+        let column_schema_int32 =
+            ColumnSchema::new("test_column_2", ConcreteDataType::int32_datatype(), false);
+
+        let formatted_int8 = format!("{:?}", column_schema_int8);
+        let formatted_int32 = format!("{:?}", column_schema_int32);
+        assert_eq!(formatted_int8, "test_column_1 Int8 nullable");
+        assert_eq!(formatted_int32, "test_column_2 Int32 not null");
     }
 }
