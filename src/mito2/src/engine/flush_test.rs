@@ -76,7 +76,7 @@ async fn test_flush_engine() {
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
-            write_buffer_manager.clone(),
+            Some(write_buffer_manager.clone()),
             Some(listener.clone()),
         )
         .await;
@@ -135,7 +135,7 @@ async fn test_write_stall() {
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
-            write_buffer_manager.clone(),
+            Some(write_buffer_manager.clone()),
             Some(listener.clone()),
         )
         .await;
@@ -197,7 +197,11 @@ async fn test_flush_empty() {
     let mut env = TestEnv::new();
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), write_buffer_manager.clone(), None)
+        .create_engine_with(
+            MitoConfig::default(),
+            Some(write_buffer_manager.clone()),
+            None,
+        )
         .await;
 
     let region_id = RegionId::new(1, 1);

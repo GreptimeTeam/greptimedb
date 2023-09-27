@@ -115,10 +115,17 @@ impl VersionControl {
     }
 
     /// Mark all opened files as deleted and set the delete marker in [VersionControlData]
-    pub(crate) fn mark_dropped(&self) {
+    pub(crate) fn mark_dropped(&self, memtable_builder: &MemtableBuilderRef) {
+        let version = self.current().version;
+        let new_mutable = memtable_builder.build(&version.metadata);
+
         let mut data = self.data.write().unwrap();
         data.is_dropped = true;
         data.version.ssts.mark_all_deleted();
+        // Reset version so we can release the reference to memtables and SSTs.
+        let new_version =
+            Arc::new(VersionBuilder::new(version.metadata.clone(), new_mutable).build());
+        data.version = new_version;
     }
 
     /// Alter schema of the region.

@@ -120,7 +120,7 @@ impl TestEnv {
     pub async fn create_engine_with(
         &mut self,
         config: MitoConfig,
-        manager: WriteBufferManagerRef,
+        manager: Option<WriteBufferManagerRef>,
         listener: Option<EventListenerRef>,
     ) -> MitoEngine {
         let (log_store, object_store) = self.create_log_and_object_store().await;

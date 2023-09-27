@@ -56,7 +56,7 @@ impl<S> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_dropped(region_id);
 
         // mark region version as dropped
-        region.version_control.mark_dropped();
+        region.version_control.mark_dropped(&self.memtable_builder);
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id
@@ -66,8 +66,20 @@ impl<S> RegionWorkerLoop<S> {
         let region_dir = region.access_layer.region_dir().to_owned();
         let object_store = self.object_store.clone();
         let dropping_regions = self.dropping_regions.clone();
+        let listener = self.listener.clone();
         common_runtime::spawn_bg(async move {
-            later_drop_task(region_id, region_dir, object_store, dropping_regions).await;
+            let gc_duration = listener
+                .on_later_drop_begin(region_id)
+                .unwrap_or(Duration::from_secs(GC_TASK_INTERVAL_SEC));
+            let removed = later_drop_task(
+                region_id,
+                region_dir,
+                object_store,
+                dropping_regions,
+                gc_duration,
+            )
+            .await;
+            listener.on_later_drop_end(region_id, removed);
         });
 
         Ok(Output::AffectedRows(0))
@@ -75,7 +87,7 @@ impl<S> RegionWorkerLoop<S> {
 }
 
 /// Background GC task to remove the entire region path once it find there is no
-/// parquet file left.
+/// parquet file left. Returns whether the path is removed.
 ///
 /// This task will keep running until finished. Any resource captured by it will
 /// not be released before then. Be sure to only pass weak reference if something
@@ -85,18 +97,24 @@ async fn later_drop_task(
     region_path: String,
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
-) {
+    gc_duration: Duration,
+) -> bool {
     for _ in 0..MAX_RETRY_TIMES {
-        sleep(Duration::from_secs(GC_TASK_INTERVAL_SEC)).await;
+        sleep(gc_duration).await;
         let result = remove_region_dir_once(&region_path, &object_store).await;
-        if let Err(err) = result {
-            warn!(
-                "Error occurs during trying to GC region dir {}: {}",
-                region_path, err
-            );
-        } else {
-            dropping_regions.remove_region(region_id);
-            info!("Region {} is dropped", region_path);
+        match result {
+            Err(err) => {
+                warn!(
+                    "Error occurs during trying to GC region dir {}: {}",
+                    region_path, err
+                );
+            }
+            Ok(true) => {
+                dropping_regions.remove_region(region_id);
+                info!("Region {} is dropped", region_path);
+                return true;
+            }
+            Ok(false) => (),
         }
     }
 
@@ -104,13 +122,16 @@ async fn later_drop_task(
         "Failed to GC region dir {} after {} retries, giving up",
         region_path, MAX_RETRY_TIMES
     );
+
+    false
 }
 
 // TODO(ruihang): place the marker in a separate dir
+/// Removes region dir if there is no parquet files, returns whether the directory is removed.
 pub(crate) async fn remove_region_dir_once(
     region_path: &str,
     object_store: &ObjectStore,
-) -> Result<()> {
+) -> Result<bool> {
     // list all files under the given region path to check if there are un-deleted parquet files
     let mut has_parquet_file = false;
     // record all paths that neither ends with .parquet nor the marker file
@@ -143,6 +164,8 @@ pub(crate) async fn remove_region_dir_once(
             .remove_all(region_path)
             .await
             .context(OpenDalSnafu)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
-    Ok(())
 }
