@@ -51,11 +51,7 @@ impl fmt::Debug for ColumnSchema {
             "{} {} {}",
             self.name,
             self.data_type,
-            if self.is_nullable {
-                "null"
-            } else {
-                "not null"
-            },
+            if self.is_nullable { "null" } else { "not null" },
         )?;
 
         // Add default constraint if present
