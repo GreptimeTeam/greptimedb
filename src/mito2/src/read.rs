@@ -30,10 +30,13 @@ use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
-use datatypes::prelude::{DataType, ScalarVector};
+use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
+use datatypes::types::TimestampType;
 use datatypes::value::ValueRef;
 use datatypes::vectors::{
-    BooleanVector, Helper, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
+    Vector, VectorRef,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
@@ -353,6 +356,38 @@ impl Batch {
                 }
             })
             .collect()
+    }
+
+    pub(crate) fn timestamps_native(&self) -> Option<&[i64]> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
+        let values = match self.timestamps.data_type() {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampSecondVector>()
+                .map(|v| v.as_arrow().values()),
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .map(|v| v.as_arrow().values()),
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondVector>()
+                .map(|v| v.as_arrow().values()),
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampNanosecondVector>()
+                .map(|v| v.as_arrow().values()),
+            _ => return None,
+        };
+
+        values.map(|v| &**v)
     }
 
     /// Takes the batch in place.
