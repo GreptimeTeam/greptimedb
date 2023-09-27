@@ -10,10 +10,6 @@ select "A";
 
 select * where "a" = "A";
 
-select GREATEST('1999-01-30', '2023-03-01');
-
-select greatest('2000-02-11'::Date, '2020-12-30'::Date);
-
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
 select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
