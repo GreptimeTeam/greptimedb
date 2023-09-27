@@ -142,7 +142,7 @@ impl PlanRewriter {
             return true;
         }
 
-        match Categorizer::check_plan(plan,self.partition_cols.clone()) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
