@@ -38,6 +38,7 @@ pub struct UpdateDatanodeTableContext<'a> {
     pub region_storage_path: &'a str,
     pub region_options: &'a HashMap<String, String>,
 }
+
 pub struct DatanodeTableKey {
     datanode_id: DatanodeId,
     table_id: TableId,
@@ -213,15 +214,16 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
+        let need_update_options = current_region_options != new_region_options;
         for (datanode, regions) in new_region_distribution.into_iter() {
-            let update_needed =
+            let need_update =
                 if let Some(current_region) = current_region_distribution.get(&datanode) {
                     // Updates if need.
-                    *current_region != regions || current_region_options != new_region_options
+                    *current_region != regions || need_update_options
                 } else {
                     true
                 };
-            if update_needed {
+            if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
                 let val = DatanodeTableValue::new(
