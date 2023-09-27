@@ -529,7 +529,7 @@ macro_rules! define_into_tonic_status {
                 let metadata = MetadataMap::from_headers(headers);
                 tonic::Status::with_metadata(
                     $crate::error::status_to_tonic_code(status_code),
-                    err.to_string(),
+                    root_error,
                     metadata,
                 )
             }
