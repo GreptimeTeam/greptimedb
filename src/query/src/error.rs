@@ -142,7 +142,6 @@ pub enum Error {
 
     #[snafu(display(""))]
     PlanSql {
-        sql: String,
         #[snafu(source)]
         error: DataFusionError,
         location: Location,

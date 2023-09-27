@@ -27,7 +27,6 @@ use snafu::{Location, Snafu};
 pub enum InnerError {
     #[snafu(display(""))]
     Datafusion {
-        msg: &'static str,
         #[snafu(source)]
         error: DataFusionError,
         location: Location,

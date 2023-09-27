@@ -61,7 +61,6 @@ pub enum Error {
     // Syntax error from sql parser.
     #[snafu(display(""))]
     Syntax {
-        sql: String,
         #[snafu(source)]
         error: ParserError,
     },

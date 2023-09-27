@@ -45,8 +45,7 @@ impl<'a> ParserContext<'a> {
                             && w.quote_style.is_none() =>
                     {
                         let _ = self.parser.next_token();
-                        self.parse_tql_eval()
-                            .context(error::SyntaxSnafu { sql: self.sql })
+                        self.parse_tql_eval().context(error::SyntaxSnafu)
                     }
 
                     Keyword::EXPLAIN => {
@@ -56,8 +55,7 @@ impl<'a> ParserContext<'a> {
 
                     Keyword::ANALYZE => {
                         let _ = self.parser.next_token();
-                        self.parse_tql_analyze()
-                            .context(error::SyntaxSnafu { sql: self.sql })
+                        self.parse_tql_analyze().context(error::SyntaxSnafu)
                     }
                     _ => self.unsupported(self.peek_token_as_string()),
                 }
@@ -136,8 +134,8 @@ impl<'a> ParserContext<'a> {
         let start = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
         let end = Self::parse_string_or_number(parser, Token::Comma).unwrap_or("0".to_string());
         let step = Self::parse_string_or_number(parser, Token::RParen).unwrap_or("5m".to_string());
-        let query = Self::parse_tql_query(parser, self.sql, delimiter)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let query =
+            Self::parse_tql_query(parser, self.sql, delimiter).context(error::SyntaxSnafu)?;
 
         Ok(Statement::Tql(Tql::Explain(TqlExplain {
             query,

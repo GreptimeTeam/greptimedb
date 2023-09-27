@@ -218,7 +218,6 @@ pub enum Error {
 
     #[snafu(display(""))]
     Datafusion {
-        msg: String,
         #[snafu(source)]
         error: DataFusionError,
         location: Location,

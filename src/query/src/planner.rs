@@ -76,14 +76,9 @@ impl DfLogicalPlanner {
 
         let sql_to_rel = SqlToRel::new_with_options(&context_provider, parser_options);
 
-        let result = sql_to_rel.statement_to_plan(df_stmt).with_context(|_| {
-            let sql = if let Statement::Query(query) = stmt {
-                query.inner.to_string()
-            } else {
-                format!("{stmt:?}")
-            };
-            PlanSqlSnafu { sql }
-        })?;
+        let result = sql_to_rel
+            .statement_to_plan(df_stmt)
+            .context(PlanSqlSnafu)?;
         let plan = RangePlanRewriter::new(table_provider, context_provider)
             .rewrite(result)
             .await?;

@@ -22,10 +22,7 @@ use crate::statements::statement::Statement;
 impl<'a> ParserContext<'a> {
     /// Parses select and it's variants.
     pub(crate) fn parse_query(&mut self) -> Result<Statement> {
-        let spquery = self
-            .parser
-            .parse_query()
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let spquery = self.parser.parse_query().context(error::SyntaxSnafu)?;
 
         Ok(Statement::Query(Box::new(Query::try_from(spquery)?)))
     }
