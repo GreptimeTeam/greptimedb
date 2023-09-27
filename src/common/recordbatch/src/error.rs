@@ -55,7 +55,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to poll stream"))]
+    #[snafu(display(""))]
     PollStream {
         #[snafu(source)]
         error: datafusion::error::DataFusionError,

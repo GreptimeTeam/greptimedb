@@ -30,7 +30,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Datafusion error"))]
+    #[snafu(display(""))]
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,

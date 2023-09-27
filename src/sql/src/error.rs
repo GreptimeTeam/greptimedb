@@ -59,7 +59,7 @@ pub enum Error {
     UnsupportedDefaultValue { column_name: String, expr: Expr },
 
     // Syntax error from sql parser.
-    #[snafu(display("Syntax error, sql: {}", sql))]
+    #[snafu(display(""))]
     Syntax {
         sql: String,
         #[snafu(source)]
