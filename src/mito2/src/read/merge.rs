@@ -260,7 +260,8 @@ impl BatchMerger {
 
             if top.last_timestamp() < next.first_timestamp() {
                 output.push_back(top);
-                break;
+                heap.push(CompareTimeSeq(next));
+                continue;
             }
 
             let next_min_ts = next.first_timestamp().unwrap();
@@ -334,12 +335,13 @@ impl PartialOrd for CompareTimeSeq {
 }
 
 impl Ord for CompareTimeSeq {
-    /// Compares by time index, sequence desc.
+    /// Compares by first timestamp desc, first sequence. (The heap is a max-heap).
     fn cmp(&self, other: &CompareTimeSeq) -> Ordering {
         self.0
             .first_timestamp()
             .cmp(&other.0.first_timestamp())
             .then_with(|| other.0.first_sequence().cmp(&self.0.first_sequence()))
+            .reverse()
     }
 }
 
@@ -623,6 +625,46 @@ mod tests {
         ));
         assert!(!merger.is_sorted);
         let batch = merger.merge_batches().unwrap().unwrap();
+        assert_eq!(
+            batch,
+            new_batch(
+                b"k1",
+                &[1, 2, 3, 4, 5],
+                &[10, 11, 10, 11, 10],
+                &[
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put
+                ],
+                &[21, 22, 23, 24, 25]
+            )
+        );
+        assert!(merger.is_sorted);
+    }
+
+    #[test]
+    fn test_batch_merger_unsorted_by_heap() {
+        let mut merger = BatchMerger::new();
+        merger.push(new_batch(
+            b"k1",
+            &[1, 3, 5],
+            &[10, 10, 10],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[21, 23, 25],
+        ));
+        assert!(merger.is_sorted);
+        merger.push(new_batch(
+            b"k1",
+            &[2, 4],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[22, 24],
+        ));
+        assert!(!merger.is_sorted);
+        let batches = merger.merge_batches_by_heap().unwrap();
+        let batch = Batch::concat(batches.into_iter().collect()).unwrap();
         assert_eq!(
             batch,
             new_batch(
