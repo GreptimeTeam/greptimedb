@@ -19,7 +19,6 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::mem;
 
 use async_trait::async_trait;
-use datatypes::scalars::ScalarVector;
 
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
@@ -247,76 +246,108 @@ impl BatchMerger {
             return Ok(VecDeque::new());
         }
 
-        let batches = mem::take(&mut self.batches);
-        let mut output = VecDeque::with_capacity(batches.len());
-        let mut heap = BinaryHeap::from_iter(batches.into_iter().map(CompareTimeSeq));
-        while !heap.is_empty() {
-            let top = heap.pop().unwrap().0;
-            let Some(next) = heap.pop() else {
-                output.push_back(top);
+        let mut output = VecDeque::with_capacity(self.batches.len());
+        if self.is_sorted {
+            // Fast path. We can output batches directly.
+            for batch in self.batches.drain(..) {
+                output_batch(&mut output, batch)?;
+            }
+
+            return Ok(output);
+        }
+
+        // Slow path. We need to merge overlapping batches.
+        // Contructs a heap from batches. Batches in the heap is not empty, we need to check
+        // this before pushing a batch into the heap.
+        let mut heap = BinaryHeap::from_iter(self.batches.drain(..).map(CompareTimeSeq));
+        // Reset merger as sorted as we have cleared batches.
+        self.is_sorted = true;
+
+        // Sorts batches.
+        while let Some(top) = heap.pop() {
+            let top = top.0;
+            let Some(next) = heap.peek() else {
+                // If there is no remaining batch, we can output the top-most batch.
+                output_batch(&mut output, top)?;
                 break;
             };
-            let next = next.0;
+            let next = &next.0;
 
             if top.last_timestamp() < next.first_timestamp() {
-                output.push_back(top);
-                heap.push(CompareTimeSeq(next));
+                // If the top-most batch doesn't overlaps with the next batch, we can output it.
+                output_batch(&mut output, top)?;
                 continue;
             }
 
+            // Safety: Batches (top, next) in the heap is not empty, so we can use unwrap here.
+            // Min timestamp in the next batch.
             let next_min_ts = next.first_timestamp().unwrap();
             let timestamps = top.timestamps_native().unwrap();
+            // Binary searches the timestamp in the top batch.
+            // Safety: Batches should have the same timestamp resolution so we can compare the native
+            // value directly.
             match timestamps.binary_search(&next_min_ts.value()) {
-                Ok(end) => {
-                    // We have duplicate timestamps. Each batch should not contain duplicate timestamps so
-                    // timestamps before `end` must less than `next_min_ts`.
-                    output.push_back(top.slice(0, end));
-                    // Removes duplicate timestamp and rebuilds the heap.
-                    if top.sequences.get_data(end).unwrap() > next.first_sequence().unwrap() {
-                        // Keep timestamp in top.
-                        if next.num_rows() > 1 {
-                            heap.push(CompareTimeSeq(next.slice(1, next.num_rows() - 1)));
-                        }
-                        heap.push(CompareTimeSeq(top.slice(end, top.num_rows() - end)));
+                Ok(pos) => {
+                    // They have duplicate timestamps. Batch itself doesn't contain duplicate timestamps so
+                    // timestamps before `pos` must less than `next_min_ts`.
+                    output_batch(&mut output, top.slice(0, pos))?;
+                    // Removes duplicate timestamp and fixes the heap. Keeps the timestamp with largest
+                    // sequence.
+                    // Safety: pos is a valid index returned by `binary_search` and `sequences` are always
+                    // not null.
+                    if top.get_sequence(pos) > next.first_sequence().unwrap() {
+                        // Safety: `next` is not None.
+                        let next = heap.pop().unwrap().0;
+                        // Keeps the timestamp in top and skips the first timestamp in the `next`
+                        // batch.
+                        push_remaining_to_heap(&mut heap, next, 1);
+                        // Skips already outputed timestamps.
+                        push_remaining_to_heap(&mut heap, top, pos);
                     } else {
-                        // Keep timestamp in next.
-                        heap.push(CompareTimeSeq(next));
-                        if top.num_rows() > end + 1 {
-                            heap.push(CompareTimeSeq(top.slice(end + 1, top.num_rows() - end - 1)));
-                        }
+                        // Keeps timestamp in next and skips the duplicated timestamp and already outputed
+                        // timestamp in top.
+                        push_remaining_to_heap(&mut heap, top, pos + 1);
                     }
                 }
-                Err(end) => {
-                    // No duplicate timestamp.
-                    output.push_back(top.slice(0, end));
-                    heap.push(CompareTimeSeq(next));
-                    heap.push(CompareTimeSeq(top.slice(end, top.num_rows() - end)));
+                Err(pos) => {
+                    // No duplicate timestamp. Outputs timestamp before `pos`.
+                    output_batch(&mut output, top.slice(0, pos))?;
+                    push_remaining_to_heap(&mut heap, top, pos);
                 }
             }
         }
-
-        // if !self.is_sorted {
-        //     // Slow path. We need to merge overlapping batches. For simplicity, we
-        //     // just sort the all batches and remove duplications.
-        //     batch.sort_and_dedup()?;
-        //     // We don't need to remove duplications if timestamps of batches
-        //     // are not overlapping.
-        // }
-
-        // Filter rows by op type. Currently, the reader only removes deleted rows but doesn't filter
-        // rows by sequence for simplicity and performance reason.
-        for batch in &mut output {
-            batch.filter_deleted()?;
-        }
-        // batch.filter_deleted()?;
-
-        // Reset merger.
-        self.is_sorted = true;
 
         Ok(output)
     }
 }
 
+/// Skips first `num_to_skip` rows from the batch and pushes remaining batch into the heap if the batch
+/// is still not empty.
+fn push_remaining_to_heap(heap: &mut BinaryHeap<CompareTimeSeq>, batch: Batch, num_to_skip: usize) {
+    let remaining = batch.num_rows() - num_to_skip;
+    if remaining <= 0 {
+        // Nothing remains.
+        return;
+    }
+
+    heap.push(CompareTimeSeq(batch.slice(num_to_skip, remaining)));
+}
+
+/// Removes deleted items from the `batch` and pushes it back to the `output` if
+/// the `batch` is not empty.
+fn output_batch(output: &mut VecDeque<Batch>, mut batch: Batch) -> Result<()> {
+    // Filter rows by op type. Currently, the reader only removes deleted rows but doesn't filter
+    // rows by sequence for simplicity and performance reason.
+    batch.filter_deleted()?;
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    output.push_back(batch);
+    Ok(())
+}
+
+/// Compare [Batch] by timestamp and sequence.
 struct CompareTimeSeq(Batch);
 
 impl PartialEq for CompareTimeSeq {
@@ -335,12 +366,13 @@ impl PartialOrd for CompareTimeSeq {
 }
 
 impl Ord for CompareTimeSeq {
-    /// Compares by first timestamp desc, first sequence. (The heap is a max-heap).
+    /// Compares by first timestamp desc, first sequence. (The heap is a max heap).
     fn cmp(&self, other: &CompareTimeSeq) -> Ordering {
         self.0
             .first_timestamp()
             .cmp(&other.0.first_timestamp())
             .then_with(|| other.0.first_sequence().cmp(&self.0.first_sequence()))
+            // We reverse the ordering as the heap is a max heap.
             .reverse()
     }
 }

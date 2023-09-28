@@ -358,6 +358,7 @@ impl Batch {
             .collect()
     }
 
+    /// Returns timestamps in a native slice or `None` if the batch is empty.
     pub(crate) fn timestamps_native(&self) -> Option<&[i64]> {
         if self.timestamps.is_empty() {
             return None;
@@ -368,26 +369,34 @@ impl Batch {
                 .timestamps
                 .as_any()
                 .downcast_ref::<TimestampSecondVector>()
-                .map(|v| v.as_arrow().values()),
+                .unwrap()
+                .as_arrow()
+                .values(),
             ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => self
                 .timestamps
                 .as_any()
                 .downcast_ref::<TimestampMillisecondVector>()
-                .map(|v| v.as_arrow().values()),
+                .unwrap()
+                .as_arrow()
+                .values(),
             ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => self
                 .timestamps
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondVector>()
-                .map(|v| v.as_arrow().values()),
+                .unwrap()
+                .as_arrow()
+                .values(),
             ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => self
                 .timestamps
                 .as_any()
                 .downcast_ref::<TimestampNanosecondVector>()
-                .map(|v| v.as_arrow().values()),
-            _ => return None,
+                .unwrap()
+                .as_arrow()
+                .values(),
+            other => panic!("timestamps in a Batch has other type {:?}", other),
         };
 
-        values.map(|v| &**v)
+        Some(&**&values)
     }
 
     /// Takes the batch in place.
@@ -427,7 +436,7 @@ impl Batch {
     ///
     /// # Panics
     /// Panics if `index` is out-of-bound or the sequence vector returns null.
-    fn get_sequence(&self, index: usize) -> SequenceNumber {
+    pub(crate) fn get_sequence(&self, index: usize) -> SequenceNumber {
         // Safety: sequences is not null so it actually returns Some.
         self.sequences.get_data(index).unwrap()
     }
@@ -681,12 +690,13 @@ mod tests {
     }
 
     #[test]
-    fn test_first_last_empty() {
+    fn test_empty_batch() {
         let batch = new_batch(&[], &[], &[], &[]);
         assert_eq!(None, batch.first_timestamp());
         assert_eq!(None, batch.last_timestamp());
         assert_eq!(None, batch.first_sequence());
         assert_eq!(None, batch.last_sequence());
+        assert!(batch.timestamps_native().is_none());
     }
 
     #[test]
@@ -740,6 +750,17 @@ mod tests {
             &[22, 23],
         );
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_timestamps_native() {
+        let batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        assert_eq!(&[1, 2, 3, 4], batch.timestamps_native().unwrap());
     }
 
     #[test]
