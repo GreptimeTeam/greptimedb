@@ -37,19 +37,19 @@ pub struct MergeReader {
     nodes: BinaryHeap<Node>,
     /// Batches for the next primary key.
     batch_merger: BatchMerger,
-
+    /// Sorted batches to output.
     output: VecDeque<Batch>,
 }
 
 #[async_trait]
 impl BatchReader for MergeReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        // Takes from sorted output.
         if let Some(batch) = self.output.pop_front() {
             return Ok(Some(batch));
         }
 
-        // Collect batches from sources for the same primary key and return
-        // the collected batch.
+        // Collect batches from sources for the same primary key.
         while !self.nodes.is_empty() {
             // Peek current key.
             let Some(current_key) = self.batch_merger.primary_key() else {
@@ -67,10 +67,9 @@ impl BatchReader for MergeReader {
             self.take_batch_from_heap().await?;
         }
 
-        // Merge collected batches.
-        // self.batch_merger.merge_batches()
+        // Merge collected batches to output.
+        self.output = self.batch_merger.merge_batches()?;
 
-        self.output = self.batch_merger.merge_batches_by_heap()?;
         Ok(self.output.pop_front())
     }
 }
@@ -211,37 +210,7 @@ impl BatchMerger {
 
     /// Merge all buffered batches and returns the merged batch. Then
     /// reset the buffer.
-    fn merge_batches(&mut self) -> Result<Option<Batch>> {
-        if self.batches.is_empty() {
-            return Ok(None);
-        }
-
-        let batches = mem::take(&mut self.batches);
-        // Concat all batches.
-        let mut batch = Batch::concat(batches)?;
-
-        // TODO(yingwen): metrics for sorted and unsorted batches.
-        if !self.is_sorted {
-            // Slow path. We need to merge overlapping batches. For simplicity, we
-            // just sort the all batches and remove duplications.
-            batch.sort_and_dedup()?;
-            // We don't need to remove duplications if timestamps of batches
-            // are not overlapping.
-        }
-
-        // Filter rows by op type. Currently, the reader only removes deleted rows but doesn't filter
-        // rows by sequence for simplicity and performance reason.
-        batch.filter_deleted()?;
-
-        // Reset merger.
-        self.is_sorted = true;
-
-        Ok(Some(batch))
-    }
-
-    /// Merge all buffered batches and returns the merged batch. Then
-    /// reset the buffer.
-    fn merge_batches_by_heap(&mut self) -> Result<VecDeque<Batch>> {
+    fn merge_batches(&mut self) -> Result<VecDeque<Batch>> {
         if self.batches.is_empty() {
             return Ok(VecDeque::new());
         }
@@ -288,8 +257,11 @@ impl BatchMerger {
             // value directly.
             match timestamps.binary_search(&next_min_ts.value()) {
                 Ok(pos) => {
-                    // They have duplicate timestamps. Batch itself doesn't contain duplicate timestamps so
-                    // timestamps before `pos` must less than `next_min_ts`.
+                    // They have duplicate timestamps. Outputs non overlapping timestamps.
+                    // Batch itself doesn't contain duplicate timestamps so timestamps before `pos`
+                    // must be less than `next_min_ts`.
+                    // It's possible to output a very small batch but concatenating small batches
+                    // slows down the reader.
                     output_batch(&mut output, top.slice(0, pos))?;
                     // Removes duplicate timestamp and fixes the heap. Keeps the timestamp with largest
                     // sequence.
@@ -543,17 +515,19 @@ mod tests {
             &[
                 new_batch(
                     b"k1",
-                    &[1, 2, 4, 5, 7],
-                    &[11, 12, 14, 15, 17],
-                    &[
-                        OpType::Put,
-                        OpType::Put,
-                        OpType::Put,
-                        OpType::Put,
-                        OpType::Put,
-                    ],
-                    &[21, 22, 24, 25, 27],
+                    &[1, 2],
+                    &[11, 12],
+                    &[OpType::Put, OpType::Put],
+                    &[21, 22],
                 ),
+                new_batch(
+                    b"k1",
+                    &[4, 5],
+                    &[14, 15],
+                    &[OpType::Put, OpType::Put],
+                    &[24, 25],
+                ),
+                new_batch(b"k1", &[7], &[17], &[OpType::Put], &[27]),
                 new_batch(b"k2", &[3], &[13], &[OpType::Put], &[23]),
             ],
         )
@@ -614,18 +588,16 @@ mod tests {
             &[
                 new_batch(
                     b"k1",
-                    &[1, 2, 3, 4],
-                    &[11, 12, 10, 14],
-                    &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
-                    &[21, 22, 33, 24],
+                    &[1, 2],
+                    &[11, 12],
+                    &[OpType::Put, OpType::Put],
+                    &[21, 22],
                 ),
-                new_batch(
-                    b"k2",
-                    &[1, 3, 10],
-                    &[11, 13, 20],
-                    &[OpType::Put, OpType::Put, OpType::Put],
-                    &[21, 23, 30],
-                ),
+                new_batch(b"k1", &[3], &[10], &[OpType::Put], &[33]),
+                new_batch(b"k1", &[4], &[14], &[OpType::Put], &[24]),
+                new_batch(b"k2", &[1], &[11], &[OpType::Put], &[21]),
+                new_batch(b"k2", &[3], &[13], &[OpType::Put], &[23]),
+                new_batch(b"k2", &[10], &[20], &[OpType::Put], &[30]),
             ],
         )
         .await;
@@ -634,7 +606,7 @@ mod tests {
     #[test]
     fn test_batch_merger_empty() {
         let mut merger = BatchMerger::new();
-        assert!(merger.merge_batches().unwrap().is_none());
+        assert!(merger.merge_batches().unwrap().is_empty());
     }
 
     #[test]
@@ -656,7 +628,8 @@ mod tests {
             &[22, 24],
         ));
         assert!(!merger.is_sorted);
-        let batch = merger.merge_batches().unwrap().unwrap();
+        let batches = merger.merge_batches().unwrap();
+        let batch = Batch::concat(batches.into_iter().collect()).unwrap();
         assert_eq!(
             batch,
             new_batch(
@@ -695,7 +668,7 @@ mod tests {
             &[22, 24],
         ));
         assert!(!merger.is_sorted);
-        let batches = merger.merge_batches_by_heap().unwrap();
+        let batches = merger.merge_batches().unwrap();
         let batch = Batch::concat(batches.into_iter().collect()).unwrap();
         assert_eq!(
             batch,
@@ -715,4 +688,6 @@ mod tests {
         );
         assert!(merger.is_sorted);
     }
+
+    // TODO(yingwen): Cases that all values for the key are deleted.
 }
