@@ -603,6 +603,44 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_merge_deleted() {
+        let reader1 = VecBatchReader::new(&[
+            new_batch(
+                b"k1",
+                &[1, 2],
+                &[11, 12],
+                &[OpType::Delete, OpType::Delete],
+                &[21, 22],
+            ),
+            new_batch(
+                b"k2",
+                &[2, 3],
+                &[12, 13],
+                &[OpType::Delete, OpType::Put],
+                &[22, 23],
+            ),
+        ]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[4, 5],
+            &[14, 15],
+            &[OpType::Delete, OpType::Delete],
+            &[24, 25],
+        )]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_iter(Box::new(reader2))
+            .build()
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[new_batch(b"k2", &[3], &[13], &[OpType::Put], &[23])],
+        )
+        .await;
+    }
+
     #[test]
     fn test_batch_merger_empty() {
         let mut merger = BatchMerger::new();
@@ -688,6 +726,4 @@ mod tests {
         );
         assert!(merger.is_sorted);
     }
-
-    // TODO(yingwen): Cases that all values for the key are deleted.
 }
