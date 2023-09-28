@@ -44,33 +44,20 @@ pub struct MergeReader {
 #[async_trait]
 impl BatchReader for MergeReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        // Takes from sorted output.
-        if let Some(batch) = self.output.pop_front() {
-            return Ok(Some(batch));
-        }
-
-        // Collect batches from sources for the same primary key.
-        while !self.nodes.is_empty() {
-            // Peek current key.
-            let Some(current_key) = self.batch_merger.primary_key() else {
-                // The merger is empty, we could push it directly.
-                self.take_batch_from_heap().await?;
-                // Try next node.
-                continue;
-            };
-            // If next node has a different key, we have finish collecting current key.
-            // Safety: node is not empty.
-            if self.nodes.peek().unwrap().primary_key() != current_key {
-                break;
+        while !self.output.is_empty() || !self.nodes.is_empty() {
+            // Takes from sorted output if there are batches in it.
+            if let Some(batch) = self.output.pop_front() {
+                return Ok(Some(batch));
             }
-            // They have the same primary key, we could take it and try next node.
-            self.take_batch_from_heap().await?;
+
+            // Collects batches to the merger.
+            self.collect_batches_to_merge().await?;
+
+            // Merge collected batches to output.
+            self.output = self.batch_merger.merge_batches()?;
         }
 
-        // Merge collected batches to output.
-        self.output = self.batch_merger.merge_batches()?;
-
-        Ok(self.output.pop_front())
+        Ok(None)
     }
 }
 
@@ -91,6 +78,28 @@ impl MergeReader {
             batch_merger: BatchMerger::new(),
             output: VecDeque::new(),
         })
+    }
+
+    /// Collect batches from sources for the same primary key.
+    async fn collect_batches_to_merge(&mut self) -> Result<()> {
+        while !self.nodes.is_empty() {
+            // Peek current key.
+            let Some(current_key) = self.batch_merger.primary_key() else {
+                // The merger is empty, we could push it directly.
+                self.take_batch_from_heap().await?;
+                // Try next node.
+                continue;
+            };
+            // If next node has a different key, we have finish collecting current key.
+            // Safety: node is not empty.
+            if self.nodes.peek().unwrap().primary_key() != current_key {
+                break;
+            }
+            // They have the same primary key, we could take it and try next node.
+            self.take_batch_from_heap().await?;
+        }
+
+        Ok(())
     }
 
     /// Takes batch from heap top and reheap.
