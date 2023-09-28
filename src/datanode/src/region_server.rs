@@ -285,11 +285,14 @@ impl RegionServerInner {
         // TODO(ruihang): add metrics and set trace id
 
         let QueryRequest {
-            header: _,
+            header,
             region_id,
             plan,
         } = request;
         let region_id = RegionId::from_u64(region_id);
+
+        let dbname = header.map(|h| h.dbname);
+        let ctx = QueryContext::with_db_name(dbname.as_ref());
 
         // build dummy catalog list
         let engine = self
@@ -306,7 +309,7 @@ impl RegionServerInner {
             .context(DecodeLogicalPlanSnafu)?;
         let result = self
             .query_engine
-            .execute(logical_plan.into(), QueryContext::arc())
+            .execute(logical_plan.into(), ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 
