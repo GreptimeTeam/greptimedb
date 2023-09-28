@@ -90,7 +90,7 @@ impl Deleter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(deletes, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(deletes, &ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 
@@ -109,7 +109,7 @@ impl Deleter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(deletes, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(deletes, &ctx).await?;
         Ok(affected_rows as _)
     }
 }
@@ -118,10 +118,13 @@ impl Deleter {
     async fn do_request(
         &self,
         requests: RegionDeleteRequests,
-        trace_id: u64,
-        span_id: u64,
+        ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
-        let header = RegionRequestHeader { trace_id, span_id };
+        let header = RegionRequestHeader {
+            trace_id: ctx.trace_id(),
+            span_id: 0,
+            dbname: ctx.get_db_string(),
+        };
         let request_factory = RegionRequestFactory::new(header);
 
         let tasks = self

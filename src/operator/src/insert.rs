@@ -104,7 +104,7 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, &ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 
@@ -126,7 +126,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, &ctx).await?;
         Ok(affected_rows as _)
     }
 
@@ -140,7 +140,7 @@ impl Inserter {
                 .convert(insert)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 }
@@ -149,10 +149,13 @@ impl Inserter {
     async fn do_request(
         &self,
         requests: RegionInsertRequests,
-        trace_id: u64,
-        span_id: u64,
+        ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
-        let header = RegionRequestHeader { trace_id, span_id };
+        let header = RegionRequestHeader {
+            trace_id: ctx.trace_id(),
+            span_id: 0,
+            dbname: ctx.get_db_string(),
+        };
         let request_factory = RegionRequestFactory::new(header);
 
         let tasks = self
