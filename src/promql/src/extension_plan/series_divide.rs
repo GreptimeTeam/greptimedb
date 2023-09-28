@@ -139,7 +139,7 @@ impl ExecutionPlan for SeriesDivideExec {
 
     fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
         let input_schema = self.input.schema();
-        let exprs = self
+        let exprs: Vec<PhysicalSortRequirement> = self
             .tag_columns
             .iter()
             .map(|tag| PhysicalSortRequirement {
@@ -148,7 +148,11 @@ impl ExecutionPlan for SeriesDivideExec {
                 options: None,
             })
             .collect();
-        vec![Some(exprs)]
+        if !exprs.is_empty() {
+            vec![Some(exprs)]
+        } else {
+            vec![None]
+        }
     }
 
     fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {

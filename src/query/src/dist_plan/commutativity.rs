@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use datafusion_expr::utils::exprlist_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -29,7 +31,6 @@ pub enum Commutativity {
     TransformedCommutative(Option<Transformer>),
     NonCommutative,
     Unimplemented,
-    CheckPartition,
     /// For unrelated plans like DDL
     Unsupported,
 }
@@ -37,7 +38,9 @@ pub enum Commutativity {
 pub struct Categorizer {}
 
 impl Categorizer {
-    pub fn check_plan(plan: &LogicalPlan) -> Commutativity {
+    pub fn check_plan(plan: &LogicalPlan, partition_cols: Option<Vec<String>>) -> Commutativity {
+        let partition_cols = partition_cols.unwrap_or_default();
+
         match plan {
             LogicalPlan::Projection(proj) => {
                 for expr in &proj.expr {
@@ -51,11 +54,23 @@ impl Categorizer {
             // TODO(ruihang): Change this to Commutative once Like is supported in substrait
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
-            LogicalPlan::Aggregate(_) => {
+            LogicalPlan::Aggregate(aggr) => {
+                if Self::check_partition(&aggr.group_expr, &partition_cols) {
+                    return Commutativity::Commutative;
+                }
+
                 // check all children exprs and uses the strictest level
                 Commutativity::Unimplemented
             }
-            LogicalPlan::Sort(_) => Commutativity::Unimplemented,
+            LogicalPlan::Sort(_) => {
+                if partition_cols.is_empty() {
+                    return Commutativity::Commutative;
+                }
+
+                // sort plan needs to consider column priority
+                // We can implement a merge-sort on partial ordered data
+                Commutativity::Unimplemented
+            }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
             LogicalPlan::CrossJoin(_) => Commutativity::NonCommutative,
             LogicalPlan::Repartition(_) => {
@@ -67,7 +82,17 @@ impl Categorizer {
             LogicalPlan::EmptyRelation(_) => Commutativity::NonCommutative,
             LogicalPlan::Subquery(_) => Commutativity::Unimplemented,
             LogicalPlan::SubqueryAlias(_) => Commutativity::Unimplemented,
-            LogicalPlan::Limit(_) => Commutativity::PartialCommutative,
+            LogicalPlan::Limit(limit) => {
+                // Only execute `fetch` on remote nodes.
+                // wait for https://github.com/apache/arrow-datafusion/pull/7669
+                if partition_cols.is_empty() && limit.fetch.is_some() {
+                    Commutativity::Commutative
+                } else if limit.skip == 0 && limit.fetch.is_some() {
+                    Commutativity::PartialCommutative
+                } else {
+                    Commutativity::Unimplemented
+                }
+            }
             LogicalPlan::Extension(extension) => {
                 Self::check_extension_plan(extension.node.as_ref() as _)
             }
@@ -93,7 +118,7 @@ impl Categorizer {
                 || name == SeriesDivide::name()
                 || name == MergeScanLogicalPlan::name() =>
             {
-                Commutativity::Commutative
+                Commutativity::Unimplemented
             }
             _ => Commutativity::Unsupported,
         }
@@ -142,10 +167,50 @@ impl Categorizer {
             | Expr::OuterReferenceColumn(_, _) => Commutativity::Unimplemented,
         }
     }
+
+    /// Return true if the given expr and partition cols satisfied the rule.
+    /// In this case the plan can be treated as fully commutative.
+    fn check_partition(exprs: &[Expr], partition_cols: &[String]) -> bool {
+        let mut ref_cols = HashSet::new();
+        if exprlist_to_columns(exprs, &mut ref_cols).is_err() {
+            return false;
+        }
+        let ref_cols = ref_cols
+            .into_iter()
+            .map(|c| c.flat_name())
+            .collect::<HashSet<_>>();
+        for col in partition_cols {
+            if !ref_cols.contains(col) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 pub type Transformer = Arc<dyn Fn(&LogicalPlan) -> Option<LogicalPlan>>;
 
 pub fn partial_commutative_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
     Some(plan.clone())
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion_expr::{LogicalPlanBuilder, Sort};
+
+    use super::*;
+
+    #[test]
+    fn sort_on_empty_partition() {
+        let plan = LogicalPlan::Sort(Sort {
+            expr: vec![],
+            input: Arc::new(LogicalPlanBuilder::empty(false).build().unwrap()),
+            fetch: None,
+        });
+        assert!(matches!(
+            Categorizer::check_plan(&plan, Some(vec![])),
+            Commutativity::Commutative
+        ));
+    }
 }

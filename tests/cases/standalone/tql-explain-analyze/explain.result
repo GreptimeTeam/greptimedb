@@ -18,13 +18,13 @@ TQL EXPLAIN (0, 10, '5s') test;
 | logical_plan  | PromInstantManipulate: range=[0..0], lookback=[300000], interval=[300000], time index=[j]     |
 |               |   PromSeriesNormalize: offset=[0], time index=[j], filter NaN: [false]                        |
 |               |     PromSeriesDivide: tags=["k"]                                                              |
-|               |       Sort: test.k DESC NULLS LAST, test.j DESC NULLS LAST                                    |
-|               |         MergeScan [is_placeholder=false]                                                      |
+|               |       MergeScan [is_placeholder=false]                                                        |
 | physical_plan | PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[j] |
-|               |   PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                    |
-|               |     PromSeriesDivideExec: tags=["k"]                                                          |
-|               |       SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST]                                |
-|               |         MergeScanExec: REDACTED
+|               |   RepartitionExec: partitioning=REDACTED
+|               |     PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false]                  |
+|               |       PromSeriesDivideExec: tags=["k"]                                                        |
+|               |         SortExec: expr=[k@2 ASC NULLS LAST]                                                   |
+|               |           MergeScanExec: REDACTED
 |               |                                                                                               |
 +---------------+-----------------------------------------------------------------------------------------------+
 

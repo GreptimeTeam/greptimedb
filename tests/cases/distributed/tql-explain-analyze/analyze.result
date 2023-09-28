@@ -20,9 +20,10 @@ TQL ANALYZE (0, 10, '5s') test;
 +-+-+
 | Plan with Metrics | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
 |_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [false], REDACTED
 |_|_PromSeriesDivideExec: tags=["k"], REDACTED
-|_|_SortExec: expr=[k@2 DESC NULLS LAST,j@1 DESC NULLS LAST], REDACTED
+|_|_SortExec: expr=[k@2 ASC NULLS LAST], REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
