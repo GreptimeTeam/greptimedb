@@ -27,6 +27,14 @@
     <a href="https://greptime.com/slack"><img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack" alt="slack" /></a>
 </p>
 
+## Upcoming Event
+Come and meet us in **KubeCon + CloudNativeCon North America 2023!**
+<p align="center">
+  <picture>
+    <img alt="KubeCon + CloudNativeCon North Logo" src="./docs/banner/KCCNC_NA_2023_1000x200_Email Banner.png" width="800px">
+  </picture>
+</p>
+
 ## What is GreptimeDB
 
 GreptimeDB is an open-source time-series database with a special focus on
