@@ -396,7 +396,7 @@ impl Batch {
             other => panic!("timestamps in a Batch has other type {:?}", other),
         };
 
-        Some(&**&values)
+        Some(values)
     }
 
     /// Takes the batch in place.

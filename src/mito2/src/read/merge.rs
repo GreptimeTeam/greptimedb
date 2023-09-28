@@ -305,8 +305,9 @@ impl BatchMerger {
 /// Skips first `num_to_skip` rows from the batch and pushes remaining batch into the heap if the batch
 /// is still not empty.
 fn push_remaining_to_heap(heap: &mut BinaryHeap<CompareTimeSeq>, batch: Batch, num_to_skip: usize) {
+    debug_assert!(batch.num_rows() >= num_to_skip);
     let remaining = batch.num_rows() - num_to_skip;
-    if remaining <= 0 {
+    if remaining == 0 {
         // Nothing remains.
         return;
     }
