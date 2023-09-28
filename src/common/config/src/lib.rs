@@ -17,7 +17,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct WalConfig {
     // wal file size in bytes
@@ -49,7 +49,7 @@ pub fn kv_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/kv")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KvStoreConfig {
     // Kv file size in bytes
