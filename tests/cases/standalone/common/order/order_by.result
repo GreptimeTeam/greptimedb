@@ -227,5 +227,5 @@ Error: 3000(PlanQuery), Error during planning: For SELECT DISTINCT, ORDER BY exp
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 

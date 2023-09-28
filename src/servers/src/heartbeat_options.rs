@@ -15,7 +15,7 @@
 use common_meta::distributed_time_constants;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct HeartbeatOptions {
     pub interval_millis: u64,

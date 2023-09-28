@@ -27,21 +27,27 @@ use crate::instance::Instance;
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
-    async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> server_error::Result<()> {
+    async fn exec(
+        &self,
+        data_points: &[DataPoint],
+        ctx: QueryContextRef,
+    ) -> server_error::Result<usize> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
             .context(AuthSnafu)?;
 
-        let (requests, _) = data_point_to_grpc_row_insert_requests(data_point)?;
-        let _ = self
+        let (requests, no_of_rows) = data_point_to_grpc_row_insert_requests(data_points)?;
+        let output = self
             .handle_row_inserts(requests, ctx)
             .await
             .map_err(BoxedError::new)
-            .with_context(|_| server_error::ExecuteQuerySnafu {
-                query: format!("{data_point:?}"),
-            })?;
-        Ok(())
+            .context(servers::error::ExecuteGrpcQuerySnafu)?;
+
+        Ok(match output {
+            common_query::Output::AffectedRows(rows) => rows,
+            _ => no_of_rows,
+        })
     }
 }

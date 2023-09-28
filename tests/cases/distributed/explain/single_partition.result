@@ -34,15 +34,8 @@ EXPLAIN SELECT SUM(i) FROM single_partition;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Aggregate: groupBy=[[]], aggr=[[SUM(single_partition.i)]]_|
-|_|_Projection: single_partition.i_|
-|_|_MergeScan [is_placeholder=false]_|
-| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[SUM(single_partition.i)]_|
-|_|_CoalescePartitionsExec_|
-|_|_AggregateExec: mode=Partial, gby=[], aggr=[SUM(single_partition.i)]_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[i@0 as i]_|
-|_|_MergeScanExec: REDACTED
+| logical_plan_| MergeScan [is_placeholder=false]_|
+| physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
@@ -56,14 +49,12 @@ EXPLAIN SELECT * FROM single_partition ORDER BY i DESC;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Sort: single_partition.i DESC NULLS FIRST_|
-|_|_MergeScan [is_placeholder=false]_|
-| physical_plan | SortExec: expr=[i@0 DESC]_|
-|_|_MergeScanExec: REDACTED
+| logical_plan_| MergeScan [is_placeholder=false]_|
+| physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
 drop table single_partition;
 
-Affected Rows: 1
+Affected Rows: 0
 

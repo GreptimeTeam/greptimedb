@@ -34,5 +34,5 @@ SELECT LENGTH(a) FROM test ORDER BY 1;
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 

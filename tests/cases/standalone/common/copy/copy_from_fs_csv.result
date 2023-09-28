@@ -63,17 +63,17 @@ select * from with_pattern order by ts;
 
 drop table demo;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table with_filename;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table with_path;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table with_pattern;
 
-Affected Rows: 1
+Affected Rows: 0
 

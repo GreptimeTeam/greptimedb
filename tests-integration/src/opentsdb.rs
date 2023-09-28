@@ -56,7 +56,7 @@ mod tests {
             ],
         );
         // should create new table "my_metric_1" directly
-        instance.exec(&data_point1, ctx.clone()).await.unwrap();
+        instance.exec(&[data_point1], ctx.clone()).await.unwrap();
 
         let data_point2 = DataPoint::new(
             "my_metric_1".to_string(),
@@ -68,11 +68,11 @@ mod tests {
             ],
         );
         // should create new column "tagk3" directly
-        instance.exec(&data_point2, ctx.clone()).await.unwrap();
+        instance.exec(&[data_point2], ctx.clone()).await.unwrap();
 
         let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
         // should handle null tags properly
-        instance.exec(&data_point3, ctx.clone()).await.unwrap();
+        instance.exec(&[data_point3], ctx.clone()).await.unwrap();
 
         let output = instance
             .do_query(

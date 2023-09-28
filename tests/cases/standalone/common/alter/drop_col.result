@@ -25,5 +25,5 @@ Error: 1004(InvalidArguments), Not allowed to remove index column j from table t
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 

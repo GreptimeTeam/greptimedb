@@ -155,7 +155,7 @@ SELECT f FROM floats WHERE f<='nan'::FLOAT;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- DOUBLE type
 -- nan as a constant
@@ -312,5 +312,5 @@ SELECT d FROM doubles WHERE d<='nan'::DOUBLE;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

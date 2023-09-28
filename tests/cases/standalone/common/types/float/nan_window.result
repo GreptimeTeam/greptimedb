@@ -62,7 +62,7 @@ SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM floats ORDER BY i, f;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- grouping by inf and nan
 CREATE TABLE doubles(f DOUBLE, i INT, ts TIMESTAMP TIME INDEX);
@@ -127,5 +127,5 @@ SELECT i, f, SUM(i) OVER (ORDER BY i, f) FROM doubles ORDER BY i, f;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

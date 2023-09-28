@@ -21,7 +21,7 @@ use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 
-use crate::error::{LoadLayeredConfigSnafu, Result};
+use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu};
 
 pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
@@ -94,9 +94,16 @@ impl Options {
                 .ignore_empty(true)
         };
 
+        // Workaround: Replacement for `Config::try_from(&default_opts)` due to
+        // `ConfigSerializer` cannot handle the case of an empty struct contained
+        // within an iterative structure.
+        // See: https://github.com/mehcode/config-rs/issues/461
+        let json_str = serde_json::to_string(&default_opts).context(SerdeJsonSnafu)?;
+        let default_config = File::from_str(&json_str, FileFormat::Json);
+
         // Add default values and environment variables as the sources of the configuration.
         let mut layered_config = Config::builder()
-            .add_source(Config::try_from(&default_opts).context(LoadLayeredConfigSnafu)?)
+            .add_source(default_config)
             .add_source(env_source);
 
         // Add config file as the source of the configuration if it is specified.

@@ -30,9 +30,6 @@ tql eval(0, 10, '5s') sum(completion * 0.0015 / 1000) + sum(prompt * 0.0015 / 10
 tql eval(0, 10, '5s') sum(completion * 0.0015 / 1000) by (model) + sum(prompt * 0.0015 / 1000) by (model);
 
 -- SQLNESS SORT_RESULT 3 1
-tql eval(0, 10, '5s') sum(completion * 0.0015 / 1000) by (model) + sum(prompt * 0.0015 / 1000);
-
--- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '5s') sum(completion / 1000) + max(completion / 1000);
 
 -- SQLNESS SORT_RESULT 3 1

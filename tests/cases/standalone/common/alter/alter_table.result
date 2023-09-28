@@ -43,5 +43,5 @@ DESC TABLE test_alt_table;
 
 DROP TABLE test_alt_table;
 
-Affected Rows: 1
+Affected Rows: 0
 

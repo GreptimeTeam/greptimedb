@@ -31,4 +31,3 @@ select b from test_unixtime;
 select TO_UNIXTIME(b) from test_unixtime;
 
 DROP TABLE test_unixtime;
-

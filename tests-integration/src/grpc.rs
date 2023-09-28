@@ -167,7 +167,7 @@ mod test {
             })),
         });
         let output = query(instance, request).await;
-        assert!(matches!(output, Output::AffectedRows(1)));
+        assert!(matches!(output, Output::AffectedRows(0)));
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {

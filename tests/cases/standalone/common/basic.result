@@ -56,7 +56,7 @@ SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;
 
 DROP TABLE system_metrics;
 
-Affected Rows: 1
+Affected Rows: 0
 
 create table foo (
     host string,
@@ -92,5 +92,5 @@ select * from foo;
 
 DROP TABLE foo;
 
-Affected Rows: 1
+Affected Rows: 0
 

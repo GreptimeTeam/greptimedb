@@ -37,9 +37,9 @@ select * from demo2 order by ts;
 
 drop table demo1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table demo2;
 
-Affected Rows: 1
+Affected Rows: 0
 

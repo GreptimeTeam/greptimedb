@@ -211,7 +211,7 @@ SELECT f FROM floats WHERE f<='-inf'::FLOAT ORDER BY f;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- DOUBLE type
 -- inf as a constant
@@ -425,5 +425,5 @@ SELECT d FROM doubles WHERE d<='-inf'::DOUBLE ORDER BY d;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

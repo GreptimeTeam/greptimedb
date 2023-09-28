@@ -142,7 +142,7 @@ impl PlanRewriter {
             return true;
         }
 
-        match Categorizer::check_plan(plan) {
+        match Categorizer::check_plan(plan, self.partition_cols.clone()) {
             Commutativity::Commutative => {}
             Commutativity::PartialCommutative => {
                 if let Some(plan) = partial_commutative_transformer(plan) {
@@ -161,7 +161,6 @@ impl PlanRewriter {
                     self.stage.push(plan)
                 }
             },
-            Commutativity::CheckPartition
             | Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
@@ -351,11 +350,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = [
-            "Aggregate: groupBy=[[]], aggr=[[AVG(t.number)]]",
-            "  MergeScan [is_placeholder=false]",
-        ]
-        .join("\n");
+        let expected = "MergeScan [is_placeholder=false]";
         assert_eq!(expected, format!("{:?}", result));
     }
 
@@ -402,11 +397,7 @@ mod test {
 
         let config = ConfigOptions::default();
         let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-        let expected = [
-            "Limit: skip=0, fetch=1",
-            "  MergeScan [is_placeholder=false]",
-        ]
-        .join("\n");
+        let expected = "MergeScan [is_placeholder=false]";
         assert_eq!(expected, format!("{:?}", result));
     }
 

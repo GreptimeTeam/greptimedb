@@ -128,32 +128,35 @@ impl Server for OpentsdbServer {
 }
 
 pub fn data_point_to_grpc_row_insert_requests(
-    data_point: &DataPoint,
+    data_points: &[DataPoint],
 ) -> Result<(RowInsertRequests, usize)> {
     let mut multi_table_data = MultiTableData::new();
-    let table_name = data_point.metric();
-    let tags = data_point.tags().clone();
-    let value = data_point.value();
-    let timestamp = data_point.ts_millis();
-    let num_columns = tags.len() + 1;
 
-    let table_data = multi_table_data.get_or_default_table_data(table_name, num_columns, 0);
-    let mut one_row = table_data.alloc_one_row();
+    for data_point in data_points {
+        let table_name = data_point.metric();
+        let tags = data_point.tags().clone();
+        let value = data_point.value();
+        let timestamp = data_point.ts_millis();
+        let num_columns = tags.len() + 1;
 
-    //tags
-    row_writer::write_tags(table_data, tags.into_iter(), &mut one_row)?;
+        let table_data = multi_table_data.get_or_default_table_data(table_name, num_columns, 0);
+        let mut one_row = table_data.alloc_one_row();
 
-    // value
-    row_writer::write_f64(table_data, FIELD_COLUMN_NAME, value, &mut one_row)?;
-    // timestamp
-    row_writer::write_ts_millis(
-        table_data,
-        TIMESTAMP_COLUMN_NAME,
-        Some(timestamp),
-        &mut one_row,
-    )?;
+        //tags
+        row_writer::write_tags(table_data, tags.into_iter(), &mut one_row)?;
 
-    table_data.add_row(one_row);
+        // value
+        row_writer::write_f64(table_data, FIELD_COLUMN_NAME, value, &mut one_row)?;
+        // timestamp
+        row_writer::write_ts_millis(
+            table_data,
+            TIMESTAMP_COLUMN_NAME,
+            Some(timestamp),
+            &mut one_row,
+        )?;
+
+        table_data.add_row(one_row);
+    }
 
     Ok(multi_table_data.into_row_insert_requests())
 }

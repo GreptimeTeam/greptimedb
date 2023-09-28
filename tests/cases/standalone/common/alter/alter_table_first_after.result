@@ -170,5 +170,5 @@ Error: 1001(Unsupported), SQL statement is not supported: ALTER TABLE t ADD COLU
 
 DROP TABLE t;
 
-Affected Rows: 1
+Affected Rows: 0
 

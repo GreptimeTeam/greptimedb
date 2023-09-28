@@ -154,6 +154,7 @@ impl MergeScanExec {
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
+        let schema = Self::arrow_schema_to_schema(self.schema())?;
 
         let stream = Box::pin(stream!({
             let _finish_timer = metric.finish_time().timer();
@@ -176,12 +177,14 @@ impl MergeScanExec {
 
                 while let Some(batch) = stream.next().await {
                     let batch = batch?;
+                    // reconstruct batch using `self.schema`
+                    // to remove metadata and correct column name
+                    let batch = RecordBatch::new(schema.clone(), batch.columns().iter().cloned())?;
                     metric.record_output_batch_rows(batch.num_rows());
-                    yield Ok(Self::remove_metadata_from_record_batch(batch));
-
                     if let Some(first_consume_timer) = first_consume_timer.as_mut().take() {
                         first_consume_timer.stop();
                     }
+                    yield Ok(batch);
                 }
             }
         }));
@@ -191,14 +194,6 @@ impl MergeScanExec {
             stream,
             output_ordering: None,
         }))
-    }
-
-    fn remove_metadata_from_record_batch(batch: RecordBatch) -> RecordBatch {
-        let arrow_schema = batch.schema.arrow_schema().as_ref();
-        let arrow_schema_without_metadata = Self::arrow_schema_without_metadata(arrow_schema);
-        let schema_without_metadata =
-            Self::arrow_schema_to_schema(arrow_schema_without_metadata).unwrap();
-        RecordBatch::new(schema_without_metadata, batch.columns().iter().cloned()).unwrap()
     }
 
     fn arrow_schema_without_metadata(arrow_schema: &ArrowSchema) -> ArrowSchemaRef {

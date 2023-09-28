@@ -26,5 +26,5 @@ SELECT * FROM host WHERE host LIKE '%+%';
 
 DROP TABLE host;
 
-Affected Rows: 1
+Affected Rows: 0
 

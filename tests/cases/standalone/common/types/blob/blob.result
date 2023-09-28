@@ -130,9 +130,9 @@ SELECT '\x7F'::BYTEA;
 
 drop table blobs;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table blob_empty;
 
-Affected Rows: 1
+Affected Rows: 0
 

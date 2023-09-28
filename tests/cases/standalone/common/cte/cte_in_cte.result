@@ -73,5 +73,5 @@ Error: 3000(PlanQuery), Error during planning: Table not found: greptime.public.
 
 drop table a;
 
-Affected Rows: 1
+Affected Rows: 0
 

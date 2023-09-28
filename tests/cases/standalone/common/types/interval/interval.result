@@ -265,5 +265,5 @@ Error: 3000(PlanQuery), Error during planning: The function Avg does not support
 
 DROP TABLE intervals;
 
-Affected Rows: 1
+Affected Rows: 0
 

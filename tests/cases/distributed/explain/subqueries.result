@@ -116,16 +116,14 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 |              |       Projection: integers.i                                      |
 |              |         MergeScan [is_placeholder=false]                          |
 |              |       SubqueryAlias: __scalar_sq_1                                |
-|              |         Aggregate: groupBy=[[]], aggr=[[MAX(integers.i)]]         |
-|              |           Projection: integers.i                                  |
-|              |             MergeScan [is_placeholder=false]                      |
+|              |         MergeScan [is_placeholder=false]                          |
 +--------------+-------------------------------------------------------------------+
 
 drop table other;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

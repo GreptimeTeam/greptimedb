@@ -109,5 +109,5 @@ select TO_UNIXTIME(b) from test_unixtime;
 
 DROP TABLE test_unixtime;
 
-Affected Rows: 1
+Affected Rows: 0
 

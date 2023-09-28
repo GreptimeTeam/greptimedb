@@ -593,4 +593,25 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn test_load_default_standalone_options() {
+        let options: StandaloneOptions =
+            Options::load_layered_options(None, "GREPTIMEDB_FRONTEND", None).unwrap();
+        let default_options = StandaloneOptions::default();
+        assert_eq!(options.mode, default_options.mode);
+        assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
+        assert_eq!(options.http, default_options.http);
+        assert_eq!(options.grpc, default_options.grpc);
+        assert_eq!(options.mysql, default_options.mysql);
+        assert_eq!(options.postgres, default_options.postgres);
+        assert_eq!(options.opentsdb, default_options.opentsdb);
+        assert_eq!(options.influxdb, default_options.influxdb);
+        assert_eq!(options.prom_store, default_options.prom_store);
+        assert_eq!(options.wal, default_options.wal);
+        assert_eq!(options.kv_store, default_options.kv_store);
+        assert_eq!(options.procedure, default_options.procedure);
+        assert_eq!(options.logging, default_options.logging);
+        assert_eq!(options.region_engine, default_options.region_engine);
+    }
 }

@@ -84,18 +84,21 @@ pub async fn put(
     let summary = params.contains_key("summary");
     let details = params.contains_key("details");
 
-    let data_points = parse_data_points(body).await?;
+    let data_points = parse_data_points(body)
+        .await?
+        .into_iter()
+        .map(|point| point.into())
+        .collect::<Vec<_>>();
 
     let response = if !summary && !details {
-        for data_point in data_points.into_iter() {
-            if let Err(e) = opentsdb_handler.exec(&data_point.into(), ctx.clone()).await {
-                // Not debugging purpose, failed fast.
-                return error::InternalSnafu {
-                    err_msg: e.to_string(),
-                }
-                .fail();
+        if let Err(e) = opentsdb_handler.exec(&data_points, ctx.clone()).await {
+            // Not debugging purpose, failed fast.
+            return error::InternalSnafu {
+                err_msg: e.to_string(),
             }
+            .fail();
         }
+
         (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
     } else {
         let mut response = OpentsdbDebuggingResponse {
@@ -108,17 +111,15 @@ pub async fn put(
             },
         };
 
-        for data_point in data_points.into_iter() {
-            let result = opentsdb_handler
-                .exec(&data_point.clone().into(), ctx.clone())
-                .await;
-            match result {
-                Ok(()) => response.on_success(),
-                Err(e) => {
-                    response.on_failed(data_point, e);
-                }
+        let result = opentsdb_handler.exec(&data_points, ctx.clone()).await;
+        match result {
+            Ok(affected_rows) => response.on_success(affected_rows),
+            Err(e) => {
+                //TODO: handle the error since I can't get details about a single datapoint again
+                response.on_failed(e);
             }
         }
+
         (
             HttpStatusCode::OK,
             Json(OpentsdbPutResponse::Debug(response)),
@@ -151,20 +152,20 @@ pub struct OpentsdbDebuggingResponse {
 }
 
 impl OpentsdbDebuggingResponse {
-    fn on_success(&mut self) {
-        self.success += 1;
+    fn on_success(&mut self, affected_rows: usize) {
+        self.success += affected_rows as i32;
     }
 
-    fn on_failed(&mut self, datapoint: DataPointRequest, error: impl ErrorExt) {
+    fn on_failed(&mut self, _error: impl ErrorExt) {
         self.failed += 1;
 
-        if let Some(details) = self.errors.as_mut() {
-            let error = OpentsdbDetailError {
-                datapoint,
-                error: error.output_msg(),
-            };
-            details.push(error);
-        };
+        // if let Some(details) = self.errors.as_mut() {
+        //     let error = OpentsdbDetailError {
+        //         datapoint,
+        //         error: error.output_msg(),
+        //     };
+        //     details.push(error);
+        // };
     }
 }
 
