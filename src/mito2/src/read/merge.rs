@@ -235,7 +235,7 @@ impl BatchMerger {
         }
 
         // Slow path. We need to merge overlapping batches.
-        // Contructs a heap from batches. Batches in the heap is not empty, we need to check
+        // Constructs a heap from batches. Batches in the heap is not empty, we need to check
         // this before pushing a batch into the heap.
         let mut heap = BinaryHeap::from_iter(self.batches.drain(..).map(CompareTimeSeq));
         // Reset merger as sorted as we have cleared batches.
@@ -282,10 +282,10 @@ impl BatchMerger {
                         // Keeps the timestamp in top and skips the first timestamp in the `next`
                         // batch.
                         push_remaining_to_heap(&mut heap, next, 1);
-                        // Skips already outputed timestamps.
+                        // Skips already outputted timestamps.
                         push_remaining_to_heap(&mut heap, top, pos);
                     } else {
-                        // Keeps timestamp in next and skips the duplicated timestamp and already outputed
+                        // Keeps timestamp in next and skips the duplicated timestamp and already outputted
                         // timestamp in top.
                         push_remaining_to_heap(&mut heap, top, pos + 1);
                     }
