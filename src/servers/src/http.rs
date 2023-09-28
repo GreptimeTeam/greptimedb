@@ -315,10 +315,7 @@ impl JsonResponse {
                     }
                 },
                 Err(e) => {
-                    return Self::with_error(
-                        format!("Query engine output error: {e}"),
-                        e.status_code(),
-                    );
+                    return Self::with_error(e.output_msg(), e.status_code());
                 }
             }
         }

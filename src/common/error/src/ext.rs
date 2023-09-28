@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use crate::status_code::StatusCode;
 
 /// Extension to [`Error`](std::error::Error) in std.
-pub trait ErrorExt: std::error::Error {
+pub trait ErrorExt: StackError {
     /// Map this error to [StatusCode].
     fn status_code(&self) -> StatusCode {
         StatusCode::Unknown
@@ -33,6 +34,63 @@ pub trait ErrorExt: std::error::Error {
     /// Returns the error as [Any](std::any::Any) so that it can be
     /// downcast to a specific implementation.
     fn as_any(&self) -> &dyn Any;
+
+    fn output_msg(&self) -> String
+    where
+        Self: Sized,
+    {
+        let error = self.last();
+        if let Some(external_error) = error.source() {
+            let external_root = external_error.sources().last().unwrap();
+
+            if error.to_string().is_empty() {
+                format!("{external_root}")
+            } else {
+                format!("{error}: {external_root}")
+            }
+        } else {
+            format!("{error}")
+        }
+    }
+}
+
+pub trait StackError: std::error::Error {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>);
+
+    fn next(&self) -> Option<&dyn StackError>;
+
+    fn last(&self) -> &dyn StackError
+    where
+        Self: Sized,
+    {
+        let Some(mut result) = self.next() else {
+            return self;
+        };
+        while let Some(err) = result.next() {
+            result = err;
+        }
+        result
+    }
+}
+
+impl<T: ?Sized + StackError> StackError for Arc<T> {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+        self.as_ref().debug_fmt(layer, buf)
+    }
+
+    fn next(&self) -> Option<&dyn StackError> {
+        self.as_ref().next()
+    }
+}
+
+impl<T: StackError> StackError for Box<T> {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+        self.as_ref().debug_fmt(layer, buf)
+    }
+
+    fn next(&self) -> Option<&dyn StackError> {
+        self.as_ref().next()
+    }
 }
 
 /// An opaque boxed error based on errors that implement [ErrorExt] trait.
@@ -90,6 +148,16 @@ impl crate::snafu::ErrorCompat for BoxedError {
     }
 }
 
+impl StackError for BoxedError {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+        self.inner.debug_fmt(layer, buf)
+    }
+
+    fn next(&self) -> Option<&dyn StackError> {
+        self.inner.next()
+    }
+}
+
 /// Error type with plain error message
 #[derive(Debug)]
 pub struct PlainError {
@@ -126,5 +194,15 @@ impl crate::ext::ErrorExt for PlainError {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self as _
+    }
+}
+
+impl StackError for PlainError {
+    fn debug_fmt(&self, layer: usize, buf: &mut Vec<String>) {
+        buf.push(format!("{}: {}", layer, self.msg))
+    }
+
+    fn next(&self) -> Option<&dyn StackError> {
+        None
     }
 }

@@ -48,6 +48,7 @@ use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::query_engine::options::QueryOptions;
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
+use crate::table_mutation::TableMutationHandlerRef;
 
 /// Query engine global state
 // TODO(yingwen): This QueryEngineState still relies on datafusion, maybe we can define a trait for it,
@@ -57,6 +58,7 @@ use crate::region_query::RegionQueryHandlerRef;
 pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
+    table_mutation_handler: Option<TableMutationHandlerRef>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
     plugins: PluginsRef,
 }
@@ -73,6 +75,7 @@ impl QueryEngineState {
     pub fn new(
         catalog_list: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
         plugins: PluginsRef,
     ) -> Self {
@@ -123,6 +126,7 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_manager: catalog_list,
+            table_mutation_handler,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
         }
@@ -182,6 +186,11 @@ impl QueryEngineState {
     #[inline]
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
+    }
+
+    #[inline]
+    pub fn table_mutation_handler(&self) -> Option<&TableMutationHandlerRef> {
+        self.table_mutation_handler.as_ref()
     }
 
     pub(crate) fn disallow_cross_schema_query(&self) -> bool {

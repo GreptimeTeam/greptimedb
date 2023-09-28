@@ -22,26 +22,32 @@ use base64::DecodeError;
 use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_telemetry::logging;
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
-use snafu::{ErrorCompat, Location, Snafu};
+use snafu::{Location, Snafu};
 use tonic::Code;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Internal error: {}", err_msg))]
     Internal { err_msg: String },
 
     #[snafu(display("Internal IO error"))]
-    InternalIo { source: std::io::Error },
+    InternalIo {
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 
     #[snafu(display("Tokio IO error: {}", err_msg))]
     TokioIo {
         err_msg: String,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to collect recordbatch"))]
@@ -51,10 +57,16 @@ pub enum Error {
     },
 
     #[snafu(display("Failed to start HTTP server"))]
-    StartHttp { source: hyper::Error },
+    StartHttp {
+        #[snafu(source)]
+        error: hyper::Error,
+    },
 
     #[snafu(display("Failed to start gRPC server"))]
-    StartGrpc { source: tonic::transport::Error },
+    StartGrpc {
+        #[snafu(source)]
+        error: tonic::transport::Error,
+    },
 
     #[snafu(display("{} server is already started", server))]
     AlreadyStarted { server: String, location: Location },
@@ -62,7 +74,8 @@ pub enum Error {
     #[snafu(display("Failed to bind address {}", addr))]
     TcpBind {
         addr: SocketAddr,
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 
     #[snafu(display("Failed to execute query, query: {}", query))]
@@ -125,7 +138,8 @@ pub enum Error {
     #[snafu(display("Failed to parse InfluxDB line protocol"))]
     InfluxdbLineProtocol {
         location: Location,
-        source: influxdb_line_protocol::Error,
+        #[snafu(source)]
+        error: influxdb_line_protocol::Error,
     },
 
     #[snafu(display("Failed to write InfluxDB line protocol"))]
@@ -153,36 +167,44 @@ pub enum Error {
     ConnResetByPeer { location: Location },
 
     #[snafu(display("Hyper error"))]
-    Hyper { source: hyper::Error },
+    Hyper {
+        #[snafu(source)]
+        error: hyper::Error,
+    },
 
     #[snafu(display("Invalid OpenTSDB line"))]
     InvalidOpentsdbLine {
-        source: FromUtf8Error,
+        #[snafu(source)]
+        error: FromUtf8Error,
         location: Location,
     },
 
     #[snafu(display("Invalid OpenTSDB Json request"))]
     InvalidOpentsdbJsonRequest {
-        source: serde_json::error::Error,
+        #[snafu(source)]
+        error: serde_json::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to decode prometheus remote request"))]
     DecodePromRemoteRequest {
         location: Location,
-        source: prost::DecodeError,
+        #[snafu(source)]
+        error: prost::DecodeError,
     },
 
     #[snafu(display("Failed to decode OTLP request"))]
     DecodeOtlpRequest {
         location: Location,
-        source: prost::DecodeError,
+        #[snafu(source)]
+        error: prost::DecodeError,
     },
 
     #[snafu(display("Failed to decompress prometheus remote request"))]
     DecompressPromRemoteRequest {
         location: Location,
-        source: snap::Error,
+        #[snafu(source)]
+        error: snap::Error,
     },
 
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
@@ -193,7 +215,8 @@ pub enum Error {
 
     #[snafu(display("Invalid Flight ticket"))]
     InvalidFlightTicket {
-        source: api::DecodeError,
+        #[snafu(source)]
+        error: api::DecodeError,
         location: Location,
     },
 
@@ -214,7 +237,8 @@ pub enum Error {
 
     #[snafu(display("Invalid visibility ASCII chars"))]
     InvisibleASCII {
-        source: hyper::header::ToStrError,
+        #[snafu(source)]
+        error: hyper::header::ToStrError,
         location: Location,
     },
 
@@ -226,13 +250,15 @@ pub enum Error {
 
     #[snafu(display("Invalid base64 value"))]
     InvalidBase64Value {
-        source: DecodeError,
+        #[snafu(source)]
+        error: DecodeError,
         location: Location,
     },
 
     #[snafu(display("Invalid utf-8 value"))]
     InvalidUtf8Value {
-        source: FromUtf8Error,
+        #[snafu(source)]
+        error: FromUtf8Error,
         location: Location,
     },
 
@@ -246,7 +272,8 @@ pub enum Error {
     #[snafu(display("Failed to dump profile data"))]
     DumpProfileData {
         location: Location,
-        source: common_mem_prof::error::Error,
+        #[snafu(source)]
+        error: common_mem_prof::error::Error,
     },
 
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
@@ -257,13 +284,15 @@ pub enum Error {
 
     #[snafu(display("Failed to build gRPC reflection service"))]
     GrpcReflectionService {
-        source: tonic_reflection::server::Error,
+        #[snafu(source)]
+        error: tonic_reflection::server::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to build HTTP response"))]
     BuildHttpResponse {
-        source: http::Error,
+        #[snafu(source)]
+        error: http::Error,
         location: Location,
     },
 
@@ -293,7 +322,8 @@ pub enum Error {
 
     #[snafu(display("Failed to join task"))]
     JoinTask {
-        source: tokio::task::JoinError,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
         location: Location,
     },
 
@@ -306,7 +336,8 @@ pub enum Error {
 
     #[snafu(display("DataFrame operation error"))]
     DataFrame {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 
@@ -418,10 +449,10 @@ impl ErrorExt for Error {
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
 
-            JoinTask { source, .. } => {
-                if source.is_cancelled() {
+            JoinTask { error, .. } => {
+                if error.is_cancelled() {
                     StatusCode::Cancelled
-                } else if source.is_panic() {
+                } else if error.is_panic() {
                     StatusCode::Unexpected
                 } else {
                     StatusCode::Unknown
@@ -480,7 +511,6 @@ macro_rules! define_into_tonic_status {
         impl From<$Error> for tonic::Status {
             fn from(err: $Error) -> Self {
                 use common_error::{GREPTIME_ERROR_CODE, GREPTIME_ERROR_MSG};
-                use snafu::ErrorCompat;
                 use tonic::codegen::http::{HeaderMap, HeaderValue};
                 use tonic::metadata::MetadataMap;
 
@@ -490,16 +520,16 @@ macro_rules! define_into_tonic_status {
                 // (which is a very rare case), just ignore. Client will use Tonic status code and message.
                 let status_code = err.status_code();
                 headers.insert(GREPTIME_ERROR_CODE, HeaderValue::from(status_code as u32));
-                let root_error = err.iter_chain().last().unwrap();
+                let root_error = err.output_msg();
 
-                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.to_string().as_bytes()) {
+                if let Ok(err_msg) = HeaderValue::from_bytes(root_error.as_bytes()) {
                     let _ = headers.insert(GREPTIME_ERROR_MSG, err_msg);
                 }
 
                 let metadata = MetadataMap::from_headers(headers);
                 tonic::Status::with_metadata(
                     $crate::error::status_to_tonic_code(status_code),
-                    err.to_string(),
+                    root_error,
                     metadata,
                 )
             }
@@ -511,13 +541,13 @@ define_into_tonic_status!(Error);
 
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
-        Error::InternalIo { source: e }
+        Error::InternalIo { error: e }
     }
 }
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let error_msg = self.iter_chain().last().unwrap().to_string();
+        let error_msg = self.output_msg();
         let status = match self {
             Error::InfluxdbLineProtocol { .. }
             | Error::InfluxdbLinesWrite { .. }

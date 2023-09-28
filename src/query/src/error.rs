@@ -17,14 +17,16 @@ use std::time::Duration;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
@@ -106,20 +108,23 @@ pub enum Error {
     #[snafu(display("Failed to parse timestamp `{}`", raw))]
     ParseTimestamp {
         raw: String,
-        source: chrono::ParseError,
+        #[snafu(source)]
+        error: chrono::ParseError,
         location: Location,
     },
 
     #[snafu(display("Failed to parse float number `{}`", raw))]
     ParseFloat {
         raw: String,
-        source: std::num::ParseFloatError,
+        #[snafu(source)]
+        error: std::num::ParseFloatError,
         location: Location,
     },
 
-    #[snafu(display("DataFusion error"))]
+    #[snafu(display(""))]
     DataFusion {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -135,10 +140,10 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display("Cannot plan SQL: {}", sql))]
+    #[snafu(display(""))]
     PlanSql {
-        sql: String,
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -194,7 +199,8 @@ pub enum Error {
     #[snafu(display("Failed to regex"))]
     BuildRegex {
         location: Location,
-        source: regex::Error,
+        #[snafu(source)]
+        error: regex::Error,
     },
 
     #[snafu(display("Failed to build data source backend"))]
@@ -254,11 +260,20 @@ pub enum Error {
     #[snafu(display("Column schema has no default value, column: {}", column))]
     ColumnSchemaNoDefault { column: String, location: Location },
 
-    #[snafu(display("Region query error, source: {}", source))]
+    #[snafu(display("Region query error"))]
     RegionQuery {
         source: BoxedError,
         location: Location,
     },
+
+    #[snafu(display("Table mutation error"))]
+    TableMutation {
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Missing table mutation handler"))]
+    MissingTableMutationHandler { location: Location },
 }
 
 impl ErrorExt for Error {
@@ -305,7 +320,10 @@ impl ErrorExt for Error {
             RemoteRequest { source, .. } => source.status_code(),
             UnexpectedOutputKind { .. } => StatusCode::Unexpected,
             CreateSchema { source, .. } => source.status_code(),
+
             RegionQuery { source, .. } => source.status_code(),
+            TableMutation { source, .. } => source.status_code(),
+            MissingTableMutationHandler { .. } => StatusCode::Unexpected,
         }
     }
 

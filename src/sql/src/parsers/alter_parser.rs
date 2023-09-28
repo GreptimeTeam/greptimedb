@@ -25,9 +25,7 @@ use crate::statements::statement::Statement;
 
 impl<'a> ParserContext<'a> {
     pub(crate) fn parse_alter(&mut self) -> Result<Statement> {
-        let alter_table = self
-            .parse_alter_table()
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let alter_table = self.parse_alter_table().context(error::SyntaxSnafu)?;
         Ok(Statement::Alter(alter_table))
     }
 
@@ -98,7 +96,7 @@ impl<'a> ParserContext<'a> {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use snafu::ErrorCompat;
+    use common_error::ext::ErrorExt;
     use sqlparser::ast::{ColumnOption, DataType};
 
     use super::*;
@@ -215,7 +213,7 @@ mod tests {
     fn test_parse_alter_drop_column() {
         let sql = "ALTER TABLE my_metric_1 DROP a";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        let err = result.iter_chain().last().unwrap().to_string();
+        let err = result.output_msg();
         assert!(err.contains("expect keyword COLUMN after ALTER TABLE DROP"));
 
         let sql = "ALTER TABLE my_metric_1 DROP COLUMN a";
@@ -245,7 +243,7 @@ mod tests {
     fn test_parse_alter_rename_table() {
         let sql = "ALTER TABLE test_table table_t";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap_err();
-        let err = result.iter_chain().last().unwrap().to_string();
+        let err = result.output_msg();
         assert!(err.contains("expect keyword ADD or DROP or RENAME after ALTER TABLE"));
 
         let sql = "ALTER TABLE test_table RENAME table_t";

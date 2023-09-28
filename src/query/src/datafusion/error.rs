@@ -16,17 +16,19 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use snafu::{Location, Snafu};
 
 /// Inner error of datafusion based query engine.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum InnerError {
-    #[snafu(display("msg: {}", msg))]
+    #[snafu(display(""))]
     Datafusion {
-        msg: &'static str,
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 

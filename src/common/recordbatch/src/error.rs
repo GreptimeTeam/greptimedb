@@ -17,17 +17,20 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Fail to create datafusion record batch"))]
     NewDfRecordBatch {
-        source: datatypes::arrow::error::ArrowError,
+        #[snafu(source)]
+        error: datatypes::arrow::error::ArrowError,
         location: Location,
     },
 
@@ -52,21 +55,24 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to poll stream"))]
+    #[snafu(display(""))]
     PollStream {
-        source: datafusion::error::DataFusionError,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
         location: Location,
     },
 
     #[snafu(display("Fail to format record batch"))]
     Format {
-        source: datatypes::arrow::error::ArrowError,
+        #[snafu(source)]
+        error: datatypes::arrow::error::ArrowError,
         location: Location,
     },
 
     #[snafu(display("Failed to init Recordbatch stream"))]
     InitRecordbatchStream {
-        source: datafusion_common::DataFusionError,
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
         location: Location,
     },
 
@@ -76,7 +82,8 @@ pub enum Error {
         projection,
     ))]
     ProjectArrowRecordBatch {
-        source: datatypes::arrow::error::ArrowError,
+        #[snafu(source)]
+        error: datatypes::arrow::error::ArrowError,
         location: Location,
         schema: datatypes::schema::SchemaRef,
         projection: Vec<usize>,

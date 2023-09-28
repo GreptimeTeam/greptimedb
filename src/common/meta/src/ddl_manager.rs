@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::{error, info};
+use common_telemetry::info;
 use snafu::{OptionExt, ResultExt};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -23,13 +23,14 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
     DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
     TableMetadataAllocatorRef,
 };
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
-    UnsupportedSnafu, WaitProcedureSnafu,
+    WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -122,6 +123,20 @@ impl DdlManager {
             )
             .context(RegisterProcedureLoaderSnafu {
                 type_name: AlterTableProcedure::TYPE_NAME,
+            })?;
+
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
+                TruncateTableProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    TruncateTableProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(RegisterProcedureLoaderSnafu {
+                type_name: TruncateTableProcedure::TYPE_NAME,
             })
     }
 
@@ -183,15 +198,21 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         truncate_table_task: TruncateTableTask,
+        table_info_value: TableInfoValue,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
-        error!("Truncate table procedure is not supported, cluster_id = {}, truncate_table_task = {:?}, region_routes = {:?}",
-            cluster_id, truncate_table_task, region_routes);
+        let context = self.create_context();
+        let procedure = TruncateTableProcedure::new(
+            cluster_id,
+            truncate_table_task,
+            table_info_value,
+            region_routes,
+            context,
+        );
 
-        UnsupportedSnafu {
-            operation: "TRUNCATE TABLE",
-        }
-        .fail()
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
     }
 
     async fn submit_procedure(&self, procedure_with_id: ProcedureWithId) -> Result<ProcedureId> {
@@ -216,31 +237,33 @@ async fn handle_truncate_table_task(
     cluster_id: u64,
     truncate_table_task: TruncateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let truncate_table = &truncate_table_task.truncate_table;
-    let table_id = truncate_table
-        .table_id
-        .as_ref()
-        .context(error::UnexpectedSnafu {
-            err_msg: "expected table id ",
-        })?
-        .id;
-
+    let table_id = truncate_table_task.table_id;
+    let table_metadata_manager = &ddl_manager.table_metadata_manager();
     let table_ref = truncate_table_task.table_ref();
 
-    let table_route_value = ddl_manager
-        .table_metadata_manager()
-        .table_route_manager()
-        .get(table_id)
-        .await?
-        .with_context(|| error::TableRouteNotFoundSnafu {
-            table_name: table_ref.to_string(),
-        })?;
+    let (table_info_value, table_route_value) =
+        table_metadata_manager.get_full_table_info(table_id).await?;
+
+    let table_info_value = table_info_value.with_context(|| error::TableInfoNotFoundSnafu {
+        table_name: table_ref.to_string(),
+    })?;
+
+    let table_route_value = table_route_value.with_context(|| error::TableRouteNotFoundSnafu {
+        table_name: table_ref.to_string(),
+    })?;
 
     let table_route = table_route_value.region_routes;
 
     let id = ddl_manager
-        .submit_truncate_table_task(cluster_id, truncate_table_task, table_route)
+        .submit_truncate_table_task(
+            cluster_id,
+            truncate_table_task,
+            table_info_value,
+            table_route,
+        )
         .await?;
+
+    info!("Table: {table_id} is truncated via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),

@@ -344,6 +344,7 @@ impl DatanodeBuilder {
             // query engine in datanode only executes plan with resolved table source.
             MemoryCatalogManager::with_default_setup(),
             None,
+            None,
             false,
             plugins,
         );

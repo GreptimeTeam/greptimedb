@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
 use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
@@ -25,12 +26,14 @@ use crate::metadata::TableId;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Default error implementation of table.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Datafusion error"))]
+    #[snafu(display(""))]
     Datafusion {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -48,7 +51,8 @@ pub enum Error {
 
     #[snafu(display("Table projection error"))]
     TableProjection {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 
@@ -99,7 +103,8 @@ pub enum Error {
         column_name,
     ))]
     BuildColumnDescriptor {
-        source: store_api::storage::ColumnDescriptorBuilderError,
+        #[snafu(source)]
+        error: store_api::storage::ColumnDescriptorBuilderError,
         table_name: String,
         column_name: String,
         location: Location,

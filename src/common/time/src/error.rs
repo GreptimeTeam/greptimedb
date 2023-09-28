@@ -18,13 +18,19 @@ use std::num::{ParseIntError, TryFromIntError};
 use chrono::ParseError;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to parse string to date, raw: {}", raw))]
-    ParseDateStr { raw: String, source: ParseError },
+    ParseDateStr {
+        raw: String,
+        #[snafu(source)]
+        error: ParseError,
+    },
 
     #[snafu(display("Invalid date string, raw: {}", raw))]
     InvalidDateStr { raw: String, location: Location },
@@ -37,7 +43,8 @@ pub enum Error {
 
     #[snafu(display("Current timestamp overflow"))]
     TimestampOverflow {
-        source: TryFromIntError,
+        #[snafu(source)]
+        error: TryFromIntError,
         location: Location,
     },
 
@@ -54,7 +61,8 @@ pub enum Error {
     #[snafu(display("Invalid offset string {raw}: "))]
     ParseOffsetStr {
         raw: String,
-        source: ParseIntError,
+        #[snafu(source)]
+        error: ParseIntError,
         location: Location,
     },
 

@@ -38,6 +38,7 @@ use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
+use crate::table_mutation::TableMutationHandlerRef;
 
 /// Describe statement result
 #[derive(Debug)]
@@ -80,11 +81,13 @@ impl QueryEngineFactory {
     pub fn new(
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
     ) -> Self {
         Self::new_with_plugins(
             catalog_manager,
             region_query_handler,
+            table_mutation_handler,
             with_dist_planner,
             Default::default(),
         )
@@ -93,12 +96,14 @@ impl QueryEngineFactory {
     pub fn new_with_plugins(
         catalog_manager: CatalogManagerRef,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
         plugins: PluginsRef,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,
             region_query_handler,
+            table_mutation_handler,
             with_dist_planner,
             plugins.clone(),
         ));
@@ -131,7 +136,7 @@ mod tests {
     #[test]
     fn test_query_engine_factory() {
         let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(catalog_list, None, false);
+        let factory = QueryEngineFactory::new(catalog_list, None, None, false);
 
         let engine = factory.query_engine();
 

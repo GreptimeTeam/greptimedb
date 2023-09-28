@@ -17,6 +17,7 @@ use std::any::Any;
 use arrow::error::ArrowError;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_recordbatch::error::Error as RecordbatchError;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
@@ -26,8 +27,9 @@ use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 use statrs::StatsError;
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to execute Python UDF: {}", msg))]
     PyUdf {
@@ -44,7 +46,8 @@ pub enum Error {
 
     #[snafu(display("Failed to execute function"))]
     ExecuteFunction {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -57,7 +60,8 @@ pub enum Error {
 
     #[snafu(display("Failed to generate function"))]
     GenerateFunction {
-        source: StatsError,
+        #[snafu(source)]
+        error: StatsError,
         location: Location,
     },
 
@@ -109,7 +113,8 @@ pub enum Error {
 
     #[snafu(display("General DataFusion error"))]
     GeneralDataFusion {
-        source: DataFusionError,
+        #[snafu(source)]
+        error: DataFusionError,
         location: Location,
     },
 
@@ -133,14 +138,16 @@ pub enum Error {
 
     #[snafu(display("Failed to cast array to {:?}", typ))]
     TypeCast {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         typ: arrow::datatypes::DataType,
         location: Location,
     },
 
     #[snafu(display("Failed to perform compute operation on arrow arrays"))]
     ArrowCompute {
-        source: ArrowError,
+        #[snafu(source)]
+        error: ArrowError,
         location: Location,
     },
 

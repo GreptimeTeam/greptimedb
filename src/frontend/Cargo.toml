@@ -28,6 +28,7 @@ common-error = { workspace = true }
 common-function = { workspace = true }
 common-grpc = { workspace = true }
 common-grpc-expr = { workspace = true }
+common-macro = { workspace = true }
 common-meta = { workspace = true }
 common-procedure = { workspace = true }
 common-query = { workspace = true }
@@ -50,7 +51,7 @@ meta-client = { workspace = true }
 raft-engine = { workspace = true }
 # Although it is not used, please do not delete it.
 metrics.workspace = true
-moka = { version = "0.9", features = ["future"] }
+moka = { workspace = true, features = ["future"] }
 object-store = { workspace = true }
 openmetrics-parser = "0.4"
 opentelemetry-proto.workspace = true

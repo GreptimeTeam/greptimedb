@@ -264,6 +264,7 @@ mod tests {
             connect_timeout_millis,
             tcp_nodelay,
             ddl_timeout_millis,
+            ..
         } = options.meta_client.unwrap();
 
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);

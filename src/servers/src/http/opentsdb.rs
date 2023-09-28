@@ -17,12 +17,13 @@ use std::collections::HashMap;
 use axum::extract::{Query, RawBody, State};
 use axum::http::StatusCode as HttpStatusCode;
 use axum::{Extension, Json};
+use common_error::ext::ErrorExt;
 use hyper::Body;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
-use snafu::{ErrorCompat, ResultExt};
+use snafu::ResultExt;
 
-use crate::error::{self, Error, Result};
+use crate::error::{self, Result};
 use crate::opentsdb::codec::DataPoint;
 use crate::query_handler::OpentsdbProtocolHandlerRef;
 
@@ -154,13 +155,13 @@ impl OpentsdbDebuggingResponse {
         self.success += 1;
     }
 
-    fn on_failed(&mut self, datapoint: DataPointRequest, error: Error) {
+    fn on_failed(&mut self, datapoint: DataPointRequest, error: impl ErrorExt) {
         self.failed += 1;
 
         if let Some(details) = self.errors.as_mut() {
             let error = OpentsdbDetailError {
                 datapoint,
-                error: error.iter_chain().last().unwrap().to_string(),
+                error: error.output_msg(),
             };
             details.push(error);
         };
@@ -169,7 +170,6 @@ impl OpentsdbDebuggingResponse {
 
 #[cfg(test)]
 mod test {
-    use snafu::ErrorCompat;
 
     use super::*;
 
@@ -229,13 +229,13 @@ mod test {
         let body = Body::from("");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
-        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        let err = result.unwrap_err().output_msg();
         assert!(err.contains("EOF while parsing a value at line 1 column 0"));
 
         let body = Body::from("hello world");
         let result = parse_data_points(body).await;
         assert!(result.is_err());
-        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        let err = result.unwrap_err().output_msg();
         assert!(err.contains("expected value at line 1 column 1"));
     }
 }

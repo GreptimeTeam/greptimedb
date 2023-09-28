@@ -75,9 +75,9 @@ impl SstVersion {
         }
     }
 
-    /// Mark all SSTs in this version as deleted.
+    /// Marks all SSTs in this version as deleted.
     pub(crate) fn mark_all_deleted(&self) {
-        for level_meta in self.levels.iter() {
+        for level_meta in &self.levels {
             for file_handle in level_meta.files.values() {
                 file_handle.mark_deleted();
             }

@@ -246,7 +246,6 @@ pub struct InsertRequest {
     pub schema_name: String,
     pub table_name: String,
     pub columns_values: HashMap<String, VectorRef>,
-    pub region_number: RegionNumber,
 }
 
 /// Delete (by primary key) request
@@ -327,7 +326,6 @@ macro_rules! meter_insert_request {
             $req.catalog_name.to_string(),
             $req.schema_name.to_string(),
             $req.table_name.to_string(),
-            $req.region_number,
             $req
         );
     };

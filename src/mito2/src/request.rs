@@ -125,7 +125,7 @@ impl WriteRequest {
     }
 
     /// Gets column index by name.
-    pub(crate) fn column_index_by_name(&self, name: &str) -> Option<usize> {
+    pub fn column_index_by_name(&self, name: &str) -> Option<usize> {
         self.name_to_index.get(name).copied()
     }
 
@@ -411,11 +411,6 @@ impl OptionOutputTx {
         if let Some(sender) = self.0.take() {
             sender.send(result);
         }
-    }
-
-    /// Takes the sender.
-    pub(crate) fn take(&mut self) -> OptionOutputTx {
-        OptionOutputTx(self.0.take())
     }
 
     /// Takes the inner sender.

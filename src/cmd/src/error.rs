@@ -16,12 +16,14 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use config::ConfigError;
 use rustyline::error::ReadlineError;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
@@ -95,13 +97,15 @@ pub enum Error {
 
     #[snafu(display("Cannot create REPL"))]
     ReplCreation {
-        source: ReadlineError,
+        #[snafu(source)]
+        error: ReadlineError,
         location: Location,
     },
 
     #[snafu(display("Error reading command"))]
     Readline {
-        source: ReadlineError,
+        #[snafu(source)]
+        error: ReadlineError,
         location: Location,
     },
 
@@ -151,7 +155,8 @@ pub enum Error {
 
     #[snafu(display("Failed to load layered config"))]
     LoadLayeredConfig {
-        source: ConfigError,
+        #[snafu(source)]
+        error: ConfigError,
         location: Location,
     },
 
@@ -164,7 +169,8 @@ pub enum Error {
     #[snafu(display("Failed to connect to Etcd at {etcd_addr}"))]
     ConnectEtcd {
         etcd_addr: String,
-        source: etcd_client::Error,
+        #[snafu(source)]
+        error: etcd_client::Error,
         location: Location,
     },
 }

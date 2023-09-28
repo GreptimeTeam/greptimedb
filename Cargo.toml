@@ -79,12 +79,13 @@ derive_builder = "0.12"
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "115c1080773be8a819e50b257fece9f839a0c836" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "693128abe9adc70ba636010a172c9da55b206bba" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
 metrics = "0.20"
+moka = { version = "0.11" }
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics"] }
 parquet = "43.0"
@@ -124,10 +125,10 @@ common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }
-common-macro = { path = "src/common/macro" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
 common-grpc = { path = "src/common/grpc" }
 common-grpc-expr = { path = "src/common/grpc-expr" }
+common-macro = { path = "src/common/macro" }
 common-mem-prof = { path = "src/common/mem-prof" }
 common-meta = { path = "src/common/meta" }
 common-pprof = { path = "src/common/pprof" }
@@ -149,8 +150,8 @@ meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
 mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
-operator = { path = "src/operator" }
 object-store = { path = "src/object-store" }
+operator = { path = "src/operator" }
 partition = { path = "src/partition" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }

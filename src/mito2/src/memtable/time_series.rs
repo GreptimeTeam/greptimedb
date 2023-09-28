@@ -293,11 +293,6 @@ impl SeriesSet {
             last_key: None,
         }
     }
-
-    /// Returns if series set is empty.
-    fn is_empty(&self) -> bool {
-        self.series.read().unwrap().is_empty()
-    }
 }
 
 struct Iter {
@@ -326,37 +321,6 @@ impl Iterator for Iter {
         } else {
             None
         }
-    }
-}
-
-/// Bucket holds a set of [Series] which alleviate lock contention between series.
-struct Bucket {
-    region_metadata: RegionMetadataRef,
-    series: RwLock<Vec<Arc<RwLock<Series>>>>,
-}
-
-impl Bucket {
-    fn new(region_metadata: RegionMetadataRef) -> Self {
-        Self {
-            region_metadata,
-            series: Default::default(),
-        }
-    }
-
-    /// Returns the series at given index.
-    /// Returns None if series not found.
-    #[inline]
-    fn get_series(&self, idx: usize) -> Option<Arc<RwLock<Series>>> {
-        self.series.read().unwrap().get(idx).cloned()
-    }
-
-    /// Adds series to bucket and returns the index inside the bucket.
-    #[inline]
-    fn add_series(&self, s: Arc<RwLock<Series>>) -> usize {
-        let mut series = self.series.write().unwrap();
-        let idx = series.len();
-        series.push(s);
-        idx
     }
 }
 

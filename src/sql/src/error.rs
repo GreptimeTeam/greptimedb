@@ -16,6 +16,7 @@ use std::any::Any;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -29,8 +30,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// SQL parser errors.
 // Now the error in parser does not contains backtrace to avoid generating backtrace
 // every time the parser parses an invalid SQL.
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("SQL statement is not supported: {}, keyword: {}", sql, keyword))]
     Unsupported { sql: String, keyword: String },
@@ -45,7 +47,8 @@ pub enum Error {
         sql: String,
         expected: String,
         actual: String,
-        source: ParserError,
+        #[snafu(source)]
+        error: ParserError,
     },
 
     #[snafu(display(
@@ -56,8 +59,11 @@ pub enum Error {
     UnsupportedDefaultValue { column_name: String, expr: Expr },
 
     // Syntax error from sql parser.
-    #[snafu(display("Syntax error, sql: {}", sql))]
-    Syntax { sql: String, source: ParserError },
+    #[snafu(display(""))]
+    Syntax {
+        #[snafu(source)]
+        error: ParserError,
+    },
 
     #[snafu(display("Missing time index constraint"))]
     MissingTimeIndex {},

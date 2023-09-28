@@ -54,8 +54,8 @@ use crate::dataframe::DataFrame;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, CreateSchemaSnafu, DataFusionSnafu,
-    MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableNotFoundSnafu,
-    UnimplementedSnafu, UnsupportedExprSnafu,
+    MissingTableMutationHandlerSnafu, MissingTimestampColumnSnafu, QueryExecutionSnafu, Result,
+    TableNotFoundSnafu, UnimplementedSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::logical_optimizer::LogicalOptimizer;
@@ -115,7 +115,7 @@ impl DatafusionQueryEngine {
         let table = self.find_table(&table_name).await?;
 
         let output = self
-            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx)
+            .exec_query_plan(LogicalPlan::DfPlan((*dml.input).clone()), query_ctx.clone())
             .await?;
         let mut stream = match output {
             Output::RecordBatches(batches) => batches.as_stream(),
@@ -132,8 +132,14 @@ impl DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?;
 
             let rows = match dml.op {
-                WriteOp::Insert => Self::insert(&table_name, &table, column_vectors).await?,
-                WriteOp::Delete => Self::delete(&table_name, &table, column_vectors).await?,
+                WriteOp::Insert => {
+                    self.insert(&table_name, column_vectors, query_ctx.clone())
+                        .await?
+                }
+                WriteOp::Delete => {
+                    self.delete(&table_name, &table, column_vectors, query_ctx.clone())
+                        .await?
+                }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
             };
             affected_rows += rows;
@@ -142,9 +148,11 @@ impl DatafusionQueryEngine {
     }
 
     async fn delete<'a>(
+        &self,
         table_name: &ResolvedTableReference<'a>,
         table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
+        query_ctx: QueryContextRef,
     ) -> Result<usize> {
         let catalog_name = table_name.catalog.to_string();
         let schema_name = table_name.schema.to_string();
@@ -174,31 +182,31 @@ impl DatafusionQueryEngine {
             key_column_values: column_vectors,
         };
 
-        table
-            .delete(request)
+        self.state
+            .table_mutation_handler()
+            .context(MissingTableMutationHandlerSnafu)?
+            .delete(request, query_ctx)
             .await
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)
     }
 
     async fn insert<'a>(
+        &self,
         table_name: &ResolvedTableReference<'a>,
-        table: &TableRef,
         column_vectors: HashMap<String, VectorRef>,
+        query_ctx: QueryContextRef,
     ) -> Result<usize> {
         let request = InsertRequest {
             catalog_name: table_name.catalog.to_string(),
             schema_name: table_name.schema.to_string(),
             table_name: table_name.table.to_string(),
             columns_values: column_vectors,
-            region_number: 0,
         };
 
-        table
-            .insert(request)
+        self.state
+            .table_mutation_handler()
+            .context(MissingTableMutationHandlerSnafu)?
+            .insert(request, query_ctx)
             .await
-            .map_err(BoxedError::new)
-            .context(QueryExecutionSnafu)
     }
 
     async fn find_table(&self, table_name: &ResolvedTableReference<'_>) -> Result<TableRef> {
@@ -269,9 +277,7 @@ impl QueryEngine for DatafusionQueryEngine {
         Ok(DataFrame::DataFusion(
             self.state
                 .read_table(table)
-                .context(error::DatafusionSnafu {
-                    msg: "Fail to create dataframe for table",
-                })
+                .context(error::DatafusionSnafu)
                 .map_err(BoxedError::new)
                 .context(QueryExecutionSnafu)?,
         ))
@@ -287,9 +293,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
                     .state
                     .session_state()
                     .optimize(df_plan)
-                    .context(error::DatafusionSnafu {
-                        msg: "Fail to optimize logical plan",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
@@ -313,9 +317,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
                 let physical_plan = state
                     .create_physical_plan(df_plan)
                     .await
-                    .context(error::DatafusionSnafu {
-                        msg: "Fail to create physical plan",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
 
@@ -386,9 +388,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                 assert_eq!(1, plan.output_partitioning().partition_count());
                 let df_stream = plan
                     .execute(0, task_ctx)
-                    .context(error::DatafusionSnafu {
-                        msg: "Failed to execute DataFusion merge exec",
-                    })
+                    .context(error::DatafusionSnafu)
                     .map_err(BoxedError::new)
                     .context(QueryExecutionSnafu)?;
                 let stream = RecordBatchStreamAdapter::try_new(df_stream)
@@ -439,35 +439,27 @@ pub async fn execute_show_with_filter(
     let context = SessionContext::new();
     context
         .register_batch(table_name, record_batch.into_df_record_batch())
-        .context(error::DatafusionSnafu {
-            msg: "Fail to register a record batch as a table",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     let mut dataframe = context
         .sql(&format!("SELECT * FROM {table_name}"))
         .await
-        .context(error::DatafusionSnafu {
-            msg: "Fail to execute a sql",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     if let Some(filter) = filter {
         let filter = convert_filter_to_df_filter(filter)?;
         dataframe = dataframe
             .filter(filter)
-            .context(error::DatafusionSnafu {
-                msg: "Fail to filter",
-            })
+            .context(error::DatafusionSnafu)
             .map_err(BoxedError::new)
             .context(QueryExecutionSnafu)?
     }
     let df_batches = dataframe
         .collect()
         .await
-        .context(error::DatafusionSnafu {
-            msg: "Fail to collect the record batches",
-        })
+        .context(error::DatafusionSnafu)
         .map_err(BoxedError::new)
         .context(QueryExecutionSnafu)?;
     let mut batches = Vec::with_capacity(df_batches.len());
@@ -517,7 +509,7 @@ mod tests {
         };
         catalog_manager.register_table_sync(req).unwrap();
 
-        QueryEngineFactory::new(catalog_manager, None, false).query_engine()
+        QueryEngineFactory::new(catalog_manager, None, None, false).query_engine()
     }
 
     #[tokio::test]

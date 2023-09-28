@@ -13,6 +13,15 @@ common-telemetry = { workspace = true }
 proc-macro2 = "1.0.66"
 quote = "1.0"
 syn = "1.0"
+syn2 = { version = "2.0", package = "syn", features = [
+    "derive",
+    "parsing",
+    "printing",
+    "clone-impls",
+    "proc-macro",
+    "extra-traits",
+    "full",
+] }
 
 [dev-dependencies]
 arc-swap = "1.0"

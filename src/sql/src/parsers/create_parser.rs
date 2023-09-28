@@ -69,7 +69,7 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
         self.parser
             .expect_keyword(Keyword::TABLE)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
@@ -86,7 +86,7 @@ impl<'a> ParserContext<'a> {
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu { sql: self.sql })?
+            .context(error::SyntaxSnafu)?
             .into_iter()
             .filter_map(|option| {
                 if let Some(v) = parse_option_string(option.value) {
@@ -159,7 +159,7 @@ impl<'a> ParserContext<'a> {
         let options = self
             .parser
             .parse_options(Keyword::WITH)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
         for option in options.iter() {
             ensure!(
                 valid_table_option(&option.name.value),
@@ -200,7 +200,7 @@ impl<'a> ParserContext<'a> {
         let column_list = self
             .parser
             .parse_parenthesized_column_list(Mandatory, false)
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let entries = self.parse_comma_separated(Self::parse_partition_entry)?;
 
@@ -219,16 +219,13 @@ impl<'a> ParserContext<'a> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        let name = self
-            .parser
-            .parse_identifier()
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+        let name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
 
         self.parser
             .expect_keyword(Keyword::VALUES)
             .and_then(|_| self.parser.expect_token(&LESS))
             .and_then(|_| self.parser.expect_token(&THAN))
-            .context(error::SyntaxSnafu { sql: self.sql })?;
+            .context(error::SyntaxSnafu)?;
 
         let value_list = self.parse_comma_separated(Self::parse_value_list)?;
 
@@ -242,10 +239,7 @@ impl<'a> ParserContext<'a> {
                 let _ = self.parser.next_token();
                 SqlValue::Number(MAXVALUE.to_string(), false)
             }
-            _ => self
-                .parser
-                .parse_value()
-                .context(error::SyntaxSnafu { sql: self.sql })?,
+            _ => self.parser.parse_value().context(error::SyntaxSnafu)?,
         };
         Ok(value)
     }
@@ -320,9 +314,7 @@ impl<'a> ParserContext<'a> {
         columns: &mut Vec<ColumnDef>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let mut column = self
-            .parse_column_def()
-            .context(SyntaxSnafu { sql: self.sql })?;
+        let mut column = self.parse_column_def().context(SyntaxSnafu)?;
 
         let mut time_index_opt_idx = None;
         for (index, opt) in column.options.iter().enumerate() {
@@ -496,11 +488,7 @@ impl<'a> ParserContext<'a> {
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-            Some(
-                self.parser
-                    .parse_identifier()
-                    .context(error::SyntaxSnafu { sql: self.sql })?,
-            )
+            Some(self.parser.parse_identifier().context(error::SyntaxSnafu)?)
         } else {
             None
         };
@@ -519,7 +507,7 @@ impl<'a> ParserContext<'a> {
                 let columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
-                    .context(error::SyntaxSnafu { sql: self.sql })?;
+                    .context(error::SyntaxSnafu)?;
                 Ok(Some(TableConstraint::Unique {
                     name,
                     columns,
@@ -541,7 +529,7 @@ impl<'a> ParserContext<'a> {
                 let columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
-                    .context(error::SyntaxSnafu { sql: self.sql })?;
+                    .context(error::SyntaxSnafu)?;
 
                 ensure!(
                     columns.len() == 1,
@@ -837,7 +825,7 @@ mod tests {
     use std::collections::HashMap;
 
     use common_catalog::consts::FILE_ENGINE;
-    use snafu::ErrorCompat;
+    use common_error::ext::ErrorExt;
     use sqlparser::ast::ColumnOption::NotNull;
 
     use super::*;
@@ -1401,10 +1389,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("sql parser error: Expected BY, found: RANGE"));
 
         let sql = r"
@@ -1418,10 +1403,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("sql parser error: Expected LESS, found: THAN"));
 
         let sql = r"
@@ -1435,10 +1417,7 @@ ENGINE=mito";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
         assert!(result
             .unwrap_err()
-            .iter_chain()
-            .last()
-            .unwrap()
-            .to_string()
+            .output_msg()
             .contains("Expected a concrete value, found: MAXVALU"));
     }
 
@@ -1547,7 +1526,7 @@ ENGINE=mito";
     fn test_invalid_column_name() {
         let sql = "create table foo(user string, i timestamp time index)";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
-        let err = result.unwrap_err().iter_chain().last().unwrap().to_string();
+        let err = result.unwrap_err().output_msg();
         assert!(err.contains("Cannot use keyword 'user' as column name"));
 
         // If column name is quoted, it's valid even same with keyword.

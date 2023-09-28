@@ -14,10 +14,12 @@
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
 #[snafu(visibility(pub))]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Invalid config value: {}, {}", value, msg))]
     InvalidConfig { value: String, msg: String },
@@ -30,7 +32,8 @@ pub enum Error {
 
     #[snafu(display("IO error"))]
     Io {
-        source: std::io::Error,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 
