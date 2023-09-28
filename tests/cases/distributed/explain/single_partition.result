@@ -65,5 +65,5 @@ EXPLAIN SELECT * FROM single_partition ORDER BY i DESC;
 
 drop table single_partition;
 
-Affected Rows: 1
+Affected Rows: 0
 

@@ -49,7 +49,7 @@ SHOW CREATE TABLE system_metrics;
 
 DROP TABLE system_metrics;
 
-Affected Rows: 1
+Affected Rows: 0
 
 create table table_without_partition (
   ts TIMESTAMP TIME INDEX NOT NULL DEFAULT current_timestamp()
@@ -75,7 +75,7 @@ show create table table_without_partition;
 
 drop table table_without_partition;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE not_supported_table_options_keys (
   id INT UNSIGNED,

@@ -40,7 +40,7 @@ SHOW CREATE TABLE system_metrics;
 
 DROP TABLE system_metrics;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE not_supported_table_options_keys (
   id INT UNSIGNED,

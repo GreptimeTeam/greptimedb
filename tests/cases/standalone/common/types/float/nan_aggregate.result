@@ -44,7 +44,7 @@ SELECT SUM(f) FROM floats;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- double
 CREATE TABLE doubles(f DOUBLE, i INT, ts TIMESTAMP TIME INDEX);
@@ -91,7 +91,7 @@ SELECT SUM(f) FROM doubles;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- float double
 CREATE TABLE floats_doubles (f FLOAT, d DOUBLE, ts TIMESTAMP TIME INDEX);
@@ -133,5 +133,5 @@ SELECT SUM(d) FROM floats_doubles WHERE d > 0;
 
 DROP TABLE floats_doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

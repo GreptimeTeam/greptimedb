@@ -259,7 +259,7 @@ mod tests {
         let Output::AffectedRows(x) = output else {
             unreachable!()
         };
-        assert_eq!(x, 1);
+        assert_eq!(x, 0);
     }
 
     async fn verify_table_is_dropped(instance: &MockDistributedInstance) {

@@ -21,5 +21,5 @@ SELECT * FROM table_should_not_break_after_incorrect_alter;
 
 DROP TABLE table_should_not_break_after_incorrect_alter;
 
-Affected Rows: 1
+Affected Rows: 0
 

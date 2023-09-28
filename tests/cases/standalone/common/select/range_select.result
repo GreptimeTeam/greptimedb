@@ -284,7 +284,7 @@ Error: 1003(Internal), Error during planning: Illegal argument in range select q
 
 DROP TABLE host;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE host_sec (
   ts timestamp(0) time index,
@@ -320,5 +320,5 @@ Affected Rows: 18
 -- SELECT ts, host, min(val) RANGE '10s', max(val) RANGE '10s' FROM host_sec ALIGN '5s' ORDER BY host, ts;
 DROP TABLE host_sec;
 
-Affected Rows: 1
+Affected Rows: 0
 

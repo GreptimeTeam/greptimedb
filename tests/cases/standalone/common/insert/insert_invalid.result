@@ -44,9 +44,9 @@ Error: 1004(InvalidArguments), Invalid SQL, error: column count mismatch, column
 
 DROP TABLE strings;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE a;
 
-Affected Rows: 1
+Affected Rows: 0
 

@@ -123,9 +123,9 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 
 drop table other;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

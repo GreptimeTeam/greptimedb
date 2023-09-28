@@ -54,5 +54,5 @@ desc host_load1;
 
 drop table host_load1;
 
-Affected Rows: 1
+Affected Rows: 0
 

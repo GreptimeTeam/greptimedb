@@ -58,5 +58,5 @@ SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
 DROP TABLE monitor;
 
-Affected Rows: 1
+Affected Rows: 0
 
