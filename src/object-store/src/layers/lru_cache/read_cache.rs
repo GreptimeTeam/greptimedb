@@ -65,7 +65,7 @@ pub(crate) struct ReadCache<C: Clone> {
 }
 
 impl<C: Accessor + Clone> ReadCache<C> {
-    /// Create a `ReadCache` with capacity in bytes.
+    /// Create a `[ReadCache]` with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
         let eviction_listener =
@@ -139,7 +139,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     continue;
                 }
 
-                // We can't retrieve the metadata from `opendal::raw::oio::Entry` directly,
+                // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
                 // because it's private field.
                 let size = {
                     let stat = self.file_cache.stat(&read_key, OpStat::default()).await?;

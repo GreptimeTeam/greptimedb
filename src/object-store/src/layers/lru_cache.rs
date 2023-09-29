@@ -33,7 +33,7 @@ pub struct LruCacheLayer<C: Clone> {
 }
 
 impl<C: Accessor + Clone> LruCacheLayer<C> {
-    /// Create a `LruCacheLayer` with local file cache and capacity in bytes.
+    /// Create a `[LruCacheLayer]` with local file cache and capacity in bytes.
     pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
         let read_cache = ReadCache::new(file_cache, capacity);
         let (entries, bytes) = read_cache.recover_cache().await?;
@@ -97,23 +97,23 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        let ret = self.inner.write(path, args).await;
+        let result = self.inner.write(path, args).await;
 
         self.read_cache
             .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
             .await;
 
-        ret
+        result
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let ret = self.inner.delete(path, args).await;
+        let result = self.inner.delete(path, args).await;
 
         self.read_cache
             .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
             .await;
 
-        ret
+        result
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
@@ -126,18 +126,15 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
-        let ret = self.inner.blocking_write(path, args);
+        let result = self.inner.blocking_write(path, args);
 
         self.read_cache
             .blocking_invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)));
 
-        ret
+        result
     }
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {
         self.inner.blocking_list(path, args)
     }
 }
-
-#[cfg(test)]
-mod tests {}
