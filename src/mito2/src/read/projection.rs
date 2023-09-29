@@ -14,6 +14,7 @@
 
 //! Utilities for projection.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -23,12 +24,13 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::value::ValueRef;
+use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 
+use crate::cache::CacheManager;
 use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
@@ -152,7 +154,11 @@ impl ProjectionMapper {
     /// Converts a [Batch] to a [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
-    pub(crate) fn convert(&self, batch: &Batch) -> common_recordbatch::error::Result<RecordBatch> {
+    pub(crate) fn convert(
+        &self,
+        batch: &Batch,
+        cache_manager: Option<&CacheManager>,
+    ) -> common_recordbatch::error::Result<RecordBatch> {
         debug_assert_eq!(self.batch_fields.len(), batch.fields().len());
         debug_assert!(self
             .batch_fields
@@ -175,8 +181,16 @@ impl ProjectionMapper {
         {
             match index {
                 BatchIndex::Tag(idx) => {
-                    let value = pk_values[*idx].as_value_ref();
-                    let vector = new_repeated_vector(&column_schema.data_type, value, num_rows)?;
+                    let value = &pk_values[*idx];
+                    let vector = match cache_manager {
+                        Some(cache) => repeated_vector_with_cache(
+                            &column_schema.data_type,
+                            value,
+                            num_rows,
+                            cache,
+                        )?,
+                        None => new_repeated_vector(&column_schema.data_type, value, num_rows)?,
+                    };
                     columns.push(vector);
                 }
                 BatchIndex::Timestamp => {
@@ -203,19 +217,43 @@ enum BatchIndex {
     Field(usize),
 }
 
+/// Gets a vector with repeated values from specific cache or creates a new one.
+fn repeated_vector_with_cache(
+    data_type: &ConcreteDataType,
+    value: &Value,
+    num_rows: usize,
+    cache_manager: &CacheManager,
+) -> common_recordbatch::error::Result<VectorRef> {
+    if let Some(vector) = cache_manager.get_repeated_vector(value) {
+        // Tries to get the vector from cache manager. If the vector doesn't
+        // have enough length, creates a new one.
+        match vector.len().cmp(&num_rows) {
+            Ordering::Less => (),
+            Ordering::Equal => return Ok(vector),
+            Ordering::Greater => return Ok(vector.slice(0, num_rows)),
+        }
+    }
+
+    // Creates a new one.
+    let vector = new_repeated_vector(data_type, value, num_rows)?;
+    // Updates cache.
+    cache_manager.put_repeated_vector(value.clone(), vector.clone());
+
+    Ok(vector)
+}
+
 /// Returns a vector with repeated values.
 fn new_repeated_vector(
     data_type: &ConcreteDataType,
-    value: ValueRef,
+    value: &Value,
     num_rows: usize,
 ) -> common_recordbatch::error::Result<VectorRef> {
     let mut mutable_vector = data_type.create_mutable_vector(1);
     mutable_vector
-        .try_push_value_ref(value)
+        .try_push_value_ref(value.as_value_ref())
         .map_err(BoxedError::new)
         .context(ExternalSnafu)?;
     // This requires an additional allocation.
-    // TODO(yingwen): Add a way to create repeated vector to data type.
     let base_vector = mutable_vector.to_vector();
     Ok(base_vector.replicate(&[num_rows]))
 }

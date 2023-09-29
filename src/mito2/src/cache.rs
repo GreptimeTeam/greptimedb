@@ -104,11 +104,18 @@ impl CacheManager {
         }
     }
 
-    /// Get a repeated vector for specific `value`.
-    pub fn get_repeated_vector(&self, value: &Value) -> Option<VectorRef> {
+    /// Gets a vector with repeated value for specific `key`.
+    pub fn get_repeated_vector(&self, key: &Value) -> Option<VectorRef> {
         self.vector_cache
             .as_ref()
-            .and_then(|vector_cache| vector_cache.get(value))
+            .and_then(|vector_cache| vector_cache.get(key))
+    }
+
+    /// Puts a vector with repeated value into the cache.
+    pub fn put_repeated_vector(&self, key: Value, vector: VectorRef) {
+        if let Some(cache) = &self.vector_cache {
+            cache.insert(key, vector);
+        }
     }
 }
 
