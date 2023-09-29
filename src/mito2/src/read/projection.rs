@@ -41,6 +41,8 @@ pub struct ProjectionMapper {
     metadata: RegionMetadataRef,
     /// Maps column in [RecordBatch] to index in [Batch].
     batch_indices: Vec<BatchIndex>,
+    /// Output record batch contains tags.
+    has_tags: bool,
     /// Decoder for primary key.
     codec: McmpRowCodec,
     /// Schema for converted [RecordBatch].
@@ -94,6 +96,7 @@ impl ProjectionMapper {
             .collect();
         // For each projected column, compute its index in batches.
         let mut batch_indices = Vec::with_capacity(projection.len());
+        let mut has_tags = false;
         for idx in &projection {
             // Safety: idx is valid.
             let column = &metadata.column_metadatas[*idx];
@@ -102,6 +105,8 @@ impl ProjectionMapper {
                 SemanticType::Tag => {
                     // Safety: It is a primary key column.
                     let index = metadata.primary_key_index(column.column_id).unwrap();
+                    // We need to output a tag.
+                    has_tags = true;
                     // We always read all primary key so the column always exists and the tag
                     // index is always valid.
                     BatchIndex::Tag(index)
@@ -119,6 +124,7 @@ impl ProjectionMapper {
         Ok(ProjectionMapper {
             metadata: metadata.clone(),
             batch_indices,
+            has_tags,
             codec,
             output_schema,
             column_ids,
@@ -166,11 +172,15 @@ impl ProjectionMapper {
             .zip(batch.fields())
             .all(|(id, batch_col)| *id == batch_col.column_id));
 
-        let pk_values = self
-            .codec
-            .decode(batch.primary_key())
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+        // Skips decoding pk if we don't need to output it.
+        let pk_values = if self.has_tags {
+            self.codec
+                .decode(batch.primary_key())
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+        } else {
+            Vec::new()
+        };
 
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         let num_rows = batch.num_rows();
