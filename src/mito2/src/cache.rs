@@ -21,6 +21,8 @@ pub(crate) mod test_util;
 use std::mem;
 use std::sync::Arc;
 
+use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
 use moka::sync::Cache;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
@@ -32,13 +34,15 @@ use crate::sst::file::FileId;
 pub struct CacheManager {
     /// Cache for SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
+    /// Cache for vectors.
+    vector_cache: Option<VectorCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
     /// Creates a new manager with specific cache size in bytes.
-    pub fn new(sst_meta_cache_size: u64) -> CacheManager {
+    pub fn new(sst_meta_cache_size: u64, vector_cache_size: u64) -> CacheManager {
         let sst_meta_cache = if sst_meta_cache_size == 0 {
             None
         } else {
@@ -51,8 +55,23 @@ impl CacheManager {
                 .build();
             Some(cache)
         };
+        let vector_cache = if vector_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(vector_cache_size)
+                .weigher(|_k, v: &VectorRef| {
+                    // We ignore the heap size of `Value`.
+                    (mem::size_of::<Value>() + v.memory_size()) as u32
+                })
+                .build();
+            Some(cache)
+        };
 
-        CacheManager { sst_meta_cache }
+        CacheManager {
+            sst_meta_cache,
+            vector_cache,
+        }
     }
 
     /// Gets cached [ParquetMetaData].
@@ -84,6 +103,13 @@ impl CacheManager {
             cache.remove(&SstMetaKey(region_id, file_id));
         }
     }
+
+    /// Get a repeated vector for specific `value`.
+    pub fn get_repeated_vector(&self, value: &Value) -> Option<VectorRef> {
+        self.vector_cache
+            .as_ref()
+            .and_then(|vector_cache| vector_cache.get(value))
+    }
 }
 
 /// Cache key for SST meta.
@@ -98,6 +124,7 @@ impl SstMetaKey {
 }
 
 type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
+type VectorCache = Cache<Value, VectorRef>;
 
 #[cfg(test)]
 mod tests {
@@ -105,8 +132,8 @@ mod tests {
     use crate::cache::test_util::parquet_meta;
 
     #[test]
-    fn test_disable_meta_cache() {
-        let cache = CacheManager::new(0);
+    fn test_disable_cache() {
+        let cache = CacheManager::new(0, 0);
         assert!(cache.sst_meta_cache.is_none());
 
         let region_id = RegionId::new(1, 1);
@@ -118,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_parquet_meta_cache() {
-        let cache = CacheManager::new(2000);
+        let cache = CacheManager::new(2000, 0);
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
