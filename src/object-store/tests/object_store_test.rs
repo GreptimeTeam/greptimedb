@@ -403,7 +403,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let _ = store.read(p3).await.unwrap();
     let _ = store.read_with(p3).range(0..5).await.unwrap();
     assert!(store.read(p2).await.is_err());
-    // Read p1 with range `1..` , the existing p1 with range `0..` must be evicited.
+    // Read p1 with range `1..` , the existing p1 with range `0..` must be evicted.
     let _ = store.read_with(p1).range(1..15).await.unwrap();
     assert_eq!(cache_layer.read_cache_stat().await, (4, 34));
     assert_cache_files(
