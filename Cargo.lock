@@ -5966,7 +5966,6 @@ dependencies = [
  "metrics",
  "moka",
  "opendal",
- "pin-project",
  "tokio",
  "uuid",
 ]
