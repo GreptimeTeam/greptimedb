@@ -76,29 +76,33 @@ async fn create_object_store_with_cache(
 ) -> Result<ObjectStore> {
     let (cache_path, cache_capacity) = match store_config {
         ObjectStoreConfig::S3(s3_config) => {
-            let path = s3_config.cache_path.as_ref();
+            let path = s3_config.cache.cache_path.as_ref();
             let capacity = s3_config
+                .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)
         }
         ObjectStoreConfig::Oss(oss_config) => {
-            let path = oss_config.cache_path.as_ref();
+            let path = oss_config.cache.cache_path.as_ref();
             let capacity = oss_config
+                .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)
         }
         ObjectStoreConfig::Azblob(azblob_config) => {
-            let path = azblob_config.cache_path.as_ref();
+            let path = azblob_config.cache.cache_path.as_ref();
             let capacity = azblob_config
+                .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)
         }
         ObjectStoreConfig::Gcs(gcs_config) => {
-            let path = gcs_config.cache_path.as_ref();
+            let path = gcs_config.cache.cache_path.as_ref();
             let capacity = gcs_config
+                .cache
                 .cache_capacity
                 .unwrap_or(DEFAULT_OBJECT_STORE_CACHE_SIZE);
             (path, capacity)
@@ -119,6 +123,8 @@ async fn create_object_store_with_cache(
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
             .await
             .context(error::InitBackendSnafu)?;
+        info!("Using `{}` as the local object storage cache.", path);
+
         Ok(object_store.layer(cache_layer))
     } else {
         Ok(object_store)

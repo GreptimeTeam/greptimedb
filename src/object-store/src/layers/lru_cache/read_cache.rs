@@ -19,8 +19,8 @@ use futures::{Future, FutureExt};
 use metrics::{decrement_gauge, increment_counter, increment_gauge};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{Page, ReadExt, WriteExt};
-use opendal::raw::{Accessor, BytesRange, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
+use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
+use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
 use crate::metrics::{
@@ -47,7 +47,7 @@ impl ReadResult {
 }
 
 /// Generate an unique cache key for the read path and range.
-fn cache_key(path: &str, args: &OpRead) -> String {
+fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
         "{:x}.cache-{}",
         md5::compute(path),
@@ -73,13 +73,13 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 // Delete the file from local file cache when it's purged from mem_cache.
                 decrement_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
                 let file_cache_cloned = file_cache_cloned.clone();
-                debug!("Delete local cache file {}.", read_key);
 
                 async move {
                     if let ReadResult::Success(size) = read_result {
                         decrement_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
 
                         let _ = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
+                        debug!("Deleted local cache file {}.", read_key);
                     }
                 }
                 .boxed()
@@ -89,7 +89,10 @@ impl<C: Accessor + Clone> ReadCache<C> {
             file_cache,
             mem_cache: Cache::builder()
                 .max_capacity(capacity as u64)
-                .weigher(|_key, value: &ReadResult| -> u32 { value.size_bytes() })
+                .weigher(|_key, value: &ReadResult| -> u32 {
+                    // TODO(dennis): add key's length to weight?
+                    value.size_bytes()
+                })
                 .async_eviction_listener(eviction_listener)
                 .support_invalidation_closures()
                 .build(),
@@ -112,6 +115,17 @@ impl<C: Accessor + Clone> ReadCache<C> {
         self.mem_cache.run_pending_tasks().await;
     }
 
+    /// Blocking version of `invalidate_entries_with_prefix`.
+    pub(crate) fn blocking_invalidate_entries_with_prefix(&self, prefix: String) {
+        // Safety: always ok when building cache with `support_invalidation_closures`.
+        self.mem_cache
+            .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
+            .ok();
+        common_runtime::block_on_bg(async {
+            self.mem_cache.run_pending_tasks().await;
+        });
+    }
+
     /// Recover existing cache items from `file_cache` to `mem_cache`.
     /// Return entry count and total approximate entry size in bytes.
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
@@ -120,6 +134,11 @@ impl<C: Accessor + Clone> ReadCache<C> {
         while let Some(entries) = pager.next().await? {
             for entry in entries {
                 let read_key = entry.path().to_string();
+
+                if read_key.ends_with("write") {
+                    continue;
+                }
+
                 // We can't retrieve the metadata from `opendal::raw::oio::Entry` directly,
                 // because it's private field.
                 let size = {
@@ -155,7 +174,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         path: &'life1 str,
         args: OpRead,
         inner_read: F,
-    ) -> Result<(RpRead, C::Reader)>
+    ) -> Result<(RpRead, Box<dyn Read>)>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
@@ -167,14 +186,19 @@ impl<C: Accessor + Clone> ReadCache<C> {
             Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
         >,
     {
-        let read_key = cache_key(path, &args);
+        let read_key = read_cache_key(path, &args);
 
         if let Some(read_result) = self.mem_cache.get(&read_key).await {
             let cache_result = match read_result {
                 ReadResult::Success(_) => {
                     increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "success");
 
-                    self.file_cache.read(&read_key, OpRead::default()).await
+                    // There is a concurrent issue here, the local cache may be purged
+                    // while reading, we have to fallback to remote read
+                    match self.file_cache.read(&read_key, OpRead::default()).await {
+                        Ok(ret) => Ok(to_output_reader(ret)),
+                        Err(_) => inner_read(path, args.clone()).await.map(to_output_reader),
+                    }
                 }
                 ReadResult::NotFound => {
                     increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "not_found");
@@ -203,6 +227,9 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 // Call `close` to ensure data is written.
                 writer.close().await?;
 
+                // Read from local cache immediately, because it may be purged while inserting.
+                let ret = self.file_cache.read(&read_key, OpRead::default()).await;
+
                 let read_bytes = rp.metadata().content_length() as u32;
 
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
@@ -212,7 +239,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     .await;
                 self.mem_cache.run_pending_tasks().await;
 
-                self.file_cache.read(&read_key, OpRead::default()).await
+                ret.map(to_output_reader)
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -232,4 +259,8 @@ impl<C: Accessor + Clone> ReadCache<C> {
             }
         }
     }
+}
+
+fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
+    (input.0, Box::new(input.1))
 }

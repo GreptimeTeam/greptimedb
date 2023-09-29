@@ -15,13 +15,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use opendal::raw::oio::Read;
 use opendal::raw::{
     Accessor, Layer, LayeredAccessor, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
 };
 use opendal::Result;
 mod read_cache;
-mod write_buffer;
 use common_telemetry::logging::info;
 use read_cache::ReadCache;
 
@@ -77,7 +77,7 @@ pub struct LruCacheAccessor<I, C: Clone> {
 #[async_trait]
 impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C> {
     type Inner = I;
-    type Reader = C::Reader;
+    type Reader = Box<dyn Read>;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;
@@ -97,14 +97,23 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
-        self.inner.write(path, args).await
-    }
+        let ret = self.inner.write(path, args).await;
 
-    async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         self.read_cache
             .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
             .await;
-        self.inner.delete(path, args).await
+
+        ret
+    }
+
+    async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
+        let ret = self.inner.delete(path, args).await;
+
+        self.read_cache
+            .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
+            .await;
+
+        ret
     }
 
     async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Pager)> {
@@ -112,11 +121,17 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     }
 
     fn blocking_read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::BlockingReader)> {
+        // TODO(dennis): support blocking read cache
         self.inner.blocking_read(path, args)
     }
 
     fn blocking_write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::BlockingWriter)> {
-        self.inner.blocking_write(path, args)
+        let ret = self.inner.blocking_write(path, args);
+
+        self.read_cache
+            .blocking_invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)));
+
+        ret
     }
 
     fn blocking_list(&self, path: &str, args: OpList) -> Result<(RpList, Self::BlockingPager)> {

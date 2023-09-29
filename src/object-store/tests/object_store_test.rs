@@ -80,6 +80,11 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     store.delete(p2).await?;
     let entries = store.list("/").await?;
     assert!(entries.is_empty());
+
+    assert!(store.read(p1).await.is_err());
+    assert!(store.read(p2).await.is_err());
+    assert!(store.read(p3).await.is_err());
+
     Ok(())
 }
 
@@ -207,6 +212,42 @@ async fn test_gcs_backend() -> Result<()> {
             guard.remove_all().await?;
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_file_backend_with_lru_cache() -> Result<()> {
+    logging::init_default_ut_logging();
+
+    let data_dir = create_temp_dir("test_file_backend_with_lru_cache");
+    let tmp_dir = create_temp_dir("test_file_backend_with_lru_cache");
+    let mut builder = Fs::default();
+    let _ = builder
+        .root(&data_dir.path().to_string_lossy())
+        .atomic_write_dir(&tmp_dir.path().to_string_lossy());
+
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let cache_dir = create_temp_dir("test_file_backend_with_lru_cache");
+    let cache_layer = {
+        let mut builder = Fs::default();
+        let _ = builder
+            .root(&cache_dir.path().to_string_lossy())
+            .atomic_write_dir(&cache_dir.path().to_string_lossy());
+        let file_cache = Arc::new(builder.build().unwrap());
+
+        LruCacheLayer::new(Arc::new(file_cache.clone()), 32)
+            .await
+            .unwrap()
+    };
+
+    let store = store.layer(cache_layer.clone());
+
+    test_object_crud(&store).await?;
+    test_object_list(&store).await?;
+
+    assert_eq!(cache_layer.read_cache_stat().await, (4, 0));
+
     Ok(())
 }
 

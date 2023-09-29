@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+common-runtime.workspace = true
 common-telemetry.workspace = true
 bytes = "1.4"
 futures = { version = "0.3" }
