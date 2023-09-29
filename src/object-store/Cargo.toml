@@ -6,11 +6,12 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
+common-telemetry.workspace = true
 bytes = "1.4"
 futures = { version = "0.3" }
-lru = "0.9"
 md5 = "0.7"
 metrics.workspace = true
+moka.workspace = true
 opendal = { version = "0.40", features = [
     "layers-tracing",
     "layers-metrics",

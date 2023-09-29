@@ -12,103 +12,71 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZeroUsize;
-use std::ops::DerefMut;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lru::LruCache;
-use metrics::increment_counter;
-use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
 use opendal::raw::{
     Accessor, Layer, LayeredAccessor, OpDelete, OpList, OpRead, OpWrite, RpDelete, RpList, RpRead,
     RpWrite,
 };
-use opendal::{ErrorKind, Result};
-use tokio::sync::Mutex;
+use opendal::Result;
+mod read_cache;
+mod write_buffer;
+use common_telemetry::logging::info;
+use read_cache::ReadCache;
 
-use crate::metrics::{
-    OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND, OBJECT_STORE_LRU_CACHE_HIT,
-    OBJECT_STORE_LRU_CACHE_MISS,
-};
-
+/// An opendal layer with local LRU file cache supporting.
 #[derive(Clone)]
-pub struct LruCacheLayer<C> {
-    cache: Arc<C>,
-    lru_cache: Arc<Mutex<LruCache<String, ()>>>,
+pub struct LruCacheLayer<C: Clone> {
+    read_cache: ReadCache<C>,
 }
 
 impl<C: Accessor + Clone> LruCacheLayer<C> {
-    pub async fn new(cache: Arc<C>, capacity: usize) -> Result<Self> {
-        let layer = Self {
-            cache,
-            lru_cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(capacity).unwrap(),
-            ))),
-        };
-        layer.recover_keys().await?;
+    /// Create a `LruCacheLayer` with local file cache and capacity in bytes.
+    pub async fn new(file_cache: Arc<C>, capacity: usize) -> Result<Self> {
+        let read_cache = ReadCache::new(file_cache, capacity);
+        let (entries, bytes) = read_cache.recover_cache().await?;
 
-        Ok(layer)
+        info!(
+            "Recover {} entries and total size {} in bytes for LruCacheLayer",
+            entries, bytes
+        );
+
+        Ok(Self { read_cache })
     }
 
-    /// Recover existing keys from `cache` to `lru_cache`.
-    async fn recover_keys(&self) -> Result<()> {
-        let (_, mut pager) = self.cache.list("/", OpList::default()).await?;
-
-        let mut lru_cache = self.lru_cache.lock().await;
-        while let Some(entries) = pager.next().await? {
-            for entry in entries {
-                let _ = lru_cache.push(entry.path().to_string(), ());
-            }
-        }
-
-        Ok(())
+    /// Returns true when the local cache contains the specific file
+    pub async fn contains_file(&self, path: &str) -> bool {
+        self.read_cache.contains_file(path).await
     }
 
-    pub async fn lru_contains_key(&self, key: &str) -> bool {
-        self.lru_cache.lock().await.contains(key)
+    /// Returns the read cache statistics info `(EntryCount, SizeInBytes)`.
+    pub async fn read_cache_stat(&self) -> (u64, u64) {
+        self.read_cache.stat().await
     }
 }
 
-impl<I: Accessor, C: Accessor> Layer<I> for LruCacheLayer<C> {
+impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
     type LayeredAccessor = LruCacheAccessor<I, C>;
 
     fn layer(&self, inner: I) -> Self::LayeredAccessor {
         LruCacheAccessor {
             inner,
-            cache: self.cache.clone(),
-            lru_cache: self.lru_cache.clone(),
+            read_cache: self.read_cache.clone(),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct LruCacheAccessor<I, C> {
+pub struct LruCacheAccessor<I, C: Clone> {
     inner: I,
-    cache: Arc<C>,
-    lru_cache: Arc<Mutex<LruCache<String, ()>>>,
-}
-
-/// Returns true when the path of the file can be cached.
-fn can_cache(path: &str) -> bool {
-    // TODO(dennis): find a better way
-    !path.ends_with("_last_checkpoint")
-}
-
-impl<I, C> LruCacheAccessor<I, C> {
-    fn cache_path(&self, path: &str, args: &OpRead) -> String {
-        format!(
-            "{:x}.cache-{}",
-            md5::compute(path),
-            args.range().to_header()
-        )
-    }
+    read_cache: ReadCache<C>,
 }
 
 #[async_trait]
-impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
+impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C> {
     type Inner = I;
-    type Reader = Box<dyn Read>;
+    type Reader = C::Reader;
     type BlockingReader = I::BlockingReader;
     type Writer = I::Writer;
     type BlockingWriter = I::BlockingWriter;
@@ -120,57 +88,11 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        if !can_cache(path) {
-            return self.inner.read(path, args).await.map(to_output_reader);
-        }
-
-        let path = path.to_string();
-        let cache_path = self.cache_path(&path, &args);
-        let lru_cache = &self.lru_cache;
-
-        // the args is already in the cache path, so we must create a new OpRead.
-        match self.cache.read(&cache_path, OpRead::default()).await {
-            Ok((rp, r)) => {
-                increment_counter!(OBJECT_STORE_LRU_CACHE_HIT);
-
-                // update lru when cache hit
-                let mut lru_cache = lru_cache.lock().await;
-                let _ = lru_cache.get_or_insert(cache_path.clone(), || ());
-                Ok(to_output_reader((rp, r)))
-            }
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
-
-                let (_, mut reader) = self.inner.read(&path, args.clone()).await?;
-                let (_, mut writer) = self.cache.write(&cache_path, OpWrite::new()).await?;
-
-                while let Some(bytes) = reader.next().await {
-                    writer.write(&bytes?).await?;
-                }
-
-                writer.close().await?;
-
-                match self.cache.read(&cache_path, OpRead::default()).await {
-                    Ok((rp, reader)) => {
-                        let r = {
-                            // push new cache file name to lru
-                            let mut lru_cache = lru_cache.lock().await;
-                            lru_cache.push(cache_path.clone(), ())
-                        };
-                        // delete the evicted cache file
-                        if let Some((k, _v)) = r {
-                            let _ = self.cache.delete(&k, OpDelete::new()).await;
-                        }
-                        return Ok(to_output_reader((rp, reader)));
-                    }
-                    Err(_) => return self.inner.read(&path, args).await.map(to_output_reader),
-                }
-            }
-            Err(err) => {
-                increment_counter!(OBJECT_STORE_LRU_CACHE_ERROR, OBJECT_STORE_LRU_CACHE_ERROR_KIND => format!("{}", err.kind()));
-                return self.inner.read(&path, args).await.map(to_output_reader);
-            }
-        }
+        self.read_cache
+            .read::<I, _>(path, args, |path, args| {
+                Box::pin(async move { self.inner.read(path, args.clone()).await })
+            })
+            .await
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
@@ -178,25 +100,9 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
-        let cache_path = md5::compute(path);
-        let lru_cache = &self.lru_cache;
-
-        let cache_files: Vec<String> = {
-            let mut guard = lru_cache.lock().await;
-            let lru = guard.deref_mut();
-            let cache_files = lru
-                .iter()
-                .filter(|(k, _v)| k.starts_with(format!("{:x}.cache-", cache_path).as_str()))
-                .map(|(k, _v)| k.clone())
-                .collect::<Vec<_>>();
-            for k in &cache_files {
-                let _ = lru.pop(k);
-            }
-            cache_files
-        };
-        for file in cache_files {
-            let _ = self.cache.delete(&file, OpDelete::new()).await;
-        }
+        self.read_cache
+            .invalidate_entries_with_prefix(format!("{:x}", md5::compute(path)))
+            .await;
         self.inner.delete(path, args).await
     }
 
@@ -217,23 +123,5 @@ impl<I: Accessor, C: Accessor> LayeredAccessor for LruCacheAccessor<I, C> {
     }
 }
 
-#[inline]
-fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
-    (input.0, Box::new(input.1))
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_can_cache() {
-        assert!(can_cache("test"));
-        assert!(can_cache("a/b/c.parquet"));
-        assert!(can_cache("1.json"));
-        assert!(can_cache("100.checkpoint"));
-        assert!(can_cache("test/last_checkpoint"));
-        assert!(!can_cache("test/__last_checkpoint"));
-        assert!(!can_cache("a/b/c/__last_checkpoint"));
-    }
-}
+mod tests {}

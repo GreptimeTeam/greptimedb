@@ -215,7 +215,7 @@ async fn assert_lru_cache<C: Accessor + Clone>(
     file_names: &[&str],
 ) {
     for file_name in file_names {
-        assert!(cache_layer.lru_contains_key(file_name).await);
+        assert!(cache_layer.contains_file(file_name).await);
     }
 }
 
@@ -265,11 +265,11 @@ async fn test_object_store_cache_policy() -> Result<()> {
     let _ = builder
         .root(&cache_dir.path().to_string_lossy())
         .atomic_write_dir(&cache_dir.path().to_string_lossy());
-    let cache_accessor = Arc::new(builder.build().unwrap());
-    let cache_store = OperatorBuilder::new(cache_accessor.clone()).finish();
+    let file_cache = Arc::new(builder.build().unwrap());
+    let cache_store = OperatorBuilder::new(file_cache.clone()).finish();
 
     // create operator for cache dir to verify cache file
-    let cache_layer = LruCacheLayer::new(Arc::new(cache_accessor.clone()), 3)
+    let cache_layer = LruCacheLayer::new(Arc::new(file_cache.clone()), 38)
         .await
         .unwrap();
     let store = store.layer(cache_layer.clone());
@@ -281,13 +281,14 @@ async fn test_object_store_cache_policy() -> Result<()> {
     store.write(p1, "Hello, object1!").await.unwrap();
     store.write(p2, "Hello, object2!").await.unwrap();
 
-    // create cache by read object
+    // Try to read p1 and p2
     let _ = store.read_with(p1).range(0..).await?;
     let _ = store.read(p1).await?;
     let _ = store.read_with(p2).range(0..).await?;
     let _ = store.read_with(p2).range(7..).await?;
     let _ = store.read(p2).await?;
 
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 38));
     assert_cache_files(
         &cache_store,
         &[
@@ -302,13 +303,16 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &cache_layer,
         &[
             "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-",
             "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-",
         ],
     )
     .await;
 
+    // Delte p2 file
     store.delete(p2).await.unwrap();
 
+    assert_eq!(cache_layer.read_cache_stat().await, (1, 15));
     assert_cache_files(
         &cache_store,
         &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
@@ -321,12 +325,17 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await;
 
+    assert!(store.read(p2).await.is_err());
+
     let p3 = "test_file3";
     store.write(p3, "Hello, object3!").await.unwrap();
 
+    // Try to read p3
     let _ = store.read(p3).await.unwrap();
     let _ = store.read_with(p3).range(0..5).await.unwrap();
 
+    // The entry count is 4, because we have the p2 `NotFound` cache.
+    assert_eq!(cache_layer.read_cache_stat().await, (4, 35));
     assert_cache_files(
         &cache_store,
         &[
@@ -347,6 +356,33 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await;
 
+    // try to read p1, p2, p3
+    let _ = store.read(p3).await.unwrap();
+    let _ = store.read_with(p3).range(0..5).await.unwrap();
+    assert!(store.read(p2).await.is_err());
+    // Read p1 with range `1..` , the existing p1 with range `0..` must be evicited.
+    let _ = store.read_with(p1).range(1..15).await.unwrap();
+    assert_eq!(cache_layer.read_cache_stat().await, (4, 34));
+    assert_cache_files(
+        &cache_store,
+        &[
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
+        ],
+        &["ello, object1!", "Hello, object3!", "Hello"],
+    )
+    .await?;
+    assert_lru_cache(
+        &cache_layer,
+        &[
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
+        ],
+    )
+    .await;
+
     let handle = metric::try_handle().unwrap();
     let metric_text = handle.render();
 
@@ -354,14 +390,15 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert!(metric_text.contains("object_store_lru_cache_miss"));
 
     drop(cache_layer);
-    let cache_layer = LruCacheLayer::new(Arc::new(cache_accessor), 3)
-        .await
-        .unwrap();
+    // Test recover
+    let cache_layer = LruCacheLayer::new(Arc::new(file_cache), 38).await.unwrap();
 
+    // The p2 `NotFound` cache will not be recovered
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 34));
     assert_lru_cache(
         &cache_layer,
         &[
-            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
