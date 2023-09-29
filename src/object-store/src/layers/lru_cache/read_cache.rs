@@ -230,8 +230,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 writer.close().await?;
 
                 // Read from local cache immediately, because it may be purged while inserting.
-                let ret = self.file_cache.read(&read_key, OpRead::default()).await;
-
+                let cache_result = self.file_cache.read(&read_key, OpRead::default()).await;
                 let read_bytes = rp.metadata().content_length() as u32;
 
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
@@ -241,7 +240,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     .await;
                 self.mem_cache.run_pending_tasks().await;
 
-                ret.map(to_output_reader)
+                cache_result.map(to_output_reader)
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
