@@ -270,8 +270,60 @@ fn new_repeated_vector(
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
+    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray, UInt64Array, UInt8Array};
+    use datatypes::arrow::util::pretty;
+    use datatypes::value::ValueRef;
+
     use super::*;
+    use crate::read::BatchBuilder;
     use crate::test_util::meta_util::TestRegionMetadataBuilder;
+
+    fn new_batch(
+        ts_start: i64,
+        tags: &[i64],
+        fields: &[(ColumnId, i64)],
+        num_rows: usize,
+    ) -> Batch {
+        let converter = McmpRowCodec::new(
+            (0..tags.len())
+                .map(|_| SortField::new(ConcreteDataType::int64_datatype()))
+                .collect(),
+        );
+        let primary_key = converter
+            .encode(tags.iter().map(|v| ValueRef::Int64(*v)))
+            .unwrap();
+
+        let mut builder = BatchBuilder::new(primary_key);
+        builder
+            .timestamps_array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                (0..num_rows).map(|i| ts_start + i as i64 * 1000),
+            )))
+            .unwrap()
+            .sequences_array(Arc::new(UInt64Array::from_iter_values(0..num_rows as u64)))
+            .unwrap()
+            .op_types_array(Arc::new(UInt8Array::from_iter_values(
+                (0..num_rows).map(|_| OpType::Put as u8),
+            )))
+            .unwrap();
+        for (column_id, field) in fields {
+            builder
+                .push_field_array(
+                    *column_id,
+                    Arc::new(Int64Array::from_iter_values(
+                        std::iter::repeat(*field).take(num_rows),
+                    )),
+                )
+                .unwrap();
+        }
+        builder.build().unwrap()
+    }
+
+    fn print_record_batch(record_batch: RecordBatch) -> String {
+        pretty::pretty_format_batches(&[record_batch.into_df_record_batch()])
+            .unwrap()
+            .to_string()
+    }
 
     #[test]
     fn test_projection_mapper_all() {
@@ -284,6 +336,25 @@ mod tests {
         let mapper = ProjectionMapper::all(&metadata).unwrap();
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!([3, 4], mapper.batch_fields());
+
+        let cache = CacheManager::new(0, 1024);
+        let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
+        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        let expect = "\
++---------------------+----+----+----+----+
+| ts                  | k0 | k1 | v0 | v1 |
++---------------------+----+----+----+----+
+| 1970-01-01T00:00:00 | 1  | 2  | 3  | 4  |
+| 1970-01-01T00:00:01 | 1  | 2  | 3  | 4  |
+| 1970-01-01T00:00:02 | 1  | 2  | 3  | 4  |
++---------------------+----+----+----+----+";
+        assert_eq!(expect, print_record_batch(record_batch));
+
+        assert!(cache.get_repeated_vector(&Value::Int64(1)).is_some());
+        assert!(cache.get_repeated_vector(&Value::Int64(2)).is_some());
+        assert!(cache.get_repeated_vector(&Value::Int64(3)).is_none());
+        let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
+        assert_eq!(expect, print_record_batch(record_batch));
     }
 
     #[test]
@@ -298,7 +369,17 @@ mod tests {
         let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
         assert_eq!([4, 1], mapper.column_ids());
         assert_eq!([4], mapper.batch_fields());
+
+        let batch = new_batch(0, &[1, 2], &[(4, 4)], 3);
+        let record_batch = mapper.convert(&batch, None).unwrap();
+        let expect = "\
++----+----+
+| v1 | k0 |
++----+----+
+| 4  | 1  |
+| 4  | 1  |
+| 4  | 1  |
++----+----+";
+        assert_eq!(expect, print_record_batch(record_batch));
     }
 }
-
-// TODO(yingwen): Add tests for mapper.
