@@ -268,4 +268,37 @@ fn new_repeated_vector(
     Ok(base_vector.replicate(&[num_rows]))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::meta_util::TestRegionMetadataBuilder;
+
+    #[test]
+    fn test_projection_mapper_all() {
+        let metadata = Arc::new(
+            TestRegionMetadataBuilder::default()
+                .num_tags(2)
+                .num_fields(2)
+                .build(),
+        );
+        let mapper = ProjectionMapper::all(&metadata).unwrap();
+        assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
+        assert_eq!([3, 4], mapper.batch_fields());
+    }
+
+    #[test]
+    fn test_projection_mapper_with_projection() {
+        let metadata = Arc::new(
+            TestRegionMetadataBuilder::default()
+                .num_tags(2)
+                .num_fields(2)
+                .build(),
+        );
+        // Columns v1, k0
+        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
+        assert_eq!([4, 1], mapper.column_ids());
+        assert_eq!([4], mapper.batch_fields());
+    }
+}
+
 // TODO(yingwen): Add tests for mapper.
