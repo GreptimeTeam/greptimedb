@@ -188,59 +188,21 @@ impl ReadRowHelper {
 mod tests {
     use api::v1;
     use api::v1::ColumnDataType;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
 
     use super::*;
     use crate::test_util::i64_value;
+    use crate::test_util::meta_util::TestRegionMetadataBuilder;
 
     const TS_NAME: &str = "ts";
     const START_SEQ: SequenceNumber = 100;
 
     /// Creates a region: `ts, k0, k1, ..., v0, v1, ...`
-    fn new_region_metadata(num_tag: usize, num_field: usize) -> RegionMetadata {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
-        let mut column_id = 0;
-        builder.push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                TS_NAME,
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id,
-        });
-        // For simplicity, we use the same data type for tag/field columns.
-        let mut primary_key = Vec::with_capacity(num_tag);
-        for i in 0..num_tag {
-            column_id += 1;
-            builder.push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    format!("k{i}"),
-                    ConcreteDataType::int64_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id,
-            });
-            primary_key.push(i as u32 + 1);
-        }
-        for i in 0..num_field {
-            column_id += 1;
-            builder.push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    format!("v{i}"),
-                    ConcreteDataType::int64_datatype(),
-                    true,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id,
-            });
-        }
-        builder.primary_key(primary_key);
-        builder.build().unwrap()
+    fn new_region_metadata(num_tags: usize, num_fields: usize) -> RegionMetadata {
+        TestRegionMetadataBuilder::default()
+            .ts_name(TS_NAME)
+            .num_tags(num_tags)
+            .num_fields(num_fields)
+            .build()
     }
 
     /// Creates rows `[ 0, 1, ..., n ] x num_rows`
