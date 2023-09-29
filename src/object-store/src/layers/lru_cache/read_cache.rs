@@ -28,19 +28,10 @@ use crate::metrics::{
     OBJECT_STORE_LRU_CACHE_MISS, OBJECT_STORE_READ_ERROR,
 };
 
-/// Cache key for read file
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReadKey {
-    // The file path
-    path: String,
-    // The read range
-    range: BytesRange,
-}
-
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 enum ReadResult {
-    // Read success,return bytes in `size`.
+    // Read success with size
     Success(u32),
     // File not found
     NotFound,
@@ -77,10 +68,9 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Create a `ReadCache` with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
-        // Create an eviction lister closure.
-        // Delete the file from local file cache when it's purged from mem_cache.
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, _cause| -> ListenerFuture {
+                // Delete the file from local file cache when it's purged from mem_cache.
                 decrement_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
                 let file_cache_cloned = file_cache_cloned.clone();
                 debug!("Delete local cache file {}.", read_key);
@@ -149,6 +139,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         Ok(self.stat().await)
     }
 
+    /// Returns true when the read cache contains the specific file.
     pub(crate) async fn contains_file(&self, path: &str) -> bool {
         self.mem_cache.contains_key(path)
             && self.file_cache.stat(path, OpStat::default()).await.is_ok()

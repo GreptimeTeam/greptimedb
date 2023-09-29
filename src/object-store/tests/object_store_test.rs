@@ -309,7 +309,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await;
 
-    // Delte p2 file
+    // Delete p2 file
     store.delete(p2).await.unwrap();
 
     assert_eq!(cache_layer.read_cache_stat().await, (1, 15));

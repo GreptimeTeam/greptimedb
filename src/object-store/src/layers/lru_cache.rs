@@ -28,6 +28,7 @@ use read_cache::ReadCache;
 /// An opendal layer with local LRU file cache supporting.
 #[derive(Clone)]
 pub struct LruCacheLayer<C: Clone> {
+    // The read cache
     read_cache: ReadCache<C>,
 }
 
