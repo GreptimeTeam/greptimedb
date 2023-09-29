@@ -135,6 +135,8 @@ type VectorCache = Cache<Value, VectorRef>;
 
 #[cfg(test)]
 mod tests {
+    use datatypes::vectors::Int64Vector;
+
     use super::*;
     use crate::cache::test_util::parquet_meta;
 
@@ -148,6 +150,11 @@ mod tests {
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+
+        let value = Value::Int64(10);
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice(&[10, 10, 10, 10]));
+        cache.put_repeated_vector(value.clone(), vector.clone());
+        assert!(cache.get_repeated_vector(&value).is_none());
     }
 
     #[test]
@@ -161,5 +168,16 @@ mod tests {
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_some());
         cache.remove_parquet_meta_data(region_id, file_id);
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+    }
+
+    #[test]
+    fn test_repeated_vector_cache() {
+        let cache = CacheManager::new(0, 4096);
+        let value = Value::Int64(10);
+        assert!(cache.get_repeated_vector(&value).is_none());
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice(&[10, 10, 10, 10]));
+        cache.put_repeated_vector(value.clone(), vector.clone());
+        let cached = cache.get_repeated_vector(&value).unwrap();
+        assert_eq!(vector, cached);
     }
 }
