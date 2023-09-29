@@ -30,6 +30,8 @@ async fn test_object_crud(store: &ObjectStore) -> Result<()> {
     // Create object handler.
     // Write data info object;
     let file_name = "test_file";
+    assert!(store.read(file_name).await.is_err());
+
     store.write(file_name, "Hello, World!").await?;
 
     // Read data from object;

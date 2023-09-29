@@ -79,7 +79,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                         decrement_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
 
                         let _ = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
-                        debug!("Deleted local cache file {}.", read_key);
+                        debug!("Deleted local cache file `{}`.", read_key);
                     }
                 }
                 .boxed()
@@ -187,8 +187,9 @@ impl<C: Accessor + Clone> ReadCache<C> {
         >,
     {
         let read_key = read_cache_key(path, &args);
+        let read_result = self.mem_cache.get(&read_key).await;
 
-        if let Some(read_result) = self.mem_cache.get(&read_key).await {
+        if let Some(read_result) = read_result {
             let cache_result = match read_result {
                 ReadResult::Success(_) => {
                     increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "success");
@@ -216,7 +217,8 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
         increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
-        match inner_read(path, args.clone()).await {
+        let inner_result = inner_read(path, args.clone()).await;
+        match inner_result {
             Ok((rp, mut reader)) => {
                 let (_, mut writer) = self.file_cache.write(&read_key, OpWrite::new()).await?;
 

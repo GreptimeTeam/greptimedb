@@ -39,7 +39,7 @@ impl<C: Accessor + Clone> LruCacheLayer<C> {
         let (entries, bytes) = read_cache.recover_cache().await?;
 
         info!(
-            "Recover {} entries and total size {} in bytes for LruCacheLayer",
+            "Recovered {} entries and total size {} in bytes for LruCacheLayer",
             entries, bytes
         );
 

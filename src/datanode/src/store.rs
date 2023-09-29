@@ -123,7 +123,11 @@ async fn create_object_store_with_cache(
         let cache_layer = LruCacheLayer::new(Arc::new(cache_store), cache_capacity.0 as usize)
             .await
             .context(error::InitBackendSnafu)?;
-        info!("Using `{}` as the local object storage cache.", path);
+
+        info!(
+            "Enabled local object storage cache, path: {}, capacity: {}.",
+            path, cache_capacity
+        );
 
         Ok(object_store.layer(cache_layer))
     } else {
