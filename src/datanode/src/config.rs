@@ -37,7 +37,7 @@ use storage::config::{
 };
 use storage::scheduler::SchedulerConfig;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(512 * readable_size::MIB);
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(256 * readable_size::MIB);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
