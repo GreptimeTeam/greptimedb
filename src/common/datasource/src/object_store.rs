@@ -15,6 +15,7 @@
 pub mod fs;
 pub mod s3;
 use std::collections::HashMap;
+use std::env;
 
 use lazy_static::lazy_static;
 use object_store::ObjectStore;
@@ -82,6 +83,84 @@ pub fn handle_windows_path(url: &str) -> Option<String> {
     DISK_SYMBOL_PATTERN
         .captures(url)
         .map(|captures| captures[0].to_string())
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum StorageType {
+    S3,
+    S3WithCache,
+    File,
+    Oss,
+    Azblob,
+    Gcs,
+}
+
+impl std::fmt::Display for StorageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageType::S3 => write!(f, "S3"),
+            StorageType::S3WithCache => write!(f, "S3"),
+            StorageType::File => write!(f, "File"),
+            StorageType::Oss => write!(f, "Oss"),
+            StorageType::Azblob => write!(f, "Azblob"),
+            StorageType::Gcs => write!(f, "Gcs"),
+        }
+    }
+}
+
+impl StorageType {
+    pub fn build_storage_types_based_on_env() -> Vec<StorageType> {
+        let mut storage_types = Vec::with_capacity(4);
+        storage_types.push(StorageType::File);
+        if env::var("GT_S3_BUCKET").is_ok() {
+            storage_types.push(StorageType::S3);
+        }
+        if env::var("GT_OSS_BUCKET").is_ok() {
+            storage_types.push(StorageType::Oss);
+        }
+        if env::var("GT_AZBLOB_CONTAINER").is_ok() {
+            storage_types.push(StorageType::Azblob);
+        }
+        if env::var("GT_GCS_BUCKET").is_ok() {
+            storage_types.push(StorageType::Gcs);
+        }
+        storage_types
+    }
+    pub fn test_on(&self) -> bool {
+        let _ = dotenv::dotenv();
+
+        match self {
+            StorageType::File => true, // always test file
+            StorageType::S3 | StorageType::S3WithCache => {
+                if let Ok(b) = env::var("GT_S3_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+            StorageType::Oss => {
+                if let Ok(b) = env::var("GT_OSS_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+            StorageType::Azblob => {
+                if let Ok(b) = env::var("GT_AZBLOB_CONTAINER") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+            StorageType::Gcs => {
+                if let Ok(b) = env::var("GT_GCS_BUCKET") {
+                    !b.is_empty()
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

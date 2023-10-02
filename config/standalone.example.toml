@@ -113,8 +113,11 @@ retry_delay = "500ms"
 [storage]
 # The working home directory.
 data_home = "/tmp/greptimedb/"
+#global_store = "File"
 # Storage type.
-type = "File"
+#[[storage.store]]
+#type = "File"
+
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
 # Cache configuration for object storage such as 'S3' etc.

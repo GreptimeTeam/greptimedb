@@ -28,6 +28,7 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_datasource::compression::CompressionType;
+pub use common_datasource::object_store::StorageType;
 use common_query::Output;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
@@ -35,6 +36,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
+use object_store::object_store_manager::ObjectStoreManager;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -71,7 +73,7 @@ pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
     logstore: Option<Arc<RaftEngineLogStore>>,
-    object_store: Option<ObjectStore>,
+    object_store_manager: Option<ObjectStoreManager>,
 }
 
 impl Default for TestEnv {
@@ -86,7 +88,7 @@ impl TestEnv {
         TestEnv {
             data_home: create_temp_dir(""),
             logstore: None,
-            object_store: None,
+            object_store_manager: None,
         }
     }
 
@@ -95,7 +97,7 @@ impl TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
             logstore: None,
-            object_store: None,
+            object_store_manager: None,
         }
     }
 
@@ -104,17 +106,26 @@ impl TestEnv {
     }
 
     pub fn get_object_store(&self) -> Option<ObjectStore> {
-        self.object_store.clone()
+        Some(
+            self.object_store_manager
+                .clone()
+                .unwrap()
+                .global_object_store(),
+        )
+    }
+
+    pub fn get_object_store_manager(&self) -> Option<ObjectStoreManager> {
+        self.object_store_manager.clone()
     }
 
     /// Creates a new engine with specific config under this env.
     pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store().await;
 
         let logstore = Arc::new(log_store);
         self.logstore = Some(logstore.clone());
-        self.object_store = Some(object_store.clone());
-        MitoEngine::new(config, logstore, object_store)
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new(config, logstore, object_store_manager)
     }
 
     /// Creates a new engine with specific config and manager/listener under this env.
@@ -124,12 +135,53 @@ impl TestEnv {
         manager: Option<WriteBufferManagerRef>,
         listener: Option<EventListenerRef>,
     ) -> MitoEngine {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store().await;
 
         let logstore = Arc::new(log_store);
         self.logstore = Some(logstore.clone());
-        self.object_store = Some(object_store.clone());
-        MitoEngine::new_for_test(config, logstore, object_store, manager, listener)
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        MitoEngine::new_for_test(config, logstore, manager, listener, object_store_manager)
+    }
+
+    pub async fn create_engine_with_multiple_object_stores(
+        &mut self,
+        config: MitoConfig,
+        manager: Option<WriteBufferManagerRef>,
+        listener: Option<EventListenerRef>,
+        storage_types: Vec<StorageType>,
+        default_storage_name: &str,
+    ) -> MitoEngine {
+        let log_store = self.create_log().await;
+
+        let logstore = Arc::new(log_store);
+        self.logstore = Some(logstore.clone());
+        let mut stores = HashMap::new();
+        for storage_type in storage_types {
+            let storage_name = storage_type.to_string();
+            let data_path = self
+                .data_home
+                .path()
+                .join("data")
+                .join(&storage_name)
+                .as_path()
+                .display()
+                .to_string();
+            let mut builder = Fs::default();
+            builder.root(&data_path);
+            let object_store = ObjectStore::new(builder).unwrap().finish();
+            stores.insert(storage_name, object_store);
+        }
+        self.object_store_manager =
+            Some(ObjectStoreManager::try_new(stores, default_storage_name).unwrap());
+
+        MitoEngine::new_for_test(
+            config,
+            logstore,
+            manager,
+            listener,
+            self.object_store_manager.clone().unwrap(),
+        )
     }
 
     /// Reopen the engine.
@@ -139,28 +191,32 @@ impl TestEnv {
         MitoEngine::new(
             config,
             self.logstore.clone().unwrap(),
-            self.object_store.clone().unwrap(),
+            self.object_store_manager.clone().unwrap(),
         )
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), object_store)
+        WorkerGroup::start(config, Arc::new(log_store), object_store_manager)
     }
 
-    async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
+    async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStoreManager) {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let data_path = data_home.join("data").as_path().display().to_string();
 
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
-        let mut builder = Fs::default();
-        builder.root(&data_path);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let data_path = data_home.join("data").as_path().display().to_string();
+        let object_store_manager = ObjectStoreManager::new_with(&data_path);
 
-        (log_store, object_store)
+        (log_store, object_store_manager)
+    }
+
+    async fn create_log(&self) -> RaftEngineLogStore {
+        let data_home = self.data_home.path();
+        let wal_path = data_home.join("wal");
+        log_store_util::create_tmp_local_file_log_store(&wal_path).await
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`

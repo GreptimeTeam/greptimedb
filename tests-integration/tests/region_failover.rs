@@ -18,6 +18,7 @@ use std::time::Duration;
 use api::v1::meta::Peer;
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_datasource::object_store::StorageType;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
 use common_meta::{distributed_time_constants, RegionIdent};
@@ -35,7 +36,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
-use tests_integration::test_util::{check_output_stream, get_test_store_config, StorageType};
+use tests_integration::test_util::{check_output_stream, get_test_store_config};
 use tokio::time;
 
 #[macro_export]
@@ -49,7 +50,7 @@ macro_rules! region_failover_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
-                        let store_type = tests_integration::test_util::StorageType::$service;
+                        let store_type = common_datasource::object_store::StorageType::$service;
                         if store_type.test_on() {
                             let _ = $crate::region_failover::$test(store_type).await;
                         }

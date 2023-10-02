@@ -19,13 +19,14 @@ use std::sync::Arc;
 use common_query::Output;
 use common_telemetry::info;
 use metrics::increment_gauge;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
 use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
+use table::requests::STORAGE_KEY;
 
-use crate::error::{InvalidMetadataSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, Result, StorageNotFoundSnafu};
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::{check_recovered_region, RegionOpener};
 use crate::worker::RegionWorkerLoop;
@@ -56,17 +57,25 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         builder.primary_key(request.primary_key);
         let metadata = builder.build().context(InvalidMetadataSnafu)?;
-
+        let object_store = if let Some(storage) = request.options.get(STORAGE_KEY) {
+            self.object_storage_manager
+                .find(storage)
+                .context(StorageNotFoundSnafu {
+                    storage: storage.to_string(),
+                })?
+        } else {
+            self.object_storage_manager.global_object_store()
+        };
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder.clone(),
-            self.object_store.clone(),
+            object_store,
             self.scheduler.clone(),
         )
         .metadata(metadata)
-        .options(request.options)
+        .options(request.options) // TODO: remove `storage` option from request.options
         .cache(Some(self.cache_manager.clone()))
         .create_or_open(&self.config, &self.wal)
         .await?;

@@ -62,4 +62,5 @@ uuid.workspace = true
 [dev-dependencies]
 common-procedure-test = { workspace = true }
 common-test-util = { workspace = true }
+dotenv = "0.15"
 log-store = { workspace = true }

@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::env;
-use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +20,7 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use common_datasource::object_store::StorageType;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
@@ -51,67 +51,6 @@ use servers::Mode;
 use session::context::QueryContext;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum StorageType {
-    S3,
-    S3WithCache,
-    File,
-    Oss,
-    Azblob,
-    Gcs,
-}
-
-impl Display for StorageType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StorageType::S3 => write!(f, "S3"),
-            StorageType::S3WithCache => write!(f, "S3"),
-            StorageType::File => write!(f, "File"),
-            StorageType::Oss => write!(f, "Oss"),
-            StorageType::Azblob => write!(f, "Azblob"),
-            StorageType::Gcs => write!(f, "Gcs"),
-        }
-    }
-}
-
-impl StorageType {
-    pub fn test_on(&self) -> bool {
-        let _ = dotenv::dotenv();
-
-        match self {
-            StorageType::File => true, // always test file
-            StorageType::S3 | StorageType::S3WithCache => {
-                if let Ok(b) = env::var("GT_S3_BUCKET") {
-                    !b.is_empty()
-                } else {
-                    false
-                }
-            }
-            StorageType::Oss => {
-                if let Ok(b) = env::var("GT_OSS_BUCKET") {
-                    !b.is_empty()
-                } else {
-                    false
-                }
-            }
-            StorageType::Azblob => {
-                if let Ok(b) = env::var("GT_AZBLOB_CONTAINER") {
-                    !b.is_empty()
-                } else {
-                    false
-                }
-            }
-            StorageType::Gcs => {
-                if let Ok(b) = env::var("GT_GCS_BUCKET") {
-                    !b.is_empty()
-                } else {
-                    false
-                }
-            }
-        }
-    }
-}
 
 fn s3_test_config() -> S3Config {
     S3Config {
@@ -243,7 +182,7 @@ pub enum TempDirGuard {
 
 pub struct TestGuard {
     pub home_guard: FileDirGuard,
-    pub storage_guard: StorageGuard,
+    pub storage_guards: Vec<StorageGuard>,
 }
 
 pub struct FileDirGuard {
@@ -260,42 +199,61 @@ pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let TempDirGuard::S3(guard)
-        | TempDirGuard::Oss(guard)
-        | TempDirGuard::Azblob(guard)
-        | TempDirGuard::Gcs(guard) = &mut self.storage_guard.0
-        {
-            guard.remove_all().await.unwrap()
+        for storage_guard in self.storage_guards.iter_mut() {
+            if let TempDirGuard::S3(guard)
+            | TempDirGuard::Oss(guard)
+            | TempDirGuard::Azblob(guard)
+            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
+            {
+                guard.remove_all().await.unwrap()
+            }
         }
     }
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
-    store_type: StorageType,
+    store_types: Vec<StorageType>,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
-    let (store, data_tmp_dir) = get_test_store_config(&store_type);
-    let opts = create_datanode_opts(store, home_dir);
+    let mut stores = Vec::with_capacity(store_types.len());
+    let mut storage_guards = Vec::with_capacity(store_types.len());
+    for store_type in store_types {
+        let (store, data_tmp_dir) = get_test_store_config(&store_type);
+        stores.push(store);
+        storage_guards.push(StorageGuard(data_tmp_dir))
+    }
+    let opts = create_datanode_opts(stores, home_dir);
 
     (
         opts,
         TestGuard {
             home_guard: FileDirGuard::new(home_tmp_dir),
-            storage_guard: StorageGuard(data_tmp_dir),
+            storage_guards,
         },
     )
 }
 
-pub(crate) fn create_datanode_opts(store: ObjectStoreConfig, home_dir: String) -> DatanodeOptions {
+pub(crate) fn create_datanode_opts(
+    stores: Vec<ObjectStoreConfig>,
+    home_dir: String,
+) -> DatanodeOptions {
+    let global_store = match &stores[0] {
+        ObjectStoreConfig::S3(_) => "S3",
+        ObjectStoreConfig::Azblob(_) => "Azblob",
+        ObjectStoreConfig::File(_) => "File",
+        ObjectStoreConfig::Oss(_) => "Oss",
+        ObjectStoreConfig::Gcs(_) => "Gcs",
+    };
     DatanodeOptions {
         node_id: Some(0),
         require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
-            store,
+            store: stores,
+            global_store: global_store.to_string(),
             ..Default::default()
         },
         mode: Mode::Standalone,

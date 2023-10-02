@@ -17,13 +17,14 @@ use std::sync::Arc;
 use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_config::KvStoreConfig;
+use common_datasource::object_store::StorageType;
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_procedure::options::ProcedureConfig;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
-use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
+use crate::test_util::{self, create_tmp_dir_and_datanode_opts, TestGuard};
 
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
@@ -33,7 +34,7 @@ pub struct GreptimeDbStandalone {
 
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
-    store_type: Option<StorageType>,
+    store_types: Option<Vec<StorageType>>,
     plugin: Option<Plugins>,
 }
 
@@ -41,14 +42,22 @@ impl GreptimeDbStandaloneBuilder {
     pub fn new(instance_name: &str) -> Self {
         Self {
             instance_name: instance_name.to_string(),
-            store_type: None,
+            store_types: None,
             plugin: None,
         }
     }
 
     pub fn with_store_type(self, store_type: StorageType) -> Self {
         Self {
-            store_type: Some(store_type),
+            store_types: Some(vec![store_type]),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_store_types(self, store_types: Vec<StorageType>) -> Self {
+        Self {
+            store_types: Some(store_types),
             ..self
         }
     }
@@ -62,9 +71,9 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     pub async fn build(self) -> GreptimeDbStandalone {
-        let store_type = self.store_type.unwrap_or(StorageType::File);
+        let store_types = self.store_types.unwrap_or(vec![StorageType::File]);
 
-        let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, &self.instance_name);
+        let (opts, guard) = create_tmp_dir_and_datanode_opts(store_types, &self.instance_name);
 
         let (kv_store, procedure_manager) = Instance::try_build_standalone_components(
             format!("{}/kv", &opts.storage.data_home),

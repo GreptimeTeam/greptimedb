@@ -20,6 +20,7 @@ use api::v1::meta::Role;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
+use common_datasource::object_store::StorageType;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
@@ -42,7 +43,6 @@ use tower::service_fn;
 
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
-    StorageType,
 };
 
 pub struct GreptimeDbCluster {
@@ -59,6 +59,7 @@ pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_store: KvStoreRef,
     store_config: Option<ObjectStoreConfig>,
+    storage_types: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
 }
 
@@ -68,6 +69,7 @@ impl GreptimeDbClusterBuilder {
             cluster_name: cluster_name.to_string(),
             kv_store: Arc::new(MemStore::default()),
             store_config: None,
+            storage_types: None,
             datanodes: None,
         }
     }
@@ -79,6 +81,11 @@ impl GreptimeDbClusterBuilder {
 
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
+        self
+    }
+
+    pub fn with_storage_types(mut self, storage_types: Vec<StorageType>) -> Self {
+        self.storage_types = Some(storage_types);
         self
     }
 
@@ -152,14 +159,16 @@ impl GreptimeDbClusterBuilder {
 
                 dir_guards.push(FileDirGuard::new(home_tmp_dir));
 
-                create_datanode_opts(store_config.clone(), home_dir)
+                create_datanode_opts(vec![store_config.clone()], home_dir)
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
-                    StorageType::File,
+                    self.storage_types
+                        .clone()
+                        .unwrap_or(vec![StorageType::File]),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                 );
 
-                storage_guards.push(guard.storage_guard);
+                storage_guards.push(guard.storage_guards);
                 dir_guards.push(guard.home_guard);
 
                 opts
@@ -171,7 +180,11 @@ impl GreptimeDbClusterBuilder {
 
             instances.insert(datanode_id, datanode);
         }
-        (instances, storage_guards, dir_guards)
+        (
+            instances,
+            storage_guards.into_iter().flatten().collect(),
+            dir_guards,
+        )
     }
 
     async fn wait_datanodes_alive(

@@ -38,16 +38,17 @@ const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
         let region = self.regions.writable_region(region_id)?;
+        let object_store = region.access_layer.object_store();
 
         info!("Try to drop region: {}", region_id);
 
         // write dropping marker
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
-        self.object_store
+
+        object_store
             .write(&marker_path, vec![])
             .await
             .context(OpenDalSnafu)?;
-
         region.stop().await?;
         // remove this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
@@ -68,9 +69,9 @@ impl<S> RegionWorkerLoop<S> {
 
         // detach a background task to delete the region dir
         let region_dir = region.access_layer.region_dir().to_owned();
-        let object_store = self.object_store.clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
+        let object_store = object_store.clone();
         common_runtime::spawn_bg(async move {
             let gc_duration = listener
                 .on_later_drop_begin(region_id)

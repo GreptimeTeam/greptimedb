@@ -46,7 +46,7 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::timer;
-use object_store::ObjectStore;
+use object_store::object_store_manager::ObjectStoreManager;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
@@ -72,12 +72,12 @@ impl MitoEngine {
     pub fn new<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManager,
     ) -> MitoEngine {
         config.sanitize();
 
         MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
+            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager)),
         }
     }
 
@@ -108,10 +108,10 @@ impl EngineInner {
     fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_sotre_manager: ObjectStoreManager,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store),
+            workers: WorkerGroup::start(config, log_store, object_sotre_manager),
         }
     }
 
@@ -235,9 +235,9 @@ impl MitoEngine {
     pub fn new_for_test<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        object_store_manager: ObjectStoreManager,
     ) -> MitoEngine {
         config.sanitize();
 
@@ -246,9 +246,9 @@ impl MitoEngine {
                 workers: WorkerGroup::start_for_test(
                     config,
                     log_store,
-                    object_store,
                     write_buffer_manager,
                     listener,
+                    object_store_manager,
                 ),
             }),
         }

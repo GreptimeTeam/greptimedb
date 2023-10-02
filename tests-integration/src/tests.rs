@@ -19,6 +19,7 @@ mod test_util;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_datasource::object_store::StorageType;
 use common_meta::key::TableMetadataManagerRef;
 use datanode::datanode::Datanode;
 use frontend::instance::Instance;
@@ -43,5 +44,16 @@ impl MockDistributedInstance {
 
 pub async fn create_distributed_instance(test_name: &str) -> MockDistributedInstance {
     let cluster = GreptimeDbClusterBuilder::new(test_name).build().await;
+    MockDistributedInstance(cluster)
+}
+
+pub async fn create_distributed_instance_with_multiple_object_stores(
+    test_name: &str,
+    custom_stores: &[StorageType],
+) -> MockDistributedInstance {
+    let cluster = GreptimeDbClusterBuilder::new(test_name)
+        .with_storage_types(custom_stores.to_vec())
+        .build()
+        .await;
     MockDistributedInstance(cluster)
 }

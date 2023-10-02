@@ -29,6 +29,12 @@ use table::error::Error as TableError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to init ObjectStorageManager"))]
+    InitObjectStorageManager {
+        source: object_store::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         location: Location,
@@ -113,6 +119,9 @@ pub enum Error {
         table_name: String,
         location: Location,
     },
+
+    #[snafu(display("Table info not found: {}", table_id))]
+    TableInfoNotFound { table_id: u32, location: Location },
 
     #[snafu(display("Column {} not found in table {}", column_name, table_name))]
     ColumnNotFound {
@@ -491,7 +500,8 @@ impl ErrorExt for Error {
             }
 
             // TODO(yingwen): Further categorize http error.
-            ParseAddr { .. }
+            TableInfoNotFound { .. }
+            | ParseAddr { .. }
             | CreateDir { .. }
             | RemoveDir { .. }
             | Catalog { .. }
@@ -525,6 +535,7 @@ impl ErrorExt for Error {
             WaitProcedure { source, .. } => source.status_code(),
             HandleRegionRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
+            InitObjectStorageManager { source, .. } => source.status_code(),
         }
     }
 

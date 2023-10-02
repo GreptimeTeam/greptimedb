@@ -84,6 +84,7 @@ pub struct TableOptions {
 pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 pub const TTL_KEY: &str = "ttl";
 pub const REGIONS_KEY: &str = "regions";
+pub const STORAGE_KEY: &str = "storage";
 
 impl TryFrom<&HashMap<String, String>> for TableOptions {
     type Error = error::Error;
@@ -340,6 +341,7 @@ pub fn valid_table_option(key: &str) -> bool {
             | WRITE_BUFFER_SIZE_KEY
             | TTL_KEY
             | REGIONS_KEY
+            | STORAGE_KEY
     ) | is_supported_in_s3(key)
 }
 

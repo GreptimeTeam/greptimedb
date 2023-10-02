@@ -22,6 +22,7 @@ common-macro = { workspace = true }
 common-runtime = { workspace = true }
 datafusion.workspace = true
 derive_builder.workspace = true
+dotenv = "0.15"
 futures.workspace = true
 lazy_static.workspace = true
 object-store = { workspace = true }

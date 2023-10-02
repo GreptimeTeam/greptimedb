@@ -388,6 +388,9 @@ pub enum Error {
         region_dir: String,
         location: Location,
     },
+
+    #[snafu(display("Storage not found: {}", storage))]
+    StorageNotFound { storage: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -436,7 +439,7 @@ impl ErrorExt for Error {
             SerializeField { .. } => StatusCode::Internal,
             NotSupportedField { .. } => StatusCode::Unsupported,
             DeserializeField { .. } => StatusCode::Unexpected,
-            InvalidBatch { .. } => StatusCode::InvalidArguments,
+            StorageNotFound { .. } | InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
             ComputeArrow { .. } => StatusCode::Internal,

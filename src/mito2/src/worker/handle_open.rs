@@ -24,6 +24,7 @@ use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
+use table::requests::STORAGE_KEY;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::REGION_COUNT;
@@ -41,15 +42,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return Ok(Output::AffectedRows(0));
         }
 
+        let object_storage = if let Some(storage_name) = request.options.get(STORAGE_KEY) {
+            self.object_storage_manager.find(storage_name).unwrap()
+        } else {
+            self.object_storage_manager.global_object_store()
+        };
+
         // Check if this region is pending drop. And clean the entire dir if so.
         if !self.dropping_regions.is_region_exists(region_id)
-            && self
-                .object_store
+            && object_storage
                 .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
-            let result = remove_region_dir_once(&request.region_dir, &self.object_store).await;
+            let result = remove_region_dir_once(
+                &request.region_dir,
+                &self.object_storage_manager.global_object_store(),
+            )
+            .await;
             info!("Region {} is dropped, result: {:?}", region_id, result);
             return RegionNotFoundSnafu { region_id }.fail();
         }
@@ -61,7 +71,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             &request.region_dir,
             self.memtable_builder.clone(),
-            self.object_store.clone(),
+            object_storage,
             self.scheduler.clone(),
         )
         .options(request.options)

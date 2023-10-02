@@ -66,11 +66,11 @@ pub struct StorageConfig {
     pub global_ttl: Option<Duration>,
     /// The working directory of database
     pub data_home: String,
-    #[serde(flatten)]
-    pub store: ObjectStoreConfig,
+    pub store: Vec<ObjectStoreConfig>,
     pub compaction: CompactionConfig,
     pub manifest: RegionManifestConfig,
     pub flush: FlushConfig,
+    pub global_store: String,
 }
 
 impl Default for StorageConfig {
@@ -78,10 +78,11 @@ impl Default for StorageConfig {
         Self {
             global_ttl: None,
             data_home: DEFAULT_DATA_HOME.to_string(),
-            store: ObjectStoreConfig::default(),
+            store: vec![ObjectStoreConfig::default()],
             compaction: CompactionConfig::default(),
             manifest: RegionManifestConfig::default(),
             flush: FlushConfig::default(),
+            global_store: "File".to_string(),
         }
     }
 }
@@ -407,13 +408,13 @@ mod tests {
     #[test]
     fn test_secstr() {
         let toml_str = r#"
-            [storage]
+            [[storage.store]]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
         "#;
         let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
-        match opts.storage.store {
+        match opts.storage.store[0].clone() {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),

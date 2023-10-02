@@ -14,12 +14,14 @@
 
 use std::sync::Arc;
 
+use common_datasource::object_store::StorageType;
 use common_query::Output;
 use common_recordbatch::util;
 use common_test_util::find_workspace_path;
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
+use super::create_distributed_instance_with_multiple_object_stores;
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 use crate::tests::{create_distributed_instance, MockDistributedInstance};
 
@@ -61,6 +63,26 @@ pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
     Arc::new(instance)
 }
 
+pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let storage_types = StorageType::build_storage_types_based_on_env();
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_store_types(storage_types)
+        .build()
+        .await;
+    Arc::new(instance)
+}
+
+pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let storage_types = StorageType::build_storage_types_based_on_env();
+    let instance =
+        create_distributed_instance_with_multiple_object_stores(&test_name, &storage_types).await;
+    Arc::new(instance)
+}
+
 #[template]
 #[rstest]
 #[case::test_with_standalone(standalone())]
@@ -68,6 +90,19 @@ pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
 #[awt]
 #[tokio::test(flavor = "multi_thread")]
 pub(crate) fn both_instances_cases(
+    #[future]
+    #[case]
+    instance: Arc<dyn MockInstance>,
+) {
+}
+
+#[template]
+#[rstest]
+#[case::test_with_standalone(standalone_with_multiple_object_stores())]
+#[case::test_with_distributed(distributed_with_multiple_object_stores())]
+#[awt]
+#[tokio::test(flavor = "multi_thread")]
+pub(crate) fn both_instances_cases_with_custom_storages(
     #[future]
     #[case]
     instance: Arc<dyn MockInstance>,

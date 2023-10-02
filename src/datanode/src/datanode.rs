@@ -33,6 +33,7 @@ use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
 use mito2::engine::MitoEngine;
+use object_store::object_store_manager::ObjectStoreManager;
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::Mode;
@@ -47,9 +48,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingMetaClientSnafu,
-    MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
-    ShutdownInstanceSnafu,
+    CreateDirSnafu, GetMetadataSnafu, InitObjectStorageManagerSnafu, MissingKvBackendSnafu,
+    MissingMetaClientSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
+    RuntimeResourceSnafu, ShutdownInstanceSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -59,7 +60,7 @@ use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
 use crate::region_server::RegionServer;
 use crate::server::Services;
-use crate::store;
+use crate::store::new_object_stores;
 
 const OPEN_REGION_PARALLELISM: usize = 16;
 
@@ -220,6 +221,7 @@ impl DatanodeBuilder {
             self.plugins.clone(),
             log_store,
             region_event_listener,
+            &self.opts.storage.global_store,
         )
         .await?;
         self.initialize_region_server(&region_server, kv_backend, matches!(mode, Mode::Standalone))
@@ -278,9 +280,9 @@ impl DatanodeBuilder {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
         let mut regions = vec![];
         let mut table_values = datanode_table_manager.tables(node_id);
-
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
+
             for region_number in table_value.regions {
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
@@ -300,6 +302,7 @@ impl DatanodeBuilder {
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await;
+                // TODO: add some tests in the tests-integration to cover the case where the storage option is passed when initializing region server.
                 region_server
                     .handle_request(
                         region_id,
@@ -332,6 +335,7 @@ impl DatanodeBuilder {
         plugins: Plugins,
         log_store: Arc<RaftEngineLogStore>,
         event_listener: RegionServerEventListenerRef,
+        global_store: &str,
     ) -> Result<RegionServer> {
         let query_engine_factory = QueryEngineFactory::new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -353,8 +357,16 @@ impl DatanodeBuilder {
 
         let mut region_server =
             RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
-        let object_store = store::new_object_store(opts).await?;
-        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
+        let object_store_manager =
+            ObjectStoreManager::try_new(new_object_stores(opts).await?, global_store)
+                .context(InitObjectStorageManagerSnafu)?;
+        let engines = Self::build_store_engines(
+            opts,
+            log_store,
+            object_store_manager.global_object_store(),
+            object_store_manager,
+        )
+        .await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -393,6 +405,7 @@ impl DatanodeBuilder {
         opts: &DatanodeOptions,
         log_store: Arc<S>,
         object_store: object_store::ObjectStore,
+        object_store_manager: ObjectStoreManager,
     ) -> Result<Vec<RegionEngineRef>>
     where
         S: LogStore,
@@ -401,11 +414,15 @@ impl DatanodeBuilder {
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let engine: MitoEngine =
-                        MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
+                    let engine: MitoEngine = MitoEngine::new(
+                        config.clone(),
+                        log_store.clone(),
+                        object_store_manager.clone(),
+                    );
                     engines.push(Arc::new(engine) as _);
                 }
                 RegionEngineConfig::File(config) => {
+                    // TODO: Get FileRegineEngine to have ObjectStoreManager
                     let engine = FileRegionEngine::new(config.clone(), object_store.clone());
                     engines.push(Arc::new(engine) as _);
                 }

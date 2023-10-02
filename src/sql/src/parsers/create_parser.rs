@@ -160,6 +160,7 @@ impl<'a> ParserContext<'a> {
             .parser
             .parse_options(Keyword::WITH)
             .context(error::SyntaxSnafu)?;
+
         for option in options.iter() {
             ensure!(
                 valid_table_option(&option.name.value),
@@ -168,6 +169,8 @@ impl<'a> ParserContext<'a> {
                 }
             );
         }
+        // Sorts options so that `test_display_create_table` can always pass.
+        let options = options.into_iter().sorted().collect();
         let create_table = CreateTable {
             if_not_exists,
             name: table_name,

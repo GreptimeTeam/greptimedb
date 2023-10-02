@@ -33,7 +33,7 @@ use std::time::Duration;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
-use object_store::ObjectStore;
+use object_store::object_store_manager::ObjectStoreManager;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -112,7 +112,7 @@ impl WorkerGroup {
     pub(crate) fn start<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManager,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -131,11 +131,11 @@ impl WorkerGroup {
                     id: id as WorkerId,
                     config: config.clone(),
                     log_store: log_store.clone(),
-                    object_store: object_store.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
+                    object_store_manager: object_store_manager.clone(),
                 }
                 .start()
             })
@@ -206,9 +206,9 @@ impl WorkerGroup {
     pub(crate) fn start_for_test<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
+        object_store_manager: ObjectStoreManager,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -229,11 +229,11 @@ impl WorkerGroup {
                     id: id as WorkerId,
                     config: config.clone(),
                     log_store: log_store.clone(),
-                    object_store: object_store.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     scheduler: scheduler.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
+                    object_store_manager: object_store_manager.clone(),
                 }
                 .start()
             })
@@ -256,11 +256,11 @@ struct WorkerStarter<S> {
     id: WorkerId,
     config: Arc<MitoConfig>,
     log_store: Arc<S>,
-    object_store: ObjectStore,
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
+    object_store_manager: ObjectStoreManager,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -278,7 +278,6 @@ impl<S: LogStore> WorkerStarter<S> {
             sender: sender.clone(),
             receiver,
             wal: Wal::new(self.log_store),
-            object_store: self.object_store,
             running: running.clone(),
             memtable_builder: Arc::new(TimeSeriesMemtableBuilder::new(Some(
                 self.write_buffer_manager.clone(),
@@ -290,6 +289,7 @@ impl<S: LogStore> WorkerStarter<S> {
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
+            object_storage_manager: self.object_store_manager,
         };
         let handle = common_runtime::spawn_write(async move {
             worker_thread.run().await;
@@ -426,8 +426,6 @@ struct RegionWorkerLoop<S> {
     receiver: Receiver<WorkerRequest>,
     /// WAL of the engine.
     wal: Wal<S>,
-    /// Object store for manifest and SSTs.
-    object_store: ObjectStore,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.
@@ -446,6 +444,8 @@ struct RegionWorkerLoop<S> {
     listener: WorkerListener,
     /// Cache.
     cache_manager: CacheManagerRef,
+    /// Manage object stores for manifest and SSTs.
+    object_storage_manager: ObjectStoreManager,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

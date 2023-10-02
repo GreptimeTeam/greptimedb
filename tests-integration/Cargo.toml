@@ -19,6 +19,7 @@ client = { workspace = true, features = ["testing"] }
 common-base = { workspace = true }
 common-catalog = { workspace = true }
 common-config = { workspace = true }
+common-datasource = { workspace = true }
 common-error = { workspace = true }
 common-grpc = { workspace = true }
 common-meta = { workspace = true, features = ["testing"] }

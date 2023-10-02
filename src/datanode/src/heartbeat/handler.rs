@@ -53,7 +53,7 @@ impl RegionHeartbeatResponseHandler {
                 let open_region_req = RegionRequest::Open(RegionOpenRequest {
                     engine: region_ident.engine,
                     region_dir: region_dir(&region_storage_path, region_id),
-                    options,
+                    options, // TODO: adds some tests to cover a case where `storage` option is passed.
                 });
                 Ok((region_id, open_region_req))
             }

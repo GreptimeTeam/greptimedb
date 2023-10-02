@@ -193,7 +193,9 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::config::{
+        CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig, S3Config,
+    };
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
@@ -230,8 +232,14 @@ mod tests {
             sync_write = false
 
             [storage]
-            type = "File"
             data_home = "/tmp/greptimedb/"
+            [[storage.store]]
+            type = "File"
+ 
+            [[storage.store]]
+            type = "S3"
+            access_key_id = "access_key_id"
+            secret_access_key = "secret_access_key"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -290,11 +298,15 @@ mod tests {
         assert_eq!(3000, timeout.as_millis());
         assert!(tcp_nodelay);
         assert_eq!("/tmp/greptimedb/", options.storage.data_home);
+        assert_eq!(options.storage.store.len(), 2);
         assert!(matches!(
-            &options.storage.store,
+            &options.storage.store[0],
             ObjectStoreConfig::File(FileConfig { .. })
         ));
-
+        assert!(matches!(
+            &options.storage.store[1],
+            ObjectStoreConfig::S3(S3Config { .. })
+        ));
         assert_eq!(
             CompactionConfig {
                 max_inflight_tasks: 3,

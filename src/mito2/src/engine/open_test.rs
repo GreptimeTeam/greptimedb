@@ -26,7 +26,7 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::test_util::{
-    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, StorageType, TestEnv,
 };
 
 #[tokio::test]
@@ -166,4 +166,72 @@ async fn test_engine_region_open_with_options() {
         Duration::from_secs(3600 * 24 * 4),
         region.version().options.ttl.unwrap()
     );
+}
+
+// TODO: move this test into the tests-integration.
+#[tokio::test]
+async fn test_engine_region_for_custom_store() {
+    let mut env = TestEnv::new();
+    let engine = env
+        .create_engine_with_multiple_object_stores(
+            MitoConfig::default(),
+            None,
+            None,
+            vec![StorageType::File, StorageType::Gcs],
+            &StorageType::File.to_string(),
+        )
+        .await;
+
+    let global_region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("storage", "File")
+        .region_dir("file")
+        .build();
+    engine
+        .handle_request(global_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let custom_region_id = RegionId::new(2, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("storage", "Gcs")
+        .region_dir("gcs")
+        .build();
+    let custom_region_dir = request.region_dir.clone();
+    engine
+        .handle_request(custom_region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Close both global and custom regions.
+    engine
+        .handle_request(
+            global_region_id,
+            RegionRequest::Close(RegionCloseRequest {}),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            custom_region_id,
+            RegionRequest::Close(RegionCloseRequest {}),
+        )
+        .await
+        .unwrap();
+
+    // Open the custom region again with options.
+    engine
+        .handle_request(
+            custom_region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir: custom_region_dir,
+                options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert!(engine.get_region(global_region_id).is_none());
+    assert!(engine.get_region(custom_region_id).is_some());
 }

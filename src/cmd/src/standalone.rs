@@ -398,6 +398,7 @@ mod tests {
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
+    use datanode::config::FileConfig;
     use servers::Mode;
 
     use super::*;
@@ -446,9 +447,13 @@ mod tests {
             sync_write = false
 
             [storage]
+            [[storage.store]]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
+
+            [[storage.store]]
+            type = "File"
 
             [storage.compaction]
             max_inflight_tasks = 3
@@ -492,10 +497,9 @@ mod tests {
         assert_eq!(2, fe_opts.mysql.runtime_size);
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
-
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
-
-        match &dn_opts.storage.store {
+        assert_eq!(dn_opts.storage.store.len(), 2);
+        match &dn_opts.storage.store[0] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
@@ -506,7 +510,10 @@ mod tests {
                 unreachable!()
             }
         }
-
+        assert!(matches!(
+            dn_opts.storage.store[1],
+            datanode::config::ObjectStoreConfig::File(FileConfig { .. })
+        ));
         assert_eq!("debug", logging_opts.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), logging_opts.dir);
     }

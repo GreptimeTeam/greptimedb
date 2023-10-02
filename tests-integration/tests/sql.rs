@@ -14,12 +14,13 @@
 
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use common_datasource::object_store::StorageType;
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
 use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_user_provider, StorageType,
+    setup_pg_server_with_user_provider,
 };
 use tokio_postgres::NoTls;
 
@@ -34,7 +35,7 @@ macro_rules! sql_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
-                        let store_type = tests_integration::test_util::StorageType::$service;
+                        let store_type = common_datasource::object_store::StorageType::$service;
                         if store_type.test_on() {
                             let _ = $crate::sql::$test(store_type).await;
                         }

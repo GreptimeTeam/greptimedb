@@ -22,13 +22,14 @@ use api::v1::{
 use auth::user_provider_from_option;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
+use common_datasource::object_store::StorageType;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
 use servers::http::prometheus::{PromData, PromSeries, PrometheusJsonResponse, PrometheusResponse};
 use servers::server::Server;
 use tests_integration::test_util::{
-    setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider, StorageType,
+    setup_grpc_server, setup_grpc_server_with, setup_grpc_server_with_user_provider,
 };
 
 #[macro_export]
@@ -42,7 +43,7 @@ macro_rules! grpc_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
-                        let store_type = tests_integration::test_util::StorageType::$service;
+                        let store_type = common_datasource::object_store::StorageType::$service;
                         if store_type.test_on() {
                             let _ = $crate::grpc::$test(store_type).await;
                         }

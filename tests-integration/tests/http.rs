@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use auth::user_provider_from_option;
 use axum::http::StatusCode;
 use axum_test_helper::TestClient;
+use common_datasource::object_store::StorageType;
 use common_error::status_code::StatusCode as ErrorCode;
 use serde_json::json;
 use servers::http::handler::HealthResponse;
@@ -25,7 +26,6 @@ use servers::http::{JsonOutput, JsonResponse};
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    StorageType,
 };
 
 #[macro_export]
@@ -39,7 +39,7 @@ macro_rules! http_test {
                         #[$meta]
                     )*
                     async fn [< $test >]() {
-                        let store_type = tests_integration::test_util::StorageType::$service;
+                        let store_type = common_datasource::object_store::StorageType::$service;
                         if store_type.test_on() {
                             let _ = $crate::http::$test(store_type).await;
                         }
@@ -601,7 +601,7 @@ pub async fn test_config_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "config_api").await;
     let client = TestClient::new(app);
-
+    let global_store = store_type.to_string();
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
     let expected_toml_str = format!(
@@ -631,6 +631,9 @@ read_batch_size = 128
 sync_write = false
 
 [storage]
+global_store = "{}"
+
+[[storage.store]]
 type = "{}"
 
 [storage.compaction]
@@ -671,7 +674,7 @@ vector_cache_size = "512MiB"
 
 [logging]
 enable_jaeger_tracing = false"#,
-        store_type
+        global_store, store_type
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);
