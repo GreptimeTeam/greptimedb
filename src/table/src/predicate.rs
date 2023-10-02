@@ -20,7 +20,7 @@ use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
-use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
 use datafusion_common::ToDFSchema;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Between, BinaryExpr, Operator};
@@ -37,7 +37,7 @@ mod stats;
 
 #[derive(Clone)]
 pub struct Predicate {
-    /// The schema of underlying storage.
+    /// The schema of the table that the expressions being applied.
     schema: SchemaRef,
     /// Physical expressions of this predicate.
     exprs: Vec<Arc<dyn PhysicalExpr>>,
@@ -111,6 +111,31 @@ impl Predicate {
                         }
                     }
                 }
+                Err(e) => {
+                    error!("Failed to create predicate for expr, error: {:?}", e);
+                }
+            }
+        }
+        res
+    }
+
+    /// Evaluates the predicate against the `stats`.
+    /// Returns a vector of boolean values, among which `false` means the row group can be skipped.
+    pub fn prune_with_stats<S: PruningStatistics>(&self, stats: &S) -> Vec<bool> {
+        let mut res = vec![true; stats.num_containers()];
+        let arrow_schema = self.schema.arrow_schema();
+        for expr in &self.exprs {
+            match PruningPredicate::try_new(expr.clone(), arrow_schema.clone()) {
+                Ok(p) => match p.prune(stats) {
+                    Ok(r) => {
+                        for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
+                            *res &= curr_val
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to prune row groups, error: {:?}", e);
+                    }
+                },
                 Err(e) => {
                     error!("Failed to create predicate for expr, error: {:?}", e);
                 }
