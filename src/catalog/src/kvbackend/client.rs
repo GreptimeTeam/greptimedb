@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::KvCacheInvalidator;
+use common_meta::cache_invalidator::{KvCacheGuard, KvCacheInvalidator, KvCacheInvalidatorExt};
 use common_meta::error::Error::{CacheNotGet, GetKvCache};
 use common_meta::error::{CacheNotGetSnafu, Error, ExternalSnafu, Result};
 use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
@@ -78,6 +78,7 @@ impl KvBackend for CachedMetaKvBackend {
         ret
     }
 
+    // #![feature(async_closure)]
     async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
         let keys = req
             .kvs
@@ -88,9 +89,11 @@ impl KvBackend for CachedMetaKvBackend {
         let resp = self.kv_backend.batch_put(req).await;
 
         if resp.is_ok() {
-            for key in keys {
-                self.invalidate_key(&key).await;
-            }
+            // for key in keys {
+            //     self.invalidate_key(&key).await;
+            // }
+            self.invalidate_keys(&keys.iter().map(|key| key.as_slice()).collect::<Vec<_>>())
+                .await;
         }
 
         resp
@@ -159,8 +162,7 @@ impl KvBackend for CachedMetaKvBackend {
         let ret = self.kv_backend.move_value(req).await;
 
         if ret.is_ok() {
-            self.invalidate_key(from_key).await;
-            self.invalidate_key(to_key).await;
+            self.invalidate_keys(&[from_key, to_key]).await;
         }
 
         ret
@@ -199,6 +201,28 @@ impl KvCacheInvalidator for CachedMetaKvBackend {
     async fn invalidate_key(&self, key: &[u8]) {
         self.cache.invalidate(key).await;
         debug!("invalidated cache key: {}", String::from_utf8_lossy(key));
+    }
+
+    async fn invalidate_keys(&self, keys: &[&[u8]]) {
+        let keys = keys.iter().map(|key| key.to_vec()).collect::<Vec<_>>();
+        let mut tasks = Vec::new();
+        for key in &keys {
+            tasks.push(self.cache.invalidate(key));
+        }
+        futures::future::join_all(tasks).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl KvCacheInvalidatorExt for CachedMetaKvBackend {
+    type CacheType = CacheBackendRef;
+    async fn invalidate_with<F>(&self, f: F)
+    where
+        F: FnOnce(&mut KvCacheGuard<Self::CacheType>) + Send + 'static,
+    {
+        let cache_ref = &mut self.cache.clone();
+        let mut guard = KvCacheGuard::<Self::CacheType>::new(cache_ref);
+        f(&mut guard);
     }
 }
 

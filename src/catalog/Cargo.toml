@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
+# async_closure = [] # unstable feature!
 
 [dependencies]
 api = { workspace = true }

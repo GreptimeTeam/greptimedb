@@ -28,6 +28,30 @@ use crate::table_name::TableName;
 #[async_trait::async_trait]
 pub trait KvCacheInvalidator: Send + Sync {
     async fn invalidate_key(&self, key: &[u8]);
+    async fn invalidate_keys(&self, keys: &[&[u8]]);
+}
+
+#[async_trait::async_trait]
+pub trait KvCacheInvalidatorExt: KvCacheInvalidator {
+    type CacheType: Send + Sync + 'static;
+
+    async fn invalidate_with<F>(&self, f: F)
+    where
+        F: FnOnce(&mut KvCacheGuard<Self::CacheType>) + Send + 'static;
+}
+
+pub struct KvCacheGuard<'a, T> {
+    inner: &'a mut T,
+}
+
+impl<'a, T> KvCacheGuard<'a, T> {
+    pub fn new(inner: &'a mut T) -> Self {
+        Self { inner }
+    }
+
+    pub fn inner(&mut self) -> &mut T {
+        self.inner
+    }
 }
 
 pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
@@ -37,6 +61,18 @@ pub struct DummyKvCacheInvalidator;
 #[async_trait::async_trait]
 impl KvCacheInvalidator for DummyKvCacheInvalidator {
     async fn invalidate_key(&self, _key: &[u8]) {}
+    async fn invalidate_keys(&self, _keys: &[&[u8]]) {}
+}
+
+#[async_trait::async_trait]
+impl KvCacheInvalidatorExt for DummyKvCacheInvalidator {
+    type CacheType = ();
+
+    async fn invalidate_with<F>(&self, _f: F)
+    where
+        F: FnOnce(&mut KvCacheGuard<Self::CacheType>) + Send + 'static,
+    {
+    }
 }
 
 /// Places context of invalidating cache. e.g., span id, trace id etc.
