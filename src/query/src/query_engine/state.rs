@@ -34,7 +34,8 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
-use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
+use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
 use substrait::extension_serializer::ExtensionSerializer;
@@ -88,6 +89,8 @@ impl QueryEngineState {
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
+        Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
+        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
@@ -129,6 +132,19 @@ impl QueryEngineState {
             table_mutation_handler,
             aggregate_functions: Arc::new(RwLock::new(HashMap::new())),
             plugins,
+        }
+    }
+
+    fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
+        let mut index_to_move = None;
+        for (i, rule) in rules.iter().enumerate() {
+            if rule.name() == name {
+                index_to_move = Some(i);
+                break;
+            }
+        }
+        if let Some(index) = index_to_move {
+            let _ = rules.remove(index);
         }
     }
 
