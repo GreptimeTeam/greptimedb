@@ -35,6 +35,7 @@ file-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
 meta-client = { workspace = true }
+meter-core.workspace = true
 meter-macros.workspace = true
 metrics.workspace = true
 object-store = { workspace = true }
@@ -54,6 +55,3 @@ substrait = { workspace = true }
 table = { workspace = true }
 tokio.workspace = true
 tonic.workspace = true
-
-[dev-dependencies]
-meter-core.workspace = true
