@@ -34,17 +34,16 @@ pub(crate) struct RowGroupPruningStats<'a> {
     ///
     /// We need column ids to distinguish different columns with the same name.
     /// e.g. Drops and then adds a column again.
-    column_ids: Option<HashSet<ColumnId>>,
+    column_ids: HashSet<ColumnId>,
 }
 
 impl<'a> RowGroupPruningStats<'a> {
-    /// Creates a new staticstics to prune specific `row_groups`.
+    /// Creates a new statistics to prune specific `row_groups`.
     pub(crate) fn new(
         row_groups: &'a [RowGroupMetaData],
         read_format: &'a ReadFormat,
-        column_ids: Option<&[ColumnId]>,
+        column_ids: HashSet<ColumnId>,
     ) -> Self {
-        let column_ids = column_ids.map(|ids| ids.iter().copied().collect());
         Self {
             row_groups,
             read_format,
@@ -58,11 +57,7 @@ impl<'a> RowGroupPruningStats<'a> {
         self.read_format
             .metadata()
             .column_by_name(name)
-            .and_then(|col| {
-                self.column_ids
-                    .as_ref()
-                    .and_then(|ids| ids.get(&col.column_id).copied())
-            })
+            .and_then(|col| self.column_ids.get(&col.column_id).copied())
     }
 }
 

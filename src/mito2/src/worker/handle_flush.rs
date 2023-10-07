@@ -31,13 +31,14 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_request(
         &mut self,
         region_id: RegionId,
+        row_group_size: Option<usize>,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        let mut task = self.new_flush_task(&region, FlushReason::Manual);
+        let mut task = self.new_flush_task(&region, FlushReason::Manual, row_group_size);
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler
@@ -92,7 +93,7 @@ impl<S> RegionWorkerLoop<S> {
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task = self.new_flush_task(region, FlushReason::EngineFull);
+                let task = self.new_flush_task(region, FlushReason::EngineFull, None);
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -105,7 +106,7 @@ impl<S> RegionWorkerLoop<S> {
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task = self.new_flush_task(region, FlushReason::EngineFull);
+                let task = self.new_flush_task(region, FlushReason::EngineFull, None);
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -122,6 +123,7 @@ impl<S> RegionWorkerLoop<S> {
         &self,
         region: &MitoRegionRef,
         reason: FlushReason,
+        row_group_size: Option<usize>,
     ) -> RegionFlushTask {
         // TODO(yingwen): metrics for flush requested.
         RegionFlushTask {
@@ -133,6 +135,7 @@ impl<S> RegionWorkerLoop<S> {
             memtable_builder: self.memtable_builder.clone(),
             file_purger: region.file_purger.clone(),
             listener: self.listener.clone(),
+            row_group_size,
         }
     }
 }

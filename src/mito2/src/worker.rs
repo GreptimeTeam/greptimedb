@@ -528,8 +528,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Flush(_) => {
-                    self.handle_flush_request(ddl.region_id, ddl.sender).await;
+                DdlRequest::Flush(req) => {
+                    self.handle_flush_request(ddl.region_id, req.row_group_size, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Compact(_) => {

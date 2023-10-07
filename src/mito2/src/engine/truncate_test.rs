@@ -167,7 +167,12 @@ async fn test_engine_truncate_after_flush() {
 
     // Flush the region.
     engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
         .await
         .unwrap();
 
@@ -304,7 +309,12 @@ async fn test_engine_truncate_during_flush() {
     let flush_task = tokio::spawn(async move {
         info!("do flush task!!!!");
         engine_cloned
-            .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
+            )
             .await
     });
 

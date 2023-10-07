@@ -574,9 +574,12 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
 }
 
 /// Flush a region manually.
-pub async fn flush_region(engine: &MitoEngine, region_id: RegionId) {
+pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_size: Option<usize>) {
     let Output::AffectedRows(rows) = engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest { row_group_size }),
+        )
         .await
         .unwrap()
     else {
