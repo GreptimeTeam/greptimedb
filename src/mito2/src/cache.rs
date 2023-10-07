@@ -152,7 +152,7 @@ mod tests {
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
 
         let value = Value::Int64(10);
-        let vector: VectorRef = Arc::new(Int64Vector::from_slice(&[10, 10, 10, 10]));
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         assert!(cache.get_repeated_vector(&value).is_none());
     }
@@ -175,7 +175,7 @@ mod tests {
         let cache = CacheManager::new(0, 4096);
         let value = Value::Int64(10);
         assert!(cache.get_repeated_vector(&value).is_none());
-        let vector: VectorRef = Arc::new(Int64Vector::from_slice(&[10, 10, 10, 10]));
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         let cached = cache.get_repeated_vector(&value).unwrap();
         assert_eq!(vector, cached);
