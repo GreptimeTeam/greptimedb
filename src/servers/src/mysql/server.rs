@@ -19,6 +19,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_runtime::Runtime;
+use common_telemetry::error;
 use common_telemetry::logging::{info, warn};
 use futures::StreamExt;
 use metrics::{decrement_gauge, increment_gauge};
@@ -137,6 +138,9 @@ impl MysqlServer {
                 match tcp_stream {
                     Err(error) => warn!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
+                        if let Err(e) = io_stream.set_nodelay(true) {
+                            error!(e;"Failed to set TCP nodelay");
+                        }
                         if let Err(error) =
                             Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await
                         {
