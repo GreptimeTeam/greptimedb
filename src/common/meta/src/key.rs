@@ -55,7 +55,7 @@ pub mod table_region;
 #[allow(deprecated)]
 pub mod table_route;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -69,6 +69,7 @@ use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
+use self::datanode_table::RegionInfo;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
@@ -256,6 +257,7 @@ impl TableMetadataManager {
             .table_name_manager()
             .build_create_txn(&table_name, table_id)?;
 
+        let region_options = (&table_info.meta.options).into();
         // Creates table info.
         let table_info_value = TableInfoValue::new(table_info);
         let (create_table_info_txn, on_create_table_info_failure) = self
@@ -268,6 +270,7 @@ impl TableMetadataManager {
             table_id,
             &engine,
             &region_storage_path,
+            region_options,
             distribution,
         )?;
 
@@ -446,10 +449,10 @@ impl TableMetadataManager {
     pub async fn update_table_route(
         &self,
         table_id: TableId,
-        engine: &str,
-        region_storage_path: &str,
+        region_info: RegionInfo,
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
+        new_region_options: &HashMap<String, String>,
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
@@ -458,10 +461,10 @@ impl TableMetadataManager {
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
-            engine,
-            region_storage_path,
+            region_info,
             current_region_distribution,
             new_region_distribution,
+            new_region_options,
         )?;
 
         // Updates the table_route.
@@ -553,7 +556,7 @@ impl_optional_meta_value! {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
     use datatypes::prelude::ConcreteDataType;
@@ -563,6 +566,7 @@ mod tests {
 
     use super::datanode_table::DatanodeTableKey;
     use crate::ddl::utils::region_storage_path;
+    use crate::key::datanode_table::RegionInfo;
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
@@ -894,10 +898,14 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &region_storage_path,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
+                },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -907,10 +915,14 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &region_storage_path,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
+                },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -921,10 +933,14 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &region_storage_path,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
+                },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -941,10 +957,14 @@ mod tests {
         assert!(table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &region_storage_path,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
+                },
                 wrong_table_route_value,
-                new_region_routes
+                new_region_routes,
+                &HashMap::new(),
             )
             .await
             .is_err());

@@ -226,7 +226,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
         );
     }
 
@@ -268,7 +268,7 @@ mod tests {
         // Timeout or not, proceed to `ActivateRegion`.
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
         );
     }
 }

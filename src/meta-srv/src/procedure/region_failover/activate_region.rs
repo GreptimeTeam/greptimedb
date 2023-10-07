@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
@@ -42,6 +43,7 @@ pub(super) struct ActivateRegion {
     // to prevent it from renewing the lease.
     remark_inactive_region: bool,
     region_storage_path: Option<String>,
+    region_options: Option<HashMap<String, String>>,
 }
 
 impl ActivateRegion {
@@ -50,6 +52,7 @@ impl ActivateRegion {
             candidate,
             remark_inactive_region: false,
             region_storage_path: None,
+            region_options: None,
         }
     }
 
@@ -77,14 +80,15 @@ impl ActivateRegion {
             ..failed_region.clone()
         };
         info!("Activating region: {candidate_ident:?}");
-
+        let region_options: HashMap<String, String> = (&table_info.meta.options).into();
         let instruction = Instruction::OpenRegion(OpenRegion::new(
             candidate_ident.clone(),
             &region_storage_path,
+            region_options.clone(),
         ));
 
         self.region_storage_path = Some(region_storage_path);
-
+        self.region_options = Some(region_options);
         let msg = MailboxMessage::json_message(
             "Activate Region",
             &format!("Metasrv@{}", ctx.selector_ctx.server_addr),
@@ -138,6 +142,11 @@ impl ActivateRegion {
                             .clone()
                             .context(error::UnexpectedSnafu {
                                 violated: "expected region_storage_path",
+                            })?,
+                        self.region_options
+                            .clone()
+                            .context(error::UnexpectedSnafu {
+                                violated: "expected region_options",
                             })?,
                     )))
                 } else {
@@ -193,6 +202,8 @@ impl State for ActivateRegion {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use api::v1::meta::mailbox_message::Payload;
     use common_meta::instruction::SimpleReply;
 
@@ -231,7 +242,8 @@ mod tests {
                         datanode_id: candidate,
                         ..failed_region.clone()
                     },
-                    &env.path
+                    &env.path,
+                    HashMap::new(),
                 )))
                 .unwrap(),
             ))
@@ -266,7 +278,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public" }"#
+            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {} }"#
         );
     }
 
@@ -300,7 +312,8 @@ mod tests {
                         datanode_id: candidate,
                         ..failed_region.clone()
                     },
-                    &env.path
+                    &env.path,
+                    HashMap::new(),
                 )))
                 .unwrap(),
             ))
