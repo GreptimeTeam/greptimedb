@@ -35,6 +35,9 @@ use crate::error::{InvalidRequestSnafu, Result};
 use crate::read::Batch;
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
+/// Only cache vector when its length `<=` this value.
+const MAX_VECTOR_LENGTH_TO_CACHE: usize = 16384;
+
 /// Handles projection and converts a projected [Batch] to a projected [RecordBatch].
 pub struct ProjectionMapper {
     /// Metadata of the region.
@@ -247,7 +250,9 @@ fn repeated_vector_with_cache(
     // Creates a new one.
     let vector = new_repeated_vector(data_type, value, num_rows)?;
     // Updates cache.
-    cache_manager.put_repeated_vector(value.clone(), vector.clone());
+    if vector.len() <= MAX_VECTOR_LENGTH_TO_CACHE {
+        cache_manager.put_repeated_vector(value.clone(), vector.clone());
+    }
 
     Ok(vector)
 }
