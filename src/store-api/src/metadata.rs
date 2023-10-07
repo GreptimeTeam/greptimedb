@@ -18,6 +18,7 @@
 
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -39,7 +40,7 @@ use crate::storage::{ColumnId, RegionId};
 pub type Result<T> = std::result::Result<T, MetadataError>;
 
 /// Metadata of a column.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ColumnMetadata {
     /// Schema of this column. Is the same as `column_schema` in [SchemaRef].
     pub column_schema: ColumnSchema,
@@ -47,6 +48,16 @@ pub struct ColumnMetadata {
     pub semantic_type: SemanticType,
     /// Immutable and unique id of a region.
     pub column_id: ColumnId,
+}
+
+impl fmt::Debug for ColumnMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{:?} {:?} {:?}]",
+            self.column_schema, self.semantic_type, self.column_id,
+        )
+    }
 }
 
 impl ColumnMetadata {
@@ -106,7 +117,7 @@ impl ColumnMetadata {
 /// RegionMetadata o-- ColumnMetadata
 /// ColumnMetadata o-- SemanticType
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct RegionMetadata {
     /// Latest schema constructed from [column_metadatas](RegionMetadata::column_metadatas).
     #[serde(skip)]
@@ -133,6 +144,18 @@ pub struct RegionMetadata {
     ///
     /// The version starts from 0. Altering the schema bumps the version.
     pub schema_version: u64,
+}
+
+impl fmt::Debug for RegionMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("RegionMetadata")
+            .field("column_metadatas", &self.column_metadatas)
+            .field("time_index", &self.time_index)
+            .field("primary_key", &self.primary_key)
+            .field("region_id", &self.region_id)
+            .field("schema_version", &self.schema_version)
+            .finish()
+    }
 }
 
 pub type RegionMetadataRef = Arc<RegionMetadata>;
@@ -1108,5 +1131,12 @@ mod test {
                 .contains("internal column name that can not be used"),
             "unexpected err: {err}",
         );
+    }
+
+    #[test]
+    fn test_debug_for_column_metadata() {
+        let region_metadata = build_test_region_metadata();
+        let formatted = format!("{:?}", region_metadata);
+        assert_eq!(formatted, "RegionMetadata { column_metadatas: [[a Int64 not null Tag 1], [b Float64 not null Field 2], [c Timestamp not null Timestamp 3]], time_index: 3, primary_key: [1], region_id: 5299989648942(1234, 5678), schema_version: 0 }");
     }
 }

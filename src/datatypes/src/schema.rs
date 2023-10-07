@@ -17,6 +17,7 @@ mod constraint;
 mod raw;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
@@ -32,7 +33,7 @@ pub use crate::schema::raw::RawSchema;
 pub const VERSION_KEY: &str = "greptime:version";
 
 /// A common schema, should be immutable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Schema {
     column_schemas: Vec<ColumnSchema>,
     name_to_index: HashMap<String, usize>,
@@ -46,6 +47,17 @@ pub struct Schema {
     ///
     /// Initial value is zero. The version should bump after altering schema.
     version: u32,
+}
+
+impl fmt::Debug for Schema {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Schema")
+            .field("column_schemas", &self.column_schemas)
+            .field("name_to_index", &self.name_to_index)
+            .field("timestamp_index", &self.timestamp_index)
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 impl Schema {
