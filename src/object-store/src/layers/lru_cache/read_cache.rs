@@ -30,7 +30,7 @@ use crate::metrics::{
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
-enum ReadResult {
+pub(crate) enum ReadResult {
     // Read success with size
     Success(u32),
     // File not found
@@ -69,7 +69,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
         let eviction_listener =
-            move |read_key: Arc<String>, read_result: ReadResult, _cause| -> ListenerFuture {
+            move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
                 // Delete the file from local file cache when it's purged from mem_cache.
                 decrement_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
                 let file_cache_cloned = file_cache_cloned.clone();
@@ -78,8 +78,11 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     if let ReadResult::Success(size) = read_result {
                         decrement_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
 
-                        let _ = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
-                        debug!("Deleted local cache file `{}`.", read_key);
+                        let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
+                        debug!(
+                            "Deleted local cache file `{}`, result: {:?}, cause: {:?}.",
+                            read_key, result, cause
+                        );
                     }
                 }
                 .boxed()
@@ -135,10 +138,6 @@ impl<C: Accessor + Clone> ReadCache<C> {
             for entry in entries {
                 let read_key = entry.path().to_string();
 
-                if read_key.ends_with("write") {
-                    continue;
-                }
-
                 // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
                 // because it's private field.
                 let size = {
@@ -180,47 +179,78 @@ impl<C: Accessor + Clone> ReadCache<C> {
         'life1: 'async_trait,
         I: Accessor,
         F: FnOnce(
+                &'life1 str,
+                OpRead,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
+            > + Clone,
+    {
+        let read_key = read_cache_key(path, &args);
+
+        let read_result = self
+            .mem_cache
+            .try_get_with(
+                read_key.clone(),
+                self.read_remote::<I, _>(&read_key, path, args.clone(), inner_read.clone()),
+            )
+            .await
+            .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
+
+        let cache_result = match read_result {
+            ReadResult::Success(_) => {
+                // There is a concurrent issue here, the local cache may be purged
+                // while reading, we have to fallback to remote read
+                match self.file_cache.read(&read_key, OpRead::default()).await {
+                    Ok(ret) => {
+                        increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "success");
+                        Ok(to_output_reader(ret))
+                    }
+                    Err(_) => {
+                        increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
+                        inner_read(path, args).await.map(to_output_reader)
+                    }
+                }
+            }
+            ReadResult::NotFound => {
+                increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "not_found");
+
+                Err(OpendalError::new(
+                    ErrorKind::NotFound,
+                    &format!("File not found: {path}"),
+                ))
+            }
+        };
+        self.mem_cache.run_pending_tasks().await;
+
+        cache_result
+    }
+
+    // Remote file from remote storage.
+    async fn read_remote<'life0, 'life1, 'async_trait, I, F>(
+        &'life0 self,
+        read_key: &str,
+        path: &'life1 str,
+        args: OpRead,
+        inner_read: F,
+    ) -> Result<ReadResult>
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        I: Accessor,
+        F: FnOnce(
             &'life1 str,
             OpRead,
         ) -> Pin<
             Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
         >,
     {
-        let read_key = read_cache_key(path, &args);
-        let read_result = self.mem_cache.get(&read_key).await;
-
-        if let Some(read_result) = read_result {
-            let cache_result = match read_result {
-                ReadResult::Success(_) => {
-                    increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "success");
-
-                    // There is a concurrent issue here, the local cache may be purged
-                    // while reading, we have to fallback to remote read
-                    match self.file_cache.read(&read_key, OpRead::default()).await {
-                        Ok(ret) => Ok(to_output_reader(ret)),
-                        Err(_) => inner_read(path, args.clone()).await.map(to_output_reader),
-                    }
-                }
-                ReadResult::NotFound => {
-                    increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "not_found");
-
-                    Err(OpendalError::new(
-                        ErrorKind::NotFound,
-                        &format!("File not found: {path}"),
-                    ))
-                }
-            };
-            self.mem_cache.run_pending_tasks().await;
-
-            return cache_result;
-        }
-
         increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
-        let inner_result = inner_read(path, args.clone()).await;
+        let inner_result = inner_read(path, args).await;
+
         match inner_result {
             Ok((rp, mut reader)) => {
-                let (_, mut writer) = self.file_cache.write(&read_key, OpWrite::new()).await?;
+                let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
 
                 while let Some(bytes) = reader.next().await {
                     writer.write(&bytes?).await?;
@@ -229,28 +259,18 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 // Call `close` to ensure data is written.
                 writer.close().await?;
 
-                // Read from local cache immediately, because it may be purged while inserting.
-                let cache_result = self.file_cache.read(&read_key, OpRead::default()).await;
                 let read_bytes = rp.metadata().content_length() as u32;
-
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, read_bytes as f64);
-                self.mem_cache
-                    .insert(read_key.clone(), ReadResult::Success(read_bytes))
-                    .await;
-                self.mem_cache.run_pending_tasks().await;
 
-                cache_result.map(to_output_reader)
+                Ok(ReadResult::Success(read_bytes))
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 increment_counter!(OBJECT_STORE_READ_ERROR, "kind" => format!("{}", e.kind()));
-
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
-                self.mem_cache.insert(read_key, ReadResult::NotFound).await;
-                self.mem_cache.run_pending_tasks().await;
 
-                Err(e)
+                Ok(ReadResult::NotFound)
             }
 
             Err(e) => {

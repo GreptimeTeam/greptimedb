@@ -19,7 +19,7 @@ pub const OBJECT_STORE_LRU_CACHE_HIT: &str = "object_store.lru_cache.hit";
 /// Cache miss counter
 pub const OBJECT_STORE_LRU_CACHE_MISS: &str = "object_store.lru_cache.miss";
 /// Object store read error counter
-pub const OBJECT_STORE_READ_ERROR: &str = "object_store.read.error";
+pub const OBJECT_STORE_READ_ERROR: &str = "object_store.read.errors";
 /// Cache entry number
 pub const OBJECT_STORE_LRU_CACHE_ENTRIES: &str = "object_store.lru_cache.entries";
 /// Cache size in bytes
