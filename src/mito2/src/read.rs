@@ -30,10 +30,13 @@ use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::SortOptions;
 use datatypes::arrow::row::{RowConverter, SortField};
-use datatypes::prelude::{DataType, ScalarVector};
+use datatypes::prelude::{ConcreteDataType, DataType, ScalarVector};
+use datatypes::types::TimestampType;
 use datatypes::value::ValueRef;
 use datatypes::vectors::{
-    BooleanVector, Helper, UInt32Vector, UInt64Vector, UInt8Vector, Vector, VectorRef,
+    BooleanVector, Helper, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
+    Vector, VectorRef,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
@@ -355,6 +358,47 @@ impl Batch {
             .collect()
     }
 
+    /// Returns timestamps in a native slice or `None` if the batch is empty.
+    pub(crate) fn timestamps_native(&self) -> Option<&[i64]> {
+        if self.timestamps.is_empty() {
+            return None;
+        }
+
+        let values = match self.timestamps.data_type() {
+            ConcreteDataType::Timestamp(TimestampType::Second(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampSecondVector>()
+                .unwrap()
+                .as_arrow()
+                .values(),
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampMillisecondVector>()
+                .unwrap()
+                .as_arrow()
+                .values(),
+            ConcreteDataType::Timestamp(TimestampType::Microsecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondVector>()
+                .unwrap()
+                .as_arrow()
+                .values(),
+            ConcreteDataType::Timestamp(TimestampType::Nanosecond(_)) => self
+                .timestamps
+                .as_any()
+                .downcast_ref::<TimestampNanosecondVector>()
+                .unwrap()
+                .as_arrow()
+                .values(),
+            other => panic!("timestamps in a Batch has other type {:?}", other),
+        };
+
+        Some(values)
+    }
+
     /// Takes the batch in place.
     fn take_in_place(&mut self, indices: &UInt32Vector) -> Result<()> {
         self.timestamps = self.timestamps.take(indices).context(ComputeVectorSnafu)?;
@@ -392,7 +436,7 @@ impl Batch {
     ///
     /// # Panics
     /// Panics if `index` is out-of-bound or the sequence vector returns null.
-    fn get_sequence(&self, index: usize) -> SequenceNumber {
+    pub(crate) fn get_sequence(&self, index: usize) -> SequenceNumber {
         // Safety: sequences is not null so it actually returns Some.
         self.sequences.get_data(index).unwrap()
     }
@@ -646,12 +690,13 @@ mod tests {
     }
 
     #[test]
-    fn test_first_last_empty() {
+    fn test_empty_batch() {
         let batch = new_batch(&[], &[], &[], &[]);
         assert_eq!(None, batch.first_timestamp());
         assert_eq!(None, batch.last_timestamp());
         assert_eq!(None, batch.first_sequence());
         assert_eq!(None, batch.last_sequence());
+        assert!(batch.timestamps_native().is_none());
     }
 
     #[test]
@@ -705,6 +750,17 @@ mod tests {
             &[22, 23],
         );
         assert_eq!(expect, batch);
+    }
+
+    #[test]
+    fn test_timestamps_native() {
+        let batch = new_batch(
+            &[1, 2, 3, 4],
+            &[11, 12, 13, 14],
+            &[OpType::Put, OpType::Delete, OpType::Put, OpType::Put],
+            &[21, 22, 23, 24],
+        );
+        assert_eq!(&[1, 2, 3, 4], batch.timestamps_native().unwrap());
     }
 
     #[test]

@@ -44,14 +44,16 @@ use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::Mutex;
-use tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 
 use self::flight::{FlightCraftRef, FlightCraftWrapper};
 use self::prom_query_gateway::PrometheusGatewayService;
 use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
-use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::error::{
+    AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
+};
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -209,7 +211,7 @@ impl Server for GrpcServer {
         let max_recv_message_size = self.config.max_recv_message_size;
         let max_send_message_size = self.config.max_send_message_size;
         let (tx, rx) = oneshot::channel();
-        let (listener, addr) = {
+        let (incoming, addr) = {
             let mut shutdown_tx = self.shutdown_tx.lock().await;
             ensure!(
                 shutdown_tx.is_none(),
@@ -220,11 +222,13 @@ impl Server for GrpcServer {
                 .await
                 .context(TcpBindSnafu { addr })?;
             let addr = listener.local_addr().context(TcpBindSnafu { addr })?;
+            let incoming =
+                TcpIncoming::from_listener(listener, true, None).context(TcpIncomingSnafu)?;
             info!("gRPC server is bound to {}", addr);
 
             *shutdown_tx = Some(tx);
 
-            (listener, addr)
+            (incoming, addr)
         };
 
         let mut builder = tonic::transport::Server::builder()
@@ -271,7 +275,7 @@ impl Server for GrpcServer {
 
         let _handle = common_runtime::spawn_bg(async move {
             let result = builder
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), rx.map(drop))
+                .serve_with_incoming_shutdown(incoming, rx.map(drop))
                 .await
                 .context(StartGrpcSnafu);
             serve_state_tx.send(result)

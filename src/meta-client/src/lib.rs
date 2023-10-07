@@ -18,7 +18,7 @@ pub mod client;
 pub mod error;
 
 // Options for meta client in datanode instance.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetaClientOptions {
     pub metasrv_addrs: Vec<String>,
     pub timeout_millis: u64,

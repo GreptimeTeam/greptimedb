@@ -86,7 +86,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[derive(Debug, Clone, Serialize, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct FileConfig {}
 
@@ -378,7 +378,7 @@ impl DatanodeOptions {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),
