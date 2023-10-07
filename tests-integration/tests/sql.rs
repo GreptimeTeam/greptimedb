@@ -13,10 +13,10 @@
 // limitations under the License.
 
 use auth::user_provider_from_option;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
-use sqlx::mysql::{MySqlDatabaseError, MySqlPoolOptions};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
 use sqlx::postgres::{PgDatabaseError, PgPoolOptions};
-use sqlx::Row;
+use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
     setup_mysql_server, setup_mysql_server_with_user_provider, setup_pg_server,
     setup_pg_server_with_user_provider, StorageType,
@@ -55,6 +55,7 @@ macro_rules! sql_tests {
 
                 test_mysql_auth,
                 test_mysql_crud,
+                test_mysql_timezone,
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_parameter_inference,
@@ -202,6 +203,49 @@ pub async fn test_mysql_crud(store_type: StorageType) {
         .await
         .unwrap();
     assert_eq!(rows.len(), 0);
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_timezone(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "mysql_timezone").await;
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    let _ = conn.execute("SET time_zone = 'UTC'").await.unwrap();
+    let time_zone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(time_zone[0].get::<String, usize>(0), "UTC");
+
+    // test data
+    let _ = conn
+        .execute("create table demo(i bigint, ts timestamp time index)")
+        .await
+        .unwrap();
+    let _ = conn
+        .execute("insert into demo values(1, 1667446797450)")
+        .await
+        .unwrap();
+    let rows = conn.fetch_all("select ts from demo").await.unwrap();
+    assert_eq!(
+        rows[0]
+            .get::<chrono::DateTime<Utc>, usize>(0)
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        "2022-11-03T03:39:57.450Z"
+    );
+
+    let _ = conn.execute("SET time_zone = '+08:00'").await.unwrap();
+    let rows2 = conn.fetch_all("select ts from demo").await.unwrap();
+    // we use Utc here for format only
+    assert_eq!(
+        rows2[0]
+            .get::<chrono::DateTime<Utc>, usize>(0)
+            .to_rfc3339_opts(SecondsFormat::Millis, true),
+        "2022-11-03T11:39:57.450Z"
+    );
 
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
