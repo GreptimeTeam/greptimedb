@@ -15,6 +15,7 @@
 //! Utilities for testing.
 
 pub mod memtable_util;
+pub mod meta_util;
 pub mod scheduler_util;
 pub mod version_util;
 
