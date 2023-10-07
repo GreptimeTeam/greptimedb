@@ -119,7 +119,7 @@ impl CacheManager {
     }
 }
 
-/// Cache key for SST meta.
+/// Cache key (region id, file id) for SST meta.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SstMetaKey(RegionId, FileId);
 
@@ -130,7 +130,11 @@ impl SstMetaKey {
     }
 }
 
+/// Maps (region id, file id) to [ParquetMetaData].
 type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
+/// Maps [Value] to a vector that holds this value repeatedly.
+///
+/// e.g. `"hello" => ["hello", "hello", "hello"]`
 type VectorCache = Cache<Value, VectorRef>;
 
 #[cfg(test)]
