@@ -12,7 +12,7 @@ common-telemetry.workspace = true
 futures.workspace = true
 md5 = "0.7"
 metrics.workspace = true
-moka.workspace = true
+moka = { workspace = true, features = ["future"] }
 opendal = { version = "0.40", features = [
     "layers-tracing",
     "layers-metrics",
