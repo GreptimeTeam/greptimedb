@@ -30,7 +30,7 @@ use crate::metrics::{
 
 /// Cache value for read file
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub(crate) enum ReadResult {
+enum ReadResult {
     // Read success with size
     Success(u32),
     // File not found
@@ -225,7 +225,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         cache_result
     }
 
-    // Remote file from remote storage.
+    /// Read the file from remote storage. If success, write the content into local cache.
     async fn read_remote<'life0, 'life1, 'async_trait, I, F>(
         &'life0 self,
         read_key: &str,
