@@ -184,8 +184,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 .and_then(|(ts, _)| ts.convert_to(self.ts_col_unit))
                 .map(TimestampRange::single),
             Operator::Lt => {
-                let Some((ts, reverse)) = self
-                    .get_timestamp_filter(left, right)else {
+                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
                     return None;
                 };
                 if reverse {
@@ -202,8 +201,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::LtEq => {
-                let Some((ts, reverse)) = self
-                    .get_timestamp_filter(left, right)else {
+                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
                     return None;
                 };
                 if reverse {
@@ -217,8 +215,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::Gt => {
-                let Some((ts, reverse)) = self
-                    .get_timestamp_filter(left, right)else {
+                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
                     return None;
                 };
                 if reverse {
@@ -235,8 +232,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::GtEq => {
-                let Some((ts, reverse)) = self
-                    .get_timestamp_filter(left, right)else {
+                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
                     return None;
                 };
                 if reverse {
