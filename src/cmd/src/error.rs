@@ -180,11 +180,31 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to connect server at {addr}"))]
+    ConnectServer {
+        addr: String,
+        source: client::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to serde json"))]
     SerdeJson {
         #[snafu(source)]
         error: serde_json::error::Error,
         location: Location,
+    },
+
+    #[snafu(display("Expect data from output, but got another thing"))]
+    NotDataFromOutput { location: Location },
+
+    #[snafu(display("Empty result from output"))]
+    EmptyResult { location: Location },
+
+    #[snafu(display("Failed to manipulate file"))]
+    FileIo {
+        location: Location,
+        #[snafu(source)]
+        error: std::io::Error,
     },
 }
 
@@ -204,12 +224,15 @@ impl ErrorExt for Error {
             Error::IterStream { source, .. } | Error::InitMetadata { source, .. } => {
                 source.status_code()
             }
+            Error::ConnectServer { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
             | Error::IllegalAuthConfig { .. }
-            | Error::ConnectEtcd { .. } => StatusCode::InvalidArguments,
+            | Error::ConnectEtcd { .. }
+            | Error::NotDataFromOutput { .. }
+            | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
 
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
@@ -222,7 +245,7 @@ impl ErrorExt for Error {
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
-            Error::SerdeJson { .. } => StatusCode::Unexpected,
+            Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
         }
     }
 
