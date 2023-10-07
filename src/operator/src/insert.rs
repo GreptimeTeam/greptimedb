@@ -29,6 +29,7 @@ use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
+use meter_macros::write_meter;
 use metrics::counter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -151,6 +152,8 @@ impl Inserter {
         requests: RegionInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
+        write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+
         let header = RegionRequestHeader {
             trace_id: ctx.trace_id(),
             span_id: 0,
