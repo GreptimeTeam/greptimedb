@@ -76,7 +76,7 @@ pub struct ExportCommand {
 
 impl ExportCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let client = Client::with_urls(&[self.addr.clone()]);
+        let client = Client::with_urls([self.addr.clone()]);
         client
             .health_check()
             .await
@@ -123,7 +123,7 @@ impl Export {
         client.set_catalog(catalog);
         client.set_schema(schema);
         let result = client
-            .sql(&sql)
+            .sql(sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
         let Output::Stream(stream) = result else {
