@@ -46,6 +46,12 @@ impl ReadResult {
     }
 }
 
+/// Returns true when the path of the file can be cached.
+fn can_cache(path: &str) -> bool {
+    // TODO(dennis): find a better way
+    !path.ends_with("_last_checkpoint")
+}
+
 /// Generate an unique cache key for the read path and range.
 fn read_cache_key(path: &str, args: &OpRead) -> String {
     format!(
@@ -185,6 +191,10 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
             > + Clone,
     {
+        if !can_cache(path) {
+            return inner_read(path, args).await.map(to_output_reader);
+        }
+
         let read_key = read_cache_key(path, &args);
 
         let read_result = self
@@ -284,4 +294,20 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
 fn to_output_reader<R: Read + 'static>(input: (RpRead, R)) -> (RpRead, Reader) {
     (input.0, Box::new(input.1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_can_cache() {
+        assert!(can_cache("test"));
+        assert!(can_cache("a/b/c.parquet"));
+        assert!(can_cache("1.json"));
+        assert!(can_cache("100.checkpoint"));
+        assert!(can_cache("test/last_checkpoint"));
+        assert!(!can_cache("test/__last_checkpoint"));
+        assert!(!can_cache("a/b/c/__last_checkpoint"));
+    }
 }
