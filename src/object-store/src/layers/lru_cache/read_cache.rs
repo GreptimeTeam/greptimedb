@@ -65,7 +65,7 @@ pub(crate) struct ReadCache<C: Clone> {
 }
 
 impl<C: Accessor + Clone> ReadCache<C> {
-    /// Create a `[ReadCache]` with capacity in bytes.
+    /// Create a [`ReadCache`] with capacity in bytes.
     pub(crate) fn new(file_cache: Arc<C>, capacity: usize) -> Self {
         let file_cache_cloned = file_cache.clone();
         let eviction_listener =
