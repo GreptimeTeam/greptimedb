@@ -44,7 +44,7 @@ use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use session::context::QueryContext;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
@@ -291,8 +291,10 @@ impl RegionServerInner {
         } = request;
         let region_id = RegionId::from_u64(region_id);
 
-        let dbname = header.map(|h| h.dbname);
-        let ctx = QueryContext::with_db_name(dbname.as_ref());
+        let ctx: QueryContextRef = header
+            .as_ref()
+            .map(|h| Arc::new(h.into()))
+            .unwrap_or_else(|| QueryContextBuilder::default().build());
 
         // build dummy catalog list
         let engine = self

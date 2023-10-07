@@ -120,11 +120,7 @@ impl Deleter {
         requests: RegionDeleteRequests,
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
-        let header = RegionRequestHeader {
-            trace_id: ctx.trace_id(),
-            span_id: 0,
-            dbname: ctx.get_db_string(),
-        };
+        let header: RegionRequestHeader = ctx.as_ref().into();
         let request_factory = RegionRequestFactory::new(header);
 
         let tasks = self
