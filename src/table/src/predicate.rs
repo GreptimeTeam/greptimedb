@@ -184,9 +184,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 .and_then(|(ts, _)| ts.convert_to(self.ts_col_unit))
                 .map(TimestampRange::single),
             Operator::Lt => {
-                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
-                    return None;
-                };
+                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
                 if reverse {
                     // [lit] < ts_col
                     let ts_val = ts.convert_to(self.ts_col_unit)?.value();
@@ -201,9 +199,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::LtEq => {
-                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
-                    return None;
-                };
+                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
                 if reverse {
                     // [lit] <= ts_col
                     ts.convert_to_ceil(self.ts_col_unit)
@@ -215,9 +211,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::Gt => {
-                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
-                    return None;
-                };
+                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
                 if reverse {
                     // [lit] > ts_col
                     ts.convert_to_ceil(self.ts_col_unit)
@@ -232,9 +226,7 @@ impl<'a> TimeRangePredicateBuilder<'a> {
                 }
             }
             Operator::GtEq => {
-                let Some((ts, reverse)) = self.get_timestamp_filter(left, right) else {
-                    return None;
-                };
+                let (ts, reverse) = self.get_timestamp_filter(left, right)?;
                 if reverse {
                     // [lit] >= ts_col
                     ts.convert_to(self.ts_col_unit)
@@ -389,8 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_predicate() {
-        // operator GT
+    fn test_gt() {
         // ts > 1ms
         check_build_predicate(
             col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
@@ -426,8 +417,10 @@ mod tests {
             col("ts").gt(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::from_start(Timestamp::new_millisecond(1001)),
         );
+    }
 
-        // operator GT_EQ
+    #[test]
+    fn test_gt_eq() {
         // ts >= 1ms
         check_build_predicate(
             col("ts").gt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
@@ -463,8 +456,10 @@ mod tests {
             col("ts").gt_eq(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::from_start(Timestamp::new_millisecond(1000)),
         );
+    }
 
-        // operator LT
+    #[test]
+    fn test_lt() {
         // ts < 1ms
         check_build_predicate(
             col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
@@ -500,8 +495,9 @@ mod tests {
             col("ts").lt(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::until_end(Timestamp::new_millisecond(1000), false),
         );
-
-        // operator LT_EQ
+    }
+    #[test]
+    fn test_lt_eq() {
         // ts <= 1ms
         check_build_predicate(
             col("ts").lt_eq(lit(ScalarValue::TimestampMillisecond(Some(1), None))),
