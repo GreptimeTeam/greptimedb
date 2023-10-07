@@ -30,6 +30,7 @@ use once_cell::sync::Lazy;
 use regex::bytes::RegexSet;
 use regex::Regex;
 use session::context::QueryContextRef;
+use session::SessionRef;
 
 static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
 static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
@@ -263,12 +264,12 @@ fn check_show_variables(query: &str) -> Option<Output> {
 }
 
 // TODO(sunng87): extract this to use sqlparser for more variables
-fn check_set_variables(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+fn check_set_variables(query: &str, session: SessionRef) -> Option<Output> {
     if let Some(captures) = SET_TIME_ZONE_PATTERN.captures(query) {
         // get the capture
         let tz = captures.get(1).unwrap();
         if let Ok(timezone) = TimeZone::from_tz_string(tz.as_str()) {
-            query_ctx.set_time_zone(timezone);
+            session.set_time_zone(timezone);
             return Some(Output::AffectedRows(0));
         }
     }
@@ -300,7 +301,11 @@ fn check_others(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
 
 // Check whether the query is a federated or driver setup command,
 // and return some faked results if there are any.
-pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
+pub(crate) fn check(
+    query: &str,
+    query_ctx: QueryContextRef,
+    session: SessionRef,
+) -> Option<Output> {
     // INSERT don't need MySQL federated check. We assume the query doesn't contain
     // federated or driver setup command if it starts with a 'INSERT' statement.
     if query.len() > 6 && query[..6].eq_ignore_ascii_case("INSERT") {
@@ -311,7 +316,7 @@ pub(crate) fn check(query: &str, query_ctx: QueryContextRef) -> Option<Output> {
     check_select_variable(query, query_ctx.clone())
         // Then to check "show variables like ...".
         .or_else(|| check_show_variables(query))
-        .or_else(|| check_set_variables(query, query_ctx.clone()))
+        .or_else(|| check_set_variables(query, session.clone()))
         // Last check
         .or_else(|| check_others(query, query_ctx))
 }

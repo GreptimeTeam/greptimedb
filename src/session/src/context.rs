@@ -34,7 +34,7 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    time_zone: ArcSwap<Option<TimeZone>>,
+    time_zone: Option<TimeZone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
     trace_id: u64,
 }
@@ -103,12 +103,7 @@ impl QueryContext {
 
     #[inline]
     pub fn time_zone(&self) -> Option<TimeZone> {
-        self.time_zone.load().as_ref().clone()
-    }
-
-    #[inline]
-    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
-        let _ = self.time_zone.swap(Arc::new(tz));
+        self.time_zone.clone()
     }
 
     #[inline]
@@ -139,9 +134,7 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            time_zone: self
-                .time_zone
-                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
+            time_zone: self.time_zone.unwrap_or(None),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

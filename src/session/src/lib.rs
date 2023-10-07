@@ -21,6 +21,7 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_time::TimeZone;
 use context::QueryContextBuilder;
 
 use crate::context::{Channel, ConnInfo, QueryContextRef};
@@ -32,6 +33,7 @@ pub struct Session {
     schema: ArcSwap<String>,
     user_info: ArcSwap<UserInfoRef>,
     conn_info: ConnInfo,
+    time_zone: ArcSwap<Option<TimeZone>>,
 }
 
 pub type SessionRef = Arc<Session>;
@@ -43,6 +45,7 @@ impl Session {
             schema: ArcSwap::new(Arc::new(DEFAULT_SCHEMA_NAME.into())),
             user_info: ArcSwap::new(Arc::new(auth::userinfo_by_name(None))),
             conn_info: ConnInfo::new(addr, channel),
+            time_zone: ArcSwap::new(Arc::new(None)),
         }
     }
 
@@ -55,6 +58,7 @@ impl Session {
             .current_catalog(self.catalog.load().to_string())
             .current_schema(self.schema.load().to_string())
             .sql_dialect(self.conn_info.channel.dialect())
+            .time_zone((**self.time_zone.load()).clone())
             .build()
     }
 
@@ -66,6 +70,16 @@ impl Session {
     #[inline]
     pub fn mut_conn_info(&mut self) -> &mut ConnInfo {
         &mut self.conn_info
+    }
+
+    #[inline]
+    pub fn time_zone(&self) -> Option<TimeZone> {
+        self.time_zone.load().as_ref().clone()
+    }
+
+    #[inline]
+    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
+        let _ = self.time_zone.swap(Arc::new(tz));
     }
 
     #[inline]
