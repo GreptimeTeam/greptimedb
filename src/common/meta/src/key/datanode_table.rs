@@ -33,10 +33,19 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
-pub struct UpdateDatanodeTableContext<'a> {
-    pub engine: &'a str,
-    pub region_storage_path: &'a str,
-    pub region_options: &'a HashMap<String, String>,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+/// RegionInfo
+/// For compatible reason, DON'T modify the field name.
+pub struct RegionInfo {
+    #[serde(default)]
+    // The table engine, it SHOULD be immutable after created.
+    pub engine: String,
+    // The region storage path, it SHOULD be immutable after created.
+    #[serde(default)]
+    pub region_storage_path: String,
+    // The region options.
+    #[serde(default)]
+    pub region_options: HashMap<String, String>,
 }
 
 pub struct DatanodeTableKey {
@@ -92,29 +101,17 @@ impl TableMetaKey for DatanodeTableKey {
 pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
-    #[serde(default)]
-    pub engine: String,
-    #[serde(default)]
-    pub region_storage_path: String,
-    #[serde(default)]
-    pub region_options: HashMap<String, String>,
+    #[serde(flatten)]
+    pub region_info: RegionInfo,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(
-        table_id: TableId,
-        regions: Vec<RegionNumber>,
-        engine: String,
-        region_storage_path: String,
-        region_options: HashMap<String, String>,
-    ) -> Self {
+    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, region_info: RegionInfo) -> Self {
         Self {
             table_id,
             regions,
-            engine,
-            region_storage_path,
-            region_options,
+            region_info,
             version: 0,
         }
     }
@@ -177,9 +174,11 @@ impl DatanodeTableManager {
                 let val = DatanodeTableValue::new(
                     table_id,
                     regions,
-                    engine.to_string(),
-                    region_storage_path.to_string(),
-                    region_options.clone(),
+                    RegionInfo {
+                        engine: engine.to_string(),
+                        region_storage_path: region_storage_path.to_string(),
+                        region_options: region_options.clone(),
+                    },
                 );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
@@ -195,11 +194,7 @@ impl DatanodeTableManager {
     pub(crate) fn build_update_txn(
         &self,
         table_id: TableId,
-        UpdateDatanodeTableContext {
-            engine,
-            region_storage_path,
-            region_options: current_region_options,
-        }: UpdateDatanodeTableContext<'_>,
+        region_info: RegionInfo,
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         new_region_options: &HashMap<String, String>,
@@ -214,7 +209,7 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
-        let need_update_options = current_region_options != new_region_options;
+        let need_update_options = region_info.region_options != *new_region_options;
         for (datanode, regions) in new_region_distribution.into_iter() {
             let need_update =
                 if let Some(current_region) = current_region_distribution.get(&datanode) {
@@ -226,14 +221,8 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(
-                    table_id,
-                    regions,
-                    engine.to_string(),
-                    region_storage_path.to_string(),
-                    new_region_options.clone(),
-                )
-                .try_as_raw_value()?;
+                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
+                    .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
         }
@@ -280,10 +269,8 @@ mod tests {
         let value = DatanodeTableValue {
             table_id: 42,
             regions: vec![1, 2, 3],
-            engine: Default::default(),
-            region_storage_path: Default::default(),
+            region_info: RegionInfo::default(),
             version: 1,
-            region_options: HashMap::new(),
         };
         let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
 

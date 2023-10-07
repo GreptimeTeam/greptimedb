@@ -69,7 +69,7 @@ use table_info::{TableInfoKey, TableInfoManager, TableInfoValue};
 use table_name::{TableNameKey, TableNameManager, TableNameValue};
 
 use self::catalog_name::{CatalogManager, CatalogNameKey, CatalogNameValue};
-use self::datanode_table::UpdateDatanodeTableContext;
+use self::datanode_table::RegionInfo;
 use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
@@ -449,7 +449,7 @@ impl TableMetadataManager {
     pub async fn update_table_route(
         &self,
         table_id: TableId,
-        update_ctx: UpdateDatanodeTableContext<'_>,
+        region_info: RegionInfo,
         current_table_route_value: TableRouteValue,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
@@ -461,7 +461,7 @@ impl TableMetadataManager {
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
-            update_ctx,
+            region_info,
             current_region_distribution,
             new_region_distribution,
             new_region_options,
@@ -566,7 +566,7 @@ mod tests {
 
     use super::datanode_table::DatanodeTableKey;
     use crate::ddl::utils::region_storage_path;
-    use crate::key::datanode_table::UpdateDatanodeTableContext;
+    use crate::key::datanode_table::RegionInfo;
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
@@ -898,10 +898,10 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                UpdateDatanodeTableContext {
-                    engine,
-                    region_storage_path: &region_storage_path,
-                    region_options: &HashMap::new(),
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
                 },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
@@ -915,10 +915,10 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                UpdateDatanodeTableContext {
-                    engine,
-                    region_storage_path: &region_storage_path,
-                    region_options: &HashMap::new(),
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
                 },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
@@ -933,10 +933,10 @@ mod tests {
         table_metadata_manager
             .update_table_route(
                 table_id,
-                UpdateDatanodeTableContext {
-                    engine,
-                    region_storage_path: &region_storage_path,
-                    region_options: &HashMap::new(),
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
                 },
                 current_table_route_value.clone(),
                 new_region_routes.clone(),
@@ -957,10 +957,10 @@ mod tests {
         assert!(table_metadata_manager
             .update_table_route(
                 table_id,
-                UpdateDatanodeTableContext {
-                    engine,
-                    region_storage_path: &region_storage_path,
-                    region_options: &HashMap::new(),
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: region_storage_path.to_string(),
+                    region_options: HashMap::new(),
                 },
                 wrong_table_route_value,
                 new_region_routes,

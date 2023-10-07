@@ -285,9 +285,9 @@ impl DatanodeBuilder {
             for region_number in table_value.regions {
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
-                    table_value.engine.clone(),
-                    table_value.region_storage_path.clone(),
-                    table_value.region_options.clone(),
+                    table_value.region_info.engine.clone(),
+                    table_value.region_info.region_storage_path.clone(),
+                    table_value.region_info.region_options.clone(),
                 ));
             }
         }
