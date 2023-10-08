@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
-use common_query::logical_plan::Expr;
 use common_telemetry::debug;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;

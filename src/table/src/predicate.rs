@@ -126,11 +126,12 @@ impl Predicate {
         // we only expect one row in primary_key.
         assert_eq!(1, primary_key.num_rows());
 
-        let mut res = true;
         for expr in &self.exprs {
             // evaluate every filter against primary key
-            let result = match expr.evaluate(primary_key).unwrap() {
-                // TODO(hl): avoid panic here
+            let Ok(eva) = expr.evaluate(primary_key) else {
+                continue;
+            };
+            let result = match eva {
                 ColumnarValue::Array(array) => {
                     let predicate_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
                     predicate_array
@@ -145,9 +146,11 @@ impl Predicate {
                     unreachable!() // TODO(hl): avoid panic here.
                 }
             };
-            res &= result;
+            if !result {
+                return Ok(false);
+            }
         }
-        Ok(res)
+        return Ok(true);
     }
 
     /// Evaluates the predicate against the `stats`.

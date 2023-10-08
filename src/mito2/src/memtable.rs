@@ -23,7 +23,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_query::logical_plan::Expr;
 use common_time::Timestamp;
 use metrics::{decrement_gauge, increment_gauge};
 use store_api::metadata::RegionMetadataRef;
