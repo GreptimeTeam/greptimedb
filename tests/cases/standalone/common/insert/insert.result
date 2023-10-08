@@ -40,9 +40,9 @@ Affected Rows: 1
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE presentations;
 
-Affected Rows: 1
+Affected Rows: 0
 

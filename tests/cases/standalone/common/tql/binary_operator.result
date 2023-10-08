@@ -35,7 +35,7 @@ tql eval (0, 30, '10s'), data + (1 > bool 2);
 
 drop table data;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- Binary operator on table with multiple field columns
 create table data (ts timestamp time index, val1 double, val2 double, val3 double);
@@ -84,5 +84,5 @@ tql eval (0, 30, '10s'), data{__field__="val1", __field__="val2"} + data{__field
 
 drop table data;
 
-Affected Rows: 1
+Affected Rows: 0
 

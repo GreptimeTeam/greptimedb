@@ -30,8 +30,7 @@ use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::server::Router;
+use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
 use crate::lock::etcd::EtcdLock;
@@ -136,10 +135,12 @@ pub async fn bootstrap_meta_srv_with_router(
     let listener = TcpListener::bind(bind_addr)
         .await
         .context(error::TcpBindSnafu { addr: bind_addr })?;
-    let listener = TcpListenerStream::new(listener);
+
+    let incoming =
+        TcpIncoming::from_listener(listener, true, None).context(error::TcpIncomingSnafu)?;
 
     router
-        .serve_with_incoming_shutdown(listener, async {
+        .serve_with_incoming_shutdown(incoming, async {
             let _ = signal.recv().await;
         })
         .await

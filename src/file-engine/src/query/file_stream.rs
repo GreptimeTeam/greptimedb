@@ -133,13 +133,9 @@ fn new_csv_stream(
 ) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
     let opener = build_csv_opener(file_schema.clone(), config, format)?;
-    build_record_batch_stream(
-        opener,
-        file_schema,
-        config.files,
-        config.projection,
-        config.limit,
-    )
+    // push down limit only if there is no filter
+    let limit = config.filters.is_empty().then_some(config.limit).flatten();
+    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
 }
 
 fn new_json_stream(
@@ -149,13 +145,9 @@ fn new_json_stream(
 ) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
     let opener = build_json_opener(file_schema.clone(), config, format)?;
-    build_record_batch_stream(
-        opener,
-        file_schema,
-        config.files,
-        config.projection,
-        config.limit,
-    )
+    // push down limit only if there is no filter
+    let limit = config.filters.is_empty().then_some(config.limit).flatten();
+    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
 }
 
 fn new_parquet_stream_with_exec_plan(
@@ -229,13 +221,9 @@ fn new_orc_stream(
 ) -> Result<SendableRecordBatchStream> {
     let file_schema = config.file_schema.arrow_schema().clone();
     let opener = build_orc_opener(file_schema.clone(), config)?;
-    build_record_batch_stream(
-        opener,
-        file_schema,
-        config.files,
-        config.projection,
-        config.limit,
-    )
+    // push down limit only if there is no filter
+    let limit = config.filters.is_empty().then_some(config.limit).flatten();
+    build_record_batch_stream(opener, file_schema, config.files, config.projection, limit)
 }
 
 #[derive(Debug, Clone)]

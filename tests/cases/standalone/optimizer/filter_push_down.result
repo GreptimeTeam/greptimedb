@@ -196,5 +196,5 @@ Error: 3001(EngineExecuteQuery), Error during planning: Attempted to create Filt
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 

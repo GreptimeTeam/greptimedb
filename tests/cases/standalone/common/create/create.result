@@ -74,19 +74,19 @@ DESC TABLE test2;
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE times;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test2;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE test_pk ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE);
 
@@ -104,7 +104,7 @@ DESC TABLE test_pk;
 
 DROP TABLE test_pk;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE test_multiple_pk_definitions ("timestamp" TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, "value" DOUBLE, PRIMARY KEY(host));
 

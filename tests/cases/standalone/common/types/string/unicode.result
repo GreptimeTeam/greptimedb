@@ -64,5 +64,5 @@ SELECT length(s) FROM emojis ORDER BY id;
 
 DROP TABLE emojis;
 
-Affected Rows: 1
+Affected Rows: 0
 

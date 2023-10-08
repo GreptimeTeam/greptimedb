@@ -42,7 +42,7 @@ SELECT MIN(f), MAX(f) FROM floats;
 
 DROP TABLE floats;
 
-Affected Rows: 1
+Affected Rows: 0
 
 -- double --
 SELECT SUM('inf'::DOUBLE), SUM('-inf'::DOUBLE), SUM('nan'::DOUBLE);
@@ -87,5 +87,5 @@ SELECT MIN(f), MAX(f) FROM doubles;
 
 DROP TABLE doubles;
 
-Affected Rows: 1
+Affected Rows: 0
 

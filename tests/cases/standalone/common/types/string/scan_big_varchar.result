@@ -224,9 +224,9 @@ SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE bigtable;
 
-Affected Rows: 1
+Affected Rows: 0
 

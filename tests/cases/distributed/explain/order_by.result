@@ -28,7 +28,7 @@ EXPLAIN SELECT DISTINCT i%2 FROM integers ORDER BY 1;
 
 DROP TABLE integers;
 
-Affected Rows: 1
+Affected Rows: 0
 
 CREATE TABLE test (a INTEGER, b INTEGER, t TIMESTAMP TIME INDEX);
 
@@ -44,10 +44,8 @@ EXPLAIN SELECT a, b FROM test ORDER BY a, b;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Sort: test.a ASC NULLS LAST, test.b ASC NULLS LAST_|
-|_|_MergeScan [is_placeholder=false]_|
-| physical_plan | SortExec: expr=[a@0 ASC NULLS LAST,b@1 ASC NULLS LAST] |
-|_|_MergeScanExec: REDACTED
+| logical_plan_| MergeScan [is_placeholder=false]_|
+| physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
 
@@ -77,5 +75,5 @@ EXPLAIN SELECT DISTINCT a, b FROM test ORDER BY a, b;
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 

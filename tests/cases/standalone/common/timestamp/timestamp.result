@@ -80,5 +80,5 @@ SELECT * FROM timestamp_with_precision ORDER BY ts ASC;
 
 DROP TABLE timestamp_with_precision;
 
-Affected Rows: 1
+Affected Rows: 0
 

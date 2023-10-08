@@ -24,7 +24,7 @@ use crate::service_config::{
     PostgresOptions, PromStoreOptions,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FrontendOptions {
     pub mode: Mode,

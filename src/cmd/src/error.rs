@@ -173,6 +173,13 @@ pub enum Error {
         error: etcd_client::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to serde json"))]
+    SerdeJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -207,6 +214,8 @@ impl ErrorExt for Error {
             }
             Error::SubstraitEncodeLogicalPlan { source, .. } => source.status_code(),
             Error::StartCatalogManager { source, .. } => source.status_code(),
+
+            Error::SerdeJson { .. } => StatusCode::Unexpected,
         }
     }
 

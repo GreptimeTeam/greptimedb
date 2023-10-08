@@ -58,9 +58,9 @@ SELECT * FROM test2;
 
 DROP TABLE test1;
 
-Affected Rows: 1
+Affected Rows: 0
 
 DROP TABLE test2;
 
-Affected Rows: 1
+Affected Rows: 0
 

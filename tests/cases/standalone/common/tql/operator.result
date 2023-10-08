@@ -68,13 +68,13 @@ tql eval (300, 300, '1s') 10 atan2 NaN;
 
 drop table trigx;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table trigy;
 
-Affected Rows: 1
+Affected Rows: 0
 
 drop table trignan;
 
-Affected Rows: 1
+Affected Rows: 0
 

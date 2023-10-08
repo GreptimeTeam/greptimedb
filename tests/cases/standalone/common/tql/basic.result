@@ -32,5 +32,5 @@ TQL EVAL (0, 10, '5s') test{k="a"};
 
 DROP TABLE test;
 
-Affected Rows: 1
+Affected Rows: 0
 
