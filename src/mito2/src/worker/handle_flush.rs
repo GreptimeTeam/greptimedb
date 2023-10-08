@@ -17,6 +17,7 @@
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
+use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
 use crate::error::{RegionTruncatedSnafu, Result};
@@ -31,14 +32,14 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_flush_request(
         &mut self,
         region_id: RegionId,
-        row_group_size: Option<usize>,
+        request: RegionFlushRequest,
         mut sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
 
-        let mut task = self.new_flush_task(&region, FlushReason::Manual, row_group_size);
+        let mut task = self.new_flush_task(&region, FlushReason::Manual, request.row_group_size);
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler
