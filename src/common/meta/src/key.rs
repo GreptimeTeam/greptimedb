@@ -193,7 +193,9 @@ impl<T: DeserializeOwned + Serialize> Serialize for DeserializedValueWithBytes<T
     where
         S: serde::Serializer,
     {
-        self.bytes.serialize(serializer)
+        // Safety: The original bytes are always JSON encoded.
+        // It's more efficiently than `serialize_bytes`.
+        serializer.serialize_str(&String::from_utf8_lossy(&self.bytes))
     }
 }
 
@@ -205,9 +207,10 @@ impl<'de, T: DeserializeOwned + Serialize> Deserialize<'de> for DeserializedValu
     where
         D: serde::Deserializer<'de>,
     {
-        let buf = Bytes::deserialize(deserializer)?;
+        let buf = String::deserialize(deserializer)?;
+        let bytes = Bytes::from(buf);
 
-        let value = DeserializedValueWithBytes::from_inner_bytes(buf)
+        let value = DeserializedValueWithBytes::from_inner_bytes(bytes)
             .map_err(|err| serde::de::Error::custom(err.to_string()))?;
 
         Ok(value)
