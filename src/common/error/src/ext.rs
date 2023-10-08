@@ -40,7 +40,10 @@ pub trait ErrorExt: StackError {
         Self: Sized,
     {
         match self.status_code() {
-            StatusCode::Unknown | StatusCode::Internal => "Internal Error".to_owned(),
+            StatusCode::Unknown | StatusCode::Unexpected | StatusCode::Internal => {
+                // masks internal error from end user
+                format!("Internal error: {}", self.status_code())
+            }
             _ => {
                 let error = self.last();
                 if let Some(external_error) = error.source() {
