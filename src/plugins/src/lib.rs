@@ -21,6 +21,8 @@ pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
 pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
 pub use meta_srv::{setup_meta_srv_plugins, start_meta_srv_plugins};
 
+/// [`OptPlugins`] is a wrapper around [`PluginsRef`] and opts returned by setup functions.
+/// T can be [`DatanodeOptions`], [`FrontendOptions`] or [`MetaSrvOptions`].
 pub struct OptPlugins<T> {
     pub opts: T,
     pub plugins: PluginsRef,

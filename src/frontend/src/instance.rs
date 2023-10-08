@@ -122,8 +122,6 @@ pub struct Instance {
     script_executor: Arc<ScriptExecutor>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
-    /// plugins: this map holds extensions to customize query or auth
-    /// behaviours.
     plugins: PluginsRef,
     servers: Arc<ServerHandlers>,
     heartbeat_task: Option<HeartbeatTask>,
