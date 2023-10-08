@@ -142,12 +142,12 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
         while let Some(entries) = pager.next().await? {
             for entry in entries {
-                let read_key = entry.path().to_string();
+                let read_key = entry.path();
 
                 // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
                 // because it's private field.
                 let size = {
-                    let stat = self.file_cache.stat(&read_key, OpStat::default()).await?;
+                    let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
 
                     stat.into_metadata().content_length()
                 };
