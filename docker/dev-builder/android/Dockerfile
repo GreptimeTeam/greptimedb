@@ -27,9 +27,10 @@ RUN git config --global --add safe.directory /greptimedb
 SHELL ["/bin/bash", "-c"]
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
 ENV PATH /root/.cargo/bin/:$PATH
-RUN rustup default nightly-2023-05-03
 
 # Add android toolchains
+ARG RUST_TOOLCHAIN
+RUN rustup toolchain install ${RUST_TOOLCHAIN}
 RUN rustup target add aarch64-linux-android
 
 # Install cargo-ndk
