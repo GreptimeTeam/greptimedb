@@ -388,6 +388,10 @@ fn prune_primary_key(
     pk_schema: arrow::datatypes::SchemaRef,
     predicate: &Predicate,
 ) -> bool {
+    // no primary key, we simply return true.
+    if pk_schema.fields().is_empty() {
+        return true;
+    }
     let Ok(pk_record_batch) = pk_to_record_batch(codec, pk, builders, pk_schema) else {
         return true;
     };
