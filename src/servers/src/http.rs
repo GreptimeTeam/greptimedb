@@ -19,7 +19,7 @@ pub mod influxdb;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
-mod pprof;
+pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod script;
