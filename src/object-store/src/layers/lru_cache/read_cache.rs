@@ -11,11 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use std::pin::Pin;
 use std::sync::Arc;
 
 use common_telemetry::logging::debug;
-use futures::{Future, FutureExt};
+use futures::FutureExt;
 use metrics::{decrement_gauge, increment_counter, increment_gauge};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
@@ -155,7 +154,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
                 increment_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
                 self.mem_cache
-                    .insert(read_key, ReadResult::Success(size as u32))
+                    .insert(read_key.to_string(), ReadResult::Success(size as u32))
                     .await;
             }
         }
@@ -174,25 +173,17 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// If the data is not found in the local cache,
     /// it will fallback to retrieving it from remote object storage
     /// and cache the result locally.
-    pub(crate) async fn read<'life0, 'life1, 'async_trait, I, F>(
-        &'life0 self,
-        path: &'life1 str,
+    pub(crate) async fn read<I>(
+        &self,
+        inner: &Arc<I>,
+        path: &str,
         args: OpRead,
-        inner_read: F,
     ) -> Result<(RpRead, Box<dyn Read>)>
     where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
         I: Accessor,
-        F: FnOnce(
-                &'life1 str,
-                OpRead,
-            ) -> Pin<
-                Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
-            > + Clone,
     {
         if !can_cache(path) {
-            return inner_read(path, args).await.map(to_output_reader);
+            return inner.read(path, args).await.map(to_output_reader);
         }
 
         let read_key = read_cache_key(path, &args);
@@ -201,7 +192,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
             .mem_cache
             .try_get_with(
                 read_key.clone(),
-                self.read_remote::<I, _>(&read_key, path, args.clone(), inner_read.clone()),
+                self.read_remote(inner, &read_key, path, args.clone()),
             )
             .await
             .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
@@ -217,7 +208,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     }
                     Err(_) => {
                         increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
-                        inner_read(path, args).await.map(to_output_reader)
+                        inner.read(path, args).await.map(to_output_reader)
                     }
                 }
             }
@@ -236,27 +227,19 @@ impl<C: Accessor + Clone> ReadCache<C> {
     }
 
     /// Read the file from remote storage. If success, write the content into local cache.
-    async fn read_remote<'life0, 'life1, 'async_trait, I, F>(
-        &'life0 self,
+    async fn read_remote<I>(
+        &self,
+        inner: &Arc<I>,
         read_key: &str,
-        path: &'life1 str,
+        path: &str,
         args: OpRead,
-        inner_read: F,
     ) -> Result<ReadResult>
     where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
         I: Accessor,
-        F: FnOnce(
-            &'life1 str,
-            OpRead,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<(RpRead, I::Reader)>> + Send + 'async_trait>,
-        >,
     {
         increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
 
-        let inner_result = inner_read(path, args).await;
+        let inner_result = inner.read(path, args).await;
 
         match inner_result {
             Ok((rp, mut reader)) => {

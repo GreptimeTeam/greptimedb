@@ -62,7 +62,7 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 
     fn layer(&self, inner: I) -> Self::LayeredAccessor {
         LruCacheAccessor {
-            inner,
+            inner: Arc::new(inner),
             read_cache: self.read_cache.clone(),
         }
     }
@@ -70,7 +70,7 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 
 #[derive(Debug)]
 pub struct LruCacheAccessor<I, C: Clone> {
-    inner: I,
+    inner: Arc<I>,
     read_cache: ReadCache<C>,
 }
 
@@ -89,11 +89,7 @@ impl<I: Accessor, C: Accessor + Clone> LayeredAccessor for LruCacheAccessor<I, C
     }
 
     async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.read_cache
-            .read::<I, _>(path, args, |path, args| {
-                Box::pin(async move { self.inner.read(path, args.clone()).await })
-            })
-            .await
+        self.read_cache.read(&self.inner, path, args).await
     }
 
     async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
