@@ -295,11 +295,8 @@ impl SeriesSet {
 
     /// Iterates all series in [SeriesSet].
     fn iter_series(&self, projection: HashSet<ColumnId>, predicate: Option<Predicate>) -> Iter {
-        // let predicate =
-        //     Predicate::try_new(filters.to_vec(), self.region_metadata.schema.clone()).unwrap();
-
         let (primary_key_builders, primary_key_schema) =
-            primary_key_builders(&self.region_metadata, 1); // TODO(hl): we prune one primary key per range.
+            primary_key_builders(&self.region_metadata, 1);
 
         Iter {
             metadata: self.region_metadata.clone(),
@@ -314,9 +311,10 @@ impl SeriesSet {
     }
 }
 
+/// Creates primary key array builders and arrow's schema for primary keys of given region schema.
 fn primary_key_builders(
     region_metadata: &RegionMetadataRef,
-    expected_len: usize,
+    num_pk_rows: usize,
 ) -> (Vec<Box<dyn MutableVector>>, arrow::datatypes::SchemaRef) {
     let (builders, fields): (_, Vec<_>) = region_metadata
         .primary_key_columns()
@@ -324,8 +322,8 @@ fn primary_key_builders(
             (
                 pk.column_schema
                     .data_type
-                    .create_mutable_vector(expected_len),
-                datatypes::arrow::datatypes::Field::new(
+                    .create_mutable_vector(num_pk_rows),
+                arrow::datatypes::Field::new(
                     pk.column_schema.name.clone(),
                     pk.column_schema.data_type.as_arrow_type(),
                     pk.column_schema.is_nullable(),
@@ -352,7 +350,7 @@ impl Iterator for Iter {
 
     fn next(&mut self) -> Option<Self::Item> {
         let map = self.series.read().unwrap();
-        let mut range = match &self.last_key {
+        let range = match &self.last_key {
             None => map.range::<Vec<u8>, _>(..),
             Some(last_key) => {
                 map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
@@ -360,11 +358,11 @@ impl Iterator for Iter {
         };
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
-        while let Some((primary_key, series)) = range.next() {
+        for (primary_key, series) in range {
             if let Some(predicate) = &self.predicate {
                 if !prune_primary_key(
                     &self.codec,
-                    primary_key,
+                    primary_key.as_slice(),
                     &mut self.primary_key_builders,
                     self.pk_schema.clone(),
                     predicate,
@@ -379,18 +377,18 @@ impl Iterator for Iter {
                 values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)),
             );
         }
-        return None;
+        None
     }
 }
 
 fn prune_primary_key(
     codec: &Arc<McmpRowCodec>,
-    pk: &Vec<u8>,
+    pk: &[u8],
     builders: &mut Vec<Box<dyn MutableVector>>,
     pk_schema: arrow::datatypes::SchemaRef,
     predicate: &Predicate,
 ) -> bool {
-    let Ok(pk_record_batch) = pk_to_record_batch(&codec, pk, builders, pk_schema) else {
+    let Ok(pk_record_batch) = pk_to_record_batch(codec, pk, builders, pk_schema) else {
         return true;
     };
 
@@ -404,7 +402,7 @@ fn prune_primary_key(
 
 fn pk_to_record_batch(
     codec: &Arc<McmpRowCodec>,
-    bytes: &Vec<u8>,
+    bytes: &[u8],
     builders: &mut Vec<Box<dyn MutableVector>>,
     pk_schema: arrow::datatypes::SchemaRef,
 ) -> error::Result<RecordBatch> {

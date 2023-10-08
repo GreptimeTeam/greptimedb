@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_query::logical_plan::{DfExpr, Expr};
-use common_telemetry::{error, warn};
+use common_telemetry::{debug, error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
@@ -123,9 +123,6 @@ impl Predicate {
 
     /// Prunes primary keys
     pub fn prune_primary_key(&self, primary_key: &RecordBatch) -> error::Result<bool> {
-        // we only expect one row in primary_key.
-        assert_eq!(1, primary_key.num_rows());
-
         for expr in &self.exprs {
             // evaluate every filter against primary key
             let Ok(eva) = expr.evaluate(primary_key) else {
@@ -142,15 +139,19 @@ impl Predicate {
                 }
                 // result was a column
                 ColumnarValue::Scalar(ScalarValue::Boolean(v)) => v.unwrap_or(true),
-                other => {
-                    unreachable!() // TODO(hl): avoid panic here.
+                _ => {
+                    unreachable!()
                 }
             };
+            debug!(
+                "Evaluate primary key {:?} against filter: {:?}, result: {:?}",
+                primary_key, expr, result
+            );
             if !result {
                 return Ok(false);
             }
         }
-        return Ok(true);
+        Ok(true)
     }
 
     /// Evaluates the predicate against the `stats`.
