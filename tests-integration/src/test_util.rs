@@ -206,7 +206,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let mut s3_config = s3_test_config();
 
             if *store_type == StorageType::S3WithCache {
-                s3_config.cache_path = Some("/tmp/greptimedb_cache".to_string());
+                s3_config.cache.cache_path = Some("/tmp/greptimedb_cache".to_string());
             }
 
             let mut builder = S3::default();

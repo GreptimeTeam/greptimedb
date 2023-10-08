@@ -174,6 +174,7 @@ async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
 
     cache
         .get(TableRouteKey::new(table_id).as_raw_key().as_slice())
+        .await
         .is_some()
 }
 

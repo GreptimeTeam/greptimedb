@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
 use catalog::memory::MemoryCatalogManager;
-use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -61,8 +60,6 @@ use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
 use crate::region_server::RegionServer;
 use crate::server::Services;
 use crate::store;
-
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
 const OPEN_REGION_PARALLELISM: usize = 16;
 
