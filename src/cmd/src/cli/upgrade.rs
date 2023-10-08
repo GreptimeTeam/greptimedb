@@ -20,7 +20,7 @@ use client::api::v1::meta::TableRouteValue;
 use common_meta::ddl::utils::region_storage_path;
 use common_meta::error as MetaError;
 use common_meta::key::catalog_name::{CatalogNameKey, CatalogNameValue};
-use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
+use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue, RegionInfo};
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
@@ -405,8 +405,11 @@ impl MigrateTableMetadata {
                     DatanodeTableValue::new(
                         table_id,
                         regions,
-                        engine.to_string(),
-                        region_storage_path.clone(),
+                        RegionInfo {
+                            engine: engine.to_string(),
+                            region_storage_path: region_storage_path.clone(),
+                            region_options: (&value.table_info.meta.options).into(),
+                        },
                     ),
                 )
             })

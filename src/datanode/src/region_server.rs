@@ -44,7 +44,7 @@ use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use session::context::QueryContext;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
@@ -285,11 +285,16 @@ impl RegionServerInner {
         // TODO(ruihang): add metrics and set trace id
 
         let QueryRequest {
-            header: _,
+            header,
             region_id,
             plan,
         } = request;
         let region_id = RegionId::from_u64(region_id);
+
+        let ctx: QueryContextRef = header
+            .as_ref()
+            .map(|h| Arc::new(h.into()))
+            .unwrap_or_else(|| QueryContextBuilder::default().build());
 
         // build dummy catalog list
         let engine = self
@@ -306,7 +311,7 @@ impl RegionServerInner {
             .context(DecodeLogicalPlanSnafu)?;
         let result = self
             .query_engine
-            .execute(logical_plan.into(), QueryContext::arc())
+            .execute(logical_plan.into(), ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 

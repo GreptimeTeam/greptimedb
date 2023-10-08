@@ -26,6 +26,7 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream,
 };
+use common_telemetry::trace_id;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
@@ -35,7 +36,7 @@ use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::{Schema, SchemaRef};
 use futures_util::StreamExt;
-use greptime_proto::v1::region::QueryRequest;
+use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
@@ -149,12 +150,15 @@ impl MergeScanExec {
         })
     }
 
-    pub fn to_stream(&self, _context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+    pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
         let metric = MergeScanMetric::new(&self.metric);
         let schema = Self::arrow_schema_to_schema(self.schema())?;
+
+        let dbname = context.task_id().unwrap_or_default();
+        let trace_id = trace_id().unwrap_or_default();
 
         let stream = Box::pin(stream!({
             let _finish_timer = metric.finish_time().timer();
@@ -163,7 +167,11 @@ impl MergeScanExec {
 
             for region_id in regions {
                 let request = QueryRequest {
-                    header: None,
+                    header: Some(RegionRequestHeader {
+                        trace_id,
+                        span_id: 0,
+                        dbname: dbname.clone(),
+                    }),
                     region_id: region_id.into(),
                     plan: substrait_plan.clone(),
                 };

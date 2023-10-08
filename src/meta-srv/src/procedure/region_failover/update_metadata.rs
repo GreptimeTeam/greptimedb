@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
+use common_meta::key::datanode_table::RegionInfo;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
@@ -31,13 +34,19 @@ use crate::lock::Opts;
 pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
+    region_options: HashMap<String, String>,
 }
 
 impl UpdateRegionMetadata {
-    pub(super) fn new(candidate: Peer, region_storage_path: String) -> Self {
+    pub(super) fn new(
+        candidate: Peer,
+        region_storage_path: String,
+        region_options: HashMap<String, String>,
+    ) -> Self {
         Self {
             candidate,
             region_storage_path,
+            region_options,
         }
     }
 
@@ -90,10 +99,14 @@ impl UpdateRegionMetadata {
         ctx.table_metadata_manager
             .update_table_route(
                 table_id,
-                engine,
-                &self.region_storage_path,
+                RegionInfo {
+                    engine: engine.to_string(),
+                    region_storage_path: self.region_storage_path.to_string(),
+                    region_options: self.region_options.clone(),
+                },
                 table_route_value,
                 new_region_routes,
+                &self.region_options,
             )
             .await
             .context(error::UpdateTableRouteSnafu)?;
@@ -174,7 +187,8 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let mut state = UpdateRegionMetadata::new(Peer::new(2, ""), env.path.clone());
+        let mut state =
+            UpdateRegionMetadata::new(Peer::new(2, ""), env.path.clone(), HashMap::new());
 
         let next_state = state.next(&env.context, &failed_region).await.unwrap();
         assert_eq!(format!("{next_state:?}"), "InvalidateCache");
@@ -187,7 +201,11 @@ mod tests {
         async fn test(env: TestingEnv, failed_region: u32, candidate: u64) -> Vec<RegionRoute> {
             let failed_region = env.failed_region(failed_region).await;
 
-            let state = UpdateRegionMetadata::new(Peer::new(candidate, ""), env.path.clone());
+            let state = UpdateRegionMetadata::new(
+                Peer::new(candidate, ""),
+                env.path.clone(),
+                HashMap::new(),
+            );
             state
                 .update_table_route(&env.context, &failed_region)
                 .await
@@ -328,14 +346,18 @@ mod tests {
             let path = env.path.clone();
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(2, ""), path);
+                    let state = UpdateRegionMetadata::new(Peer::new(2, ""), path, HashMap::new());
                     state
                         .update_metadata(&ctx_1, &failed_region_1)
                         .await
                         .unwrap();
                 }),
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(3, ""), env.path.clone());
+                    let state = UpdateRegionMetadata::new(
+                        Peer::new(3, ""),
+                        env.path.clone(),
+                        HashMap::new(),
+                    );
                     state
                         .update_metadata(&ctx_2, &failed_region_2)
                         .await

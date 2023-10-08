@@ -49,7 +49,7 @@ async fn test_manual_flush() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    flush_region(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).unwrap();
@@ -164,7 +164,7 @@ async fn test_write_stall() {
     tokio::spawn(async move {
         listener.wait().await;
 
-        flush_region(&engine_cloned, region_id).await;
+        flush_region(&engine_cloned, region_id, None).await;
     });
 
     // Triggers write stall.
@@ -212,7 +212,7 @@ async fn test_flush_empty() {
         .await
         .unwrap();
 
-    flush_region(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).unwrap();
@@ -247,7 +247,7 @@ async fn test_flush_reopen_region() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    flush_region(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
     let check_region = || {
         let region = engine.get_region(region_id).unwrap();
         let version_data = region.version_control.current();

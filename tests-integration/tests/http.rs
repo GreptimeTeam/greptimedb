@@ -663,6 +663,7 @@ auto_flush_interval = "30m"
 global_write_buffer_size = "1GiB"
 global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
+vector_cache_size = "512MiB"
 
 [[region_engine]]
 

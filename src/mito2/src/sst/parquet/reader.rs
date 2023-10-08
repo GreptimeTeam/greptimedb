@@ -14,6 +14,7 @@
 
 //! Parquet reader.
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -44,6 +45,7 @@ use crate::error::{
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::format::ReadFormat;
+use crate::sst::parquet::stats::RowGroupPruningStats;
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 
 /// Parquet SST reader builder.
@@ -151,18 +153,17 @@ impl ParquetReaderBuilder {
         let key_value_meta = builder.metadata().file_metadata().key_value_metadata();
         let region_meta = self.get_region_metadata(file_path, key_value_meta)?;
 
-        // Prune row groups by metadata.
-        if let Some(predicate) = &self.predicate {
-            // TODO(yingwen): Now we encode tags into the full primary key so we need some approach
-            // to implement pruning.
-            let pruned_row_groups = predicate
-                .prune_row_groups(builder.metadata().row_groups())
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
-                .collect::<Vec<_>>();
-            builder = builder.with_row_groups(pruned_row_groups);
-        }
+        let column_ids: HashSet<_> = self
+            .projection
+            .as_ref()
+            .map(|p| p.iter().cloned().collect())
+            .unwrap_or_else(|| {
+                region_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|c| c.column_id)
+                    .collect()
+            });
 
         let read_format = ReadFormat::new(Arc::new(region_meta));
         // The arrow schema converted from the region meta should be the same as parquet's.
@@ -178,6 +179,22 @@ impl ParquetReaderBuilder {
                 )
             }
         );
+
+        // Prune row groups by metadata.
+        if let Some(predicate) = &self.predicate {
+            let stats = RowGroupPruningStats::new(
+                builder.metadata().row_groups(),
+                &read_format,
+                column_ids,
+            );
+            let pruned_row_groups = predicate
+                .prune_with_stats(&stats)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
+                .collect::<Vec<_>>();
+            builder = builder.with_row_groups(pruned_row_groups);
+        }
 
         let parquet_schema_desc = builder.metadata().file_metadata().schema_descr();
         if let Some(column_ids) = self.projection.as_ref() {

@@ -729,7 +729,9 @@ impl Server for HttpServer {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::bind(&listening).serve(app.into_make_service());
+            let server = axum::Server::bind(&listening)
+                .tcp_nodelay(true)
+                .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 

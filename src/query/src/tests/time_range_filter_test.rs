@@ -149,7 +149,7 @@ async fn test_range_filter() {
     tester
         .check(
             "select * from m where ts > 1000;",
-            TimestampRange::from_start(Timestamp::new(1000, TimeUnit::Millisecond)),
+            TimestampRange::from_start(Timestamp::new(1001, TimeUnit::Millisecond)),
         )
         .await;
 
@@ -163,7 +163,7 @@ async fn test_range_filter() {
     tester
         .check(
             "select * from m where ts > 1000 and ts < 2000;",
-            TimestampRange::with_unit(1000, 2000, TimeUnit::Millisecond).unwrap(),
+            TimestampRange::with_unit(1001, 2000, TimeUnit::Millisecond).unwrap(),
         )
         .await;
 

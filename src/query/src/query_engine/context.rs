@@ -39,10 +39,10 @@ impl QueryEngineContext {
     }
 
     pub fn build_task_ctx(&self) -> Arc<TaskContext> {
-        let task_id = self.query_ctx.trace_id().to_string();
+        let dbname = self.query_ctx.get_db_string();
         let state = &self.state;
         Arc::new(TaskContext::new(
-            Some(task_id),
+            Some(dbname),
             state.session_id().to_string(),
             state.config().clone(),
             state.scalar_functions().clone(),

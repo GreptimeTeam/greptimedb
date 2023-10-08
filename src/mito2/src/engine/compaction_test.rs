@@ -44,7 +44,12 @@ async fn put_and_flush(
     put_rows(engine, region_id, rows).await;
 
     let Output::AffectedRows(rows) = engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
         .await
         .unwrap()
     else {
@@ -79,7 +84,12 @@ async fn delete_and_flush(
     assert_eq!(row_cnt, rows_affected);
 
     let Output::AffectedRows(rows) = engine
-        .handle_request(region_id, RegionRequest::Flush(RegionFlushRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest {
+                row_group_size: None,
+            }),
+        )
         .await
         .unwrap()
     else {

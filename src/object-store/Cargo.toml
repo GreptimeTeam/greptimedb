@@ -7,19 +7,20 @@ license.workspace = true
 [dependencies]
 async-trait = "0.1"
 bytes = "1.4"
-futures = { version = "0.3" }
-lru = "0.9"
+common-runtime.workspace = true
+common-telemetry.workspace = true
+futures.workspace = true
 md5 = "0.7"
 metrics.workspace = true
+moka = { workspace = true, features = ["future"] }
 opendal = { version = "0.40", features = [
     "layers-tracing",
     "layers-metrics",
 ] }
-pin-project = "1.0"
-tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
 common-telemetry = { workspace = true }
 common-test-util = { workspace = true }
+tokio.workspace = true

@@ -630,7 +630,8 @@ mod tests {
                     Some(Payload::Json(
                         serde_json::to_string(&Instruction::OpenRegion(OpenRegion::new(
                             opening_region,
-                            &path
+                            &path,
+                            HashMap::new(),
                         )))
                         .unwrap(),
                     ))

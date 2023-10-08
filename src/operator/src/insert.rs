@@ -29,6 +29,7 @@ use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
+use meter_macros::write_meter;
 use metrics::counter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -104,7 +105,7 @@ impl Inserter {
         .convert(requests)
         .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, &ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 
@@ -126,7 +127,7 @@ impl Inserter {
             .convert(request)
             .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, &ctx).await?;
         Ok(affected_rows as _)
     }
 
@@ -140,7 +141,7 @@ impl Inserter {
                 .convert(insert)
                 .await?;
 
-        let affected_rows = self.do_request(inserts, ctx.trace_id(), 0).await?;
+        let affected_rows = self.do_request(inserts, ctx).await?;
         Ok(Output::AffectedRows(affected_rows as _))
     }
 }
@@ -149,10 +150,10 @@ impl Inserter {
     async fn do_request(
         &self,
         requests: RegionInsertRequests,
-        trace_id: u64,
-        span_id: u64,
+        ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
-        let header = RegionRequestHeader { trace_id, span_id };
+        write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
+        let header: RegionRequestHeader = ctx.as_ref().into();
         let request_factory = RegionRequestFactory::new(header);
 
         let tasks = self

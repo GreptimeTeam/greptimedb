@@ -13,10 +13,12 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::HeartbeatResponse;
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::FunctionRef;
 use common_meta::heartbeat::handler::{
@@ -26,6 +28,7 @@ use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
 use common_meta::instruction::{Instruction, OpenRegion, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
+use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
 use query::dataframe::DataFrame;
 use query::plan::LogicalPlan;
@@ -33,7 +36,12 @@ use query::planner::LogicalPlanner;
 use query::query_engine::DescribeResult;
 use query::QueryEngine;
 use session::context::QueryContextRef;
+use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::RegionRequest;
+use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
@@ -79,6 +87,7 @@ fn open_region_instruction() -> Instruction {
             engine: "mito2".to_string(),
         },
         "path/dir",
+        HashMap::new(),
     ))
 }
 
@@ -128,4 +137,53 @@ pub fn mock_region_server() -> RegionServer {
         Arc::new(Runtime::builder().build().unwrap()),
         Box::new(NoopRegionServerEventListener),
     )
+}
+
+pub struct MockRegionEngine {
+    sender: Sender<(RegionId, RegionRequest)>,
+}
+
+impl MockRegionEngine {
+    pub fn new() -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+        (Arc::new(Self { sender: tx }), rx)
+    }
+}
+
+#[async_trait::async_trait]
+impl RegionEngine for MockRegionEngine {
+    fn name(&self) -> &str {
+        "mock"
+    }
+
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<Output, BoxedError> {
+        let _ = self.sender.send((region_id, request)).await;
+
+        Ok(Output::AffectedRows(0))
+    }
+
+    async fn handle_query(
+        &self,
+        _region_id: RegionId,
+        _request: ScanRequest,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn get_metadata(&self, _region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
+        unimplemented!()
+    }
+
+    async fn stop(&self) -> Result<(), BoxedError> {
+        Ok(())
+    }
+
+    fn set_writable(&self, _region_id: RegionId, _writable: bool) -> Result<(), BoxedError> {
+        Ok(())
+    }
 }

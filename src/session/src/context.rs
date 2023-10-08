@@ -11,11 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
 use std::fmt::{Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -34,9 +34,10 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    time_zone: ArcSwap<Option<TimeZone>>,
+    time_zone: Option<TimeZone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
     trace_id: u64,
+    span_id: u64,
 }
 
 impl Display for QueryContext {
@@ -47,6 +48,31 @@ impl Display for QueryContext {
             self.current_catalog(),
             self.current_schema()
         )
+    }
+}
+
+impl From<&RegionRequestHeader> for QueryContext {
+    fn from(value: &RegionRequestHeader) -> Self {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&value.dbname);
+        QueryContext {
+            current_catalog: catalog.to_string(),
+            current_schema: schema.to_string(),
+            current_user: Default::default(),
+            time_zone: Default::default(),
+            sql_dialect: Box::new(GreptimeDbDialect {}),
+            trace_id: value.trace_id,
+            span_id: value.span_id,
+        }
+    }
+}
+
+impl From<&QueryContext> for RegionRequestHeader {
+    fn from(value: &QueryContext) -> Self {
+        RegionRequestHeader {
+            trace_id: value.trace_id,
+            span_id: value.span_id,
+            dbname: value.get_db_string(),
+        }
     }
 }
 
@@ -103,12 +129,7 @@ impl QueryContext {
 
     #[inline]
     pub fn time_zone(&self) -> Option<TimeZone> {
-        self.time_zone.load().as_ref().clone()
-    }
-
-    #[inline]
-    pub fn set_time_zone(&self, tz: Option<TimeZone>) {
-        let _ = self.time_zone.swap(Arc::new(tz));
+        self.time_zone.clone()
     }
 
     #[inline]
@@ -125,6 +146,11 @@ impl QueryContext {
     pub fn trace_id(&self) -> u64 {
         self.trace_id
     }
+
+    #[inline]
+    pub fn span_id(&self) -> u64 {
+        self.span_id
+    }
 }
 
 impl QueryContextBuilder {
@@ -139,13 +165,12 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            time_zone: self
-                .time_zone
-                .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
+            time_zone: self.time_zone.unwrap_or(None),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
             trace_id: self.trace_id.unwrap_or_else(common_telemetry::gen_trace_id),
+            span_id: self.span_id.unwrap_or_default(),
         })
     }
 
