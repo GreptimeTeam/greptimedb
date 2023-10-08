@@ -37,7 +37,7 @@ use storage::config::{
 };
 use storage::scheduler::SchedulerConfig;
 
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
+pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
 
 /// Default data home in file storage
 const DEFAULT_DATA_HOME: &str = "/tmp/greptimedb";
@@ -86,9 +86,18 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Default, Deserialize)]
+#[derive(Debug, Clone, Serialize, Default, Deserialize, Eq, PartialEq)]
 #[serde(default)]
 pub struct FileConfig {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ObjectStorageCacheConfig {
+    /// The local file cache directory
+    pub cache_path: Option<String>,
+    /// The cache capacity in bytes
+    pub cache_capacity: Option<ReadableSize>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -101,8 +110,8 @@ pub struct S3Config {
     pub secret_access_key: SecretString,
     pub endpoint: Option<String>,
     pub region: Option<String>,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,8 +124,8 @@ pub struct OssConfig {
     #[serde(skip_serializing)]
     pub access_key_secret: SecretString,
     pub endpoint: String,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +139,8 @@ pub struct AzblobConfig {
     pub account_key: SecretString,
     pub endpoint: String,
     pub sas_token: Option<String>,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,8 +152,8 @@ pub struct GcsConfig {
     #[serde(skip_serializing)]
     pub credential_path: SecretString,
     pub endpoint: String,
-    pub cache_path: Option<String>,
-    pub cache_capacity: Option<ReadableSize>,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
 }
 
 impl Default for S3Config {
@@ -156,8 +165,7 @@ impl Default for S3Config {
             secret_access_key: SecretString::from(String::default()),
             endpoint: Option::default(),
             region: Option::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
+            cache: ObjectStorageCacheConfig::default(),
         }
     }
 }
@@ -170,8 +178,7 @@ impl Default for OssConfig {
             access_key_id: SecretString::from(String::default()),
             access_key_secret: SecretString::from(String::default()),
             endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
+            cache: ObjectStorageCacheConfig::default(),
         }
     }
 }
@@ -184,9 +191,8 @@ impl Default for AzblobConfig {
             account_name: SecretString::from(String::default()),
             account_key: SecretString::from(String::default()),
             endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
             sas_token: Option::default(),
+            cache: ObjectStorageCacheConfig::default(),
         }
     }
 }
@@ -199,8 +205,7 @@ impl Default for GcsConfig {
             scope: String::default(),
             credential_path: SecretString::from(String::default()),
             endpoint: String::default(),
-            cache_path: Option::default(),
-            cache_capacity: Option::default(),
+            cache: ObjectStorageCacheConfig::default(),
         }
     }
 }
@@ -378,7 +383,7 @@ impl DatanodeOptions {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum RegionEngineConfig {
     #[serde(rename = "mito")]
     Mito(MitoConfig),

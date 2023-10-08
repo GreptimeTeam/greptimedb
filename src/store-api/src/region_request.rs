@@ -110,7 +110,9 @@ impl RegionRequest {
             )]),
             region_request::Body::Flush(flush) => Ok(vec![(
                 flush.region_id.into(),
-                Self::Flush(RegionFlushRequest {}),
+                Self::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
             )]),
             region_request::Body::Compact(compact) => Ok(vec![(
                 compact.region_id.into(),
@@ -415,8 +417,10 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
     }
 }
 
-#[derive(Debug)]
-pub struct RegionFlushRequest {}
+#[derive(Debug, Default)]
+pub struct RegionFlushRequest {
+    pub row_group_size: Option<usize>,
+}
 
 #[derive(Debug)]
 pub struct RegionCompactRequest {}

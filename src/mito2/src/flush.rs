@@ -190,6 +190,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
+    pub(crate) row_group_size: Option<usize>,
 }
 
 impl RegionFlushTask {
@@ -272,7 +273,10 @@ impl RegionFlushTask {
     /// Flushes memtables to level 0 SSTs.
     async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
         // TODO(yingwen): Make it configurable.
-        let write_opts = WriteOptions::default();
+        let mut write_opts = WriteOptions::default();
+        if let Some(row_group_size) = self.row_group_size {
+            write_opts.row_group_size = row_group_size;
+        }
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
 
@@ -689,6 +693,7 @@ mod tests {
             memtable_builder: builder.memtable_builder(),
             file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
+            row_group_size: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

@@ -67,7 +67,7 @@ async fn test_engine_drop_region() {
         rows: build_rows_for_key("a", 0, 2, 0),
     };
     put_rows(&engine, region_id, rows).await;
-    flush_region(&engine, region_id).await;
+    flush_region(&engine, region_id, None).await;
 
     // drop the created region.
     engine

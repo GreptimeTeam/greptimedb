@@ -115,6 +115,10 @@ data_home = "/tmp/greptimedb/"
 type = "File"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
+# Cache configuration for object storage such as 'S3' etc.
+# cache_path = "/path/local_cache"
+# The local file cache capacity in bytes.
+# cache_capacity = "256Mib"
 
 # Compaction options.
 [storage.compaction]

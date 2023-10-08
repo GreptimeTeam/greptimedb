@@ -91,7 +91,9 @@ impl MysqlInstanceShim {
     }
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone()) {
+        if let Some(output) =
+            crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
+        {
             vec![Ok(output)]
         } else {
             let trace_id = query_ctx.trace_id();
@@ -110,7 +112,9 @@ impl MysqlInstanceShim {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        if let Some(output) = crate::mysql::federated::check(query, query_ctx.clone()) {
+        if let Some(output) =
+            crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
+        {
             Ok(output)
         } else {
             self.query_handler.do_exec_plan(plan, query_ctx).await

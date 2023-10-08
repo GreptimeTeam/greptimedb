@@ -78,6 +78,12 @@ pub enum Error {
         error: std::io::Error,
     },
 
+    #[snafu(display("Failed to convert to TcpIncoming"))]
+    TcpIncoming {
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     #[snafu(display("Failed to execute query, query: {}", query))]
     ExecuteQuery {
         query: String,
@@ -391,6 +397,7 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
+            | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,

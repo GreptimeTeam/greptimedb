@@ -165,8 +165,9 @@ impl ScanRegion {
             .collect();
 
         debug!(
-            "Seq scan region {}, memtables: {}, ssts_to_read: {}, total_ssts: {}",
+            "Seq scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, total_ssts: {}",
             self.version.metadata.region_id,
+            self.request,
             memtables.len(),
             files.len(),
             total_ssts

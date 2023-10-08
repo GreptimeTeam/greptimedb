@@ -21,6 +21,8 @@ pub(crate) mod test_util;
 use std::mem;
 use std::sync::Arc;
 
+use datatypes::value::Value;
+use datatypes::vectors::VectorRef;
 use moka::sync::Cache;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
@@ -32,13 +34,15 @@ use crate::sst::file::FileId;
 pub struct CacheManager {
     /// Cache for SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
+    /// Cache for vectors.
+    vector_cache: Option<VectorCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
     /// Creates a new manager with specific cache size in bytes.
-    pub fn new(sst_meta_cache_size: u64) -> CacheManager {
+    pub fn new(sst_meta_cache_size: u64, vector_cache_size: u64) -> CacheManager {
         let sst_meta_cache = if sst_meta_cache_size == 0 {
             None
         } else {
@@ -51,8 +55,23 @@ impl CacheManager {
                 .build();
             Some(cache)
         };
+        let vector_cache = if vector_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(vector_cache_size)
+                .weigher(|_k, v: &VectorRef| {
+                    // We ignore the heap size of `Value`.
+                    (mem::size_of::<Value>() + v.memory_size()) as u32
+                })
+                .build();
+            Some(cache)
+        };
 
-        CacheManager { sst_meta_cache }
+        CacheManager {
+            sst_meta_cache,
+            vector_cache,
+        }
     }
 
     /// Gets cached [ParquetMetaData].
@@ -84,9 +103,23 @@ impl CacheManager {
             cache.remove(&SstMetaKey(region_id, file_id));
         }
     }
+
+    /// Gets a vector with repeated value for specific `key`.
+    pub fn get_repeated_vector(&self, key: &Value) -> Option<VectorRef> {
+        self.vector_cache
+            .as_ref()
+            .and_then(|vector_cache| vector_cache.get(key))
+    }
+
+    /// Puts a vector with repeated value into the cache.
+    pub fn put_repeated_vector(&self, key: Value, vector: VectorRef) {
+        if let Some(cache) = &self.vector_cache {
+            cache.insert(key, vector);
+        }
+    }
 }
 
-/// Cache key for SST meta.
+/// Cache key (region id, file id) for SST meta.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SstMetaKey(RegionId, FileId);
 
@@ -97,16 +130,23 @@ impl SstMetaKey {
     }
 }
 
+/// Maps (region id, file id) to [ParquetMetaData].
 type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
+/// Maps [Value] to a vector that holds this value repeatedly.
+///
+/// e.g. `"hello" => ["hello", "hello", "hello"]`
+type VectorCache = Cache<Value, VectorRef>;
 
 #[cfg(test)]
 mod tests {
+    use datatypes::vectors::Int64Vector;
+
     use super::*;
     use crate::cache::test_util::parquet_meta;
 
     #[test]
-    fn test_disable_meta_cache() {
-        let cache = CacheManager::new(0);
+    fn test_disable_cache() {
+        let cache = CacheManager::new(0, 0);
         assert!(cache.sst_meta_cache.is_none());
 
         let region_id = RegionId::new(1, 1);
@@ -114,11 +154,16 @@ mod tests {
         let metadata = parquet_meta();
         cache.put_parquet_meta_data(region_id, file_id, metadata);
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+
+        let value = Value::Int64(10);
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
+        cache.put_repeated_vector(value.clone(), vector.clone());
+        assert!(cache.get_repeated_vector(&value).is_none());
     }
 
     #[test]
     fn test_parquet_meta_cache() {
-        let cache = CacheManager::new(2000);
+        let cache = CacheManager::new(2000, 0);
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
@@ -127,5 +172,16 @@ mod tests {
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_some());
         cache.remove_parquet_meta_data(region_id, file_id);
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
+    }
+
+    #[test]
+    fn test_repeated_vector_cache() {
+        let cache = CacheManager::new(0, 4096);
+        let value = Value::Int64(10);
+        assert!(cache.get_repeated_vector(&value).is_none());
+        let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
+        cache.put_repeated_vector(value.clone(), vector.clone());
+        let cached = cache.get_repeated_vector(&value).unwrap();
+        assert_eq!(vector, cached);
     }
 }

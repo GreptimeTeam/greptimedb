@@ -14,13 +14,11 @@
 
 //! Datanode implementation.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
 use catalog::memory::MemoryCatalogManager;
-use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -62,8 +60,6 @@ use crate::heartbeat::{new_metasrv_client, HeartbeatTask};
 use crate::region_server::RegionServer;
 use crate::server::Services;
 use crate::store;
-
-pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize(1024);
 
 const OPEN_REGION_PARALLELISM: usize = 16;
 
@@ -286,8 +282,9 @@ impl DatanodeBuilder {
             for region_number in table_value.regions {
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
-                    table_value.engine.clone(),
-                    table_value.region_storage_path.clone(),
+                    table_value.region_info.engine.clone(),
+                    table_value.region_info.region_storage_path.clone(),
+                    table_value.region_info.region_options.clone(),
                 ));
             }
         }
@@ -296,7 +293,7 @@ impl DatanodeBuilder {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
         let mut tasks = vec![];
 
-        for (region_id, engine, store_path) in regions {
+        for (region_id, engine, store_path, options) in regions {
             let region_dir = region_dir(&store_path, region_id);
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
@@ -307,7 +304,7 @@ impl DatanodeBuilder {
                         RegionRequest::Open(RegionOpenRequest {
                             engine: engine.clone(),
                             region_dir,
-                            options: HashMap::new(),
+                            options,
                         }),
                     )
                     .await?;
@@ -408,5 +405,82 @@ impl DatanodeBuilder {
             }
         }
         Ok(engines)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches::assert_matches;
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+
+    use common_base::Plugins;
+    use common_meta::key::datanode_table::DatanodeTableManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::KvBackendRef;
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::RegionId;
+
+    use crate::config::DatanodeOptions;
+    use crate::datanode::DatanodeBuilder;
+    use crate::tests::{mock_region_server, MockRegionEngine};
+
+    async fn setup_table_datanode(kv: &KvBackendRef) {
+        let mgr = DatanodeTableManager::new(kv.clone());
+        let txn = mgr
+            .build_create_txn(
+                1028,
+                "mock",
+                "foo/bar/weny",
+                HashMap::from([("foo".to_string(), "bar".to_string())]),
+                BTreeMap::from([(0, vec![0, 1, 2])]),
+            )
+            .unwrap();
+
+        let r = kv.txn(txn).await.unwrap();
+        assert!(r.succeeded);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_region_server() {
+        let mut mock_region_server = mock_region_server();
+        let (mock_region, mut mock_region_handler) = MockRegionEngine::new();
+
+        mock_region_server.register_engine(mock_region.clone());
+
+        let builder = DatanodeBuilder::new(
+            DatanodeOptions {
+                node_id: Some(0),
+                ..Default::default()
+            },
+            None,
+            Arc::new(Plugins::default()),
+        );
+
+        let kv = Arc::new(MemoryKvBackend::default()) as _;
+        setup_table_datanode(&kv).await;
+
+        builder
+            .initialize_region_server(&mock_region_server, kv.clone(), false)
+            .await
+            .unwrap();
+
+        for i in 0..3 {
+            let (region_id, req) = mock_region_handler.recv().await.unwrap();
+            assert_eq!(region_id, RegionId::new(1028, i));
+            if let RegionRequest::Open(req) = req {
+                assert_eq!(
+                    req.options,
+                    HashMap::from([("foo".to_string(), "bar".to_string())])
+                )
+            } else {
+                unreachable!()
+            }
+        }
+
+        assert_matches!(
+            mock_region_handler.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
     }
 }

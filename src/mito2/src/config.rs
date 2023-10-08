@@ -27,7 +27,7 @@ const DEFAULT_NUM_WORKERS: usize = 1;
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct MitoConfig {
     // Worker configs:
     /// Number of region workers (default 1).
@@ -58,8 +58,10 @@ pub struct MitoConfig {
     pub global_write_buffer_reject_size: ReadableSize,
 
     // Cache configs:
-    /// Cache size for SST metadata (default 128MB). Setting it to 0 to disable cache.
+    /// Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
     pub sst_meta_cache_size: ReadableSize,
+    /// Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+    pub vector_cache_size: ReadableSize,
 }
 
 impl Default for MitoConfig {
@@ -75,6 +77,7 @@ impl Default for MitoConfig {
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
             sst_meta_cache_size: ReadableSize::mb(128),
+            vector_cache_size: ReadableSize::mb(512),
         }
     }
 }

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
@@ -73,13 +74,15 @@ impl Display for OpenRegion {
 pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
+    pub options: HashMap<String, String>,
 }
 
 impl OpenRegion {
-    pub fn new(region_ident: RegionIdent, path: &str) -> Self {
+    pub fn new(region_ident: RegionIdent, path: &str, options: HashMap<String, String>) -> Self {
         Self {
             region_ident,
             region_storage_path: path.to_string(),
+            options,
         }
     }
 }
@@ -127,12 +130,13 @@ mod tests {
                 engine: "mito2".to_string(),
             },
             "test/foo",
+            HashMap::new(),
         ));
 
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo"}}"#,
+            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","options":{}}}"#,
             serialized
         );
 

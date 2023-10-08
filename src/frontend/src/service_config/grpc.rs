@@ -17,7 +17,7 @@ use common_grpc::channel_manager::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GrpcOptions {
     pub addr: String,
     pub runtime_size: usize,

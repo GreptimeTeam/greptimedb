@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use arrow::datatypes::Field;
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ pub const COMMENT_KEY: &str = "greptime:storage:comment";
 const DEFAULT_CONSTRAINT_KEY: &str = "greptime:default_constraint";
 
 /// Schema of a column, used as an immutable struct.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnSchema {
     pub name: String,
     pub data_type: ConcreteDataType,
@@ -41,6 +42,30 @@ pub struct ColumnSchema {
     is_time_index: bool,
     default_constraint: Option<ColumnDefaultConstraint>,
     metadata: Metadata,
+}
+
+impl fmt::Debug for ColumnSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} {}",
+            self.name,
+            self.data_type,
+            if self.is_nullable { "null" } else { "not null" },
+        )?;
+
+        // Add default constraint if present
+        if let Some(default_constraint) = &self.default_constraint {
+            write!(f, " default={:?}", default_constraint)?;
+        }
+
+        // Add metadata if present
+        if !self.metadata.is_empty() {
+            write!(f, " metadata={:?}", self.metadata)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl ColumnSchema {
@@ -393,5 +418,19 @@ mod tests {
     fn test_column_schema_single_no_default() {
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), false);
         assert!(column_schema.create_default().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_debug_for_column_schema() {
+        let column_schema_int8 =
+            ColumnSchema::new("test_column_1", ConcreteDataType::int8_datatype(), true);
+
+        let column_schema_int32 =
+            ColumnSchema::new("test_column_2", ConcreteDataType::int32_datatype(), false);
+
+        let formatted_int8 = format!("{:?}", column_schema_int8);
+        let formatted_int32 = format!("{:?}", column_schema_int32);
+        assert_eq!(formatted_int8, "test_column_1 Int8 null");
+        assert_eq!(formatted_int32, "test_column_2 Int32 not null");
     }
 }

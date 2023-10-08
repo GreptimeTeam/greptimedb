@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use servers::tls::TlsOption;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MysqlOptions {
     pub enable: bool,
     pub addr: String,

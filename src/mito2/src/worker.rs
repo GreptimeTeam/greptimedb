@@ -120,7 +120,10 @@ impl WorkerGroup {
             config.global_write_buffer_size.as_bytes() as usize,
         ));
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(config.sst_meta_cache_size.as_bytes()));
+        let cache_manager = Arc::new(CacheManager::new(
+            config.sst_meta_cache_size.as_bytes(),
+            config.vector_cache_size.as_bytes(),
+        ));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -215,7 +218,10 @@ impl WorkerGroup {
             ))
         });
         let scheduler = Arc::new(LocalScheduler::new(config.max_background_jobs));
-        let cache_manager = Arc::new(CacheManager::new(config.sst_meta_cache_size.as_bytes()));
+        let cache_manager = Arc::new(CacheManager::new(
+            config.sst_meta_cache_size.as_bytes(),
+            config.vector_cache_size.as_bytes(),
+        ));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -528,8 +534,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Flush(_) => {
-                    self.handle_flush_request(ddl.region_id, ddl.sender).await;
+                DdlRequest::Flush(req) => {
+                    self.handle_flush_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Compact(_) => {
