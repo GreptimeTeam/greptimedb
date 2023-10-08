@@ -62,7 +62,7 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 
     fn layer(&self, inner: I) -> Self::LayeredAccessor {
         LruCacheAccessor {
-            inner: Arc::new(inner),
+            inner,
             read_cache: self.read_cache.clone(),
         }
     }
@@ -70,7 +70,7 @@ impl<I: Accessor, C: Accessor + Clone> Layer<I> for LruCacheLayer<C> {
 
 #[derive(Debug)]
 pub struct LruCacheAccessor<I, C: Clone> {
-    inner: Arc<I>,
+    inner: I,
     read_cache: ReadCache<C>,
 }
 

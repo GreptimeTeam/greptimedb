@@ -172,7 +172,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// and cache the result locally.
     pub(crate) async fn read<I>(
         &self,
-        inner: &Arc<I>,
+        inner: &I,
         path: &str,
         args: OpRead,
     ) -> Result<(RpRead, Box<dyn Read>)>
@@ -223,7 +223,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
     /// Read the file from remote storage. If success, write the content into local cache.
     async fn read_remote<I>(
         &self,
-        inner: &Arc<I>,
+        inner: &I,
         read_key: &str,
         path: &str,
         args: OpRead,
