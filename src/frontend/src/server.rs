@@ -80,6 +80,7 @@ impl Services {
                 None,
                 user_provider.clone(),
                 grpc_runtime,
+                Some(instance.clone()),
             );
 
             result.push((Box::new(grpc_server), grpc_addr));

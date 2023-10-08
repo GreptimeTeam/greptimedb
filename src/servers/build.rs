@@ -20,6 +20,10 @@ fn main() {
 
     #[cfg(feature = "dashboard")]
     fetch_dashboard_assets();
+
+    tonic_build::configure()
+        .compile(&["src/grpc/proto/shm.proto"], &["."])
+        .expect("compile proto");
 }
 
 #[cfg(feature = "dashboard")]

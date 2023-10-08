@@ -592,6 +592,17 @@ impl PrometheusHandler for Instance {
     }
 }
 
+#[async_trait]
+impl ShmipcHandler for Instance {
+    async fn handle(
+        &self,
+        notification: NotificationRequest,
+    ) -> Result<Response<NotificationResponse>, Status> {
+        // TODO Zhuziyi
+        Ok(())
+    }
+}
+
 pub fn check_permission(
     plugins: Arc<Plugins>,
     stmt: &Statement,

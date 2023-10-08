@@ -17,6 +17,7 @@ pub mod flight;
 pub mod greptime_handler;
 pub mod prom_query_gateway;
 pub mod region_server;
+pub mod shmipc_handler;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -51,6 +52,7 @@ use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
 use self::flight::{FlightCraftRef, FlightCraftWrapper};
 use self::prom_query_gateway::PrometheusGatewayService;
 use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
+use self::shmipc_handler::{ShmipcHandlerRef, ShmipcService};
 use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
 };
@@ -59,6 +61,7 @@ use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
+use crate::shm_server::ShmServer;
 
 type TonicResult<T> = std::result::Result<T, Status>;
 
@@ -81,6 +84,8 @@ pub struct GrpcServer {
     flight_handler: Option<FlightCraftRef>,
     /// Handler for [RegionServer].
     region_server_handler: Option<RegionServerRequestHandler>,
+    /// Handler for [ShmipcService]
+    shmipc_handler: Option<ShmipcHandlerRef>,
 }
 
 /// Grpc Server configuration
@@ -110,6 +115,7 @@ impl GrpcServer {
         region_server_handler: Option<RegionServerHandlerRef>,
         user_provider: Option<UserProviderRef>,
         runtime: Arc<Runtime>,
+        shmipc_handler: Option<ShmipcHandlerRef>,
     ) -> Self {
         let database_handler = query_handler.map(|handler| {
             GreptimeRequestHandler::new(handler, user_provider.clone(), runtime.clone())
@@ -125,6 +131,7 @@ impl GrpcServer {
             prometheus_handler,
             flight_handler,
             region_server_handler,
+            shmipc_handler,
         }
     }
 
@@ -264,6 +271,13 @@ impl Server for GrpcServer {
         if let Some(region_server_handler) = &self.region_server_handler {
             builder = builder.add_service(
                 RegionServer::new(region_server_handler.clone())
+                    .max_decoding_message_size(max_recv_message_size)
+                    .max_encoding_message_size(max_send_message_size),
+            );
+        }
+        if let Some(shmipc_handler) = &self.shmipc_handler {
+            builder = builder.add_service(
+                ShmServer::new(ShmipcService::new(shmipc_handler.clone()))
                     .max_decoding_message_size(max_recv_message_size)
                     .max_encoding_message_size(max_send_message_size),
             );

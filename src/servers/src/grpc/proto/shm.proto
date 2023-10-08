@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ipc;
+
+message NotificationRequest {
+    uint32 start_offset = 1;
+    uint32 end_offset = 2;
+}
+
+message NotificationResponse{
+    bool success = 1;
+}
+
+service Shm {
+    rpc notify(NotificationRequest) returns (NotificationResponse){}
+}

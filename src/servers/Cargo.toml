@@ -120,3 +120,4 @@ tokio-test = "0.4"
 
 [build-dependencies]
 build-data = "0.1.4"
+tonic-build = "0.10"

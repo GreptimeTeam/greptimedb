@@ -56,3 +56,5 @@ pub struct SqlPlan {
     plan: Option<LogicalPlan>,
     schema: Option<Schema>,
 }
+
+include!(concat!(env!("OUT_DIR"), "/ipc.rs"));
