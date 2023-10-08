@@ -39,20 +39,21 @@ pub trait ErrorExt: StackError {
     where
         Self: Sized,
     {
-        if self.status_code() == StatusCode::Unknown {
-            "Internal Error".to_owned()
-        } else {
-            let error = self.last();
-            if let Some(external_error) = error.source() {
-                let external_root = external_error.sources().last().unwrap();
+        match self.status_code() {
+            StatusCode::Unknown | StatusCode::Internal => "Internal Error".to_owned(),
+            _ => {
+                let error = self.last();
+                if let Some(external_error) = error.source() {
+                    let external_root = external_error.sources().last().unwrap();
 
-                if error.to_string().is_empty() {
-                    format!("{external_root}")
+                    if error.to_string().is_empty() {
+                        format!("{external_root}")
+                    } else {
+                        format!("{error}: {external_root}")
+                    }
                 } else {
-                    format!("{error}: {external_root}")
+                    format!("{error}")
                 }
-            } else {
-                format!("{error}")
             }
         }
     }
