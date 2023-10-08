@@ -361,7 +361,7 @@ impl Iterator for Iter {
         };
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
-        if let Some((primary_key, series)) = range.next() {
+        while let Some((primary_key, series)) = range.next() {
             if let Some(predicate) = &self.predicate {
                 if !prune_primary_key(
                     &self.codec,
@@ -370,15 +370,17 @@ impl Iterator for Iter {
                     self.pk_schema.clone(),
                     predicate,
                 ) {
-                    return None;
+                    // read next series
+                    continue;
                 }
             }
             self.last_key = Some(primary_key.clone());
             let values = series.write().unwrap().compact(&self.metadata);
-            Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)))
-        } else {
-            None
+            return Some(
+                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)),
+            );
         }
+        return None;
     }
 }
 
