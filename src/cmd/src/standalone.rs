@@ -17,7 +17,7 @@ use std::sync::Arc;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
-use common_base::PluginsRef;
+use common_base::Plugins;
 use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
@@ -359,7 +359,7 @@ impl StartCommand {
 
 /// Build frontend instance in standalone mode
 async fn build_frontend(
-    plugins: PluginsRef,
+    plugins: Plugins,
     kv_store: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
     catalog_manager: CatalogManagerRef,

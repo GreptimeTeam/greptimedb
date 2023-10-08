@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
-use common_base::{Plugins, PluginsRef};
+use common_base::Plugins;
 use datanode::config::DatanodeOptions;
 use datanode::error::Result;
 
@@ -23,10 +21,10 @@ use crate::OptPlugins;
 pub async fn setup_datanode_plugins(opts: DatanodeOptions) -> Result<OptPlugins<DatanodeOptions>> {
     Ok(OptPlugins {
         opts,
-        plugins: Arc::new(Plugins::new()),
+        plugins: Plugins::new(),
     })
 }
 
-pub async fn start_datanode_plugins(_plugins: PluginsRef) -> Result<()> {
+pub async fn start_datanode_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }

@@ -202,7 +202,7 @@ impl GreptimeDbClusterBuilder {
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
 
-        let mut datanode = DatanodeBuilder::new(opts, None, Arc::new(Plugins::default()))
+        let mut datanode = DatanodeBuilder::new(opts, None, Plugins::default())
             .with_meta_client(meta_client)
             .build()
             .await
@@ -234,7 +234,7 @@ impl GreptimeDbClusterBuilder {
             FeInstance::try_new_distributed_with(
                 meta_client,
                 datanode_clients,
-                Arc::new(Plugins::default()),
+                Plugins::default(),
                 &frontend_opts,
             )
             .await

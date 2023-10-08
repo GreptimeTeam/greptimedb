@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
-use common_base::PluginsRef;
+use common_base::Plugins;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_query::physical_plan::SessionContext;
 use common_query::prelude::ScalarUdf;
@@ -60,7 +60,7 @@ pub struct QueryEngineState {
     catalog_manager: CatalogManagerRef,
     table_mutation_handler: Option<TableMutationHandlerRef>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
-    plugins: PluginsRef,
+    plugins: Plugins,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -77,7 +77,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
-        plugins: PluginsRef,
+        plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);

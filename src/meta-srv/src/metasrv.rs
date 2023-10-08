@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Peer;
-use common_base::PluginsRef;
+use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
@@ -190,7 +190,7 @@ pub struct MetaSrv {
     table_metadata_manager: TableMetadataManagerRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 
-    plugins: PluginsRef,
+    plugins: Plugins,
 }
 
 impl MetaSrv {
@@ -360,7 +360,7 @@ impl MetaSrv {
         self.plugins.get::<SubscribeManagerRef>()
     }
 
-    pub fn plugins(&self) -> &PluginsRef {
+    pub fn plugins(&self) -> &Plugins {
         &self.plugins
     }
 

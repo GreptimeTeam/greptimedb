@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
-use common_base::{Plugins, PluginsRef};
+use common_base::Plugins;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
@@ -68,7 +68,7 @@ pub struct MetaSrvBuilder {
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
-    plugins: Option<PluginsRef>,
+    plugins: Option<Plugins>,
 }
 
 impl MetaSrvBuilder {
@@ -132,7 +132,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn plugins(mut self, plugins: PluginsRef) -> Self {
+    pub fn plugins(mut self, plugins: Plugins) -> Self {
         self.plugins = Some(plugins);
         self
     }
@@ -263,7 +263,7 @@ impl MetaSrvBuilder {
                 enable_telemetry,
             )
             .await,
-            plugins: plugins.unwrap_or_else(|| Arc::new(Plugins::default())),
+            plugins: plugins.unwrap_or_else(Plugins::default),
         })
     }
 }

@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use auth::UserProviderRef;
-use common_base::{Plugins, PluginsRef};
+use common_base::Plugins;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
@@ -31,12 +29,9 @@ pub async fn setup_frontend_plugins(opts: FrontendOptions) -> Result<OptPlugins<
         plugins.insert::<UserProviderRef>(provider);
     }
 
-    Ok(OptPlugins {
-        opts,
-        plugins: Arc::new(plugins),
-    })
+    Ok(OptPlugins { opts, plugins })
 }
 
-pub async fn start_frontend_plugins(_plugins: PluginsRef) -> Result<()> {
+pub async fn start_frontend_plugins(_plugins: Plugins) -> Result<()> {
     Ok(())
 }

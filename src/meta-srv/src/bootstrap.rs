@@ -20,7 +20,7 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
-use common_base::PluginsRef;
+use common_base::Plugins;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -56,11 +56,11 @@ pub struct MetaSrvInstance {
 
     signal_sender: Option<Sender<()>>,
 
-    plugins: PluginsRef,
+    plugins: Plugins,
 }
 
 impl MetaSrvInstance {
-    pub async fn new(opts: MetaSrvOptions, plugins: PluginsRef) -> Result<MetaSrvInstance> {
+    pub async fn new(opts: MetaSrvOptions, plugins: Plugins) -> Result<MetaSrvInstance> {
         let meta_srv = build_meta_srv(&opts, plugins.clone()).await?;
         let http_srv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
@@ -122,7 +122,7 @@ impl MetaSrvInstance {
         Ok(())
     }
 
-    pub fn plugins(&self) -> PluginsRef {
+    pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }
 }
@@ -161,7 +161,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(admin::make_admin_service(meta_srv))
 }
 
-pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: PluginsRef) -> Result<MetaSrv> {
+pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<MetaSrv> {
     let (kv_store, election, lock) = if opts.use_memory_store {
         (
             Arc::new(MemStore::new()) as _,

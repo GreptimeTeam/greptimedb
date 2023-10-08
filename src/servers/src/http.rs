@@ -42,7 +42,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
-use common_base::PluginsRef;
+use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -105,7 +105,7 @@ pub struct HttpServer {
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
     greptime_config_options: Option<String>,
-    plugins: PluginsRef,
+    plugins: Plugins,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,7 +439,7 @@ impl HttpServerBuilder {
         self
     }
 
-    pub fn with_plugins(&mut self, plugins: PluginsRef) -> &mut Self {
+    pub fn with_plugins(&mut self, plugins: Plugins) -> &mut Self {
         self.inner.plugins = plugins;
         self
     }
