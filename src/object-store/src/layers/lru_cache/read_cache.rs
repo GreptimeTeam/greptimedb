@@ -120,7 +120,6 @@ impl<C: Accessor + Clone> ReadCache<C> {
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
             .ok();
-        self.mem_cache.run_pending_tasks().await;
     }
 
     /// Blocking version of `invalidate_entries_with_prefix`.
@@ -129,9 +128,6 @@ impl<C: Accessor + Clone> ReadCache<C> {
         self.mem_cache
             .invalidate_entries_if(move |k: &String, &_v| k.starts_with(&prefix))
             .ok();
-        common_runtime::block_on_bg(async {
-            self.mem_cache.run_pending_tasks().await;
-        });
     }
 
     /// Recover existing cache items from `file_cache` to `mem_cache`.
@@ -164,6 +160,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
     /// Returns true when the read cache contains the specific file.
     pub(crate) async fn contains_file(&self, path: &str) -> bool {
+        self.mem_cache.run_pending_tasks().await;
         self.mem_cache.contains_key(path)
             && self.file_cache.stat(path, OpStat::default()).await.is_ok()
     }
@@ -197,7 +194,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
             .await
             .map_err(|e| OpendalError::new(e.kind(), &e.to_string()))?;
 
-        let cache_result = match read_result {
+        match read_result {
             ReadResult::Success(_) => {
                 // There is a concurrent issue here, the local cache may be purged
                 // while reading, we have to fallback to remote read
@@ -220,10 +217,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     &format!("File not found: {path}"),
                 ))
             }
-        };
-        self.mem_cache.run_pending_tasks().await;
-
-        cache_result
+        }
     }
 
     /// Read the file from remote storage. If success, write the content into local cache.
