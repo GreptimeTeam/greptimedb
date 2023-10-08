@@ -335,7 +335,9 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data"))]
-    DumpPprof { source: common_pprof::Error },
+    DumpPprof {
+        source: crate::http::pprof::nix::Error,
+    },
 
     #[snafu(display(""))]
     Metrics { source: BoxedError },

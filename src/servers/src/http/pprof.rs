@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #[cfg(feature = "pprof")]
-mod nix;
+pub(crate) mod nix;
 
 #[cfg(feature = "pprof")]
 pub mod handler {
