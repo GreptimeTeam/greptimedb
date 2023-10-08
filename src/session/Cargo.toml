@@ -8,6 +8,7 @@ license.workspace = true
 testing = []
 
 [dependencies]
+api.workspace = true
 arc-swap = "1.5"
 auth.workspace = true
 common-catalog = { workspace = true }

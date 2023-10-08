@@ -4175,7 +4175,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=693128abe9adc70ba636010a172c9da55b206bba#693128abe9adc70ba636010a172c9da55b206bba"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1f1dd532a111e3834cc3019c5605e2993ffb9dc3#1f1dd532a111e3834cc3019c5605e2993ffb9dc3"
 dependencies = [
  "prost",
  "serde",
@@ -8899,6 +8899,7 @@ dependencies = [
 name = "session"
 version = "0.4.0-nightly"
 dependencies = [
+ "api",
  "arc-swap",
  "auth",
  "common-catalog",
