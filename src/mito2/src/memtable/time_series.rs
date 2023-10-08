@@ -20,8 +20,10 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_query::logical_plan::Expr;
+use common_telemetry::debug;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::DataType;
 use datatypes::prelude::{MutableVector, ScalarVectorBuilder, Vector, VectorRef};
 use datatypes::value::ValueRef;
@@ -31,7 +33,9 @@ use datatypes::vectors::{
 use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
+use crate::error;
 use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::{
@@ -76,7 +80,7 @@ impl MemtableBuilder for TimeSeriesMemtableBuilder {
 pub struct TimeSeriesMemtable {
     id: MemtableId,
     region_metadata: RegionMetadataRef,
-    row_codec: McmpRowCodec,
+    row_codec: Arc<McmpRowCodec>,
     series_set: SeriesSet,
     alloc_tracker: AllocTracker,
     max_timestamp: AtomicI64,
@@ -89,13 +93,13 @@ impl TimeSeriesMemtable {
         id: MemtableId,
         write_buffer_manager: Option<WriteBufferManagerRef>,
     ) -> Self {
-        let row_codec = McmpRowCodec::new(
+        let row_codec = Arc::new(McmpRowCodec::new(
             region_metadata
                 .primary_key_columns()
                 .map(|c| SortField::new(c.column_schema.data_type.clone()))
                 .collect(),
-        );
-        let series_set = SeriesSet::new(region_metadata.clone());
+        ));
+        let series_set = SeriesSet::new(region_metadata.clone(), row_codec.clone());
         Self {
             id,
             region_metadata,
@@ -200,7 +204,11 @@ impl Memtable for TimeSeriesMemtable {
         Ok(())
     }
 
-    fn iter(&self, projection: Option<&[ColumnId]>, _filters: &[Expr]) -> BoxedBatchIterator {
+    fn iter(
+        &self,
+        projection: Option<&[ColumnId]>,
+        filters: Option<Predicate>,
+    ) -> BoxedBatchIterator {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
         } else {
@@ -210,7 +218,7 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        Box::new(self.series_set.iter_series(projection))
+        Box::new(self.series_set.iter_series(projection, filters))
     }
 
     fn is_empty(&self) -> bool {
@@ -253,13 +261,15 @@ type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
+    codec: Arc<McmpRowCodec>,
 }
 
 impl SeriesSet {
-    fn new(region_metadata: RegionMetadataRef) -> Self {
+    fn new(region_metadata: RegionMetadataRef, codec: Arc<McmpRowCodec>) -> Self {
         Self {
             region_metadata,
             series: Default::default(),
+            codec,
         }
     }
 }
@@ -285,14 +295,46 @@ impl SeriesSet {
     }
 
     /// Iterates all series in [SeriesSet].
-    fn iter_series(&self, projection: HashSet<ColumnId>) -> Iter {
+    fn iter_series(&self, projection: HashSet<ColumnId>, predicate: Option<Predicate>) -> Iter {
+        // let predicate =
+        //     Predicate::try_new(filters.to_vec(), self.region_metadata.schema.clone()).unwrap();
+
+        let (primary_key_builders, primary_key_schema) =
+            primary_key_builders(&self.region_metadata, 1); // TODO(hl): we prune one primary key per range.
+
         Iter {
             metadata: self.region_metadata.clone(),
             series: self.series.clone(),
             projection,
             last_key: None,
+            predicate,
+            pk_schema: primary_key_schema,
+            primary_key_builders,
+            codec: self.codec.clone(),
         }
     }
+}
+
+fn primary_key_builders(
+    region_metadata: &RegionMetadataRef,
+    expected_len: usize,
+) -> (Vec<Box<dyn MutableVector>>, arrow::datatypes::SchemaRef) {
+    let (builders, fields): (_, Vec<_>) = region_metadata
+        .primary_key_columns()
+        .map(|pk| {
+            (
+                pk.column_schema
+                    .data_type
+                    .create_mutable_vector(expected_len),
+                datatypes::arrow::datatypes::Field::new(
+                    pk.column_schema.name.clone(),
+                    pk.column_schema.data_type.as_arrow_type(),
+                    pk.column_schema.is_nullable(),
+                ),
+            )
+        })
+        .unzip();
+    (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
 struct Iter {
@@ -300,6 +342,10 @@ struct Iter {
     series: Arc<SeriesRwLockMap>,
     projection: HashSet<ColumnId>,
     last_key: Option<Vec<u8>>,
+    predicate: Option<Predicate>,
+    pk_schema: arrow::datatypes::SchemaRef,
+    primary_key_builders: Vec<Box<dyn MutableVector>>,
+    codec: Arc<McmpRowCodec>,
 }
 
 impl Iterator for Iter {
@@ -314,7 +360,19 @@ impl Iterator for Iter {
             }
         };
 
+        // TODO(hl): maybe yield more than one time series to amortize range overhead.
         if let Some((primary_key, series)) = range.next() {
+            if let Some(predicate) = &self.predicate {
+                if !prune_primary_key(
+                    &self.codec,
+                    primary_key,
+                    &mut self.primary_key_builders,
+                    self.pk_schema.clone(),
+                    predicate,
+                ) {
+                    return None;
+                }
+            }
             self.last_key = Some(primary_key.clone());
             let values = series.write().unwrap().compact(&self.metadata);
             Some(values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)))
@@ -322,6 +380,46 @@ impl Iterator for Iter {
             None
         }
     }
+}
+
+fn prune_primary_key(
+    codec: &Arc<McmpRowCodec>,
+    pk: &Vec<u8>,
+    builders: &mut Vec<Box<dyn MutableVector>>,
+    pk_schema: arrow::datatypes::SchemaRef,
+    predicate: &Predicate,
+) -> bool {
+    let Ok(pk_record_batch) = pk_to_record_batch(&codec, pk, builders, pk_schema) else {
+        return true;
+    };
+
+    let result = predicate.prune_primary_key(&pk_record_batch);
+    debug!(
+        "Prune primary key: {:?}, res: {:?}",
+        pk_record_batch, result
+    );
+    result.unwrap_or(true)
+}
+
+fn pk_to_record_batch(
+    codec: &Arc<McmpRowCodec>,
+    bytes: &Vec<u8>,
+    builders: &mut Vec<Box<dyn MutableVector>>,
+    pk_schema: arrow::datatypes::SchemaRef,
+) -> error::Result<RecordBatch> {
+    let pk_values = codec.decode(bytes).unwrap();
+    assert_eq!(builders.len(), pk_values.len());
+
+    let arrays = builders
+        .iter_mut()
+        .zip(pk_values.iter())
+        .map(|(builder, pk_value)| {
+            builder.push_value_ref(pk_value.as_value_ref());
+            builder.to_vector().to_arrow_array()
+        })
+        .collect();
+
+    Ok(RecordBatch::try_new(pk_schema, arrays).unwrap())
 }
 
 /// A `Series` holds a list of field values of some given primary key.
@@ -784,7 +882,13 @@ mod tests {
     #[test]
     fn test_series_set_concurrency() {
         let schema = schema_for_test();
-        let set = Arc::new(SeriesSet::new(schema.clone()));
+        let row_codec = Arc::new(McmpRowCodec::new(
+            schema
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect(),
+        ));
+        let set = Arc::new(SeriesSet::new(schema.clone(), row_codec));
 
         let concurrency = 32;
         let pk_num = concurrency * 2;
@@ -866,7 +970,7 @@ mod tests {
             .map(|kv| kv.timestamp().as_timestamp().unwrap().unwrap().value())
             .collect::<HashSet<_>>();
 
-        let iter = memtable.iter(None, &[]);
+        let iter = memtable.iter(None, None);
         let read = iter
             .flat_map(|batch| {
                 batch
@@ -892,7 +996,7 @@ mod tests {
         let memtable = TimeSeriesMemtable::new(schema, 42, None);
         memtable.write(&kvs).unwrap();
 
-        let iter = memtable.iter(Some(&[3]), &[]);
+        let iter = memtable.iter(Some(&[3]), None);
 
         let mut v0_all = vec![];
 

@@ -19,13 +19,15 @@ use common_telemetry::{error, warn};
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::file::metadata::RowGroupMetaData;
 use datafusion::physical_optimizer::pruning::{PruningPredicate, PruningStatistics};
-use datafusion_common::ToDFSchema;
+use datafusion_common::{ScalarValue, ToDFSchema};
 use datafusion_expr::expr::InList;
-use datafusion_expr::{Between, BinaryExpr, Operator};
+use datafusion_expr::{Between, BinaryExpr, ColumnarValue, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datatypes::arrow::array::BooleanArray;
 use datatypes::schema::SchemaRef;
 use datatypes::value::scalar_value_to_timestamp;
 use snafu::ResultExt;
@@ -117,6 +119,35 @@ impl Predicate {
             }
         }
         res
+    }
+
+    /// Prunes primary keys
+    pub fn prune_primary_key(&self, primary_key: &RecordBatch) -> error::Result<bool> {
+        // we only expect one row in primary_key.
+        assert_eq!(1, primary_key.num_rows());
+
+        let mut res = true;
+        for expr in &self.exprs {
+            // evaluate every filter against primary key
+            let result = match expr.evaluate(primary_key).unwrap() {
+                // TODO(hl): avoid panic here
+                ColumnarValue::Array(array) => {
+                    let predicate_array = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    predicate_array
+                        .into_iter()
+                        .map(|x| x.unwrap_or(true))
+                        .next()
+                        .unwrap_or(true)
+                }
+                // result was a column
+                ColumnarValue::Scalar(ScalarValue::Boolean(v)) => v.unwrap_or(true),
+                other => {
+                    unreachable!() // TODO(hl): avoid panic here.
+                }
+            };
+            res &= result;
+        }
+        Ok(res)
     }
 
     /// Evaluates the predicate against the `stats`.

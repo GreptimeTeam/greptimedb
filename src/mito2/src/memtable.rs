@@ -28,6 +28,7 @@ use common_time::Timestamp;
 use metrics::{decrement_gauge, increment_gauge};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::flush::WriteBufferManagerRef;
@@ -73,7 +74,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Scans the memtable.
     /// `projection` selects columns to read, `None` means reading all columns.
     /// `filters` are the predicates to be pushed down to memtable.
-    fn iter(&self, projection: Option<&[ColumnId]>, filters: &[Expr]) -> BoxedBatchIterator;
+    fn iter(
+        &self,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+    ) -> BoxedBatchIterator;
 
     /// Returns true if the memtable is empty.
     fn is_empty(&self) -> bool;

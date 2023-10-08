@@ -20,6 +20,7 @@ use std::sync::Arc;
 use common_query::logical_plan::Expr;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
+use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::memtable::{
@@ -50,7 +51,11 @@ impl Memtable for EmptyMemtable {
         Ok(())
     }
 
-    fn iter(&self, _projection: Option<&[ColumnId]>, _filters: &[Expr]) -> BoxedBatchIterator {
+    fn iter(
+        &self,
+        _projection: Option<&[ColumnId]>,
+        _filters: Option<Predicate>,
+    ) -> BoxedBatchIterator {
         Box::new(std::iter::empty())
     }
 
