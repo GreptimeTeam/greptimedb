@@ -36,15 +36,15 @@ pub(crate) async fn fetch_table(
 
         let table = Table {
             id: table_id as u64,
-            table_name: table_info.table_name(),
+            table_name: table_info.inner.table_name(),
             table_schema: vec![],
         };
-        let table_route = TableRoute::new(table, table_route.region_routes);
+        let table_route = TableRoute::new(table, table_route.inner.region_routes);
         let table_route_value = table_route
             .try_into()
             .context(error::TableRouteConversionSnafu)?;
 
-        Ok(Some((table_info, table_route_value)))
+        Ok(Some((table_info.into_inner(), table_route_value)))
     } else {
         Ok(None)
     }

@@ -45,6 +45,7 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders};
@@ -63,7 +64,7 @@ impl AlterTableProcedure {
     pub fn new(
         cluster_id: u64,
         task: AlterTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         context: DdlContext,
     ) -> Result<Self> {
         let alter_kind = task
@@ -74,7 +75,7 @@ impl AlterTableProcedure {
                 err_msg: "'kind' is absent",
             })?;
         let (kind, next_column_id) =
-            create_proto_alter_kind(&table_info_value.table_info, alter_kind)?;
+            create_proto_alter_kind(&table_info_value.inner.table_info, alter_kind)?;
 
         debug!(
             "New AlterTableProcedure, kind: {:?}, next_column_id: {:?}",
@@ -100,7 +101,7 @@ impl AlterTableProcedure {
             })
             .map_err(ProcedureError::external)?;
         let (kind, next_column_id) =
-            create_proto_alter_kind(&data.table_info_value.table_info, alter_kind)
+            create_proto_alter_kind(&data.table_info_value.inner.table_info, alter_kind)
                 .map_err(ProcedureError::external)?;
         assert_eq!(data.next_column_id, next_column_id);
 
@@ -191,7 +192,8 @@ impl AlterTableProcedure {
             .await?
             .with_context(|| TableRouteNotFoundSnafu {
                 table_name: table_ref.to_string(),
-            })?;
+            })?
+            .into_inner();
 
         let leaders = find_leaders(&region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
@@ -413,7 +415,7 @@ pub struct AlterTableData {
     state: AlterTableState,
     task: AlterTableTask,
     /// Table info value before alteration.
-    table_info_value: TableInfoValue,
+    table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     cluster_id: u64,
     /// Next column id of the table if the task adds columns to the table.
     next_column_id: Option<ColumnId>,
@@ -422,7 +424,7 @@ pub struct AlterTableData {
 impl AlterTableData {
     pub fn new(
         task: AlterTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         cluster_id: u64,
         next_column_id: Option<ColumnId>,
     ) -> Self {
@@ -444,7 +446,7 @@ impl AlterTableData {
     }
 
     fn table_info(&self) -> &RawTableInfo {
-        &self.table_info_value.table_info
+        &self.table_info_value.inner.table_info
     }
 }
 
