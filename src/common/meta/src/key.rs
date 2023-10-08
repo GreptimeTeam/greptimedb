@@ -700,7 +700,7 @@ mod tests {
             TableRouteValue::new(vec![region_route.clone(), region_route.clone()]);
         let expected = serde_json::to_vec(&expected_region_routes).unwrap();
 
-        //Serialize behaviors:
+        // Serialize behaviors:
         // The inner field will be ignored.
         let value = DeserializedValueWithBytes {
             // ignored
