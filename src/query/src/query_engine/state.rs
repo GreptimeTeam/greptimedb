@@ -136,32 +136,14 @@ impl QueryEngineState {
     }
 
     fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
-        let mut index_to_move = None;
-        for (i, rule) in rules.iter().enumerate() {
-            if rule.name() == name {
-                index_to_move = Some(i);
-                break;
-            }
-        }
-        if let Some(index) = index_to_move {
-            let _ = rules.remove(index);
-        }
+        rules.retain(|rule| rule.name() != name);
     }
 
     fn remove_physical_optimize_rule(
         rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
         name: &str,
     ) {
-        let mut index_to_move = None;
-        for (i, rule) in rules.iter().enumerate() {
-            if rule.name() == name {
-                index_to_move = Some(i);
-                break;
-            }
-        }
-        if let Some(index) = index_to_move {
-            let _ = rules.remove(index);
-        }
+        rules.retain(|rule| rule.name() != name);
     }
 
     /// Register a udf function
