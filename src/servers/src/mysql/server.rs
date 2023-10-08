@@ -139,7 +139,7 @@ impl MysqlServer {
                     Err(error) => warn!("Broken pipe: {}", error), // IoError doesn't impl ErrorExt.
                     Ok(io_stream) => {
                         if let Err(e) = io_stream.set_nodelay(true) {
-                            error!(e;"Failed to set TCP nodelay");
+                            error!(e; "Failed to set TCP nodelay");
                         }
                         if let Err(error) =
                             Self::handle(io_stream, io_runtime, spawn_ref, spawn_config).await

@@ -82,7 +82,7 @@ impl OpentsdbServer {
                 match stream {
                     Ok(stream) => {
                         if let Err(e) = stream.set_nodelay(true) {
-                            error!(e;"Failed to set TCP nodelay");
+                            error!(e; "Failed to set TCP nodelay");
                         }
                         let connection = Connection::new(stream);
                         let mut handler = Handler::new(query_handler, connection, shutdown);
