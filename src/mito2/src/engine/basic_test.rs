@@ -16,10 +16,12 @@
 
 use std::collections::HashMap;
 
+use api::v1::value::ValueData;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use datatypes::prelude::ConcreteDataType;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
@@ -173,6 +175,133 @@ async fn test_write_query_region() {
 | 1     | 1.0     | 1970-01-01T00:00:01 |
 | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_write_different_order() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().tag_num(2).field_num(2).build();
+
+    // tag_0, tag_1, field_0, field_1, ts,
+    let mut column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Swap position of columns.
+    column_schemas.swap(0, 3);
+    column_schemas.swap(2, 4);
+
+    // Now the schema is field_1, tag_1, ts, tag_0, field_0
+    let rows = (0..3)
+        .map(|i| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value((i + 10) as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(format!("b{i}"))),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value(i as f64)),
+                },
+            ],
+        })
+        .collect();
+    let rows = Rows {
+        schema: column_schemas,
+        rows,
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+-------+---------+---------+---------------------+
+| tag_0 | tag_1 | field_0 | field_1 | ts                  |
++-------+-------+---------+---------+---------------------+
+| a0    | b0    | 0.0     | 10.0    | 1970-01-01T00:00:00 |
+| a1    | b1    | 1.0     | 11.0    | 1970-01-01T00:00:01 |
+| a2    | b2    | 2.0     | 12.0    | 1970-01-01T00:00:02 |
++-------+-------+---------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_write_different_order2() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // tag_0, tag_1, field_0, field_1, ts,
+    let mut request = CreateRequestBuilder::new().tag_num(2).field_num(2).build();
+    // Change the field type of field_1.
+    request.column_metadatas[3].column_schema.data_type = ConcreteDataType::string_datatype();
+
+    let mut column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Swap position of columns.
+    column_schemas.swap(2, 3);
+
+    // Now the schema is tag_0, tag_1, field_1, field_0, ts
+    let rows = (0..3)
+        .map(|i| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(format!("b{i}"))),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue((i + 10).to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::F64Value(i as f64)),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                },
+            ],
+        })
+        .collect();
+    let rows = Rows {
+        schema: column_schemas,
+        rows,
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+-------+---------+---------+---------------------+
+| tag_0 | tag_1 | field_0 | field_1 | ts                  |
++-------+-------+---------+---------+---------------------+
+| a0    | b0    | 0.0     | 10      | 1970-01-01T00:00:00 |
+| a1    | b1    | 1.0     | 11      | 1970-01-01T00:00:01 |
+| a2    | b2    | 2.0     | 12      | 1970-01-01T00:00:02 |
++-------+-------+---------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 

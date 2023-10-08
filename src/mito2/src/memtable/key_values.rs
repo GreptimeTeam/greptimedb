@@ -169,6 +169,7 @@ impl ReadRowHelper {
             .unwrap();
         indices.push(*ts_index);
         // Iterate columns and find field columns.
+        // TODO(yingwen): use `field_columns()`
         for column in metadata.column_metadatas.iter() {
             if column.semantic_type == SemanticType::Field {
                 // Get index in request for each field column.
