@@ -16,6 +16,7 @@
 
 mod format;
 pub mod reader;
+mod stats;
 pub mod writer;
 
 use common_base::readable_size::ReadableSize;

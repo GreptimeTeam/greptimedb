@@ -30,14 +30,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array};
+use datafusion_common::ScalarValue;
+use datatypes::arrow::array::{ArrayRef, BinaryArray, DictionaryArray, UInt16Array, UInt64Array};
 use datatypes::arrow::datatypes::{
-    DataType, Field, FieldRef, Fields, Schema, SchemaRef, UInt16Type,
+    DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef, UInt16Type,
 };
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::DataType;
 use datatypes::vectors::{Helper, Vector};
+use parquet::file::metadata::RowGroupMetaData;
+use parquet::file::statistics::Statistics;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
@@ -47,6 +51,7 @@ use crate::error::{
     ConvertVectorSnafu, InvalidBatchSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
 use crate::read::{Batch, BatchBuilder, BatchColumn};
+use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 /// Number of columns that have fixed positions.
 ///
@@ -250,6 +255,66 @@ impl ReadFormat {
         Ok(())
     }
 
+    /// Returns min values of specific column in row groups.
+    pub(crate) fn min_values(
+        &self,
+        row_groups: &[RowGroupMetaData],
+        column_id: ColumnId,
+    ) -> Option<ArrayRef> {
+        let column = self.metadata.column_by_id(column_id)?;
+        match column.semantic_type {
+            SemanticType::Tag => self.tag_values(row_groups, column, true),
+            SemanticType::Field => {
+                let index = self.field_id_to_index.get(&column_id)?;
+                Self::column_values(row_groups, column, *index, true)
+            }
+            SemanticType::Timestamp => {
+                let index = self.time_index_position();
+                Self::column_values(row_groups, column, index, true)
+            }
+        }
+    }
+
+    /// Returns max values of specific column in row groups.
+    pub(crate) fn max_values(
+        &self,
+        row_groups: &[RowGroupMetaData],
+        column_id: ColumnId,
+    ) -> Option<ArrayRef> {
+        let column = self.metadata.column_by_id(column_id)?;
+        match column.semantic_type {
+            SemanticType::Tag => self.tag_values(row_groups, column, false),
+            SemanticType::Field => {
+                let index = self.field_id_to_index.get(&column_id)?;
+                Self::column_values(row_groups, column, *index, false)
+            }
+            SemanticType::Timestamp => {
+                let index = self.time_index_position();
+                Self::column_values(row_groups, column, index, false)
+            }
+        }
+    }
+
+    /// Returns null counts of specific column in row groups.
+    pub(crate) fn null_counts(
+        &self,
+        row_groups: &[RowGroupMetaData],
+        column_id: ColumnId,
+    ) -> Option<ArrayRef> {
+        let column = self.metadata.column_by_id(column_id)?;
+        match column.semantic_type {
+            SemanticType::Tag => None,
+            SemanticType::Field => {
+                let index = self.field_id_to_index.get(&column_id)?;
+                Self::column_null_counts(row_groups, *index)
+            }
+            SemanticType::Timestamp => {
+                let index = self.time_index_position();
+                Self::column_null_counts(row_groups, index)
+            }
+        }
+    }
+
     /// Get fields from `record_batch`.
     fn get_field_batch_columns(&self, record_batch: &RecordBatch) -> Result<Vec<BatchColumn>> {
         record_batch
@@ -272,6 +337,148 @@ impl ReadFormat {
                 })
             })
             .collect()
+    }
+
+    /// Returns min/max values of specific tag.
+    fn tag_values(
+        &self,
+        row_groups: &[RowGroupMetaData],
+        column: &ColumnMetadata,
+        is_min: bool,
+    ) -> Option<ArrayRef> {
+        let is_first_tag = self
+            .metadata
+            .primary_key
+            .first()
+            .map(|id| *id == column.column_id)
+            .unwrap_or(false);
+        if !is_first_tag {
+            // Only the min-max of the first tag is available in the primary key.
+            return None;
+        }
+
+        let converter =
+            McmpRowCodec::new(vec![SortField::new(column.column_schema.data_type.clone())]);
+        let values = row_groups.iter().map(|meta| {
+            let stats = meta.column(self.primary_key_position()).statistics()?;
+            if !stats.has_min_max_set() {
+                return None;
+            }
+            match stats {
+                Statistics::Boolean(_) => None,
+                Statistics::Int32(_) => None,
+                Statistics::Int64(_) => None,
+                Statistics::Int96(_) => None,
+                Statistics::Float(_) => None,
+                Statistics::Double(_) => None,
+                Statistics::ByteArray(s) => {
+                    let bytes = if is_min { s.min_bytes() } else { s.max_bytes() };
+                    let mut values = converter.decode(bytes).ok()?;
+                    values.pop()
+                }
+                Statistics::FixedLenByteArray(_) => None,
+            }
+        });
+        let mut builder = column
+            .column_schema
+            .data_type
+            .create_mutable_vector(row_groups.len());
+        for value_opt in values {
+            match value_opt {
+                // Safety: We use the same data type to create the converter.
+                Some(v) => builder.push_value_ref(v.as_value_ref()),
+                None => builder.push_null(),
+            }
+        }
+        let vector = builder.to_vector();
+
+        Some(vector.to_arrow_array())
+    }
+
+    /// Returns min/max values of specific non-tag columns.
+    fn column_values(
+        row_groups: &[RowGroupMetaData],
+        column: &ColumnMetadata,
+        column_index: usize,
+        is_min: bool,
+    ) -> Option<ArrayRef> {
+        let null_scalar: ScalarValue = column
+            .column_schema
+            .data_type
+            .as_arrow_type()
+            .try_into()
+            .ok()?;
+        let scalar_values = row_groups
+            .iter()
+            .map(|meta| {
+                let stats = meta.column(column_index).statistics()?;
+                if !stats.has_min_max_set() {
+                    return None;
+                }
+                match stats {
+                    Statistics::Boolean(s) => Some(ScalarValue::Boolean(Some(if is_min {
+                        *s.min()
+                    } else {
+                        *s.max()
+                    }))),
+                    Statistics::Int32(s) => Some(ScalarValue::Int32(Some(if is_min {
+                        *s.min()
+                    } else {
+                        *s.max()
+                    }))),
+                    Statistics::Int64(s) => Some(ScalarValue::Int64(Some(if is_min {
+                        *s.min()
+                    } else {
+                        *s.max()
+                    }))),
+
+                    Statistics::Int96(_) => None,
+                    Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
+                        *s.min()
+                    } else {
+                        *s.max()
+                    }))),
+                    Statistics::Double(s) => Some(ScalarValue::Float64(Some(if is_min {
+                        *s.min()
+                    } else {
+                        *s.max()
+                    }))),
+                    Statistics::ByteArray(s) => {
+                        let bytes = if is_min { s.min_bytes() } else { s.max_bytes() };
+                        let s = String::from_utf8(bytes.to_vec()).ok();
+                        Some(ScalarValue::Utf8(s))
+                    }
+
+                    Statistics::FixedLenByteArray(_) => None,
+                }
+            })
+            .map(|maybe_scalar| maybe_scalar.unwrap_or_else(|| null_scalar.clone()))
+            .collect::<Vec<ScalarValue>>();
+        debug_assert_eq!(scalar_values.len(), row_groups.len());
+        ScalarValue::iter_to_array(scalar_values).ok()
+    }
+
+    /// Returns null counts of specific non-tag columns.
+    fn column_null_counts(
+        row_groups: &[RowGroupMetaData],
+        column_index: usize,
+    ) -> Option<ArrayRef> {
+        let values = row_groups.iter().map(|meta| {
+            let col = meta.column(column_index);
+            let stat = col.statistics()?;
+            Some(stat.null_count())
+        });
+        Some(Arc::new(UInt64Array::from_iter(values)))
+    }
+
+    /// Field index of the primary key.
+    fn primary_key_position(&self) -> usize {
+        self.arrow_schema.fields.len() - 3
+    }
+
+    /// Field index of the time index.
+    fn time_index_position(&self) -> usize {
+        self.arrow_schema.fields.len() - FIXED_POS_COLUMN_NUM
     }
 }
 
@@ -328,12 +535,16 @@ fn internal_fields() -> [FieldRef; 3] {
     [
         Arc::new(Field::new_dictionary(
             PRIMARY_KEY_COLUMN_NAME,
-            DataType::UInt16,
-            DataType::Binary,
+            ArrowDataType::UInt16,
+            ArrowDataType::Binary,
             false,
         )),
-        Arc::new(Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false)),
-        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, DataType::UInt8, false)),
+        Arc::new(Field::new(
+            SEQUENCE_COLUMN_NAME,
+            ArrowDataType::UInt64,
+            false,
+        )),
+        Arc::new(Field::new(OP_TYPE_COLUMN_NAME, ArrowDataType::UInt8, false)),
     ]
 }
 
@@ -408,20 +619,23 @@ mod tests {
 
     fn build_test_arrow_schema() -> SchemaRef {
         let fields = vec![
-            Field::new("field1", DataType::Int64, true),
-            Field::new("field0", DataType::Int64, true),
+            Field::new("field1", ArrowDataType::Int64, true),
+            Field::new("field0", ArrowDataType::Int64, true),
             Field::new(
                 "ts",
-                DataType::Timestamp(TimeUnit::Millisecond, None),
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
             Field::new(
                 "__primary_key",
-                DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Binary)),
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt16),
+                    Box::new(ArrowDataType::Binary),
+                ),
                 false,
             ),
-            Field::new("__sequence", DataType::UInt64, false),
-            Field::new("__op_type", DataType::UInt8, false),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
         ];
         Arc::new(Schema::new(fields))
     }
