@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::info;
+use metrics::increment_gauge;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
@@ -25,6 +26,7 @@ use store_api::region_request::RegionCreateRequest;
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidMetadataSnafu, Result};
+use crate::metrics::REGION_COUNT;
 use crate::region::opener::{check_recovered_region, RegionOpener};
 use crate::worker::RegionWorkerLoop;
 
@@ -69,10 +71,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .create_or_open(&self.config, &self.wal)
         .await?;
 
-        // TODO(yingwen): Custom the Debug format for the metadata and also print it.
-        info!("A new region created, region_id: {}", region.region_id);
+        info!("A new region created, region: {:?}", region.metadata());
 
-        // TODO(yingwen): Metrics.
+        increment_gauge!(REGION_COUNT, 1.0);
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

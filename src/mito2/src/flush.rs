@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::{error, info, timer};
-use metrics::increment_counter;
+use metrics::{counter, increment_counter};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::AsRefStr;
@@ -32,7 +32,8 @@ use crate::error::{
 };
 use crate::memtable::MemtableBuilderRef;
 use crate::metrics::{
-    FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REASON, FLUSH_REQUESTS_TOTAL, TYPE_LABEL,
+    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REASON, FLUSH_REQUESTS_TOTAL,
+    TYPE_LABEL,
 };
 use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
@@ -290,6 +291,7 @@ impl RegionFlushTask {
         }
         let memtables = version.memtables.immutables();
         let mut file_metas = Vec::with_capacity(memtables.len());
+        let mut flushed_bytes = 0;
 
         for mem in memtables {
             if mem.is_empty() {
@@ -308,6 +310,7 @@ impl RegionFlushTask {
                 continue;
             };
 
+            flushed_bytes += sst_info.file_size;
             file_metas.push(FileMeta {
                 region_id: version.metadata.region_id,
                 file_id,
@@ -315,6 +318,10 @@ impl RegionFlushTask {
                 level: 0,
                 file_size: sst_info.file_size,
             });
+        }
+
+        if !file_metas.is_empty() {
+            counter!(FLUSH_BYTES_TOTAL, flushed_bytes as u64);
         }
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();

@@ -16,6 +16,8 @@
 pub const WRITE_BUFFER_BYTES: &str = "mito.write_buffer_bytes";
 /// Type label.
 pub const TYPE_LABEL: &str = "type";
+/// Gauge for open regions
+pub const REGION_COUNT: &str = "mito.region_count";
 
 // ------ Flush related metrics
 /// Counter of scheduled flush requests.
@@ -27,4 +29,6 @@ pub const FLUSH_REASON: &str = "reason";
 pub const FLUSH_ERRORS_TOTAL: &str = "mito.flush.errors_total";
 /// Elapsed time of a flush job.
 pub const FLUSH_ELAPSED: &str = "mito.flush.elapsed";
+/// Histogram of flushed bytes.
+pub const FLUSH_BYTES_TOTAL: &str = "mito.flush.bytes_total";
 // ------ End of flush related metrics
