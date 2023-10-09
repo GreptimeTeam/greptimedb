@@ -279,6 +279,7 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
         region_server_handler,
         None,
         runtime,
+        None,
     );
     let _handle = tokio::spawn(async move {
         Server::builder()

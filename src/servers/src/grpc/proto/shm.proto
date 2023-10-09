@@ -2,13 +2,17 @@ syntax = "proto3";
 
 package ipc;
 
-message NotificationRequest {
+message WriteRecord {
     uint32 start_offset = 1;
     uint32 end_offset = 2;
 }
 
+message NotificationRequest {
+    repeated WriteRecord write_records = 1;
+}
+
 message NotificationResponse{
-    bool success = 1;
+    uint32 success_mask = 1;
 }
 
 service Shm {

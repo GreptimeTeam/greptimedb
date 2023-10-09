@@ -53,6 +53,7 @@ impl Services {
                 region_server_handler,
                 None,
                 runtime,
+                None,
             ),
             http_server: HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)

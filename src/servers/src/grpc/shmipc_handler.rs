@@ -1,17 +1,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-// use common_runtime::Runtime;
-use tonic::{Request, Response, Status};
+use common_telemetry::logging::info;
+use tonic::{Request, Response};
 
-// use crate::shm_client::ShmClient;
-use crate::{shm_server::Shm, NotificationRequest, NotificationResponse};
+use crate::grpc::TonicResult;
+use crate::shm_server::Shm;
+use crate::{NotificationRequest, NotificationResponse};
 #[async_trait]
 pub trait ShmipcHandler: Send + Sync {
     async fn handle(
         &self,
         notification: NotificationRequest,
-    ) -> Result<Response<NotificationResponse>, Status>;
+    ) -> TonicResult<Response<NotificationResponse>>;
 }
 
 pub type ShmipcHandlerRef = Arc<dyn ShmipcHandler>;
@@ -19,7 +20,6 @@ pub type ShmipcHandlerRef = Arc<dyn ShmipcHandler>;
 #[derive(Clone)]
 pub(crate) struct ShmipcService {
     handler: ShmipcHandlerRef,
-    // runtime: Arc<Runtime>,
 }
 
 impl ShmipcService {
@@ -28,13 +28,14 @@ impl ShmipcService {
     }
 }
 
-#[tonic::async_trait]
+#[async_trait]
 impl Shm for ShmipcService {
     async fn notify(
         &self,
         request: Request<NotificationRequest>,
-    ) -> Result<Response<NotificationResponse>, Status> {
-        // TODO zhuziyi
+    ) -> TonicResult<Response<NotificationResponse>> {
+        info!("receive notification request");
+        // TODO(zhuziyi)
         let request = request.into_inner();
         let response = self.handler.handle(request).await?;
         Ok(response)

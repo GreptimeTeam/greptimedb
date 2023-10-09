@@ -63,7 +63,7 @@ use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 use crate::server::Server;
 use crate::shm_server::ShmServer;
 
-type TonicResult<T> = std::result::Result<T, Status>;
+pub type TonicResult<T> = std::result::Result<T, Status>;
 
 pub struct GrpcServer {
     config: GrpcServerConfig,
@@ -107,6 +107,7 @@ impl Default for GrpcServerConfig {
 }
 
 impl GrpcServer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Option<GrpcServerConfig>,
         query_handler: Option<ServerGrpcQueryHandlerRef>,
@@ -276,6 +277,7 @@ impl Server for GrpcServer {
             );
         }
         if let Some(shmipc_handler) = &self.shmipc_handler {
+            info!("gRPC shmipc notifaction service start");
             builder = builder.add_service(
                 ShmServer::new(ShmipcService::new(shmipc_handler.clone()))
                     .max_decoding_message_size(max_recv_message_size)

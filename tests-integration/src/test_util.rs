@@ -465,6 +465,7 @@ pub async fn setup_grpc_server_with(
         None,
         user_provider,
         runtime,
+        None,
     ));
 
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
