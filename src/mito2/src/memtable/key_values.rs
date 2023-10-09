@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+use api::v1::{Mutation, OpType, Row, Rows};
 use datatypes::value::ValueRef;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::SequenceNumber;
@@ -169,12 +169,10 @@ impl ReadRowHelper {
             .unwrap();
         indices.push(*ts_index);
         // Iterate columns and find field columns.
-        for column in metadata.column_metadatas.iter() {
-            if column.semantic_type == SemanticType::Field {
-                // Get index in request for each field column.
-                let index = name_to_index.get(&column.column_schema.name).unwrap();
-                indices.push(*index);
-            }
+        for column in metadata.field_columns() {
+            // Get index in request for each field column.
+            let index = name_to_index.get(&column.column_schema.name).unwrap();
+            indices.push(*index);
         }
 
         ReadRowHelper {
@@ -186,8 +184,7 @@ impl ReadRowHelper {
 
 #[cfg(test)]
 mod tests {
-    use api::v1;
-    use api::v1::ColumnDataType;
+    use api::v1::{self, ColumnDataType, SemanticType};
 
     use super::*;
     use crate::test_util::i64_value;

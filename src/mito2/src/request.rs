@@ -145,6 +145,7 @@ impl WriteRequest {
             .map(|column| (&column.column_name, column))
             .collect();
 
+        let mut need_fill_default = false;
         // Checks all columns in this region.
         for column in &metadata.column_metadatas {
             if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
@@ -199,7 +200,7 @@ impl WriteRequest {
                 // Rows don't have this column.
                 self.check_missing_column(column)?;
 
-                return FillDefaultSnafu { region_id }.fail();
+                need_fill_default = true;
             }
         }
 
@@ -212,6 +213,9 @@ impl WriteRequest {
             }
             .fail();
         }
+
+        // If we need to fill default values, return a special error.
+        ensure!(!need_fill_default, FillDefaultSnafu { region_id });
 
         Ok(())
     }
@@ -683,6 +687,7 @@ pub(crate) struct CompactionFailed {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::value::ValueData;
     use api::v1::{Row, SemanticType};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnDefaultConstraint;
@@ -950,7 +955,7 @@ mod tests {
         assert_eq!(expect_rows, request.rows);
     }
 
-    fn region_metadata_for_delete() -> RegionMetadata {
+    fn region_metadata_two_fields() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -1010,7 +1015,7 @@ mod tests {
                 values: vec![ts_ms_value(1)],
             }],
         };
-        let metadata = region_metadata_for_delete();
+        let metadata = region_metadata_two_fields();
 
         let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Delete, rows).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
@@ -1077,5 +1082,38 @@ mod tests {
         let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
         let err = request.fill_missing_columns(&metadata).unwrap_err();
         check_invalid_request(&err, "column ts does not have default value");
+    }
+
+    #[test]
+    fn test_missing_and_invalid() {
+        // Missing f0 and f1 has invalid type (string).
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("f1", ColumnDataType::String, SemanticType::Field),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    i64_value(100),
+                    ts_ms_value(1),
+                    Value {
+                        value_data: Some(ValueData::StringValue("xxxxx".to_string())),
+                    },
+                ],
+            }],
+        };
+        let metadata = region_metadata_two_fields();
+
+        let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        check_invalid_request(
+            &err,
+            "column f1 expect type Int64(Int64Type), given: STRING(12)",
+        );
     }
 }
