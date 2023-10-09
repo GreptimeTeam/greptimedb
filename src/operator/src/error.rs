@@ -29,7 +29,7 @@ use snafu::{Location, Snafu};
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Table already exists: `{}`", table))]
-    TableAlreadyExist { table: String, location: Location },
+    TableAlreadyExists { table: String, location: Location },
 
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
@@ -515,7 +515,7 @@ impl ErrorExt for Error {
             | Error::InferFileTableSchema { .. }
             | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
 
-            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
+            Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 

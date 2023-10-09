@@ -109,7 +109,7 @@ impl StatementExecutor {
             return if create_table.create_if_not_exists {
                 Ok(table)
             } else {
-                error::TableAlreadyExistSnafu {
+                error::TableAlreadyExistsSnafu {
                     table: format_full_table_name(
                         &create_table.catalog_name,
                         &create_table.schema_name,
