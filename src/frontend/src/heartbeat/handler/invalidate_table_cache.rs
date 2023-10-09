@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use async_trait::async_trait;
-use common_meta::cache_invalidator::{
-    CacheInvalidator, Context, KvCacheInvalidatorRef, TableMetadataCacheInvalidator,
-};
+use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::error::Result as MetaResult;
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
@@ -26,7 +24,7 @@ use futures::future::Either;
 
 #[derive(Clone)]
 pub struct InvalidateTableCacheHandler {
-    table_metadata_cache_invalidator: TableMetadataCacheInvalidator,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 #[async_trait]
@@ -41,7 +39,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 
     async fn handle(&self, ctx: &mut HeartbeatResponseHandlerContext) -> MetaResult<HandleControl> {
         let mailbox = ctx.mailbox.clone();
-        let cache_invalidator = self.table_metadata_cache_invalidator.clone();
+        let cache_invalidator = self.cache_invalidator.clone();
 
         let (meta, invalidator) = match ctx.incoming_message.take() {
             Some((meta, Instruction::InvalidateTableIdCache(table_id))) => (
@@ -86,11 +84,7 @@ impl HeartbeatResponseHandler for InvalidateTableCacheHandler {
 }
 
 impl InvalidateTableCacheHandler {
-    pub fn new(backend_cache_invalidator: KvCacheInvalidatorRef) -> Self {
-        Self {
-            table_metadata_cache_invalidator: TableMetadataCacheInvalidator::new(
-                backend_cache_invalidator,
-            ),
-        }
+    pub fn new(cache_invalidator: CacheInvalidatorRef) -> Self {
+        Self { cache_invalidator }
     }
 }
