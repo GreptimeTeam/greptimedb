@@ -26,7 +26,10 @@ use crate::sst::file::FileTimeRange;
 /// Key of metadata in parquet SST.
 pub const PARQUET_METADATA_KEY: &str = "greptime:metadata";
 const DEFAULT_WRITE_BUFFER_SIZE: ReadableSize = ReadableSize::mb(8);
-const DEFAULT_ROW_GROUP_SIZE: usize = 100000;
+/// Default batch size to read parquet files.
+pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 1024;
+/// Default row group size for parquet files.
+const DEFAULT_ROW_GROUP_SIZE: usize = 100 * DEFAULT_READ_BATCH_SIZE;
 
 /// Parquet write options.
 #[derive(Debug)]
