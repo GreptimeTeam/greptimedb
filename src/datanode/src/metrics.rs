@@ -16,3 +16,5 @@
 
 pub const HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
 pub const HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";
+pub const HANDLE_REGION_REQUEST_ELAPSED: &str = "datanode.handle_region_request_elapsed";
+pub const REGION_REQUEST_TYPE: &str = "datanode.region_request_type";

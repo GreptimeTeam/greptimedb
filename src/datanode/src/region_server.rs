@@ -28,7 +28,7 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
-use common_telemetry::{info, warn};
+use common_telemetry::{info, timer, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogList, CatalogProvider};
@@ -227,7 +227,11 @@ impl RegionServerInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output> {
-        // TODO(ruihang): add some metrics
+        let request_type = request.request_type();
+        let _timer = timer!(
+            crate::metrics::HANDLE_REGION_REQUEST_ELAPSED,
+            &[(crate::metrics::REGION_REQUEST_TYPE, request_type),]
+        );
 
         let region_change = match &request {
             RegionRequest::Create(create) => RegionChange::Register(create.engine.clone()),
