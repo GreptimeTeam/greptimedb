@@ -218,7 +218,7 @@ impl TruncateTableData {
     }
 
     fn table_info(&self) -> &RawTableInfo {
-        &self.table_info_value.inner.table_info
+        &self.table_info_value.table_info
     }
 
     fn table_id(&self) -> TableId {

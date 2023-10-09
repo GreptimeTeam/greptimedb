@@ -57,6 +57,7 @@ pub mod table_route;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -170,9 +171,17 @@ macro_rules! ensure_values {
 /// The `inner` field will be deserialized from the `bytes` field.
 pub struct DeserializedValueWithBytes<T: DeserializeOwned + Serialize> {
     // The original bytes of the inner.
-    pub bytes: Bytes,
+    bytes: Bytes,
     // The value was deserialized from the original bytes.
-    pub inner: T,
+    inner: T,
+}
+
+impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
 }
 
 impl<T: DeserializeOwned + Serialize + Debug> Debug for DeserializedValueWithBytes<T> {
@@ -244,12 +253,13 @@ impl<T: Serialize + DeserializeOwned> DeserializedValueWithBytes<T> {
         self.inner
     }
 
-    pub fn into_bytes(self) -> Bytes {
-        self.bytes
+    /// Returns original `bytes`
+    pub fn into_bytes(&self) -> Vec<u8> {
+        self.bytes.to_vec()
     }
 
+    #[cfg(feature = "testing")]
     /// Notes: used for test purpose.
-    /// Due to it was used in other crates, without wrapping with a #[cfg(test)].
     pub fn from_inner(inner: T) -> Self {
         let bytes = serde_json::to_vec(&inner).unwrap();
 
@@ -426,7 +436,7 @@ impl TableMetadataManager {
         table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
         table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<()> {
-        let table_info = &table_info_value.inner.table_info;
+        let table_info = &table_info_value.table_info;
         let table_id = table_info.ident.table_id;
 
         // Deletes table name.
@@ -446,7 +456,7 @@ impl TableMetadataManager {
             .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(&table_route_value.inner.region_routes)?;
+        let distribution = region_distribution(&table_route_value.region_routes)?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -477,7 +487,7 @@ impl TableMetadataManager {
         current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         new_table_name: String,
     ) -> Result<()> {
-        let current_table_info = &current_table_info_value.inner.table_info;
+        let current_table_info = &current_table_info_value.table_info;
         let table_id = current_table_info.ident.table_id;
 
         let table_name_key = TableNameKey::new(
@@ -535,9 +545,9 @@ impl TableMetadataManager {
         current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         new_table_info: RawTableInfo,
     ) -> Result<()> {
-        let table_id = current_table_info_value.inner.table_info.ident.table_id;
+        let table_id = current_table_info_value.table_info.ident.table_id;
 
-        let new_table_info_value = current_table_info_value.inner.update(new_table_info);
+        let new_table_info_value = current_table_info_value.update(new_table_info);
 
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
@@ -570,7 +580,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
-            region_distribution(&current_table_route_value.inner.region_routes)?;
+            region_distribution(&current_table_route_value.region_routes)?;
         let new_region_distribution = region_distribution(&new_region_routes)?;
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
@@ -582,7 +592,7 @@ impl TableMetadataManager {
         )?;
 
         // Updates the table_route.
-        let new_table_route_value = current_table_route_value.inner.update(new_region_routes);
+        let new_table_route_value = current_table_route_value.update(new_region_routes);
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
@@ -922,9 +932,8 @@ mod tests {
             .unwrap();
         let mut modified_table_info = table_info.clone();
         modified_table_info.name = "hi".to_string();
-        let modified_table_info_value = DeserializedValueWithBytes::from_inner(
-            table_info_value.inner.update(modified_table_info),
-        );
+        let modified_table_info_value =
+            DeserializedValueWithBytes::from_inner(table_info_value.update(modified_table_info));
         // if the table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
@@ -1004,7 +1013,7 @@ mod tests {
         let mut wrong_table_info = table_info.clone();
         wrong_table_info.name = "wrong".to_string();
         let wrong_table_info_value = DeserializedValueWithBytes::from_inner(
-            current_table_info_value.inner.update(wrong_table_info),
+            current_table_info_value.update(wrong_table_info),
         );
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
@@ -1116,7 +1125,7 @@ mod tests {
         // if the current_table_route_value is wrong, it should return an error.
         // The ABA problem.
         let wrong_table_route_value =
-            DeserializedValueWithBytes::from_inner(current_table_route_value.inner.update(vec![
+            DeserializedValueWithBytes::from_inner(current_table_route_value.update(vec![
                 new_region_route(1, 1),
                 new_region_route(2, 2),
                 new_region_route(3, 3),

@@ -257,11 +257,11 @@ impl DropTableData {
     }
 
     fn region_routes(&self) -> &Vec<RegionRoute> {
-        &self.table_route_value.inner.region_routes
+        &self.table_route_value.region_routes
     }
 
     fn table_info(&self) -> &RawTableInfo {
-        &self.table_info_value.inner.table_info
+        &self.table_info_value.table_info
     }
 
     fn table_id(&self) -> TableId {

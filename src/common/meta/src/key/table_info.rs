@@ -151,7 +151,7 @@ impl TableInfoManager {
     )> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = current_table_info_value.bytes.to_vec();
+        let raw_value = current_table_info_value.into_bytes();
 
         let txn = Txn::new()
             .when(vec![Compare::with_value(
@@ -176,7 +176,7 @@ impl TableInfoManager {
     ) -> Result<Txn> {
         let key = TableInfoKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = table_info_value.bytes.to_vec();
+        let raw_value = table_info_value.into_bytes();
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
         let txn = Txn::new().and_then(vec![

@@ -32,14 +32,16 @@ pub(crate) async fn fetch_table(
         .context(TableMetadataManagerSnafu)?;
 
     if let Some(table_info) = table_info {
-        let table_route = table_route.context(TableRouteNotFoundSnafu { table_id })?;
+        let table_route = table_route
+            .context(TableRouteNotFoundSnafu { table_id })?
+            .into_inner();
 
         let table = Table {
             id: table_id as u64,
-            table_name: table_info.inner.table_name(),
+            table_name: table_info.table_name(),
             table_schema: vec![],
         };
-        let table_route = TableRoute::new(table, table_route.inner.region_routes);
+        let table_route = TableRoute::new(table, table_route.region_routes);
         let table_route_value = table_route
             .try_into()
             .context(error::TableRouteConversionSnafu)?;

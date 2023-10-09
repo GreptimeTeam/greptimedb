@@ -81,7 +81,7 @@ impl UpdateRegionMetadata {
             .context(error::TableMetadataManagerSnafu)?
             .context(TableRouteNotFoundSnafu { table_id })?;
 
-        let mut new_region_routes = table_route_value.inner.region_routes.clone();
+        let mut new_region_routes = table_route_value.region_routes.clone();
 
         for region_route in new_region_routes.iter_mut() {
             if region_route.region.id.region_number() == failed_region.region_number {

@@ -75,7 +75,7 @@ impl AlterTableProcedure {
                 err_msg: "'kind' is absent",
             })?;
         let (kind, next_column_id) =
-            create_proto_alter_kind(&table_info_value.inner.table_info, alter_kind)?;
+            create_proto_alter_kind(&table_info_value.table_info, alter_kind)?;
 
         debug!(
             "New AlterTableProcedure, kind: {:?}, next_column_id: {:?}",
@@ -101,7 +101,7 @@ impl AlterTableProcedure {
             })
             .map_err(ProcedureError::external)?;
         let (kind, next_column_id) =
-            create_proto_alter_kind(&data.table_info_value.inner.table_info, alter_kind)
+            create_proto_alter_kind(&data.table_info_value.table_info, alter_kind)
                 .map_err(ProcedureError::external)?;
         assert_eq!(data.next_column_id, next_column_id);
 
@@ -446,7 +446,7 @@ impl AlterTableData {
     }
 
     fn table_info(&self) -> &RawTableInfo {
-        &self.table_info_value.inner.table_info
+        &self.table_info_value.table_info
     }
 }
 
