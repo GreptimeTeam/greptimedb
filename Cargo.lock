@@ -1853,6 +1853,7 @@ dependencies = [
  "arrow-flight",
  "async-stream",
  "async-trait",
+ "base64 0.21.3",
  "chrono",
  "common-catalog",
  "common-error",
