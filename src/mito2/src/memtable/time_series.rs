@@ -34,8 +34,10 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
 
-use crate::error;
-use crate::error::{ComputeArrowSnafu, ConvertVectorSnafu, PrimaryKeyLengthMismatchSnafu, Result};
+use crate::error::{
+    ComputeArrowSnafu, ConvertVectorSnafu, NewRecordBatchSnafu, PrimaryKeyLengthMismatchSnafu,
+    Result,
+};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
@@ -180,7 +182,7 @@ impl Memtable for TimeSeriesMemtable {
                     actual: kv.num_primary_keys()
                 }
             );
-            let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
+            let primary_key_encoded = PrimaryKey::new(self.row_codec.encode(kv.primary_keys())?);
             let fields = kv.fields().collect::<Vec<_>>();
 
             allocated += fields.len() * std::mem::size_of::<ValueRef>();
@@ -206,7 +208,7 @@ impl Memtable for TimeSeriesMemtable {
     fn iter(
         &self,
         projection: Option<&[ColumnId]>,
-        filters: Option<Predicate>,
+        predicate: Option<Predicate>,
     ) -> BoxedBatchIterator {
         let projection = if let Some(projection) = projection {
             projection.iter().copied().collect()
@@ -217,7 +219,7 @@ impl Memtable for TimeSeriesMemtable {
                 .collect()
         };
 
-        Box::new(self.series_set.iter_series(projection, filters))
+        Box::new(self.series_set.iter_series(projection, predicate))
     }
 
     fn is_empty(&self) -> bool {
@@ -255,7 +257,67 @@ impl Memtable for TimeSeriesMemtable {
     }
 }
 
-type SeriesRwLockMap = RwLock<BTreeMap<Vec<u8>, Arc<RwLock<Series>>>>;
+struct PrimaryKey {
+    bytes: Vec<u8>,
+    record_batch: RwLock<Option<Arc<RecordBatch>>>,
+}
+
+impl Clone for PrimaryKey {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            record_batch: Default::default(),
+        }
+    }
+}
+
+impl PrimaryKey {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            record_batch: RwLock::new(None),
+        }
+    }
+
+    fn get_or_update_record_batch_with<F: FnMut() -> Result<RecordBatch>>(
+        &self,
+        mut f: F,
+    ) -> Result<Arc<RecordBatch>> {
+        if let Some(rb) = self.record_batch.read().unwrap().as_ref() {
+            return Ok(rb.clone());
+        }
+
+        let batch = Arc::new(f()?);
+        Ok(self
+            .record_batch
+            .write()
+            .unwrap()
+            .get_or_insert(batch)
+            .clone())
+    }
+}
+
+impl Eq for PrimaryKey {}
+
+impl PartialEq<Self> for PrimaryKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes.eq(&other.bytes)
+    }
+}
+
+impl PartialOrd<Self> for PrimaryKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PrimaryKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bytes.cmp(&other.bytes)
+    }
+}
+
+type SeriesRwLockMap = RwLock<BTreeMap<PrimaryKey, Arc<RwLock<Series>>>>;
 
 struct SeriesSet {
     region_metadata: RegionMetadataRef,
@@ -276,7 +338,7 @@ impl SeriesSet {
 impl SeriesSet {
     /// Returns the series for given primary key, or create a new series if not already exist,
     /// along with the allocated memory footprint for primary keys.
-    fn get_or_add_series(&self, primary_key: Vec<u8>) -> (Arc<RwLock<Series>>, usize) {
+    fn get_or_add_series(&self, primary_key: PrimaryKey) -> (Arc<RwLock<Series>>, usize) {
         if let Some(series) = self.series.read().unwrap().get(&primary_key) {
             return (series.clone(), 0);
         };
@@ -284,7 +346,7 @@ impl SeriesSet {
         let mut indices = self.series.write().unwrap();
         match indices.entry(primary_key) {
             Entry::Vacant(v) => {
-                let key_len = v.key().len();
+                let key_len = v.key().bytes.len();
                 v.insert(s.clone());
                 (s, key_len)
             }
@@ -338,7 +400,7 @@ struct Iter {
     metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
     projection: HashSet<ColumnId>,
-    last_key: Option<Vec<u8>>,
+    last_key: Option<PrimaryKey>,
     predicate: Option<Predicate>,
     pk_schema: arrow::datatypes::SchemaRef,
     primary_key_builders: Vec<Box<dyn MutableVector>>,
@@ -351,9 +413,9 @@ impl Iterator for Iter {
     fn next(&mut self) -> Option<Self::Item> {
         let map = self.series.read().unwrap();
         let range = match &self.last_key {
-            None => map.range::<Vec<u8>, _>(..),
+            None => map.range::<PrimaryKey, _>(..),
             Some(last_key) => {
-                map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
+                map.range::<PrimaryKey, _>((Bound::Excluded(last_key), Bound::Unbounded))
             }
         };
 
@@ -362,9 +424,9 @@ impl Iterator for Iter {
             if let Some(predicate) = &self.predicate {
                 if !prune_primary_key(
                     &self.codec,
-                    primary_key.as_slice(),
+                    primary_key,
                     &mut self.primary_key_builders,
-                    self.pk_schema.clone(),
+                    &self.pk_schema,
                     predicate,
                 ) {
                     // read next series
@@ -383,16 +445,19 @@ impl Iterator for Iter {
 
 fn prune_primary_key(
     codec: &Arc<McmpRowCodec>,
-    pk: &[u8],
+    pk: &PrimaryKey,
     builders: &mut Vec<Box<dyn MutableVector>>,
-    pk_schema: arrow::datatypes::SchemaRef,
+    pk_schema: &arrow::datatypes::SchemaRef,
     predicate: &Predicate,
 ) -> bool {
     // no primary key, we simply return true.
     if pk_schema.fields().is_empty() {
         return true;
     }
-    let Ok(pk_record_batch) = pk_to_record_batch(codec, pk, builders, pk_schema) else {
+
+    let Ok(pk_record_batch) = pk.get_or_update_record_batch_with(move || {
+        pk_to_record_batch(codec, &pk.bytes, builders, pk_schema)
+    }) else {
         return true;
     };
 
@@ -408,8 +473,8 @@ fn pk_to_record_batch(
     codec: &Arc<McmpRowCodec>,
     bytes: &[u8],
     builders: &mut Vec<Box<dyn MutableVector>>,
-    pk_schema: arrow::datatypes::SchemaRef,
-) -> error::Result<RecordBatch> {
+    pk_schema: &arrow::datatypes::SchemaRef,
+) -> Result<RecordBatch> {
     let pk_values = codec.decode(bytes).unwrap();
     assert_eq!(builders.len(), pk_values.len());
 
@@ -422,7 +487,7 @@ fn pk_to_record_batch(
         })
         .collect();
 
-    Ok(RecordBatch::try_new(pk_schema, arrays).unwrap())
+    RecordBatch::try_new(pk_schema.clone(), arrays).context(NewRecordBatchSnafu)
 }
 
 /// A `Series` holds a list of field values of some given primary key.
@@ -562,12 +627,12 @@ impl Values {
     /// keeps only the latest row for the same timestamp.
     pub fn to_batch(
         &self,
-        primary_key: &[u8],
+        primary_key: &PrimaryKey,
         metadata: &RegionMetadataRef,
         projection: &HashSet<ColumnId>,
     ) -> Result<Batch> {
         let builder = BatchBuilder::with_required_columns(
-            primary_key.to_vec(),
+            primary_key.bytes.clone(),
             self.timestamp.clone(),
             self.sequence.clone(),
             self.op_type.clone(),
@@ -800,7 +865,11 @@ mod tests {
         };
 
         let batch = values
-            .to_batch(b"test", &schema, &[0, 1, 2, 3, 4].into_iter().collect())
+            .to_batch(
+                &PrimaryKey::new(b"test".to_vec()),
+                &schema,
+                &[0, 1, 2, 3, 4].into_iter().collect(),
+            )
             .unwrap();
         check_value(
             &batch,
@@ -902,7 +971,7 @@ mod tests {
                 for j in i * 100..(i + 1) * 100 {
                     let pk = j % pk_num;
                     let primary_key = format!("pk-{}", pk).as_bytes().to_vec();
-                    let (series, _) = set.get_or_add_series(primary_key);
+                    let (series, _) = set.get_or_add_series(PrimaryKey::new(primary_key));
                     let mut guard = series.write().unwrap();
                     guard.push(
                         ts_value_ref(j as i64),
@@ -925,7 +994,7 @@ mod tests {
 
         for i in 0..pk_num {
             let pk = format!("pk-{}", i).as_bytes().to_vec();
-            let (series, _) = set.get_or_add_series(pk);
+            let (series, _) = set.get_or_add_series(PrimaryKey::new(pk));
             let mut guard = series.write().unwrap();
             let values = guard.compact(&schema).unwrap();
             timestamps.extend(values.sequence.iter_data().map(|v| v.unwrap() as i64));

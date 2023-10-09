@@ -140,7 +140,7 @@ impl Predicate {
                 // result was a column
                 ColumnarValue::Scalar(ScalarValue::Boolean(v)) => v.unwrap_or(true),
                 _ => {
-                    unreachable!()
+                    unreachable!("Unexpected primary key record batch evaluation result: {:?}, primary key: {:?}", eva, primary_key);
                 }
             };
             debug!(
