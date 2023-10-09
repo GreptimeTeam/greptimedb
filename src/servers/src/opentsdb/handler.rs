@@ -169,7 +169,7 @@ mod tests {
             .await
             .unwrap();
         let resp = client.read_line().await.unwrap();
-        assert_eq!(resp, Some("Internal error: expected".to_string()));
+        assert_eq!(resp, Some("Internal error: 1003".to_string()));
 
         client.write_line("get".to_string()).await.unwrap();
         let resp = client.read_line().await.unwrap();

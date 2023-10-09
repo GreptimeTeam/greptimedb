@@ -163,10 +163,7 @@ async fn test_opentsdb_put() {
         .send()
         .await;
     assert_eq!(result.status(), 500);
-    assert_eq!(
-        result.text().await,
-        "{\"error\":\"Internal error: Internal error: expected\"}"
-    );
+    assert_eq!(result.text().await, "{\"error\":\"Internal error: 1003\"}");
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {
@@ -208,7 +205,7 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: expected\"}]}");
+    assert_eq!(result.text().await, "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
 
     // multiple data point summary debug put
     let result = client
@@ -233,7 +230,7 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: expected\"}]}");
+    assert_eq!(result.text().await, "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {
