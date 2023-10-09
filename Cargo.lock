@@ -2476,7 +2476,7 @@ dependencies = [
 [[package]]
 name = "datafusion"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2524,7 +2524,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2538,7 +2538,7 @@ dependencies = [
 [[package]]
 name = "datafusion-execution"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2555,7 +2555,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2569,7 +2569,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2586,7 +2586,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2621,7 +2621,7 @@ dependencies = [
 [[package]]
 name = "datafusion-row"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2632,7 +2632,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2645,7 +2645,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "async-recursion",
  "chrono",
