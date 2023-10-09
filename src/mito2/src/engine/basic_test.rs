@@ -26,7 +26,6 @@ use store_api::region_request::{RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
 use super::*;
-use crate::error::Error;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,

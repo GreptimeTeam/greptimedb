@@ -145,6 +145,7 @@ impl WriteRequest {
             .map(|column| (&column.column_name, column))
             .collect();
 
+        let mut need_fill_default = false;
         // Checks all columns in this region.
         for column in &metadata.column_metadatas {
             if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
@@ -199,7 +200,7 @@ impl WriteRequest {
                 // Rows don't have this column.
                 self.check_missing_column(column)?;
 
-                return FillDefaultSnafu { region_id }.fail();
+                need_fill_default = true;
             }
         }
 
@@ -212,6 +213,9 @@ impl WriteRequest {
             }
             .fail();
         }
+
+        // If we need to fill default values, return a special error.
+        ensure!(!need_fill_default, FillDefaultSnafu { region_id });
 
         Ok(())
     }
@@ -1107,6 +1111,9 @@ mod tests {
 
         let request = WriteRequest::new(RegionId::new(1, 1), OpType::Put, rows).unwrap();
         let err = request.check_schema(&metadata).unwrap_err();
-        check_invalid_request(&err, "xxx");
+        check_invalid_request(
+            &err,
+            "column f1 expect type Int64(Int64Type), given: STRING(12)",
+        );
     }
 }
