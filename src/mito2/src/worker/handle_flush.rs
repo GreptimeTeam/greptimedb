@@ -186,8 +186,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Delete wal.
         info!(
-            "Region {} flush finished, tries to bump wal to {}",
-            region_id, request.flushed_entry_id
+            "Region {} flush finished, elapsed: {:?}, tries to bump wal to {}",
+            region_id,
+            request.timer.elapsed(),
+            request.flushed_entry_id
         );
         if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
             error!(e; "Failed to write wal, region: {}", region_id);
@@ -195,7 +197,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // Notifies waiters.
+        // Notifies waiters and observes the flush timer.
         request.on_success();
 
         // Handle pending requests for the region.

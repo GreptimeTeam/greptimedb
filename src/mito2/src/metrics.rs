@@ -13,4 +13,18 @@
 // limitations under the License.
 
 /// Global write buffer size in bytes.
-pub const WRITE_BUFFER_BYTES: &str = "storage.write_buffer_bytes";
+pub const WRITE_BUFFER_BYTES: &str = "mito.write_buffer_bytes";
+/// Type label.
+pub const TYPE_LABEL: &str = "type";
+
+// ------ Flush related metrics
+/// Counter of scheduled flush requests.
+/// Note that the flush scheduler may merge some flush requests.
+pub const FLUSH_REQUESTS_TOTAL: &str = "mito.flush.requests_total";
+/// Reason to flush.
+pub const FLUSH_REASON: &str = "reason";
+/// Counter of scheduled failed flush jobs.
+pub const FLUSH_ERRORS_TOTAL: &str = "mito.flush.errors_total";
+/// Elapsed time of a flush job.
+pub const FLUSH_ELAPSED: &str = "mito.flush.elapsed";
+// ------ End of flush related metrics

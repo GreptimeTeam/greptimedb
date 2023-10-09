@@ -19,7 +19,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, timer};
+use metrics::increment_counter;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::AsRefStr;
@@ -30,6 +31,9 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::memtable::MemtableBuilderRef;
+use crate::metrics::{
+    FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REASON, FLUSH_REQUESTS_TOTAL, TYPE_LABEL,
+};
 use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
@@ -114,8 +118,8 @@ impl WriteBufferManager for WriteBufferManagerImpl {
         let mutable_memtable_memory_usage = self.memory_active.load(Ordering::Relaxed);
         if mutable_memtable_memory_usage > self.mutable_limit {
             info!(
-                "Engine should flush (over mutable limit), mutable_usage: {}, mutable_limit: {}.",
-                mutable_memtable_memory_usage, self.mutable_limit,
+                "Engine should flush (over mutable limit), mutable_usage: {}, memory_usage: {}, mutable_limit: {}, global_limit: {}",
+                mutable_memtable_memory_usage, self.memory_usage(), self.mutable_limit, self.global_write_buffer_size,
             );
             return true;
         }
@@ -232,6 +236,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
+        let timer = timer!(FLUSH_ELAPSED, &[(TYPE_LABEL, "total")]);
         self.listener.on_flush_begin(self.region_id).await;
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
@@ -251,6 +256,7 @@ impl RegionFlushTask {
                     memtables_to_remove,
                     senders: std::mem::take(&mut self.senders),
                     file_purger: self.file_purger.clone(),
+                    timer,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -259,6 +265,9 @@ impl RegionFlushTask {
             }
             Err(e) => {
                 error!(e; "Failed to flush region {}", self.region_id);
+                // Discard the timer.
+                timer.discard();
+
                 let err = Arc::new(e);
                 self.on_failure(err.clone());
                 WorkerRequest::Background {
@@ -272,6 +281,8 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs.
     async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
+        let timer = timer!(FLUSH_ELAPSED, &[(TYPE_LABEL, "flush_memtables")]);
+
         // TODO(yingwen): Make it configurable.
         let mut write_opts = WriteOptions::default();
         if let Some(row_group_size) = self.row_group_size {
@@ -308,10 +319,11 @@ impl RegionFlushTask {
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}",
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}",
             version.metadata.region_id,
             self.reason.as_ref(),
-            file_ids
+            file_ids,
+            timer.elapsed(),
         );
 
         Ok(file_metas)
@@ -365,6 +377,8 @@ impl FlushScheduler {
         task: RegionFlushTask,
     ) -> Result<()> {
         debug_assert_eq!(region_id, task.region_id);
+
+        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => task.reason.as_ref().to_string());
 
         let version = version_control.current().version;
         if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
@@ -445,6 +459,8 @@ impl FlushScheduler {
     /// Notifies the scheduler that the flush job is failed.
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
+
+        increment_counter!(FLUSH_ERRORS_TOTAL);
 
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {
