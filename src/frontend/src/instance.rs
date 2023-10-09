@@ -61,9 +61,8 @@ use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
 use query::{QueryEngineFactory, QueryEngineRef};
 use raft_engine::{Config, ReadableSize, RecoveryMode};
+use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
-use servers::grpc::shmipc_handler::ShmipcHandler;
-use servers::grpc::TonicResult;
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -74,7 +73,6 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
-use servers::{error as server_error, NotificationRequest, NotificationResponse};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -83,7 +81,6 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
-use tonic::Response;
 
 use self::region_query::FrontendRegionQueryHandler;
 use self::standalone::StandaloneTableMetadataCreator;
@@ -109,7 +106,6 @@ pub trait FrontendInstance:
     + OpenTelemetryProtocolHandler
     + ScriptHandler
     + PrometheusHandler
-    + ShmipcHandler
     + Send
     + Sync
     + 'static
@@ -593,31 +589,6 @@ impl PrometheusHandler for Instance {
 
     fn catalog_manager(&self) -> CatalogManagerRef {
         self.catalog_manager.clone()
-    }
-}
-
-#[async_trait]
-impl ShmipcHandler for Instance {
-    async fn handle(
-        &self,
-        notification_request: NotificationRequest,
-    ) -> TonicResult<Response<NotificationResponse>> {
-
-        info!("frontend begins to handle request");
-        let write_records = notification_request.write_records;
-
-        let success_mask: u32 = 0;
-
-        for write_record in write_records.into_iter() {
-            let start_offset = write_record.start_offset as usize;
-            let end_offset = write_record.end_offset as usize;
-            // cases that end_offset <= start_offset are excluded.
-            assert!(start_offset < end_offset);
-            info!("[{} - {}]", start_offset, end_offset);
-            // TODO(zhuziyi): read record from share memory
-        }
-
-        Ok(Response::new(NotificationResponse { success_mask }))
     }
 }
 

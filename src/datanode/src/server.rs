@@ -38,6 +38,7 @@ impl Services {
     pub async fn try_new(region_server: RegionServer, opts: &DatanodeOptions) -> Result<Self> {
         let flight_handler = Some(Arc::new(region_server.clone()) as _);
         let region_server_handler = Some(Arc::new(region_server.clone()) as _);
+        let shmipc_handler = Some(Arc::new(region_server.clone()) as _);
         let runtime = region_server.runtime();
         let grpc_config = GrpcServerConfig {
             max_recv_message_size: opts.rpc_max_recv_message_size,
@@ -53,7 +54,7 @@ impl Services {
                 region_server_handler,
                 None,
                 runtime,
-                None,
+                shmipc_handler,
             ),
             http_server: HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)

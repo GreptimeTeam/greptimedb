@@ -240,7 +240,7 @@ impl DatanodeBuilder {
 
         let services = match mode {
             Mode::Distributed => Some(Services::try_new(region_server.clone(), &self.opts).await?),
-            Mode::Standalone => None,
+            Mode::Standalone => Some(Services::try_new(region_server.clone(), &self.opts).await?),
         };
 
         let greptimedb_telemetry_task = get_greptimedb_telemetry_task(

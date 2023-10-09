@@ -44,6 +44,8 @@ use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
+use servers::grpc::shmipc_handler::ShmipcHandler;
+use servers::{NotificationRequest, NotificationResponse};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -187,6 +189,30 @@ impl FlightCraft for RegionServer {
 
         let stream = Box::pin(FlightRecordBatchStream::new(result, trace_id));
         Ok(Response::new(stream))
+    }
+}
+
+#[async_trait]
+impl ShmipcHandler for RegionServer {
+    async fn handle(
+        &self,
+        notification_request: NotificationRequest,
+    ) -> TonicResult<Response<NotificationResponse>> {
+        info!("RegionServer begins to handle request");
+        let write_records = notification_request.write_records;
+
+        let success_mask: u32 = 0;
+
+        for write_record in write_records.into_iter() {
+            let start_offset = write_record.start_offset as usize;
+            let end_offset = write_record.end_offset as usize;
+            // cases that end_offset <= start_offset are excluded.
+            assert!(start_offset < end_offset);
+            info!("[{} - {}]", start_offset, end_offset);
+            // TODO(zhuziyi): read record from share memory
+        }
+
+        Ok(Response::new(NotificationResponse { success_mask }))
     }
 }
 
