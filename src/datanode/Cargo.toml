@@ -10,6 +10,10 @@ arrow-flight.workspace = true
 async-compat = "0.2"
 async-stream.workspace = true
 async-trait.workspace = true
+arrow = "40"
+arrow-array = "40"
+arrow-schema = "40"
+arrow-ipc = "40"
 axum = "0.6"
 axum-macros = "0.3"
 bytes = "1.1"
@@ -45,6 +49,7 @@ log-store = { workspace = true }
 meta-client = { workspace = true }
 metrics.workspace = true
 mito2 = { workspace = true }
+memmap2 = "0.7"
 object-store = { workspace = true }
 pin-project = "1.0"
 prost.workspace = true

@@ -279,9 +279,12 @@ impl Server for GrpcServer {
         if let Some(shmipc_handler) = &self.shmipc_handler {
             info!("gRPC shmipc notifaction service start");
             builder = builder.add_service(
-                ShmServer::new(ShmipcService::new(shmipc_handler.clone()))
-                    .max_decoding_message_size(max_recv_message_size)
-                    .max_encoding_message_size(max_send_message_size),
+                ShmServer::new(ShmipcService::new(
+                    shmipc_handler.clone(),
+                    "/tmp/greptimedb/shmipc",
+                ))
+                .max_decoding_message_size(max_recv_message_size)
+                .max_encoding_message_size(max_send_message_size),
             );
         }
 

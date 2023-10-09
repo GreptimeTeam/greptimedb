@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use api::v1::region::{region_request, QueryRequest, RegionResponse};
 use api::v1::{ResponseHeader, Status};
+use arrow::ipc::reader::FileReader;
 use arrow_flight::{FlightData, Ticket};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -28,7 +29,7 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
-use common_telemetry::{info, warn};
+use common_telemetry::{error, info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogList, CatalogProvider};
@@ -39,6 +40,7 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr as DfExpr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
 use futures_util::future::try_join_all;
+use memmap2::Mmap;
 use prost::Message;
 use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
@@ -194,22 +196,52 @@ impl FlightCraft for RegionServer {
 
 #[async_trait]
 impl ShmipcHandler for RegionServer {
+    fn read_range(
+        &self,
+        start_offset: usize,
+        end_offset: usize,
+        mmap: &Mmap,
+    ) -> std::result::Result<(), servers::error::Error> {
+        // build a cursor for reading a given range of the memory mapping.
+        let cursor = std::io::Cursor::new(&mmap[start_offset..end_offset]);
+
+        // build an arrow ipc reader based on the cursor.
+        let mut ipc_reader = FileReader::try_new(cursor, None).unwrap();
+
+        // read a record batch from the range.
+        while let Some(record_batch_res) = ipc_reader.next() {
+            let record_batch = record_batch_res.unwrap();
+            info!(
+                "Shm server reads a record batch at range [{start_offset}, {end_offset}): {:?}",
+                record_batch
+            );
+            // TODO(zhuziyi): memtable record write
+            assert!(ipc_reader.next().is_none());
+        }
+        Ok(())
+    }
+
     async fn handle(
         &self,
         notification_request: NotificationRequest,
+        mmap: &Mmap,
     ) -> TonicResult<Response<NotificationResponse>> {
         info!("RegionServer begins to handle request");
         let write_records = notification_request.write_records;
 
-        let success_mask: u32 = 0;
+        let mut success_mask: u32 = 0;
 
-        for write_record in write_records.into_iter() {
+        for (i, write_record) in write_records.into_iter().enumerate() {
             let start_offset = write_record.start_offset as usize;
             let end_offset = write_record.end_offset as usize;
             // cases that end_offset <= start_offset are excluded.
             assert!(start_offset < end_offset);
             info!("[{} - {}]", start_offset, end_offset);
             // TODO(zhuziyi): read record from share memory
+            match self.read_range(start_offset, end_offset, mmap) {
+                Ok(_) => success_mask = (success_mask << i) | 0b1,
+                Err(e) => error!("Failed to read a record batch from a range. source: {}", e),
+            }
         }
 
         Ok(Response::new(NotificationResponse { success_mask }))
