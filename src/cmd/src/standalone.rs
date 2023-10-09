@@ -34,7 +34,6 @@ use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
 };
 use mito2::config::MitoConfig;
-use plugins::OptPlugins;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
@@ -298,10 +297,8 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let OptPlugins {
-            opts: fe_opts,
-            plugins: fe_plugins,
-        } = plugins::setup_frontend_plugins(opts.frontend)
+        let mut fe_opts = opts.frontend;
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -386,7 +383,6 @@ mod tests {
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
-    use plugins::OptPlugins;
     use servers::Mode;
 
     use super::*;
@@ -394,12 +390,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
+        let mut fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        let OptPlugins { plugins, .. } = plugins::setup_frontend_plugins(fe_opts).await.unwrap();
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider

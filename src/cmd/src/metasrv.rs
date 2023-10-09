@@ -18,7 +18,6 @@ use clap::Parser;
 use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
-use plugins::OptPlugins;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartMetaServerSnafu};
@@ -159,8 +158,8 @@ impl StartCommand {
         Ok(Options::Metasrv(Box::new(opts)))
     }
 
-    async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
-        let OptPlugins { opts, plugins } = plugins::setup_meta_srv_plugins(opts)
+    async fn build(self, mut opts: MetaSrvOptions) -> Result<Instance> {
+        let plugins = plugins::setup_meta_srv_plugins(&mut opts)
             .await
             .context(StartMetaServerSnafu)?;
 

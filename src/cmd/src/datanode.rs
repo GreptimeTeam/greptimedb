@@ -19,7 +19,6 @@ use common_telemetry::logging;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use meta_client::MetaClientOptions;
-use plugins::OptPlugins;
 use servers::Mode;
 use snafu::ResultExt;
 
@@ -164,8 +163,8 @@ impl StartCommand {
         Ok(Options::Datanode(Box::new(opts)))
     }
 
-    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
-        let OptPlugins { opts, plugins } = plugins::setup_datanode_plugins(opts)
+    async fn build(self, mut opts: DatanodeOptions) -> Result<Instance> {
+        let plugins = plugins::setup_datanode_plugins(&mut opts)
             .await
             .context(StartDatanodeSnafu)?;
 

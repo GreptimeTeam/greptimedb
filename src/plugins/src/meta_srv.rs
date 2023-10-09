@@ -16,13 +16,8 @@ use common_base::Plugins;
 use meta_srv::error::Result;
 use meta_srv::metasrv::MetaSrvOptions;
 
-use crate::OptPlugins;
-
-pub async fn setup_meta_srv_plugins(opts: MetaSrvOptions) -> Result<OptPlugins<MetaSrvOptions>> {
-    Ok(OptPlugins {
-        opts,
-        plugins: Plugins::new(),
-    })
+pub async fn setup_meta_srv_plugins(_opts: &mut MetaSrvOptions) -> Result<Plugins> {
+    Ok(Plugins::new())
 }
 
 pub async fn start_meta_srv_plugins(_plugins: Plugins) -> Result<()> {
