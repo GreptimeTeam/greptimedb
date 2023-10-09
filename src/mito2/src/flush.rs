@@ -23,7 +23,7 @@ use common_telemetry::{error, info, timer};
 use metrics::{counter, increment_counter};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
-use strum::AsRefStr;
+use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
@@ -168,7 +168,7 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 }
 
 /// Reason of a flush task.
-#[derive(Debug, AsRefStr)]
+#[derive(Debug, IntoStaticStr)]
 pub enum FlushReason {
     /// Other reasons.
     Others,
@@ -178,6 +178,13 @@ pub enum FlushReason {
     Manual,
     /// Flush to alter table.
     Alter,
+}
+
+impl FlushReason {
+    /// Get flush reason as static str.
+    fn as_str(&self) -> &'static str {
+        self.into()
+    }
 }
 
 /// Task to flush a region.
@@ -328,7 +335,7 @@ impl RegionFlushTask {
         info!(
             "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}",
             version.metadata.region_id,
-            self.reason.as_ref(),
+            self.reason.as_str(),
             file_ids,
             timer.elapsed(),
         );
@@ -385,7 +392,7 @@ impl FlushScheduler {
     ) -> Result<()> {
         debug_assert_eq!(region_id, task.region_id);
 
-        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => task.reason.as_ref().to_string());
+        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => task.reason.as_str());
 
         let version = version_control.current().version;
         if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
