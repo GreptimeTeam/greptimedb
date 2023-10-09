@@ -172,11 +172,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -196,11 +191,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -242,12 +232,7 @@ jobs:
           features: ${{ matrix.features }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
           artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -272,15 +257,14 @@ jobs:
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
 
-  release-images-to-acr:
-    name: Build and push images to ACR
+  release-cn-artifacts:
+    name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
+      release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-2004-16-cores
+    runs-on: ubuntu-latest
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
@@ -290,14 +274,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build and push images to ACR
-        uses: ./.github/actions/build-images
+      - name: Release artifacts to CN region
+        uses: ./.github/actions/release-cn-artifacts
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
+          aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
 
   release-artifacts:
     name: Create GitHub release and upload artifacts

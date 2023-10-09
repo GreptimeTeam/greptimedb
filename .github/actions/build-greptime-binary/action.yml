@@ -16,30 +16,6 @@ inputs:
   version:
     description: Version of the artifact
     required: true
-  release-to-s3-bucket:
-    description: S3 bucket to store released artifacts
-    required: true
-  aws-access-key-id:
-    description: AWS access key id
-    required: true
-  aws-secret-access-key:
-    description: AWS secret access key
-    required: true
-  aws-region:
-    description: AWS region
-    required: true
-  upload-to-s3:
-    description: Upload to S3
-    required: false
-    default: 'true'
-  upload-latest-artifacts:
-    description: Upload the latest artifacts to S3
-    required: false
-    default: 'true'
-  build-android-artifacts:
-    description: Build android artifacts
-    required: false
-    default: 'false'
   working-dir:
     description: Working directory to build the artifacts
     required: false
@@ -64,12 +40,6 @@ runs:
         artifacts-dir: ${{ inputs.artifacts-dir }}
         target-file: ./target/${{ inputs.cargo-profile }}/greptime
         version: ${{ inputs.version }}
-        release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        aws-region: ${{ inputs.aws-region }}
-        upload-to-s3: ${{ inputs.upload-to-s3 }}
-        upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
         working-dir: ${{ inputs.working-dir }}
 
     # TODO(zyy17): We can remove build-android-artifacts flag in the future.
@@ -86,10 +56,4 @@ runs:
         artifacts-dir: ${{ inputs.artifacts-dir }}
         target-file: ./target/aarch64-linux-android/release/greptime
         version: ${{ inputs.version }}
-        release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        aws-region: ${{ inputs.aws-region }}
-        upload-to-s3: ${{ inputs.upload-to-s3 }}
-        upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
         working-dir: ${{ inputs.working-dir }}

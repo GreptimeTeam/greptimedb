@@ -198,12 +198,7 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
           dev-mode: true # Only build the standard greptime binary.
-          upload-to-s3: false # No need to upload to S3.
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
   release-images-to-dockerhub:
@@ -239,35 +234,35 @@ jobs:
         run: |
           echo "build-result=success" >> $GITHUB_OUTPUT
 
-  release-images-to-acr:
-    name: Build and push images to ACR
+  release-cn-artifacts:
+    name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
+      release-images-to-dockerhub,
     ]
     runs-on: ubuntu-latest
-    # When we push to ACR, it's easy to fail due to some unknown network issues.
-    # However, we don't want to fail the whole workflow because of this.
-    # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Build and push images to ACR
-        uses: ./.github/actions/build-images
+      - name: Release artifacts to CN region
+        uses: ./.github/actions/release-cn-artifacts
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          image-name: ${{ env.IMAGE_NAME }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: false # Don't push the latest tag to registry.
-          dev-mode: true # Only build the standard images.
+          aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          dev-mode: true                     # Only build the standard images(exclude centos images).
+          push-latest-tag: false             # Don't push the latest tag to registry.
+          update-latest-version-info: false  # Don't update the latest version info in S3.
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner
