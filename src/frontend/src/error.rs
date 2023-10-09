@@ -182,9 +182,6 @@ pub enum Error {
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, location: Location },
 
-    #[snafu(display("Table already exists: `{}`", table))]
-    TableAlreadyExist { table: String, location: Location },
-
     #[snafu(display("Failed to found context value: {}", key))]
     ContextValueNotFound { key: String, location: Location },
 
@@ -345,7 +342,6 @@ impl ErrorExt for Error {
             | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
-            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::InvokeRegionServer { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),

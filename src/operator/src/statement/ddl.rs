@@ -95,6 +95,31 @@ impl StatementExecutor {
             .fail();
         };
 
+        // if table exists.
+        if let Some(table) = self
+            .catalog_manager
+            .table(
+                &create_table.catalog_name,
+                &create_table.schema_name,
+                &create_table.table_name,
+            )
+            .await
+            .context(error::CatalogSnafu)?
+        {
+            return if create_table.create_if_not_exists {
+                Ok(table)
+            } else {
+                error::TableAlreadyExistsSnafu {
+                    table: format_full_table_name(
+                        &create_table.catalog_name,
+                        &create_table.schema_name,
+                        &create_table.table_name,
+                    ),
+                }
+                .fail()
+            };
+        }
+
         let table_name = TableName::new(
             &create_table.catalog_name,
             &create_table.schema_name,
