@@ -46,6 +46,10 @@ CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX);
+
+Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test2`
+
 DESC TABLE integers;
 
 +--------+----------------------+-----+------+---------+---------------+
