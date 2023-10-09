@@ -257,7 +257,7 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
         cached_meta_backend.clone(),
         datanode_clients,
     );
-    let plugins: Arc<Plugins> = Default::default();
+    let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,
         None,

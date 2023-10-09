@@ -61,7 +61,7 @@ pub struct QueryEngineState {
     catalog_manager: CatalogManagerRef,
     table_mutation_handler: Option<TableMutationHandlerRef>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -78,7 +78,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
-        plugins: Arc<Plugins>,
+        plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);

@@ -12,19 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+mod datanode;
+mod frontend;
+mod meta_srv;
 
-use axum::Router as HttpRouter;
-use tonic::transport::server::Router as GrpcRouter;
-
-pub trait Configurator: Send + Sync {
-    fn config_http(&self, route: HttpRouter) -> HttpRouter {
-        route
-    }
-
-    fn config_grpc(&self, route: GrpcRouter) -> GrpcRouter {
-        route
-    }
-}
-
-pub type ConfiguratorRef = Arc<dyn Configurator>;
+pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
+pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
+pub use meta_srv::{setup_meta_srv_plugins, start_meta_srv_plugins};

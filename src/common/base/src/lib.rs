@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use bit_vec::BitVec;
 
+/// [`Plugins`] is a wrapper of Arc contents.
+/// Make it Cloneable and we can treat it like an Arc struct.
 #[derive(Default, Clone)]
 pub struct Plugins {
     inner: Arc<Mutex<anymap::Map<dyn Any + Send + Sync>>>,

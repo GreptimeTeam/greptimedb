@@ -44,7 +44,6 @@ use crate::error::{
     IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
     StartDatanodeSnafu, StartFrontendSnafu,
 };
-use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
 #[derive(Parser)]
@@ -298,8 +297,11 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-        let fe_opts = opts.frontend;
+        let mut fe_opts = opts.frontend;
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
+            .await
+            .context(StartFrontendSnafu)?;
+
         let dn_opts = opts.datanode;
 
         info!("Standalone start command: {:#?}", self);
@@ -315,7 +317,7 @@ impl StartCommand {
                 .context(StartFrontendSnafu)?;
 
         let datanode =
-            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), plugins.clone())
+            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), Default::default())
                 .build()
                 .await
                 .context(StartDatanodeSnafu)?;
@@ -335,7 +337,7 @@ impl StartCommand {
 
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
-            plugins,
+            fe_plugins,
             kv_store,
             procedure_manager,
             catalog_manager,
@@ -354,7 +356,7 @@ impl StartCommand {
 
 /// Build frontend instance in standalone mode
 async fn build_frontend(
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
     kv_store: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
     catalog_manager: CatalogManagerRef,
@@ -388,13 +390,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let command = StartCommand {
+        let mut fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        let plugins = load_frontend_plugins(&command.user_provider);
-        let plugins = plugins.unwrap();
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
             .authenticate(

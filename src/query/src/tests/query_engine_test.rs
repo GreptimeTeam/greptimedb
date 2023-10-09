@@ -127,7 +127,6 @@ async fn test_query_validate() -> Result<()> {
     plugins.insert(QueryOptions {
         disallow_cross_schema_query: true,
     });
-    let plugins = Arc::new(plugins);
 
     let factory = QueryEngineFactory::new_with_plugins(catalog_list, None, None, false, plugins);
     let engine = factory.query_engine();

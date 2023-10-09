@@ -72,6 +72,7 @@ pub struct Datanode {
     region_server: RegionServer,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
+    plugins: Plugins,
 }
 
 impl Datanode {
@@ -137,11 +138,15 @@ impl Datanode {
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
     }
+
+    pub fn plugins(&self) -> Plugins {
+        self.plugins.clone()
+    }
 }
 
 pub struct DatanodeBuilder {
     opts: DatanodeOptions,
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
     meta_client: Option<MetaClient>,
     kv_backend: Option<KvBackendRef>,
 }
@@ -149,11 +154,7 @@ pub struct DatanodeBuilder {
 impl DatanodeBuilder {
     /// `kv_backend` is optional. If absent, the builder will try to build one
     /// by using the given `opts`
-    pub fn new(
-        opts: DatanodeOptions,
-        kv_backend: Option<KvBackendRef>,
-        plugins: Arc<Plugins>,
-    ) -> Self {
+    pub fn new(opts: DatanodeOptions, kv_backend: Option<KvBackendRef>, plugins: Plugins) -> Self {
         Self {
             opts,
             plugins,
@@ -262,6 +263,7 @@ impl DatanodeBuilder {
             greptimedb_telemetry_task,
             region_event_receiver,
             leases_notifier,
+            plugins: self.plugins.clone(),
         })
     }
 
@@ -327,7 +329,7 @@ impl DatanodeBuilder {
 
     async fn new_region_server(
         opts: &DatanodeOptions,
-        plugins: Arc<Plugins>,
+        plugins: Plugins,
         log_store: Arc<RaftEngineLogStore>,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
@@ -359,6 +361,8 @@ impl DatanodeBuilder {
 
         Ok(region_server)
     }
+
+    // internal utils
 
     /// Build [RaftEngineLogStore]
     async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
@@ -454,7 +458,7 @@ mod tests {
                 ..Default::default()
             },
             None,
-            Arc::new(Plugins::default()),
+            Plugins::default(),
         );
 
         let kv = Arc::new(MemoryKvBackend::default()) as _;

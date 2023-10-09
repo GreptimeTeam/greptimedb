@@ -20,7 +20,6 @@ use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
 use common_telemetry::info;
-use servers::configurator::ConfiguratorRef;
 use servers::error::InternalIoSnafu;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
@@ -47,7 +46,7 @@ impl Services {
     pub(crate) async fn build<T>(
         opts: &FrontendOptions,
         instance: Arc<T>,
-        plugins: Arc<Plugins>,
+        plugins: Plugins,
     ) -> Result<ServerHandlers>
     where
         T: FrontendInstance,
@@ -120,7 +119,7 @@ impl Services {
             let http_server = http_server_builder
                 .with_metrics_handler(MetricsHandler)
                 .with_script_handler(instance.clone())
-                .with_configurator(plugins.get::<ConfiguratorRef>())
+                .with_plugins(plugins)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build();
             result.push((Box::new(http_server), http_addr));

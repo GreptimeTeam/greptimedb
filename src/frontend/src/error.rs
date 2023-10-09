@@ -272,6 +272,9 @@ pub enum Error {
         source: operator::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid auth config"))]
+    IllegalAuthConfig { source: auth::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -288,6 +291,7 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
             | Error::UnsupportedFormat { .. }
+            | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,

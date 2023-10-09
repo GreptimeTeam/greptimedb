@@ -20,7 +20,7 @@ use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
 
-use crate::error::{self, Result};
+use crate::error::{self, Result, StartMetaServerSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -29,10 +29,10 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
-        self.instance
-            .start()
+        plugins::start_meta_srv_plugins(self.instance.plugins())
             .await
-            .context(error::StartMetaServerSnafu)
+            .context(StartMetaServerSnafu)?;
+        self.instance.start().await.context(StartMetaServerSnafu)
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -158,12 +158,15 @@ impl StartCommand {
         Ok(Options::Metasrv(Box::new(opts)))
     }
 
-    async fn build(self, opts: MetaSrvOptions) -> Result<Instance> {
-        logging::info!("MetaSrv start command: {:#?}", self);
+    async fn build(self, mut opts: MetaSrvOptions) -> Result<Instance> {
+        let plugins = plugins::setup_meta_srv_plugins(&mut opts)
+            .await
+            .context(StartMetaServerSnafu)?;
 
+        logging::info!("MetaSrv start command: {:#?}", self);
         logging::info!("MetaSrv options: {:#?}", opts);
 
-        let instance = MetaSrvInstance::new(opts)
+        let instance = MetaSrvInstance::new(opts, plugins)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

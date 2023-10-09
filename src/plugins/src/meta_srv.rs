@@ -12,19 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use common_base::Plugins;
+use meta_srv::error::Result;
+use meta_srv::metasrv::MetaSrvOptions;
 
-use axum::Router as HttpRouter;
-use tonic::transport::server::Router as GrpcRouter;
-
-pub trait Configurator: Send + Sync {
-    fn config_http(&self, route: HttpRouter) -> HttpRouter {
-        route
-    }
-
-    fn config_grpc(&self, route: GrpcRouter) -> GrpcRouter {
-        route
-    }
+pub async fn setup_meta_srv_plugins(_opts: &mut MetaSrvOptions) -> Result<Plugins> {
+    Ok(Plugins::new())
 }
 
-pub type ConfiguratorRef = Arc<dyn Configurator>;
+pub async fn start_meta_srv_plugins(_plugins: Plugins) -> Result<()> {
+    Ok(())
+}
