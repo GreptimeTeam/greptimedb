@@ -1854,6 +1854,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.21.3",
+ "bytes",
  "chrono",
  "common-catalog",
  "common-error",

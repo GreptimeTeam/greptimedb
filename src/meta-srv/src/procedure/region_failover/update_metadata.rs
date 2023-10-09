@@ -220,6 +220,7 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap()
+                .into_inner()
                 .region_routes
         }
 
@@ -373,7 +374,8 @@ mod tests {
                 .get(table_id)
                 .await
                 .unwrap()
-                .unwrap();
+                .unwrap()
+                .into_inner();
 
             let peers = &extract_all_peers(&table_route_value.region_routes);
             let actual = &table_route_value.region_routes;
@@ -392,7 +394,8 @@ mod tests {
                 .get(table_id)
                 .await
                 .unwrap()
-                .unwrap();
+                .unwrap()
+                .into_inner();
 
             let map = region_distribution(&table_route_value.region_routes).unwrap();
             assert_eq!(map.len(), 2);

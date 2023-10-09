@@ -17,6 +17,7 @@ use std::fmt::Display;
 use serde::{Deserialize, Serialize};
 use table::metadata::TableId;
 
+use super::DeserializedValueWithBytes;
 use crate::error::Result;
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
@@ -81,7 +82,7 @@ impl TableRouteManager {
         table_id: TableId,
     ) -> (
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     ) {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -97,7 +98,7 @@ impl TableRouteManager {
         table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
@@ -121,15 +122,15 @@ impl TableRouteManager {
     pub(crate) fn build_update_txn(
         &self,
         table_id: TableId,
-        current_table_route_value: &TableRouteValue,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_table_route_value: &TableRouteValue,
     ) -> Result<(
         Txn,
-        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>>,
+        impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>,
     )> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = current_table_route_value.try_as_raw_value()?;
+        let raw_value = current_table_route_value.into_bytes();
         let new_raw_value: Vec<u8> = new_table_route_value.try_as_raw_value()?;
 
         let txn = Txn::new()
@@ -148,11 +149,11 @@ impl TableRouteManager {
     pub(crate) fn build_delete_txn(
         &self,
         table_id: TableId,
-        table_route_value: &TableRouteValue,
+        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<Txn> {
         let key = TableRouteKey::new(table_id);
         let raw_key = key.as_raw_key();
-        let raw_value = table_route_value.try_as_raw_value()?;
+        let raw_value = table_route_value.into_bytes();
         let removed_key = to_removed_key(&String::from_utf8_lossy(&raw_key));
 
         let txn = Txn::new().and_then(vec![
@@ -165,7 +166,8 @@ impl TableRouteManager {
 
     fn build_decode_fn(
         raw_key: Vec<u8>,
-    ) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<TableRouteValue>> {
+    ) -> impl FnOnce(&Vec<TxnOpResponse>) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>>
+    {
         move |response: &Vec<TxnOpResponse>| {
             response
                 .iter()
@@ -178,28 +180,34 @@ impl TableRouteManager {
                 })
                 .flat_map(|r| &r.kvs)
                 .find(|kv| kv.key == raw_key)
-                .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
+                .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
                 .transpose()
         }
     }
 
-    pub async fn get(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
+    pub async fn get(
+        &self,
+        table_id: TableId,
+    ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let key = TableRouteKey::new(table_id);
         self.kv_backend
             .get(&key.as_raw_key())
             .await?
-            .map(|kv| TableRouteValue::try_from_raw_value(&kv.value))
+            .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
     }
 
     #[cfg(test)]
-    pub async fn get_removed(&self, table_id: TableId) -> Result<Option<TableRouteValue>> {
+    pub async fn get_removed(
+        &self,
+        table_id: TableId,
+    ) -> Result<Option<DeserializedValueWithBytes<TableRouteValue>>> {
         let key = TableRouteKey::new(table_id).to_string();
         let removed_key = to_removed_key(&key).into_bytes();
         self.kv_backend
             .get(&removed_key)
             .await?
-            .map(|x| TableRouteValue::try_from_raw_value(&x.value))
+            .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
             .transpose()
     }
 
@@ -209,7 +217,7 @@ impl TableRouteManager {
     ) -> Result<Option<RegionDistribution>> {
         self.get(table_id)
             .await?
-            .map(|table_route| region_distribution(&table_route.region_routes))
+            .map(|table_route| region_distribution(&table_route.into_inner().region_routes))
             .transpose()
     }
 }

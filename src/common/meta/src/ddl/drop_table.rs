@@ -39,6 +39,7 @@ use crate::error::{self, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
@@ -55,8 +56,8 @@ impl DropTableProcedure {
     pub fn new(
         cluster_id: u64,
         task: DropTableTask,
-        table_route_value: TableRouteValue,
-        table_info_value: TableInfoValue,
+        table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -231,16 +232,16 @@ pub struct DropTableData {
     pub state: DropTableState,
     pub cluster_id: u64,
     pub task: DropTableTask,
-    pub table_route_value: TableRouteValue,
-    pub table_info_value: TableInfoValue,
+    pub table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+    pub table_info_value: DeserializedValueWithBytes<TableInfoValue>,
 }
 
 impl DropTableData {
     pub fn new(
         cluster_id: u64,
         task: DropTableTask,
-        table_route_value: TableRouteValue,
-        table_info_value: TableInfoValue,
+        table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     ) -> Self {
         Self {
             state: DropTableState::Prepare,

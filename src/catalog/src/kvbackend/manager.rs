@@ -229,6 +229,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .get(table_id)
             .await
             .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner())
         else {
             return Ok(None);
         };

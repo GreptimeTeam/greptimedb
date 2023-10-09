@@ -32,7 +32,9 @@ pub(crate) async fn fetch_table(
         .context(TableMetadataManagerSnafu)?;
 
     if let Some(table_info) = table_info {
-        let table_route = table_route.context(TableRouteNotFoundSnafu { table_id })?;
+        let table_route = table_route
+            .context(TableRouteNotFoundSnafu { table_id })?
+            .into_inner();
 
         let table = Table {
             id: table_id as u64,
@@ -44,7 +46,7 @@ pub(crate) async fn fetch_table(
             .try_into()
             .context(error::TableRouteConversionSnafu)?;
 
-        Ok(Some((table_info, table_route_value)))
+        Ok(Some((table_info.into_inner(), table_route_value)))
     } else {
         Ok(None)
     }
