@@ -46,7 +46,7 @@ impl Default for WalConfig {
 }
 
 pub fn kv_store_dir(store_dir: &str) -> String {
-    format!("{store_dir}/kv")
+    format!("{store_dir}/metadata")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
