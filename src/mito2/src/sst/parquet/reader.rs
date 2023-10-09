@@ -46,7 +46,7 @@ use crate::read::{Batch, BatchReader};
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::stats::RowGroupPruningStats;
-use crate::sst::parquet::PARQUET_METADATA_KEY;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, PARQUET_METADATA_KEY};
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
@@ -147,7 +147,8 @@ impl ParquetReaderBuilder {
         };
         let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
             .await
-            .context(ReadParquetSnafu { path: file_path })?;
+            .context(ReadParquetSnafu { path: file_path })?
+            .with_batch_size(DEFAULT_READ_BATCH_SIZE);
 
         // Decode region metadata.
         let key_value_meta = builder.metadata().file_metadata().key_value_metadata();
