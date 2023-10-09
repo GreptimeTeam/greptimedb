@@ -26,6 +26,7 @@ use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::sequence::Sequence;
 use common_telemetry::{debug, info, timer, warn};
 use dashmap::DashMap;
+use futures::future::join_all;
 use metrics::{decrement_gauge, increment_gauge};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::Sender;
@@ -149,17 +150,24 @@ impl Pushers {
             .range(range)
             .map(|(_, value)| value)
             .collect::<Vec<_>>();
+        let mut results = Vec::with_capacity(pushers.len());
+
         for pusher in pushers {
             let mut mailbox_message = mailbox_message.clone();
             mailbox_message.id = 0; // one-way message
-            pusher
-                .push(HeartbeatResponse {
-                    header: Some(pusher.header()),
-                    mailbox_message: Some(mailbox_message),
-                    ..Default::default()
-                })
-                .await?;
+
+            results.push(pusher.push(HeartbeatResponse {
+                header: Some(pusher.header()),
+                mailbox_message: Some(mailbox_message),
+                ..Default::default()
+            }))
         }
+
+        // Checks the error out of the loop.
+        let _ = join_all(results)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(())
     }
