@@ -9520,6 +9520,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "strum 0.25.0",
  "tokio",
 ]
 

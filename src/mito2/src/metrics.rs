@@ -18,6 +18,8 @@ pub const WRITE_BUFFER_BYTES: &str = "mito.write_buffer_bytes";
 pub const TYPE_LABEL: &str = "type";
 /// Gauge for open regions
 pub const REGION_COUNT: &str = "mito.region_count";
+/// Elapsed time to handle requests.
+pub const HANDLE_REQUEST_ELAPSED: &str = "mito.handle_request.elapsed";
 
 // ------ Flush related metrics
 /// Counter of scheduled flush requests.

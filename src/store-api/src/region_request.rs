@@ -19,6 +19,7 @@ use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
 use api::v1::{self, Rows, SemanticType};
 use snafu::{ensure, OptionExt};
+use strum::IntoStaticStr;
 
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
@@ -27,7 +28,7 @@ use crate::metadata::{
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
-#[derive(Debug)]
+#[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
     // TODO: rename to InsertRequest
     Put(RegionPutRequest),
@@ -123,6 +124,11 @@ impl RegionRequest {
                 Self::Truncate(RegionTruncateRequest {}),
             )]),
         }
+    }
+
+    /// Returns the type name of the request.
+    pub fn type_name(&self) -> &'static str {
+        self.into()
     }
 }
 
