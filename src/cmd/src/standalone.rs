@@ -311,10 +311,13 @@ impl StartCommand {
         );
 
         let metadata_dir = metadata_store_dir(&opts.data_home);
-        let (kv_store, procedure_manager) =
-            FeInstance::try_build_standalone_components(metadata_dir, opts.kv_store, opts.procedure)
-                .await
-                .context(StartFrontendSnafu)?;
+        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
+            metadata_dir,
+            opts.kv_store,
+            opts.procedure,
+        )
+        .await
+        .context(StartFrontendSnafu)?;
 
         let datanode =
             DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), Default::default())
