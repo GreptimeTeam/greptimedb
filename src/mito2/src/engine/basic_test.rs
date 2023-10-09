@@ -22,10 +22,11 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{RegionOpenRequest, RegionPutRequest};
 use store_api::storage::RegionId;
 
 use super::*;
+use crate::error::Error;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
@@ -179,9 +180,7 @@ async fn test_write_query_region() {
 }
 
 #[tokio::test]
-async fn test_write_different_order() {
-    common_telemetry::init_default_ut_logging();
-
+async fn test_different_order() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -242,9 +241,7 @@ async fn test_write_different_order() {
 }
 
 #[tokio::test]
-async fn test_write_different_order2() {
-    common_telemetry::init_default_ut_logging();
-
+async fn test_different_order_and_type() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -415,4 +412,49 @@ async fn test_put_overwrite() {
 | b     | 4.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_absent_and_invalid_columns() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    // tag_0, field_0, field_1, ts,
+    let request = CreateRequestBuilder::new().field_num(2).build();
+
+    let mut column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Change the type of field_1 in input.
+    column_schemas[2].datatype = api::v1::ColumnDataType::String as i32;
+    // Input tag_0, field_1 (invalid type string), ts
+    column_schemas.remove(1);
+    let rows = (0..3)
+        .map(|i| api::v1::Row {
+            values: vec![
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(format!("a{i}"))),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::StringValue(i.to_string())),
+                },
+                api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                },
+            ],
+        })
+        .collect();
+    let rows = Rows {
+        schema: column_schemas,
+        rows,
+    };
+    let err = engine
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
 }
