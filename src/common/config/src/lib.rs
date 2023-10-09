@@ -45,7 +45,7 @@ impl Default for WalConfig {
     }
 }
 
-pub fn kv_store_dir(store_dir: &str) -> String {
+pub fn metadata_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/metadata")
 }
 

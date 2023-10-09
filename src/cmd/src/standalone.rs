@@ -18,7 +18,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
-use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
+use common_config::{metadata_store_dir, KvStoreConfig, WalConfig};
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
@@ -310,9 +310,9 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let kv_dir = kv_store_dir(&opts.data_home);
+        let metadata_dir = metadata_store_dir(&opts.data_home);
         let (kv_store, procedure_manager) =
-            FeInstance::try_build_standalone_components(kv_dir, opts.kv_store, opts.procedure)
+            FeInstance::try_build_standalone_components(metadata_dir, opts.kv_store, opts.procedure)
                 .await
                 .context(StartFrontendSnafu)?;
 
