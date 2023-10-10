@@ -169,8 +169,13 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
             Some(Arc::new(MemLock::default()) as _),
         )
     } else {
-        let etcd_endpoints = [&opts.store_addr];
-        let etcd_client = Client::connect(etcd_endpoints, None)
+        let etcd_endpoints = opts
+            .store_addr
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>();
+        let etcd_client = Client::connect(&etcd_endpoints, None)
             .await
             .context(error::ConnectEtcdSnafu)?;
         (

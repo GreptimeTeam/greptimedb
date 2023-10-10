@@ -72,7 +72,7 @@ impl Default for MetaSrvOptions {
             store_addr: "127.0.0.1:2379".to_string(),
             selector: SelectorType::default(),
             use_memory_store: false,
-            enable_region_failover: true,
+            enable_region_failover: false,
             http: HttpOptions::default(),
             logging: LoggingOptions {
                 dir: format!("{METASRV_HOME}/logs"),
