@@ -33,6 +33,7 @@ use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_ex
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream,
 };
+use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::utils::get_arrayref_at_indices;
 use datafusion_common::{DFField, DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::utils::exprlist_to_fields;
@@ -159,6 +160,18 @@ pub struct RangeFn {
 impl PartialEq for RangeFn {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
+    }
+}
+
+impl PartialOrd for RangeFn {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RangeFn {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.cmp(&other.name)
     }
 }
 
@@ -374,48 +387,57 @@ impl RangeSelect {
             .range_expr
             .iter()
             .map(|range_fn| {
-                let (expr, args) = match &range_fn.expr {
+                let expr = match &range_fn.expr {
                     Expr::AggregateFunction(aggr) => {
-                        let args = self.create_physical_expr_list(
-                            &aggr.args,
-                            input_dfschema,
-                            &input_schema,
-                            session_state,
-                        )?;
-                        Ok((
-                            create_aggr_expr(
-                                &aggr.fun,
-                                false,
-                                &args,
-                                &[],
+                        let expr = create_aggr_expr(
+                            &aggr.fun,
+                            false,
+                            &self.create_physical_expr_list(
+                                &aggr.args,
+                                input_dfschema,
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                session_state,
                             )?,
-                            args,
-                        ))
+                            &if let Some(exprs) = &aggr.order_by {
+                                exprs
+                                    .iter()
+                                    .map(|x| {
+                                        create_physical_sort_expr(
+                                            x,
+                                            input_dfschema,
+                                            &input_schema,
+                                            session_state.execution_props(),
+                                        )
+                                    })
+                                    .collect::<DfResult<Vec<_>>>()?
+                            } else {
+                                vec![]
+                            },
+                            &input_schema,
+                            range_fn.expr.display_name()?,
+                        )?;
+                        Ok(expr)
                     }
                     Expr::AggregateUDF(aggr_udf) => {
-                        let args = self.create_physical_expr_list(
-                            &aggr_udf.args,
-                            input_dfschema,
-                            &input_schema,
-                            session_state,
-                        )?;
-                        Ok((
-                            create_aggr_udf_expr(
-                                &aggr_udf.fun,
-                                &args,
+                        let expr = create_aggr_udf_expr(
+                            &aggr_udf.fun,
+                            &self.create_physical_expr_list(
+                                &aggr_udf.args,
+                                input_dfschema,
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                session_state,
                             )?,
-                            args,
-                        ))
+                            &input_schema,
+                            range_fn.expr.display_name()?,
+                        )?;
+                        Ok(expr)
                     }
                     _ => Err(DataFusionError::Plan(format!(
                         "Unexpected Expr:{} in RangeSelect",
                         range_fn.expr.display_name()?
                     ))),
                 }?;
+                let args = expr.expressions();
                 Ok(RangeFnExec {
                     expr,
                     args,

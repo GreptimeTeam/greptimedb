@@ -12,27 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::str::FromStr;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ahash::{HashSet, HashSetExt};
 use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::prelude::Column;
 use datafusion::scalar::ScalarValue;
-use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter, VisitRecursion};
+use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter, VisitRecursion};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
-use datafusion_expr::expr::{AggregateFunction, AggregateUDF, ScalarUDF};
+use datafusion_expr::expr::ScalarUDF;
 use datafusion_expr::{
-    AggregateFunction as AggregateFn, Expr, ExprSchemable, Extension, LogicalPlan,
-    LogicalPlanBuilder, Projection,
+    Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder, Projection,
 };
-use datafusion_sql::planner::ContextProvider;
 use datatypes::prelude::ConcreteDataType;
 use promql_parser::util::parse_duration;
 use snafu::{OptionExt, ResultExt};
@@ -40,38 +35,40 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use super::plan::Fill;
 use crate::error::{
-    CatalogSnafu, DataFusionSnafu, Result, TimeIndexNotFoundSnafu, UnknownTableSnafu,
+    CatalogSnafu, DataFusionSnafu, RangeQuerySnafu, Result, TimeIndexNotFoundSnafu,
+    UnknownTableSnafu,
 };
 use crate::range_select::plan::{RangeFn, RangeSelect};
-use crate::DfContextProviderAdapter;
 
 /// `RangeExprRewriter` will recursively search certain `Expr`, find all `range_fn` scalar udf contained in `Expr`,
 /// and collect the information required by the RangeSelect query,
 /// and finally modify the `range_fn` scalar udf to an ordinary column field.
 pub struct RangeExprRewriter<'a> {
-    input_plan: Arc<LogicalPlan>,
+    input_plan: &'a Arc<LogicalPlan>,
     align: Duration,
     by: Vec<Expr>,
-    range_fn_key: HashSet<u64>,
-    range_fn: Vec<RangeFn>,
-    context_provider: &'a DfContextProviderAdapter,
+    /// Use `BTreeSet` to avoid in case like `avg(a) RANGE '5m' + avg(a) RANGE '5m'`, duplicate range expr `avg(a) RANGE '5m'` be calculate twice
+    range_fn: BTreeSet<RangeFn>,
+    sub_aggr: &'a Aggregate,
 }
 
 impl<'a> RangeExprRewriter<'a> {
-    pub fn gen_range_expr(&self, func_name: &str, args: Vec<Expr>) -> DFResult<Expr> {
-        match AggregateFn::from_str(func_name) {
-            Ok(agg_fn) => Ok(Expr::AggregateFunction(AggregateFunction::new(
-                agg_fn, args, false, None, None,
-            ))),
-            Err(_) => match self.context_provider.get_aggregate_meta(func_name) {
-                Some(agg_udf) => Ok(Expr::AggregateUDF(AggregateUDF::new(
-                    agg_udf, args, None, None,
-                ))),
-                None => Err(DataFusionError::Plan(format!(
-                    "{} is not a Aggregate function or a Aggregate UDF",
-                    func_name
-                ))),
-            },
+    pub fn get_range_expr(&self, args: &[Expr], i: usize) -> DFResult<Expr> {
+        match args.get(i) {
+            Some(Expr::Column(column)) => {
+                let index = self.sub_aggr.schema.index_of_column(column)?;
+                let len = self.sub_aggr.group_expr.len();
+                self.sub_aggr
+                    .aggr_expr
+                    .get(index - len)
+                    .cloned()
+                    .ok_or(DataFusionError::Plan(
+                        "Range expr not found in underlying Aggregate Plan".into(),
+                    ))
+            }
+            _ => Err(DataFusionError::Plan(
+                "Illegal range expr in range select query".into(),
+            )),
         }
     }
 }
@@ -109,41 +106,21 @@ fn parse_expr_list(args: &[Expr], start: usize, len: usize) -> DFResult<Vec<Expr
 impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
     type N = Expr;
 
-    fn pre_visit(&mut self, node: &Self::N) -> DFResult<RewriteRecursion> {
-        // Expr like `rate(max(a) RANGE '6m') RANGE '6m'` have legal syntax but illegal semantic.
-        // Nest Range select is illegal, so once we meet range_fn, stop rewrite args nest in range_fn
-        if let Expr::ScalarUDF(func) = &node {
-            if func.fun.name == "range_fn" {
-                return Ok(RewriteRecursion::Mutate);
-            }
-        }
-        Ok(RewriteRecursion::Continue)
-    }
-
     fn mutate(&mut self, node: Expr) -> DFResult<Expr> {
         if let Expr::ScalarUDF(func) = &node {
             if func.fun.name == "range_fn" {
-                // `range_fn(func_name, argc, [argv], range, fill, byc, [byv], align)`
-                // `argsv` and `byv` are variadic arguments, argc/byc indicate the length of arguments
-                if have_range_in_exprs(&func.args) {
-                    return Err(DataFusionError::Plan(
-                        "Nest Range Query is not allowed".to_string(),
-                    ));
-                }
-                let func_name = parse_str_expr(&func.args, 0)?;
-                let argc = str::parse::<usize>(parse_str_expr(&func.args, 1)?)
+                // `range_fn(func, range, fill, byc, [byv], align)`
+                // `[byv]` are variadic arguments, byc indicate the length of arguments
+                let range_expr = self.get_range_expr(&func.args, 0)?;
+                let range_str = parse_str_expr(&func.args, 1)?;
+                let byc = str::parse::<usize>(parse_str_expr(&func.args, 3)?)
                     .map_err(|e| DataFusionError::Plan(e.to_string()))?;
-                let byc = str::parse::<usize>(parse_str_expr(&func.args, argc + 4)?)
-                    .map_err(|e| DataFusionError::Plan(e.to_string()))?;
-                let range_str = parse_str_expr(&func.args, argc + 2)?;
-                let args = parse_expr_list(&func.args, 2, argc)?;
-                let by = parse_expr_list(&func.args, argc + 5, byc)?;
-                let align = parse_duration(parse_str_expr(&func.args, argc + byc + 5)?)
+                let by = parse_expr_list(&func.args, 4, byc)?;
+                let align = parse_duration(parse_str_expr(&func.args, byc + 4)?)
                     .map_err(DataFusionError::Plan)?;
-                let range_expr = self.gen_range_expr(func_name, args)?;
                 let mut data_type = range_expr.get_type(self.input_plan.schema())?;
                 let mut need_cast = false;
-                let fill = Fill::try_from_str(parse_str_expr(&func.args, argc + 3)?, &data_type)?;
+                let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
                 if matches!(fill, Fill::Linear) && data_type.is_integer() {
                     data_type = DataType::Float64;
                     need_cast = true;
@@ -171,14 +148,7 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
                     need_cast,
                 };
                 let alias = Expr::Column(Column::from_name(range_fn.name.clone()));
-                // avoid case like `avg(a) RANGE '5m' + avg(a) RANGE '5m'`, range_fn be calculate twice
-                let mut s = DefaultHasher::new();
-                range_fn.name.hash(&mut s);
-                let hash = s.finish();
-                if !self.range_fn_key.contains(&hash) {
-                    self.range_fn.push(range_fn);
-                    self.range_fn_key.insert(hash);
-                }
+                self.range_fn.insert(range_fn);
                 return Ok(alias);
             }
         }
@@ -187,25 +157,18 @@ impl<'a> TreeNodeRewriter for RangeExprRewriter<'a> {
 }
 
 /// In order to implement RangeSelect query like `avg(field_0) RANGE '5m' FILL NULL`,
-/// All RangeSelect query items are converted into udf scalar function in sql parse stage, with format like `range_fn('avg', .....)`.
+/// All RangeSelect query items are converted into udf scalar function in sql parse stage, with format like `range_fn(avg(field_0), .....)`.
 /// `range_fn` contains all the parameters we need to execute RangeSelect.
 /// In order to correctly execute the query process of range select, we need to modify the query plan generated by datafusion.
 /// We need to recursively find the entire LogicalPlan, and find all `range_fn` scalar udf contained in the project plan,
 /// collecting info we need to generate RangeSelect Query LogicalPlan and rewrite th original LogicalPlan.
 pub struct RangePlanRewriter {
     table_provider: DfTableSourceProvider,
-    context_provider: DfContextProviderAdapter,
 }
 
 impl RangePlanRewriter {
-    pub fn new(
-        table_provider: DfTableSourceProvider,
-        context_provider: DfContextProviderAdapter,
-    ) -> Self {
-        Self {
-            table_provider,
-            context_provider,
-        }
+    pub fn new(table_provider: DfTableSourceProvider) -> Self {
+        Self { table_provider }
     }
 
     pub async fn rewrite(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
@@ -226,19 +189,28 @@ impl RangePlanRewriter {
             LogicalPlan::Projection(Projection { expr, input, .. })
                 if have_range_in_exprs(expr) =>
             {
-                let input = if let Some(new_input) = new_inputs[0].take() {
-                    Arc::new(new_input)
+                let (aggr_plan, input) = if let LogicalPlan::Aggregate(aggr) = input.as_ref() {
+                    // Expr like `rate(max(a) RANGE '6m') RANGE '6m'` have legal syntax but illegal semantic.
+                    if have_range_in_exprs(&aggr.aggr_expr) {
+                        return RangeQuerySnafu {
+                            msg: "Nest Range Query is not allowed",
+                        }
+                        .fail();
+                    }
+                    (aggr, aggr.input.clone())
                 } else {
-                    input.clone()
+                    return RangeQuerySnafu {
+                        msg: "Window functions is not allowed in Range Query",
+                    }
+                    .fail();
                 };
-                let (time_index, default_by) = self.get_index_by(input.schema().clone()).await?;
+                let (time_index, default_by) = self.get_index_by(input.schema()).await?;
                 let mut range_rewriter = RangeExprRewriter {
-                    input_plan: input.clone(),
+                    input_plan: &input,
                     align: Duration::default(),
                     by: vec![],
-                    range_fn_key: HashSet::new(),
-                    range_fn: vec![],
-                    context_provider: &self.context_provider,
+                    range_fn: BTreeSet::new(),
+                    sub_aggr: aggr_plan,
                 };
                 let new_expr = expr
                     .iter()
@@ -250,7 +222,7 @@ impl RangePlanRewriter {
                 }
                 let range_select = RangeSelect::try_new(
                     input.clone(),
-                    range_rewriter.range_fn,
+                    range_rewriter.range_fn.into_iter().collect(),
                     range_rewriter.align,
                     time_index,
                     range_rewriter.by,
@@ -295,7 +267,7 @@ impl RangePlanRewriter {
     /// return `(time_index, [row_columns])` to the rewriter.
     /// If the user does not explicitly use the `by` keyword to indicate time series,
     /// `[row_columns]` will be use as default time series
-    async fn get_index_by(&mut self, schema: Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
+    async fn get_index_by(&mut self, schema: &Arc<DFSchema>) -> Result<(Expr, Vec<Expr>)> {
         let mut time_index_expr = Expr::Wildcard;
         let mut default_by = vec![];
         for field in schema.fields() {
@@ -364,8 +336,6 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
 
 #[cfg(test)]
 mod test {
-
-    use std::error::Error;
 
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
@@ -572,13 +542,8 @@ mod test {
     async fn range_nest_range_err() {
         let query = r#"SELECT sum(avg(field_0 + field_1) RANGE '5m' + 1) RANGE '5m' + 1 FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         assert_eq!(
-            do_query(query)
-                .await
-                .unwrap_err()
-                .source()
-                .unwrap()
-                .to_string(),
-            "Error during planning: Nest Range Query is not allowed"
+            do_query(query).await.unwrap_err().to_string(),
+            "Range Query: Nest Range Query is not allowed"
         )
     }
 }

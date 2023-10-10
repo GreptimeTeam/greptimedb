@@ -79,7 +79,7 @@ impl DfLogicalPlanner {
         let result = sql_to_rel
             .statement_to_plan(df_stmt)
             .context(PlanSqlSnafu)?;
-        let plan = RangePlanRewriter::new(table_provider, context_provider)
+        let plan = RangePlanRewriter::new(table_provider)
             .rewrite(result)
             .await?;
         Ok(LogicalPlan::DfPlan(plan))

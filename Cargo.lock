@@ -9266,12 +9266,13 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.34.0"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da#6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da"
 dependencies = [
  "lazy_static",
  "log",
  "regex",
  "sqlparser 0.35.0",
- "sqlparser_derive 0.1.1",
+ "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da)",
 ]
 
 [[package]]
@@ -9287,6 +9288,8 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55fe75cb4a364c7f7ae06c7dbbc8d84bddd85d6cdf9975963c3935bc1991761e"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9296,8 +9299,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55fe75cb4a364c7f7ae06c7dbbc8d84bddd85d6cdf9975963c3935bc1991761e"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da#6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da"
 dependencies = [
  "proc-macro2",
  "quote",
