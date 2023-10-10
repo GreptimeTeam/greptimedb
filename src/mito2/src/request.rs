@@ -29,7 +29,7 @@ use common_telemetry::metric::Timer;
 use common_telemetry::tracing::log::info;
 use common_telemetry::warn;
 use datatypes::prelude::DataType;
-use metrics::register_histogram;
+use metrics::histogram;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -655,7 +655,7 @@ pub(crate) struct CompactionFinished {
 impl CompactionFinished {
     pub fn on_success(self) {
         // only update compaction time on success
-        register_histogram!(COMPACTION_ELAPSED_TOTAL).record(self.start_time.elapsed());
+        histogram!(COMPACTION_ELAPSED_TOTAL, self.start_time.elapsed());
 
         for sender in self.senders {
             sender.send(Ok(AffectedRows(0)));
