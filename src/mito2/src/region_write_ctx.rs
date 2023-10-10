@@ -97,9 +97,9 @@ pub(crate) struct RegionWriteCtx {
 
     // Metrics:
     /// Rows to put.
-    put_num: usize,
+    pub(crate) put_num: usize,
     /// Rows to delete.
-    delete_num: usize,
+    pub(crate) delete_num: usize,
 }
 
 impl RegionWriteCtx {

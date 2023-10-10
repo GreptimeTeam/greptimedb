@@ -24,7 +24,10 @@ use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{RejectWriteSnafu, Result};
-use crate::metrics::{STAGE_LABEL, WRITE_REJECT_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL};
+use crate::metrics::{
+    STAGE_LABEL, TYPE_LABEL, WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED,
+    WRITE_STALL_TOTAL,
+};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -80,13 +83,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         }
 
+        let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
         {
             let _timer = timer!(WRITE_STAGE_ELAPSED, &[(STAGE_LABEL, "write_memtable")]);
             for mut region_ctx in region_ctxs.into_values() {
                 region_ctx.write_memtable();
+                put_rows += region_ctx.put_num;
+                delete_rows += region_ctx.delete_num;
             }
         }
+
+        counter!(WRITE_ROWS_TOTAL, put_rows as u64, TYPE_LABEL => "put");
+        counter!(WRITE_ROWS_TOTAL, delete_rows as u64, TYPE_LABEL => "delete");
     }
 }
 
