@@ -44,7 +44,7 @@ use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;
 use crate::metrics::{
-    METRIC_MERGE_SCAN_ERROR_COUNT, METRIC_MERGE_SCAN_POLL_ELAPSED, METRIC_MERGE_SCAN_REGIONS,
+    METRIC_MERGE_SCAN_ERRORS_TOTAL, METRIC_MERGE_SCAN_POLL_ELAPSED, METRIC_MERGE_SCAN_REGIONS,
 };
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -185,7 +185,7 @@ impl MergeScanExec {
                     .do_get(request)
                     .await
                     .map_err(|e| {
-                        metrics::increment_counter!(METRIC_MERGE_SCAN_ERROR_COUNT);
+                        metrics::increment_counter!(METRIC_MERGE_SCAN_ERRORS_TOTAL);
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;

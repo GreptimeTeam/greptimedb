@@ -20,4 +20,4 @@ pub static METRIC_CREATE_PHYSICAL_ELAPSED: &str = "query.create_physicalplan_ela
 pub static METRIC_EXEC_PLAN_ELAPSED: &str = "query.execute_plan_elapsed";
 pub static METRIC_MERGE_SCAN_POLL_ELAPSED: &str = "query.merge_scan.poll_elapsed";
 pub static METRIC_MERGE_SCAN_REGIONS: &str = "query.merge_scan.regions";
-pub static METRIC_MERGE_SCAN_ERROR_COUNT: &str = "query.merge_scan.error_count";
+pub static METRIC_MERGE_SCAN_ERRORS_TOTAL: &str = "query.merge_scan.errors_total";
