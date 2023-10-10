@@ -328,7 +328,7 @@ impl RegionFlushTask {
         }
 
         if !file_metas.is_empty() {
-            counter!(FLUSH_BYTES_TOTAL, flushed_bytes as u64);
+            counter!(FLUSH_BYTES_TOTAL, flushed_bytes);
         }
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
