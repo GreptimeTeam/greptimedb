@@ -92,6 +92,8 @@ pub(crate) struct RegionWriteCtx {
     ///
     /// The i-th notify is for i-th mutation.
     notifiers: Vec<WriteNotify>,
+    /// The write operation is failed and we should not write to the mutable memtable.
+    failed: bool,
 
     // Metrics:
     /// Rows to put.
@@ -118,6 +120,7 @@ impl RegionWriteCtx {
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
             notifiers: Vec::new(),
+            failed: false,
             put_num: 0,
             delete_num: 0,
         }
@@ -168,6 +171,9 @@ impl RegionWriteCtx {
         for notify in &mut self.notifiers {
             notify.err = Some(err.clone());
         }
+
+        // Fail the whole write operation.
+        self.failed = true;
     }
 
     /// Updates next entry id.
@@ -178,6 +184,10 @@ impl RegionWriteCtx {
     /// Consumes mutations and writes them into mutable memtable.
     pub(crate) fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
+
+        if self.failed {
+            return;
+        }
 
         let mutable = &self.version.memtables.mutable;
         // Takes mutations from the wal entry.
