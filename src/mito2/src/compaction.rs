@@ -20,8 +20,9 @@ mod twcs;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, timer};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -32,6 +33,7 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
+use crate::metrics::{COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
 use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -47,6 +49,8 @@ pub struct CompactionRequest {
     /// Waiters of the compaction request.
     pub(crate) waiters: Vec<OutputTx>,
     pub(crate) file_purger: FilePurgerRef,
+    /// Start time of compaction task.
+    pub(crate) start_time: Instant,
 }
 
 impl CompactionRequest {
@@ -175,11 +179,14 @@ impl CompactionScheduler {
             "Pick compaction strategy {:?} for region: {}",
             picker, region_id
         );
+
+        let pick_timer = timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "pick")]);
         let Some(mut task) = picker.pick(request) else {
             // Nothing to compact, remove it from the region status map.
             self.region_status.remove(&region_id);
             return Ok(());
         };
+        drop(pick_timer);
 
         // Submit the compaction task.
         self.scheduler
@@ -188,10 +195,8 @@ impl CompactionScheduler {
             }))
             .map_err(|e| {
                 error!(e; "Failed to submit compaction request for region {}", region_id);
-
                 // If failed to submit the job, we need to remove the region from the scheduler.
                 self.region_status.remove(&region_id);
-
                 e
             })
     }
@@ -295,12 +300,14 @@ impl CompactionStatus {
         waiter: OptionOutputTx,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
+        let start_time = Instant::now();
         let mut req = CompactionRequest {
             current_version,
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
+            start_time,
         };
 
         if let Some(pending) = self.pending_compaction.take() {
