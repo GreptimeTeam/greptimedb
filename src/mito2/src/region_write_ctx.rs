@@ -15,7 +15,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, Rows, WalEntry};
+use api::v1::{Mutation, OpType, Rows, WalEntry};
 use common_query::Output;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -92,6 +92,14 @@ pub(crate) struct RegionWriteCtx {
     ///
     /// The i-th notify is for i-th mutation.
     notifiers: Vec<WriteNotify>,
+    /// The write operation is failed and we should not write to the mutable memtable.
+    failed: bool,
+
+    // Metrics:
+    /// Rows to put.
+    pub(crate) put_num: usize,
+    /// Rows to delete.
+    pub(crate) delete_num: usize,
 }
 
 impl RegionWriteCtx {
@@ -112,6 +120,9 @@ impl RegionWriteCtx {
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
             notifiers: Vec::new(),
+            failed: false,
+            put_num: 0,
+            delete_num: 0,
         }
     }
 
@@ -130,6 +141,13 @@ impl RegionWriteCtx {
 
         // Increase sequence number.
         self.next_sequence += num_rows as u64;
+
+        // Update metrics.
+        match OpType::from_i32(op_type) {
+            Some(OpType::Delete) => self.delete_num += num_rows,
+            Some(OpType::Put) => self.put_num += num_rows,
+            None => (),
+        }
     }
 
     /// Encode and add WAL entry to the writer.
@@ -153,6 +171,9 @@ impl RegionWriteCtx {
         for notify in &mut self.notifiers {
             notify.err = Some(err.clone());
         }
+
+        // Fail the whole write operation.
+        self.failed = true;
     }
 
     /// Updates next entry id.
@@ -163,6 +184,10 @@ impl RegionWriteCtx {
     /// Consumes mutations and writes them into mutable memtable.
     pub(crate) fn write_memtable(&mut self) {
         debug_assert_eq!(self.notifiers.len(), self.wal_entry.mutations.len());
+
+        if self.failed {
+            return;
+        }
 
         let mutable = &self.version.memtables.mutable;
         // Takes mutations from the wal entry.

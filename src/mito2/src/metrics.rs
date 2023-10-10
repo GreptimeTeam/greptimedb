@@ -44,4 +44,6 @@ pub const WRITE_REJECT_TOTAL: &str = "mito.write.reject_total";
 pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
 /// Stage label.
 pub const STAGE_LABEL: &str = "stage";
+/// Counter of rows to write.
+pub const WRITE_ROWS_TOTAL: &str = "mito.write.rows_total";
 // ------ End of write related metrics
