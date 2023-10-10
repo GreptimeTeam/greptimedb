@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use async_stream::stream;
@@ -39,8 +40,12 @@ use futures_util::StreamExt;
 use greptime_proto::v1::region::{QueryRequest, RegionRequestHeader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
+use tokio::time::Instant;
 
 use crate::error::ConvertSchemaSnafu;
+use crate::metrics::{
+    METRIC_MERGE_SCAN_ERRORS_TOTAL, METRIC_MERGE_SCAN_POLL_ELAPSED, METRIC_MERGE_SCAN_REGIONS,
+};
 use crate::region_query::RegionQueryHandlerRef;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -161,6 +166,7 @@ impl MergeScanExec {
         let trace_id = trace_id().unwrap_or_default();
 
         let stream = Box::pin(stream!({
+            metrics::histogram!(METRIC_MERGE_SCAN_REGIONS, regions.len() as f64);
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
@@ -178,12 +184,21 @@ impl MergeScanExec {
                 let mut stream = region_query_handler
                     .do_get(request)
                     .await
-                    .map_err(BoxedError::new)
+                    .map_err(|e| {
+                        metrics::increment_counter!(METRIC_MERGE_SCAN_ERRORS_TOTAL);
+                        BoxedError::new(e)
+                    })
                     .context(ExternalSnafu)?;
 
                 ready_timer.stop();
 
+                let mut poll_duration = Duration::new(0, 0);
+
+                let mut poll_timer = Instant::now();
                 while let Some(batch) = stream.next().await {
+                    let poll_elapsed = poll_timer.elapsed();
+                    poll_duration += poll_elapsed;
+
                     let batch = batch?;
                     // reconstruct batch using `self.schema`
                     // to remove metadata and correct column name
@@ -193,7 +208,10 @@ impl MergeScanExec {
                         first_consume_timer.stop();
                     }
                     yield Ok(batch);
+                    // reset poll timer
+                    poll_timer = Instant::now();
                 }
+                metrics::histogram!(METRIC_MERGE_SCAN_POLL_ELAPSED, poll_duration.as_secs_f64());
             }
         }));
 

@@ -7036,6 +7036,7 @@ dependencies = [
  "datatypes",
  "futures",
  "greptime-proto",
+ "metrics",
  "promql-parser",
  "prost",
  "query",
