@@ -14,6 +14,7 @@
 
 // metric stuffs, inspired by databend
 
+use std::fmt;
 use std::sync::{Arc, Once, RwLock};
 use std::time::{Duration, Instant};
 
@@ -63,11 +64,21 @@ pub fn try_handle() -> Option<PrometheusHandle> {
 pub struct Timer {
     start: Instant,
     histogram: Histogram,
+    observed: bool,
 }
 
 impl From<Histogram> for Timer {
     fn from(histogram: Histogram) -> Timer {
         Timer::from_histogram(histogram)
+    }
+}
+
+impl fmt::Debug for Timer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Timer")
+            .field("start", &self.start)
+            .field("observed", &self.observed)
+            .finish()
     }
 }
 
@@ -77,6 +88,7 @@ impl Timer {
         Self {
             start: Instant::now(),
             histogram,
+            observed: false,
         }
     }
 
@@ -85,6 +97,7 @@ impl Timer {
         Self {
             start: Instant::now(),
             histogram: register_histogram!(name),
+            observed: false,
         }
     }
 
@@ -93,6 +106,7 @@ impl Timer {
         Self {
             start: Instant::now(),
             histogram: register_histogram!(name, labels),
+            observed: false,
         }
     }
 
@@ -100,11 +114,18 @@ impl Timer {
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
+
+    /// Discards the timer result.
+    pub fn discard(mut self) {
+        self.observed = true;
+    }
 }
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        self.histogram.record(self.elapsed())
+        if !self.observed {
+            self.histogram.record(self.elapsed())
+        }
     }
 }
 

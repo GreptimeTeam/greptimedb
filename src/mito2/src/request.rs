@@ -25,6 +25,7 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_query::Output;
 use common_query::Output::AffectedRows;
+use common_telemetry::metric::Timer;
 use common_telemetry::tracing::log::info;
 use common_telemetry::warn;
 use datatypes::prelude::DataType;
@@ -592,9 +593,12 @@ pub(crate) struct FlushFinished {
     pub(crate) senders: Vec<OutputTx>,
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
+    /// Flush timer.
+    pub(crate) timer: Timer,
 }
 
 impl FlushFinished {
+    /// Marks the flush job as successful and observes the timer.
     pub(crate) fn on_success(self) {
         for sender in self.senders {
             sender.send(Ok(Output::AffectedRows(0)));
