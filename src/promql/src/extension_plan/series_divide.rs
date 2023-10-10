@@ -38,6 +38,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
+use crate::metrics::PROMQL_SERIES_COUNT;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SeriesDivide {
@@ -204,6 +205,7 @@ impl ExecutionPlan for SeriesDivideExec {
             schema,
             input,
             metric: baseline_metric,
+            num_series: 0,
         }))
     }
 
@@ -239,6 +241,7 @@ pub struct SeriesDivideStream {
     schema: SchemaRef,
     input: SendableRecordBatchStream,
     metric: BaselineMetrics,
+    num_series: usize,
 }
 
 impl RecordBatchStream for SeriesDivideStream {
@@ -259,6 +262,7 @@ impl Stream for SeriesDivideStream {
                         Some(Ok(batch)) => batch,
                         None => {
                             self.buffer = None;
+                            self.num_series += 1;
                             return Poll::Ready(Some(Ok(batch)));
                         }
                         error => return Poll::Ready(error),
@@ -271,12 +275,16 @@ impl Stream for SeriesDivideStream {
                     let result_batch = batch.slice(0, same_length);
                     let remaining_batch = batch.slice(same_length, batch.num_rows() - same_length);
                     self.buffer = Some(remaining_batch);
+                    self.num_series += 1;
                     return Poll::Ready(Some(Ok(result_batch)));
                 }
             } else {
                 let batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
                     Some(Ok(batch)) => batch,
-                    None => return Poll::Ready(None),
+                    None => {
+                        metrics::histogram!(PROMQL_SERIES_COUNT, self.num_series as f64);
+                        return Poll::Ready(None);
+                    }
                     error => return Poll::Ready(error),
                 };
                 self.buffer = Some(batch);

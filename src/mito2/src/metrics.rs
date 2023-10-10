@@ -45,6 +45,8 @@ pub const WRITE_STALL_TOTAL: &str = "mito.write.stall_total";
 pub const WRITE_REJECT_TOTAL: &str = "mito.write.reject_total";
 /// Elapsed time of each write stage.
 pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
+/// Counter of rows to write.
+pub const WRITE_ROWS_TOTAL: &str = "mito.write.rows_total";
 // ------ End of write related metrics
 
 // Compaction metrics
