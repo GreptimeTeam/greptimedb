@@ -12,4 +12,5 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// Counter for the number of series processed per query.
 pub static PROMQL_SERIES_COUNT: &str = "promql.series_count";
