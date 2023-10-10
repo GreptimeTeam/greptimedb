@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// Stage label.
+pub const STAGE_LABEL: &str = "stage";
+
 /// Global write buffer size in bytes.
 pub const WRITE_BUFFER_BYTES: &str = "mito.write_buffer_bytes";
 /// Type label.
@@ -42,8 +45,16 @@ pub const WRITE_STALL_TOTAL: &str = "mito.write.stall_total";
 pub const WRITE_REJECT_TOTAL: &str = "mito.write.reject_total";
 /// Elapsed time of each write stage.
 pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
-/// Stage label.
-pub const STAGE_LABEL: &str = "stage";
 /// Counter of rows to write.
 pub const WRITE_ROWS_TOTAL: &str = "mito.write.rows_total";
 // ------ End of write related metrics
+
+// Compaction metrics
+/// Timer of different stages in compaction.
+pub const COMPACTION_STAGE_ELAPSED: &str = "mito.compaction.stage_elapsed";
+/// Timer of whole compaction task.
+pub const COMPACTION_ELAPSED_TOTAL: &str = "mito.compaction.total_elapsed";
+/// Counter of all requested compaction task.
+pub const COMPACTION_REQUEST_COUNT: &str = "mito.compaction.requests_total";
+/// Counter of failed compaction task.
+pub const COMPACTION_FAILURE_COUNT: &str = "mito.compaction.failure_total";

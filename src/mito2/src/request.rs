@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::helper::{
     is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
@@ -29,6 +29,7 @@ use common_telemetry::metric::Timer;
 use common_telemetry::tracing::log::info;
 use common_telemetry::warn;
 use datatypes::prelude::DataType;
+use metrics::histogram;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -45,6 +46,7 @@ use crate::error::{
     InvalidRequestSnafu, Result,
 };
 use crate::memtable::MemtableId;
+use crate::metrics::COMPACTION_ELAPSED_TOTAL;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
 use crate::wal::EntryId;
@@ -646,10 +648,15 @@ pub(crate) struct CompactionFinished {
     pub(crate) file_purger: FilePurgerRef,
     /// Inferred Compaction time window.
     pub(crate) compaction_time_window: Option<Duration>,
+    /// Start time of compaction task.
+    pub(crate) start_time: Instant,
 }
 
 impl CompactionFinished {
     pub fn on_success(self) {
+        // only update compaction time on success
+        histogram!(COMPACTION_ELAPSED_TOTAL, self.start_time.elapsed());
+
         for sender in self.senders {
             sender.send(Ok(AffectedRows(0)));
         }

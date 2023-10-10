@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{error, info};
+use common_telemetry::{error, info, timer};
+use metrics::increment_counter;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+use crate::metrics::{COMPACTION_REQUEST_COUNT, COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
@@ -30,7 +32,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
-
+        increment_counter!(COMPACTION_REQUEST_COUNT);
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
             &region.version_control,
@@ -57,27 +59,33 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         };
 
-        // Write region edit to manifest.
-        let edit = RegionEdit {
-            files_to_add: std::mem::take(&mut request.compaction_outputs),
-            files_to_remove: std::mem::take(&mut request.compacted_files),
-            compaction_time_window: request.compaction_time_window,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-        };
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
-        if let Err(e) = region.manifest_manager.update(action_list).await {
-            error!(e; "Failed to update manifest, region: {}", region_id);
-            request.on_failure(e);
-            return;
+        {
+            let manifest_timer =
+                timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "write_manifest")]);
+            // Write region edit to manifest.
+            let edit = RegionEdit {
+                files_to_add: std::mem::take(&mut request.compaction_outputs),
+                files_to_remove: std::mem::take(&mut request.compacted_files),
+                compaction_time_window: request.compaction_time_window,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+            };
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+            if let Err(e) = region.manifest_manager.update(action_list).await {
+                error!(e; "Failed to update manifest, region: {}", region_id);
+                manifest_timer.discard();
+                request.on_failure(e);
+                return;
+            }
+
+            // Apply edit to region's version.
+            region
+                .version_control
+                .apply_edit(edit, &[], region.file_purger.clone());
         }
-
-        // Apply edit to region's version.
-        region
-            .version_control
-            .apply_edit(edit, &[], region.file_purger.clone());
+        // compaction finished.
         request.on_success();
-
         // Schedule next compaction if necessary.
         self.compaction_scheduler.on_compaction_finished(region_id);
     }
