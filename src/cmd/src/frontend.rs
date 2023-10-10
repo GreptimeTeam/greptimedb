@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use clap::Parser;
 use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
@@ -85,6 +87,8 @@ pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
+    http_timeout: Option<u64>,
+    #[clap(long)]
     grpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
@@ -136,6 +140,10 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr = addr.clone()
+        }
+
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout)
         }
 
         if let Some(disable_dashboard) = self.disable_dashboard {
