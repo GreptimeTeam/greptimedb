@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use common_telemetry::{error, info, timer};
+use metrics::increment_counter;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
+use crate::metrics::{COMPACTION_REQUEST_COUNT, COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
@@ -31,7 +32,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
-
+        increment_counter!(COMPACTION_REQUEST_COUNT);
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
             &region.version_control,
@@ -59,7 +60,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         {
-            let _manifest_timer =
+            let manifest_timer =
                 timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "write_manifest")]);
             // Write region edit to manifest.
             let edit = RegionEdit {
@@ -73,6 +74,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
             if let Err(e) = region.manifest_manager.update(action_list).await {
                 error!(e; "Failed to update manifest, region: {}", region_id);
+                manifest_timer.discard();
                 request.on_failure(e);
                 return;
             }

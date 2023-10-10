@@ -52,5 +52,7 @@ pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
 pub const COMPACTION_STAGE_ELAPSED: &str = "mito.compaction.stage_elapsed";
 /// Timer of whole compaction task.
 pub const COMPACTION_ELAPSED_TOTAL: &str = "mito.compaction.total_elapsed";
+/// Counter of all requested compaction task.
+pub const COMPACTION_REQUEST_COUNT: &str = "mito.compaction.requests_total";
 /// Counter of failed compaction task.
 pub const COMPACTION_FAILURE_COUNT: &str = "mito.compaction.failure_total";
