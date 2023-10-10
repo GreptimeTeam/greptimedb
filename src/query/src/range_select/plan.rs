@@ -258,20 +258,24 @@ impl RangeSelect {
         // that need project is identical to range plan schema.
         // 1. all exprs in project must belong to range schema
         // 2. range schema and project exprs must have same size
-        let schema_project = projection_expr
-            .iter()
-            .map(|project_expr| {
-                if let Expr::Column(column) = project_expr {
-                    schema_before_project
-                        .index_of_column_by_name(column.relation.as_ref(), &column.name)
-                        .unwrap_or(None)
-                        .ok_or(())
-                } else {
-                    Err(())
-                }
-            })
-            .collect::<std::result::Result<Vec<usize>, ()>>()
-            .ok();
+        let schema_project = if projection_expr.len() == schema_before_project.fields().len() {
+            projection_expr
+                .iter()
+                .map(|project_expr| {
+                    if let Expr::Column(column) = project_expr {
+                        schema_before_project
+                            .index_of_column_by_name(column.relation.as_ref(), &column.name)
+                            .unwrap_or(None)
+                            .ok_or(())
+                    } else {
+                        Err(())
+                    }
+                })
+                .collect::<std::result::Result<Vec<usize>, ()>>()
+                .ok()
+        } else {
+            None
+        };
         let schema = if let Some(project) = &schema_project {
             let project_field = project
                 .iter()
