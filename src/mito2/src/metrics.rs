@@ -34,3 +34,14 @@ pub const FLUSH_ELAPSED: &str = "mito.flush.elapsed";
 /// Histogram of flushed bytes.
 pub const FLUSH_BYTES_TOTAL: &str = "mito.flush.bytes_total";
 // ------ End of flush related metrics
+
+// ------ Write related metrics
+/// Counter of stalled write requests.
+pub const WRITE_STALL_TOTAL: &str = "mito.write.stall_total";
+/// Counter of rejected write requests.
+pub const WRITE_REJECT_TOTAL: &str = "mito.write.reject_total";
+/// Elapsed time of each write stage.
+pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
+/// Stage label.
+pub const STAGE_LABEL: &str = "stage";
+// ------ End of write related metrics
