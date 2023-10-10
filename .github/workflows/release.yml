@@ -63,7 +63,7 @@ on:
         description: Build macos artifacts
         required: false
         default: false
-      release_artifacts:
+      publish_github_release:
         type: boolean
         description: Create GitHub release and upload artifacts
         required: false
@@ -287,9 +287,9 @@ jobs:
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
 
-  release-artifacts:
+  publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.release_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -303,8 +303,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Release artifacts
-        uses: ./.github/actions/release-artifacts
+      - name: Publish GitHub release
+        uses: ./.github/actions/publish-github-release
         with:
           version: ${{ needs.allocate-runners.outputs.version }}
 
