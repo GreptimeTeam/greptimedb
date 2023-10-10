@@ -114,3 +114,19 @@ runs:
         upload-to-s3: ${{ inputs.upload-to-s3 }}
         upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
         working-dir: ${{ inputs.working-dir }}
+
+    - name: Build greptime on android base image
+      uses: ./.github/actions/build-greptime-binary
+      if: ${{ inputs.arch == 'amd64' && inputs.dev-mode == 'false' }} # Only build android base image on amd64.
+      with:
+        base-image: android
+        artifacts-dir: greptime-android-arm64-${{ inputs.version }}
+        version: ${{ inputs.version }}
+        release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+        upload-to-s3: ${{ inputs.upload-to-s3 }}
+        upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
+        working-dir: ${{ inputs.working-dir }}
+        build-android-artifacts: true

@@ -67,7 +67,6 @@ runs:
       run:
         make dev-builder \
         BASE_IMAGE=android \
-        BUILDX_MULTI_PLATFORM_BUILD=true \
         IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
         IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
         IMAGE_TAG=${{ inputs.version }}
