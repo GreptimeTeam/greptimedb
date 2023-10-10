@@ -135,8 +135,7 @@ impl SeqScan {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
         for mem in &self.memtables {
-            // TODO(hl): pass filters once memtable supports filter pushdown.
-            let iter = mem.iter(Some(self.mapper.column_ids()), &[]);
+            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
             builder.push_batch_iter(iter);
         }
         for file in &self.files {

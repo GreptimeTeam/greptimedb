@@ -5500,6 +5500,7 @@ dependencies = [
  "anymap",
  "api",
  "aquamarine",
+ "arc-swap",
  "async-channel",
  "async-compat",
  "async-stream",

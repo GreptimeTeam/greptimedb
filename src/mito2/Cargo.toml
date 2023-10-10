@@ -12,6 +12,7 @@ test = ["common-test-util"]
 anymap = "1.0.0-beta.2"
 api.workspace = true
 aquamarine.workspace = true
+arc-swap = "1.6"
 async-channel = "1.9"
 async-compat = "0.2"
 async-stream.workspace = true

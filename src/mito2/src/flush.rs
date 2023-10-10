@@ -307,7 +307,7 @@ impl RegionFlushTask {
             }
 
             let file_id = FileId::random();
-            let iter = mem.iter(None, &[]);
+            let iter = mem.iter(None, None);
             let source = Source::Iter(iter);
             let mut writer = self
                 .access_layer
