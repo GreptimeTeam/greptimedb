@@ -9,6 +9,7 @@ default = []
 test = ["common-test-util"]
 
 [dependencies]
+arc-swap = "1.6"
 anymap = "1.0.0-beta.2"
 api.workspace = true
 aquamarine.workspace = true

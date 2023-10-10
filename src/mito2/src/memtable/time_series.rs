@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
+use arc_swap::ArcSwapOption;
 use common_telemetry::debug;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
@@ -259,7 +260,7 @@ impl Memtable for TimeSeriesMemtable {
 
 struct PrimaryKey {
     bytes: Vec<u8>,
-    record_batch: RwLock<Option<Arc<RecordBatch>>>,
+    record_batch: ArcSwapOption<RecordBatch>,
 }
 
 impl Clone for PrimaryKey {
@@ -275,7 +276,7 @@ impl PrimaryKey {
     fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
-            record_batch: RwLock::new(None),
+            record_batch: ArcSwapOption::empty(),
         }
     }
 
@@ -283,17 +284,13 @@ impl PrimaryKey {
         &self,
         mut f: F,
     ) -> Result<Arc<RecordBatch>> {
-        if let Some(rb) = self.record_batch.read().unwrap().as_ref() {
-            return Ok(rb.clone());
+        if let Some(rb) = self.record_batch.load_full() {
+            return Ok(rb);
         }
 
         let batch = Arc::new(f()?);
-        Ok(self
-            .record_batch
-            .write()
-            .unwrap()
-            .get_or_insert(batch)
-            .clone())
+        self.record_batch.store(Some(batch.clone()));
+        Ok(batch)
     }
 }
 
