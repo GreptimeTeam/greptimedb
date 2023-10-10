@@ -30,7 +30,6 @@ use crate::storage::{ColumnId, RegionId, ScanRequest};
 
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
-    // TODO: rename to InsertRequest
     Put(RegionPutRequest),
     Delete(RegionDeleteRequest),
     Create(RegionCreateRequest),

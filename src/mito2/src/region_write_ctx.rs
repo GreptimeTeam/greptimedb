@@ -15,7 +15,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use api::v1::{Mutation, Rows, WalEntry};
+use api::v1::{Mutation, OpType, Rows, WalEntry};
 use common_query::Output;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -92,6 +92,12 @@ pub(crate) struct RegionWriteCtx {
     ///
     /// The i-th notify is for i-th mutation.
     notifiers: Vec<WriteNotify>,
+
+    // Metrics:
+    /// Rows to put.
+    put_num: usize,
+    /// Rows to delete.
+    delete_num: usize,
 }
 
 impl RegionWriteCtx {
@@ -112,6 +118,8 @@ impl RegionWriteCtx {
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
             notifiers: Vec::new(),
+            put_num: 0,
+            delete_num: 0,
         }
     }
 
@@ -130,6 +138,13 @@ impl RegionWriteCtx {
 
         // Increase sequence number.
         self.next_sequence += num_rows as u64;
+
+        // Update metrics.
+        match OpType::from_i32(op_type) {
+            Some(OpType::Delete) => self.delete_num += num_rows,
+            Some(OpType::Put) => self.put_num += num_rows,
+            None => (),
+        }
     }
 
     /// Encode and add WAL entry to the writer.
