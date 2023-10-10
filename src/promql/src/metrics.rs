@@ -12,12 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(option_get_or_insert_default)]
-#![feature(let_chains)]
-
-pub mod error;
-pub mod extension_plan;
-pub mod functions;
-mod metrics;
-pub mod planner;
-pub mod range_array;
+pub static PROMQL_SERIES_COUNT: &str = "promql.series.count";
