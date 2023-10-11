@@ -48,6 +48,12 @@ SELECT ts, host, min(floor(CAST(val as Float64))) RANGE '5s' FROM host ALIGN '5s
 
 SELECT ts, host, floor(min(val) RANGE '5s') FROM host ALIGN '5s' ORDER BY host, ts;
 
+-- Test by calculate
+
+SELECT ts, length(host), max(val) RANGE '5s' FROM host ALIGN '20s' BY (length(host)) ORDER BY ts;
+
+SELECT ts, CAST(length(host) as INT64) + 2, max(val) RANGE '5s' FROM host ALIGN '20s' BY (CAST(length(host) as INT64) + 2) ORDER BY ts;
+
 -- Test complex range expr calculate
 
 SELECT ts, host, (min(val) + max(val)) RANGE '20s' + 1.0 FROM host ALIGN '10s' ORDER BY host, ts;
