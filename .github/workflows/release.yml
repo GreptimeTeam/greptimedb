@@ -73,11 +73,6 @@ on:
         description: Build and push images to DockerHub and ACR
         required: false
         default: false
-      release_dev_builder_image:
-        type: boolean
-        description: Release dev-builder image
-        required: false
-        default: false
 
 # Use env variables to control all the release process.
 env:
@@ -324,25 +319,6 @@ jobs:
         uses: ./.github/actions/release-artifacts
         with:
           version: ${{ needs.allocate-runners.outputs.version }}
-
-  release-dev-builder-image:
-    name: Release dev builder image
-    if: ${{ inputs.release_dev_builder_image }} # Only manually trigger this job.
-    runs-on: ubuntu-latest-16-cores
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Build and push dev builder image
-        uses: ./.github/actions/build-dev-builder-image
-        with:
-          dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
-          acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
 
   ### Stop runners ###
   # It's very necessary to split the job of releasing runners into 'stop-linux-amd64-runner' and 'stop-linux-arm64-runner'.
