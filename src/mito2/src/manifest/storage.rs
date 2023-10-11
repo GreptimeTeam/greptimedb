@@ -424,6 +424,32 @@ impl ManifestObjectStore {
     pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         self.object_store.read(path).await.context(OpenDalSnafu)
     }
+
+    /// Get the total size(Byte) of all manifest files.
+    pub async fn get_total_manifest_size(&self) -> Result<u64> {
+        let entries = self
+            .get_paths(|entry| {
+                let file_name = entry.name();
+                if is_delta_file(file_name) || is_checkpoint_file(file_name) {
+                    return Some(entry);
+                }
+                None
+            })
+            .await?;
+        let mut size = 0;
+        for entry in entries {
+            let bytes = self
+                .object_store
+                .read(entry.path())
+                .await
+                .context(OpenDalSnafu)?;
+            size += bytes.len() as u64;
+        }
+
+        // last checkpoint file only contains size ,version and checksum,
+        // which is very tiny, maybe we don't need add it.
+        Ok(size)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -599,5 +625,30 @@ mod tests {
         assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
         let mut it = log_store.scan(0, 10).await.unwrap();
         assert!(it.next_log().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_manifest_files_size() {
+        let mut log_store = new_test_manifest_store();
+        // write manifest files
+        log_store.compress_type = CompressionType::Uncompressed;
+        for v in 0..5 {
+            log_store
+                .save(v, format!("hello, {v}").as_bytes())
+                .await
+                .unwrap();
+        }
+        log_store
+            .save_checkpoint(5, "checkpoint_uncompressed".as_bytes())
+            .await
+            .unwrap();
+        // get manifest files size
+        assert_eq!(log_store.get_total_manifest_size().await.unwrap(), 63);
+
+        // delete some manifest files
+        assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
+
+        // get manifest files size after delete
+        assert_eq!(log_store.get_total_manifest_size().await.unwrap(), 39);
     }
 }
