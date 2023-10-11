@@ -118,7 +118,7 @@ type = "File"
 # Cache configuration for object storage such as 'S3' etc.
 # cache_path = "/path/local_cache"
 # The local file cache capacity in bytes.
-# cache_capacity = "256Mib"
+# cache_capacity = "256MB"
 
 # Compaction options.
 [storage.compaction]
