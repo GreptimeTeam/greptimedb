@@ -59,11 +59,6 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ inputs.release_dev_builder_images_cn }}
     steps:
-      - name: Install skopeo
-        shell: bash
-        run: |
-          sudo apt update && sudo apt install -y skopeo
-
       - name: Push dev-builder-ubuntu image
         shell: bash
         if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.disable_building_images }}
@@ -71,7 +66,7 @@ jobs:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
         run: |
-          skopeo copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }} \
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }} \
             --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }}
 
@@ -82,7 +77,7 @@ jobs:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
         run: |
-          skopeo copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }} \
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }} \
             --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }}
 
@@ -93,6 +88,6 @@ jobs:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
         run: |
-          skopeo copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }} \
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }} \
             --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
             docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }}
