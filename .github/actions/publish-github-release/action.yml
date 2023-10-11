@@ -1,5 +1,5 @@
-name: Release artifacts
-description: Release artifacts
+name: Publish GitHub release
+description: Publish GitHub release
 inputs:
   version:
     description: Version to release

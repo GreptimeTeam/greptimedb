@@ -19,25 +19,9 @@ inputs:
   disable-run-tests:
     description: Disable running integration tests
     required: true
-  release-to-s3-bucket:
-    description: S3 bucket to store released artifacts
-    required: true
   artifacts-dir:
     description: Directory to store artifacts
     required: true
-  aws-access-key-id:
-    description: AWS access key id
-    required: true
-  aws-secret-access-key:
-    description: AWS secret access key
-    required: true
-  aws-region:
-    description: AWS region
-    required: true
-  upload-to-s3:
-    description: Upload to S3
-    required: false
-    default: 'true'
 runs:
   using: composite
   steps:
@@ -103,8 +87,3 @@ runs:
         artifacts-dir: ${{ inputs.artifacts-dir }}
         target-file: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
         version: ${{ inputs.version }}
-        release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
-        aws-access-key-id: ${{ inputs.aws-access-key-id }}
-        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
-        aws-region: ${{ inputs.aws-region }}
-        upload-to-s3: ${{ inputs.upload-to-s3 }}
