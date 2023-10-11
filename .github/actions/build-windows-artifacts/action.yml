@@ -1,0 +1,80 @@
+name: Build Windows artifacts
+description: Build Windows artifacts
+inputs:
+  arch:
+    description: Architecture to build
+    required: true
+  rust-toolchain:
+    description: Rust toolchain to use
+    required: true
+  cargo-profile:
+    description: Cargo profile to build
+    required: true
+  features:
+    description: Cargo features to build
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  disable-run-tests:
+    description: Disable running integration tests
+    required: true
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: arduino/setup-protoc@v1
+
+    - name: Install rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.rust-toolchain }}
+        targets: ${{ inputs.arch }}
+        components: llvm-tools-preview
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Install Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install PyArrow Package
+      shell: pwsh
+      run: pip install pyarrow
+
+    - name: Install WSL distribution
+      uses: Vampire/setup-wsl@v2
+      with:
+        distribution: Ubuntu-22.04
+
+    - name: Install latest nextest release # For integration tests.
+      if: ${{ inputs.disable-run-tests == 'false' }}
+      uses: taiki-e/install-action@nextest
+
+    - name: Run integration tests
+      if: ${{ inputs.disable-run-tests == 'false' }}
+      shell: pwsh
+      run: make test sqlness-test
+
+    - name: Upload sqlness logs
+      if: ${{ failure() }} # Only upload logs when the integration tests failed.
+      uses: actions/upload-artifact@v3
+      with:
+        name: sqlness-logs
+        path: ${{ runner.temp }}/greptime-*.log
+        retention-days: 3
+
+    - name: Build greptime binary
+      shell: pwsh
+      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }}
+
+    - name: Upload artifacts
+      uses: ./.github/actions/upload-artifacts
+      with:
+        artifacts-dir: ${{ inputs.artifacts-dir }}
+        target-file: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime
+        version: ${{ inputs.version }}

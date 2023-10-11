@@ -63,6 +63,11 @@ on:
         description: Build macos artifacts
         required: false
         default: false
+      build_windows_artifacts:
+        type: boolean
+        description: Build Windows artifacts
+        required: false
+        default: false
       publish_github_release:
         type: boolean
         description: Create GitHub release and upload artifacts
@@ -97,6 +102,7 @@ jobs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
       macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
+      windows-runner: windows-latest-8-cores
 
       # The following EC2 resource id will be used for resource releasing.
       linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}
@@ -225,6 +231,42 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/actions/build-macos-artifacts
+        with:
+          arch: ${{ matrix.arch }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          features: ${{ matrix.features }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
+
+  build-windows-artifacts:
+    name: Build Windows artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ${{ needs.allocate-runners.outputs.windows-runner }}
+            arch: x86_64-pc-windows-msvc
+            features: servers/dashboard
+            artifacts-dir-prefix: greptime-windows-x86_64
+          - os: ${{ needs.allocate-runners.outputs.windows-runner }}
+            arch: x86_64-pc-windows-msvc
+            features: pyo3_backend,servers/dashboard
+            artifacts-dir-prefix: greptime-windows-x86_64-pyo3
+    runs-on: ${{ matrix.os }}
+    needs: [
+      allocate-runners,
+    ]
+    if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/build-windows-artifacts
         with:
           arch: ${{ matrix.arch }}
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
