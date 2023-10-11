@@ -1,0 +1,30 @@
+name: Release dev-builder images
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually.
+    inputs:
+      release_dev_builder_images:
+        type: boolean
+        description: Release dev-builder images
+        required: false
+        default: false
+
+jobs:
+  release-dev-builder-images:
+    name: Release dev builder images
+    if: ${{ inputs.release_dev_builder_images }} # Only manually trigger this job.
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Build and push dev builder images
+        uses: ./.github/actions/build-dev-builder-image
+        with:
+          dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
