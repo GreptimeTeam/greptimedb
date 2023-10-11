@@ -254,28 +254,22 @@ impl RangeSelect {
             DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
                 .context(DataFusionSnafu)?,
         );
-        // If the result of the project plan happens to be the schema of the range plan, no project plan is required
-        // that need project is identical to range plan schema.
-        // 1. all exprs in project must belong to range schema
-        // 2. range schema and project exprs must have same size
-        let schema_project = if projection_expr.len() == schema_before_project.fields().len() {
-            projection_expr
-                .iter()
-                .map(|project_expr| {
-                    if let Expr::Column(column) = project_expr {
-                        schema_before_project
-                            .index_of_column_by_name(column.relation.as_ref(), &column.name)
-                            .unwrap_or(None)
-                            .ok_or(())
-                    } else {
-                        Err(())
-                    }
-                })
-                .collect::<std::result::Result<Vec<usize>, ()>>()
-                .ok()
-        } else {
-            None
-        };
+        // If the results of project plan can be obtained directly from range plan without any additional calculations, no project plan is required.
+        // We can simply project the final output of the range plan to produce the final result.
+        let schema_project = projection_expr
+            .iter()
+            .map(|project_expr| {
+                if let Expr::Column(column) = project_expr {
+                    schema_before_project
+                        .index_of_column_by_name(column.relation.as_ref(), &column.name)
+                        .unwrap_or(None)
+                        .ok_or(())
+                } else {
+                    Err(())
+                }
+            })
+            .collect::<std::result::Result<Vec<usize>, ()>>()
+            .ok();
         let schema = if let Some(project) = &schema_project {
             let project_field = project
                 .iter()
