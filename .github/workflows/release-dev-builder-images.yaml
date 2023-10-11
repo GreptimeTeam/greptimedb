@@ -27,6 +27,11 @@ on:
         description: Release dev-builder images to CN region
         required: false
         default: false
+      disable_building_images:
+        type: boolean
+        description: Disable building images
+        required: false
+        default: false
 
 jobs:
   release-dev-builder-images:
@@ -61,7 +66,7 @@ jobs:
 
       - name: Push dev-builder-ubuntu image
         shell: bash
-        if: ${{ inputs.release_dev_builder_ubuntu_image }}
+        if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.disable_building_images }}
         env:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
@@ -72,7 +77,7 @@ jobs:
 
       - name: Push dev-builder-centos image
         shell: bash
-        if: ${{ inputs.release_dev_builder_centos_image }}
+        if: ${{ inputs.release_dev_builder_centos_image || inputs.disable_building_images }}
         env:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
@@ -83,7 +88,7 @@ jobs:
 
       - name: Push dev-builder-android image
         shell: bash
-        if: ${{ inputs.release_dev_builder_android_image }}
+        if: ${{ inputs.release_dev_builder_android_image || inputs.disable_building_images }}
         env:
           DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
           DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
