@@ -63,38 +63,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Install skopeo
-      shell: bash
-      run: |
-        sudo apt update && sudo apt install -y skopeo
-
-    - name: Push images from Dockerhub to ACR
-      shell: bash
-      run: |
-        skopeo copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-          --dest-creds "${{ inputs.image-registry-username }}":"${{ inputs.image-registry-password }}" \
-          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}
-        
-        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
-          skopeo copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-            --dest-creds "${{ inputs.image-registry-username }}":"${{ inputs.image-registry-password }}" \
-            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:${{ inputs.version }}
-        fi
-
-    - name: Push latest images from Dockerhub to ACR
-      shell: bash
-      if: ${{ inputs.push-latest-tag == 'true' }}
-      run: |
-        skopeo copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-          --dest-creds "${{ inputs.image-registry-username }}":"${{ inputs.image-registry-password }}" \
-          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:latest
-
-        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
-          skopeo copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-            --dest-creds "${{ inputs.image-registry-username }}":"${{ inputs.image-registry-password }}" \
-            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:latest
-        fi
-
     - name: Download artifacts
       uses: actions/download-artifact@v3
       with:
@@ -136,3 +104,36 @@ runs:
         command: |
           echo "${{ inputs.version }}" > ${{ inputs.artifacts-dir }}/latest-version.txt && \
           aws cp ${{ inputs.artifacts-dir }}/latest-version.txt s3://${{ inputs.aws-cn-s3-bucket }}/releases/greptimedb/latest-version.txt
+
+    - name: Push images from Dockerhub to ACR
+      shell: bash
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+      run: |
+        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}
+        
+        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:${{ inputs.version }}
+        fi
+
+    - name: Push latest images from Dockerhub to ACR
+      shell: bash
+      if: ${{ inputs.push-latest-tag == 'true' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+      run: |
+        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:latest
+
+        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:latest
+        fi
