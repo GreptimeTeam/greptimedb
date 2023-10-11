@@ -104,11 +104,11 @@ Or if you built from docker:
 docker run -p 4002:4002 -v "$(pwd):/tmp/greptimedb" greptime/greptimedb standalone start
 ```
 
-Please see [the online document site](https://docs.greptime.com/getting-started/overview#install-greptimedb) for more installation options and [operations info](https://docs.greptime.com/user-guide/operations/overview).
+Please see the online document site for more installation options and [operations info](https://docs.greptime.com/user-guide/operations/overview).
 
 ### Get started
 
-Read the [complete getting started guide](https://docs.greptime.com/getting-started/overview#connect) on our [official document site](https://docs.greptime.com/).
+Read the [complete getting started guide](https://docs.greptime.com/getting-started/try-out-greptimedb) on our [official document site](https://docs.greptime.com/).
 
 To write and query data, GreptimeDB is compatible with multiple [protocols and clients](https://docs.greptime.com/user-guide/clients/overview).
 
