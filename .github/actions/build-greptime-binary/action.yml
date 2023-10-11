@@ -36,6 +36,10 @@ inputs:
     description: Upload the latest artifacts to S3
     required: false
     default: 'true'
+  build-android-artifacts:
+    description: Build android artifacts
+    required: false
+    default: 'false'
   working-dir:
     description: Working directory to build the artifacts
     required: false
@@ -45,6 +49,7 @@ runs:
   steps:
     - name: Build greptime binary
       shell: bash
+      if: ${{ inputs.build-android-artifacts == 'false' }}
       run: |
         cd ${{ inputs.working-dir }} && \
         make build-by-dev-builder \
@@ -54,9 +59,32 @@ runs:
 
     - name: Upload artifacts
       uses: ./.github/actions/upload-artifacts
+      if: ${{ inputs.build-android-artifacts == 'false' }}
       with:
         artifacts-dir: ${{ inputs.artifacts-dir }}
         target-file: ./target/${{ inputs.cargo-profile }}/greptime
+        version: ${{ inputs.version }}
+        release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+        upload-to-s3: ${{ inputs.upload-to-s3 }}
+        upload-latest-artifacts: ${{ inputs.upload-latest-artifacts }}
+        working-dir: ${{ inputs.working-dir }}
+
+    # TODO(zyy17): We can remove build-android-artifacts flag in the future.
+    - name: Build greptime binary
+      shell: bash
+      if: ${{ inputs.build-android-artifacts == 'true' }}
+      run: |
+        cd ${{ inputs.working-dir }} && make strip-android-bin
+
+    - name: Upload android artifacts
+      uses: ./.github/actions/upload-artifacts
+      if: ${{ inputs.build-android-artifacts == 'true' }}
+      with:
+        artifacts-dir: ${{ inputs.artifacts-dir }}
+        target-file: ./target/aarch64-linux-android/release/greptime
         version: ${{ inputs.version }}
         release-to-s3-bucket: ${{ inputs.release-to-s3-bucket }}
         aws-access-key-id: ${{ inputs.aws-access-key-id }}

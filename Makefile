@@ -94,7 +94,7 @@ build-android-bin: ## Build greptime binary for android.
 	CARGO_BUILD_EXTRA_OPTS="--bin greptime --no-default-features"
 
 .PHONY: strip-android-bin
-strip-android-bin: ## Strip greptime binary for android.
+strip-android-bin: build-android-bin ## Strip greptime binary for android.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
