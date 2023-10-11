@@ -20,6 +20,10 @@ inputs:
     description: Working directory to build the artifacts
     required: false
     default: .
+  build-android-artifacts:
+    description: Build android artifacts
+    required: false
+    default: 'false'
 runs:
   using: composite
   steps:
