@@ -393,6 +393,18 @@ pub enum Error {
     #[snafu(display("Missing required parameter, param: {:?}", param))]
     MissingRequiredParameter { param: String },
 
+    #[snafu(display("Failed to start procedure manager"))]
+    StartProcedureManager {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
+    #[snafu(display("Failed to stop procedure manager"))]
+    StopProcedureManager {
+        location: Location,
+        source: common_procedure::Error,
+    },
+
     #[snafu(display("Failed to recover procedure"))]
     RecoverProcedure {
         location: Location,
@@ -622,6 +634,8 @@ impl ErrorExt for Error {
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }
+            Error::StartProcedureManager { source, .. }
+            | Error::StopProcedureManager { source, .. } => source.status_code(),
 
             Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
                 source.status_code()

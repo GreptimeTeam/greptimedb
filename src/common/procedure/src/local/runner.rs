@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::logging;
 use tokio::time;
 
-use crate::error::{ProcedurePanicSnafu, Result};
+use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
 use crate::ProcedureState::Retrying;
@@ -104,6 +105,7 @@ impl Drop for ProcedureGuard {
 
 // TODO(yingwen): Support cancellation.
 pub(crate) struct Runner {
+    pub(crate) running: Arc<AtomicBool>,
     pub(crate) meta: ProcedureMetaRef,
     pub(crate) procedure: BoxedProcedure,
     pub(crate) manager_ctx: Arc<ManagerContext>,
@@ -114,6 +116,11 @@ pub(crate) struct Runner {
 }
 
 impl Runner {
+    /// Return `ProcedureManager` is running.
+    pub(crate) fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
     /// Run the procedure.
     pub(crate) async fn run(mut self) {
         // Ensure we can update the procedure state.
@@ -146,6 +153,11 @@ impl Runner {
 
         // Release locks and notify parent procedure.
         guard.finish();
+
+        // If `ProcedureManager` is stopped, it stops the current task immediately without deleting the procedure.
+        if !self.running() {
+            return;
+        }
 
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
@@ -186,6 +198,13 @@ impl Runner {
         let mut retry = self.exponential_builder.build();
         let mut retry_times = 0;
         loop {
+            // Don't store state if `ProcedureManager` is stopped.
+            if !self.running() {
+                self.meta.set_state(ProcedureState::Failed {
+                    error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                });
+                return;
+            }
             match self.execute_once(ctx).await {
                 ExecResult::Done | ExecResult::Failed => return,
                 ExecResult::Continue => (),
@@ -238,6 +257,14 @@ impl Runner {
                     status.need_persist(),
                 );
 
+                // Don't store state if `ProcedureManager` is stopped.
+                if !self.running() {
+                    self.meta.set_state(ProcedureState::Failed {
+                        error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                    });
+                    return ExecResult::Failed;
+                }
+
                 if status.need_persist() {
                     if let Err(err) = self.persist_procedure().await {
                         self.meta.set_state(ProcedureState::retrying(Arc::new(err)));
@@ -277,6 +304,14 @@ impl Runner {
                     return ExecResult::RetryLater;
                 }
 
+                // Don't store state if `ProcedureManager` is stopped.
+                if !self.running() {
+                    self.meta.set_state(ProcedureState::Failed {
+                        error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                    });
+                    return ExecResult::Failed;
+                }
+
                 // Write rollback key so we can skip this procedure while recovering procedures.
                 self.rollback(Arc::new(e)).await
             }
@@ -308,6 +343,7 @@ impl Runner {
             procedure.lock_key(),
         ));
         let runner = Runner {
+            running: self.running.clone(),
             meta: meta.clone(),
             procedure,
             manager_ctx: self.manager_ctx.clone(),
@@ -474,6 +510,7 @@ mod tests {
         store: Arc<ProcedureStore>,
     ) -> Runner {
         Runner {
+            running: Arc::new(AtomicBool::new(true)),
             meta,
             procedure,
             manager_ctx: Arc::new(ManagerContext::new()),
@@ -767,6 +804,69 @@ mod tests {
         for child_id in children_ids {
             assert!(manager_ctx.state(child_id).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn test_running_is_stopped() {
+        let exec_fn = move |_| async move { Ok(Status::Executing { persist: true }) }.boxed();
+        let normal = ProcedureAdapter {
+            data: "normal".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = create_temp_dir("test_running_is_stopped");
+        let meta = normal.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_continue(), "{res:?}");
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.step"],
+        )
+        .await;
+
+        runner.running.store(false, Ordering::Relaxed);
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_failed());
+        // Shouldn't write any files
+        check_files(
+            &object_store,
+            &procedure_store,
+            ctx.procedure_id,
+            &["0000000000.step"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_running_is_stopped_on_error() {
+        let exec_fn =
+            |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
+        let normal = ProcedureAdapter {
+            data: "fail".to_string(),
+            lock_key: LockKey::single("catalog.schema.table"),
+            exec_fn,
+        };
+
+        let dir = create_temp_dir("test_running_is_stopped_on_error");
+        let meta = normal.new_meta(ROOT_ID);
+        let ctx = context_without_provider(meta.id);
+        let object_store = test_util::new_object_store(&dir);
+        let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
+        let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
+        runner.running.store(false, Ordering::Relaxed);
+
+        let res = runner.execute_once(&ctx).await;
+        assert!(res.is_failed(), "{res:?}");
+        // Shouldn't write any files
+        check_files(&object_store, &procedure_store, ctx.procedure_id, &[]).await;
     }
 
     #[tokio::test]

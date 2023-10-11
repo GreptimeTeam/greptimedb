@@ -59,6 +59,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
 
     let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
     let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+    procedure_manager.set_running();
 
     let in_memory = Arc::new(MemStore::new());
     let meta_peer_client = MetaPeerClientBuilder::default()

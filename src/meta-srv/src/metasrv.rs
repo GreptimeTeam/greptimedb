@@ -37,7 +37,10 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
-use crate::error::{InitMetadataSnafu, RecoverProcedureSnafu, Result};
+use crate::error::{
+    InitMetadataSnafu, RecoverProcedureSnafu, Result, StartProcedureManagerSnafu,
+    StopProcedureManagerSnafu,
+};
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
@@ -225,6 +228,9 @@ impl MetaSrv {
                             );
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
+                                    if let Err(e) = procedure_manager.start() {
+                                        error!("Failed to start procedure manager, error: {e}");
+                                    }
                                     if let Err(e) = procedure_manager.recover().await {
                                         error!("Failed to recover procedures, error: {e}");
                                     }
@@ -235,6 +241,9 @@ impl MetaSrv {
                                     });
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
+                                    if let Err(e) = procedure_manager.stop().await {
+                                        error!("Failed to stop procedure manager, error: {e}");
+                                    }
                                     if let Some(sub_manager) = subscribe_manager.clone() {
                                         info!("Leader changed, un_subscribe all");
                                         if let Err(e) = sub_manager.un_subscribe_all() {
@@ -259,6 +268,10 @@ impl MetaSrv {
                         }
                     }
                 }
+
+                if let Err(e) = procedure_manager.stop().await {
+                    error!("Failed to stop procedure manager, error: {e}");
+                }
             });
 
             let election = election.clone();
@@ -274,6 +287,9 @@ impl MetaSrv {
                 info!("MetaSrv stopped");
             });
         } else {
+            self.procedure_manager
+                .start()
+                .context(StartProcedureManagerSnafu)?;
             self.procedure_manager
                 .recover()
                 .await
@@ -291,8 +307,12 @@ impl MetaSrv {
             .context(InitMetadataSnafu)
     }
 
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&self) -> Result<()> {
         self.started.store(false, Ordering::Relaxed);
+        self.procedure_manager
+            .stop()
+            .await
+            .context(StopProcedureManagerSnafu)
     }
 
     #[inline]
