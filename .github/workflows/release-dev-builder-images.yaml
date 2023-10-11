@@ -3,16 +3,26 @@ name: Release dev-builder images
 on:
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
-      release_dev_builder_images:
+      release_dev_builder_ubuntu_image:
         type: boolean
-        description: Release dev-builder images
+        description: Release dev-builder-ubuntu images
+        required: false
+        default: false
+      release_dev_builder_centos_image:
+        type: boolean
+        description: Release dev-builder-centos images
+        required: false
+        default: false
+      release_dev_builder_android_image:
+        type: boolean
+        description: Release dev-builder-android images
         required: false
         default: false
 
 jobs:
   release-dev-builder-images:
     name: Release dev builder images
-    if: ${{ inputs.release_dev_builder_images }} # Only manually trigger this job.
+    if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }} # Only manually trigger this job.
     runs-on: ubuntu-latest-16-cores
     steps:
       - name: Checkout
@@ -21,10 +31,13 @@ jobs:
           fetch-depth: 0
 
       - name: Build and push dev builder images
-        uses: ./.github/actions/build-dev-builder-image
+        uses: ./.github/actions/build-dev-builder-images
         with:
           dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
           acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image }}
+          build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image }}
+          build-dev-builder-android: ${{ inputs.release_dev_builder_android_image }}
