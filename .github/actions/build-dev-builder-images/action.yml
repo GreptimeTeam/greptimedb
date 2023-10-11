@@ -15,19 +15,6 @@ inputs:
     description: The dockerhub namespace of the image registry to store the images
     required: false
     default: greptime
-  acr-image-registry:
-    description: The ACR image registry to store the images
-    required: true
-  acr-image-registry-username:
-    description: The ACR username to login to the image registry
-    required: true
-  acr-image-registry-password:
-    description: The ACR password to login to the image registry
-    required: true
-  acr-image-namespace:
-    description: The ACR namespace of the image registry to store the images
-    required: false
-    default: greptime
   version:
     description: Version of the dev-builder
     required: false
@@ -62,45 +49,28 @@ runs:
     - name: Build and push dev-builder-ubuntu image
       shell: bash
       if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
-      env:
-        DST_REGISTRY_USERNAME: ${{ inputs.acr-image-registry-username }}
-        DST_REGISTRY_PASSWORD: ${{ inputs.acr-image-registry-password }}
       run: |
         make dev-builder \
           BASE_IMAGE=ubuntu \
           BUILDX_MULTI_PLATFORM_BUILD=true \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          IMAGE_TAG=${{ inputs.version }} && \
-        
-        skopeo copy -a docker://docker.io/${{ inputs.dockerhub-image-namespace }}/dev-builder-ubuntu:${{ inputs.version }} \
-          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-          docker://${{ inputs.acr-image-registry }}/${{ inputs.acr-image-namespace }}/dev-builder-ubuntu:${{ inputs.version }}
+          IMAGE_TAG=${{ inputs.version }}
 
     - name: Build and push dev-builder-centos image
       shell: bash
       if: ${{ inputs.build-dev-builder-centos == 'true' }}
-      env:
-        DST_REGISTRY_USERNAME: ${{ inputs.acr-image-registry-username }}
-        DST_REGISTRY_PASSWORD: ${{ inputs.acr-image-registry-password }}
       run: |
         make dev-builder \
           BASE_IMAGE=centos \
           BUILDX_MULTI_PLATFORM_BUILD=true \
           IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
-          IMAGE_TAG=${{ inputs.version }} && \
-        
-        skopeo copy -a docker://docker.io/${{ inputs.dockerhub-image-namespace }}/dev-builder-centos:${{ inputs.version }} \
-          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-          docker://${{ inputs.acr-image-registry }}/${{ inputs.acr-image-namespace }}/dev-builder-centos:${{ inputs.version }}
+          IMAGE_TAG=${{ inputs.version }}
 
     - name: Build and push dev-builder-android image # Only build image for amd64 platform.
       shell: bash
       if: ${{ inputs.build-dev-builder-android == 'true' }}
-      env:
-        DST_REGISTRY_USERNAME: ${{ inputs.acr-image-registry-username }}
-        DST_REGISTRY_PASSWORD: ${{ inputs.acr-image-registry-password }}
       run: |
         make dev-builder \
           BASE_IMAGE=android \
@@ -108,8 +78,4 @@ runs:
           IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
           IMAGE_TAG=${{ inputs.version }} && \
         
-        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }} && \
-
-        skopeo copy -a docker://docker.io/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }} \
-          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-          docker://${{ inputs.acr-image-registry }}/${{ inputs.acr-image-namespace }}/dev-builder-android:${{ inputs.version }}
+        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}
