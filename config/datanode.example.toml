@@ -51,7 +51,7 @@ type = "File"
 # The local file cache directory
 # cache_path = "/path/local_cache"
 # The local file cache capacity in bytes.
-# cache_capacity = "256Mib"
+# cache_capacity = "256MB"
 
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]
