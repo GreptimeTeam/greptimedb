@@ -20,7 +20,7 @@ use clap::{Parser, ValueEnum};
 use client::{Client, Database};
 use common_query::Output;
 use common_recordbatch::util::collect;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use datatypes::scalars::ScalarVector;
 use datatypes::vectors::StringVector;
 use snafu::{OptionExt, ResultExt};
@@ -33,6 +33,8 @@ use crate::error::{
     CollectRecordBatchesSnafu, ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu,
     NotDataFromOutputSnafu, RequestDatabaseSnafu, Result,
 };
+
+type TableReference = (String, String, String);
 
 #[derive(Debug, Default, Clone, ValueEnum)]
 enum ExportTarget {
@@ -117,31 +119,63 @@ impl Export {
         }
     }
 
-    async fn get_table_list(&self, catalog: &str, schema: &str) -> Result<Vec<String>> {
-        let sql = "show tables";
+    /// Return a list of [`TableReference`] to be exported.
+    /// Includes all tables under the given `catalog` and `schema`
+    async fn get_table_list(&self, catalog: &str, schema: &str) -> Result<Vec<TableReference>> {
+        // TODO: SQL injection hurts
+        let sql = format!(
+            "select table_catalog, table_schema, table_name from \
+            information_schema.tables where table_type = \'BASE TABLE\'\
+            and table_catalog = \'{catalog}\' and table_schema = \'{schema}\'",
+        );
         let mut client = self.client.clone();
         client.set_catalog(catalog);
         client.set_schema(schema);
         let result = client
-            .sql(sql)
+            .sql(&sql)
             .await
             .with_context(|_| RequestDatabaseSnafu { sql })?;
         let Output::Stream(stream) = result else {
             NotDataFromOutputSnafu.fail()?
         };
-        let record_batch = collect(stream)
+        let Some(record_batch) = collect(stream)
             .await
             .context(CollectRecordBatchesSnafu)?
             .pop()
-            .context(EmptyResultSnafu)?;
-        Ok(record_batch
+        else {
+            return Ok(vec![]);
+        };
+
+        debug!("Fetched table list: {}", record_batch.pretty_print());
+
+        if record_batch.num_rows() == 0 {
+            return Ok(vec![]);
+        }
+
+        let mut result = Vec::with_capacity(record_batch.num_rows());
+        let catalog_column = record_batch
             .column(0)
             .as_any()
             .downcast_ref::<StringVector>()
-            .unwrap()
-            .iter_data()
-            .map(|x| x.unwrap().to_string())
-            .collect())
+            .unwrap();
+        let schema_column = record_batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .unwrap();
+        let table_column = record_batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringVector>()
+            .unwrap();
+        for i in 0..record_batch.num_rows() {
+            let catalog = catalog_column.get_data(i).unwrap().to_owned();
+            let schema = schema_column.get_data(i).unwrap().to_owned();
+            let table = table_column.get_data(i).unwrap().to_owned();
+            result.push((catalog, schema, table));
+        }
+
+        Ok(result)
     }
 
     async fn show_create_table(&self, catalog: &str, schema: &str, table: &str) -> Result<String> {
@@ -188,10 +222,10 @@ impl Export {
                 let output_file =
                     Path::new(&self.output_dir).join(format!("{catalog}-{schema}.sql"));
                 let mut file = File::create(output_file).await.context(FileIoSnafu)?;
-                for table in table_list {
-                    match self.show_create_table(&catalog, &schema, &table).await {
+                for (c, s, t) in table_list {
+                    match self.show_create_table(&c, &s, &t).await {
                         Err(e) => {
-                            error!(e; "Failed to export table {}.{}.{}", catalog, schema, table)
+                            error!(e; "Failed to export table {}.{}.{}", c, s, t)
                         }
                         Ok(create_table) => {
                             file.write_all(create_table.as_bytes())
