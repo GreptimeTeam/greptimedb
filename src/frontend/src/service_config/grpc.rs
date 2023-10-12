@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::readable_size::ReadableSize;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
@@ -22,9 +23,9 @@ pub struct GrpcOptions {
     pub addr: String,
     pub runtime_size: usize,
     // Max gRPC receiving(decoding) message size
-    pub max_recv_message_size: usize,
+    pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
-    pub max_send_message_size: usize,
+    pub max_send_message_size: ReadableSize,
 }
 
 impl Default for GrpcOptions {
@@ -32,8 +33,8 @@ impl Default for GrpcOptions {
         Self {
             addr: "127.0.0.1:4001".to_string(),
             runtime_size: 8,
-            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
-            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            max_recv_message_size: ReadableSize(DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE as u64),
+            max_send_message_size: ReadableSize(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE as u64),
         }
     }
 }

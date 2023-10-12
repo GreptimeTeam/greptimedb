@@ -49,8 +49,8 @@ impl HeartbeatTask {
     ) -> Self {
         HeartbeatTask {
             meta_client,
-            report_interval: heartbeat_opts.interval_millis,
-            retry_interval: heartbeat_opts.retry_interval_millis,
+            report_interval: heartbeat_opts.interval_millis.as_secs(),
+            retry_interval: heartbeat_opts.retry_interval_millis.as_secs(),
             resp_handler_executor,
         }
     }

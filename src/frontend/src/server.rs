@@ -69,8 +69,8 @@ impl Services {
             );
 
             let grpc_config = GrpcServerConfig {
-                max_recv_message_size: opts.max_recv_message_size,
-                max_send_message_size: opts.max_send_message_size,
+                max_recv_message_size: opts.max_recv_message_size.as_bytes() as usize,
+                max_send_message_size: opts.max_send_message_size.as_bytes() as usize,
             };
             let grpc_server = GrpcServer::new(
                 Some(grpc_config),

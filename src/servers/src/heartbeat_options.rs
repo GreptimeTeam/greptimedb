@@ -13,13 +13,14 @@
 // limitations under the License.
 
 use common_meta::distributed_time_constants;
+use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct HeartbeatOptions {
-    pub interval_millis: u64,
-    pub retry_interval_millis: u64,
+    pub interval_millis: Duration,
+    pub retry_interval_millis: Duration,
 }
 
 impl HeartbeatOptions {
@@ -30,8 +31,8 @@ impl HeartbeatOptions {
     pub fn frontend_default() -> Self {
         Self {
             // Frontend can send heartbeat with a longer interval.
-            interval_millis: distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
-            retry_interval_millis: distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
+            interval_millis: Duration::from_millis(distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS),
+            retry_interval_millis:Duration::from_millis(distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS),
         }
     }
 }
@@ -39,8 +40,8 @@ impl HeartbeatOptions {
 impl Default for HeartbeatOptions {
     fn default() -> Self {
         Self {
-            interval_millis: distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-            retry_interval_millis: distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
+            interval_millis: Duration::from_millis(distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS),
+            retry_interval_millis:Duration::from_millis(distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS),
         }
     }
 }

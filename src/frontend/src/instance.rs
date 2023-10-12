@@ -22,8 +22,6 @@ mod script;
 mod standalone;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
-
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -236,14 +234,12 @@ impl Instance {
         );
 
         let channel_config = ChannelConfig::new()
-            .timeout(Duration::from_millis(meta_client_options.timeout_millis))
-            .connect_timeout(Duration::from_millis(
-                meta_client_options.connect_timeout_millis,
-            ))
+            .timeout(meta_client_options.timeout_millis)
+            .connect_timeout(meta_client_options.connect_timeout_millis)
             .tcp_nodelay(meta_client_options.tcp_nodelay);
-        let ddl_channel_config = channel_config.clone().timeout(Duration::from_millis(
-            meta_client_options.ddl_timeout_millis,
-        ));
+        let ddl_channel_config = channel_config
+            .clone()
+            .timeout(meta_client_options.ddl_timeout_millis);
         let channel_manager = ChannelManager::with_config(channel_config);
         let ddl_channel_manager = ChannelManager::with_config(ddl_channel_config);
 
