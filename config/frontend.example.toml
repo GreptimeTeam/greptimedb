@@ -2,10 +2,10 @@
 mode = "distributed"
 
 [heartbeat]
-# Interval for sending heartbeat task to the Metasrv in milliseconds, 5000 by default.
-interval_millis = 5000
-# Interval for retry sending heartbeat task in milliseconds, 5000 by default.
-retry_interval_millis = 5000
+# Interval for sending heartbeat task to the Metasrv, 5 seconds by default.
+interval = "5s"
+# Interval for retry sending heartbeat task, 5 seconds by default.
+retry_interval = "5s"
 
 # HTTP server options, see `standalone.example.toml`.
 [http]
@@ -59,10 +59,10 @@ enable = true
 # Metasrv client options, see `datanode.example.toml`.
 [meta_client]
 metasrv_addrs = ["127.0.0.1:3002"]
-timeout_millis = 3000
+timeout = "3s"
 # DDL timeouts options.
-ddl_timeout_millis = 10000
-connect_timeout_millis = 1000
+ddl_timeout = "10s"
+connect_timeout = "1s"
 tcp_nodelay = true
 
 # Log options, see `standalone.example.toml`
