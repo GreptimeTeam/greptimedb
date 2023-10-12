@@ -80,6 +80,19 @@ pub fn file_version(path: &str) -> ManifestVersion {
     s.parse().unwrap_or_else(|_| panic!("Invalid file: {path}"))
 }
 
+/// Return's the file name from path
+/// Just use for .json and .checkpoint file
+/// ### Panics
+/// Panics if the file path is not a valid delta or checkpoint file.
+#[inline]
+pub fn file_name(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or("").to_string();
+    if !is_checkpoint_file(&name) && !is_delta_file(&name) {
+        panic!("Invalid file: {path}")
+    }
+    name
+}
+
 /// Return's the file compress algorithm by file extension.
 ///
 /// for example file
@@ -188,6 +201,7 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
+    /// Scan the manifest files in the range of [start, end) and return the iterator.
     pub async fn scan(
         &self,
         start: ManifestVersion,
@@ -216,6 +230,9 @@ impl ManifestObjectStore {
         })
     }
 
+    /// Delete all manifest files in the range of [start, end).
+    /// If keep_last_checkpoint is true, the last checkpoint file will be kept.
+    /// Return the number of deleted files.
     pub async fn delete_until(
         &mut self,
         end: ManifestVersion,
@@ -273,7 +290,7 @@ impl ManifestObjectStore {
         let ret = paths.len();
 
         debug!(
-            "Deleting {} logs from manifest storage path {} until {}, checkpoint: {:?}, paths: {:?}",
+            "Deleting {} logs from manifest storage path {} until {}, checkpoint_version: {:?}, paths: {:?}",
             ret,
             self.path,
             end,
@@ -281,10 +298,10 @@ impl ManifestObjectStore {
             paths,
         );
 
-        // delete manifest size from paths
+        // delete the manifest'size in paths
         paths.iter().for_each(|path| {
-            let path = format!("{}{}", self.path, path);
-            self.manifest_size_map.remove(&path);
+            let name = file_name(path);
+            self.manifest_size_map.remove(&name);
         });
 
         self.object_store
@@ -295,6 +312,7 @@ impl ManifestObjectStore {
         Ok(ret)
     }
 
+    /// Save the delta manifest file.
     pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         debug!("Save log to manifest storage, version: {}", version);
@@ -313,6 +331,7 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
+    /// Save the checkpoint manifest file.
     pub async fn save_checkpoint(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.checkpoint_file_path(version);
         let data = self
@@ -426,8 +445,6 @@ impl ManifestObjectStore {
         };
 
         let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
-        // set last checkpoint size
-        self.set_manifest_size_by_path(&last_checkpoint_path, last_checkpoint_data.len() as u64);
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
@@ -481,19 +498,18 @@ impl ManifestObjectStore {
 
     /// Set the size of the manifest file by path.
     pub fn set_manifest_size_by_path(&mut self, path: &str, size: u64) {
-        self.manifest_size_map.insert(path.to_string(), size);
+        self.manifest_size_map.insert(file_name(path), size);
     }
 
     /// Set the size of the delta file by delta version.
     pub fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map
-            .insert(self.delta_file_path(version), size);
+        self.manifest_size_map.insert(delta_file(version), size);
     }
 
     /// Set the size of the checkpoint file by checkpoint version.
     pub fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
         self.manifest_size_map
-            .insert(self.checkpoint_file_path(version), size);
+            .insert(checkpoint_file(version), size);
     }
 }
 
@@ -670,6 +686,28 @@ mod tests {
         assert_eq!(11, log_store.delete_until(10, false).await.unwrap());
         let mut it = log_store.scan(0, 10).await.unwrap();
         assert!(it.next_log().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_file_name() {
+        let name = file_name(
+            "data/greptime/public/1054/1054_0000000000/manifest/00000000000000000007.json",
+        );
+        assert_eq!(name, "00000000000000000007.json");
+
+        let name = file_name(
+            "/data/greptime/public/1054/1054_0000000000/manifest/00000000000000000007.checkpoint",
+        );
+        assert_eq!(name, "00000000000000000007.checkpoint");
+
+        let version = file_version("00000000000000000007.checkpoint");
+        assert_eq!(version, 7);
+
+        let name = delta_file(version);
+        assert_eq!(name, "00000000000000000007.json");
+
+        let name = checkpoint_file(version);
+        assert_eq!(name, "00000000000000000007.checkpoint");
     }
 
     #[tokio::test]

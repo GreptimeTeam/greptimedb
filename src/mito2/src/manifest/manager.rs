@@ -115,6 +115,7 @@ impl RegionManifestManager {
     /// Construct a region's manifest and persist it.
     pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
         let inner = RegionManifestManagerInner::new(metadata, options).await?;
+        debug!("new: total manifest size: {}", inner.manifest_size());
         Ok(Self {
             inner: RwLock::new(inner),
         })
@@ -123,6 +124,7 @@ impl RegionManifestManager {
     /// Open an existing manifest.
     pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
         if let Some(inner) = RegionManifestManagerInner::open(options).await? {
+            debug!("open: total manifest size: {}", inner.manifest_size());
             Ok(Some(Self {
                 inner: RwLock::new(inner),
             }))
@@ -134,13 +136,16 @@ impl RegionManifestManager {
     /// Stop background tasks gracefully.
     pub async fn stop(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
+        debug!("stop: total manifest size: {}", inner.manifest_size());
         inner.stop().await
     }
 
     /// Update the manifest. Return the current manifest version number.
     pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let mut inner = self.inner.write().await;
-        inner.update(action_list).await
+        let res = inner.update(action_list).await;
+        debug!("update: total manifest size: {}", inner.manifest_size());
+        res
     }
 
     /// Retrieve the current [RegionManifest].
