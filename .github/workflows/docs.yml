@@ -30,7 +30,7 @@ name: CI
 jobs:
   typos:
     name: Spell Check with Typos
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
       - uses: crate-ci/typos@v1.13.10
@@ -38,33 +38,33 @@ jobs:
   check:
     name: Check
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'
 
   fmt:
     name: Rustfmt
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'
 
   clippy:
     name: Clippy
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'
 
   coverage:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'
 
   sqlness:
     name: Sqlness Test
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - run: 'echo "No action required"'

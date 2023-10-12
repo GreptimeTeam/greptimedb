@@ -10,7 +10,7 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 10
     steps:
       - uses: thehanimo/pr-title-checker@v1.3.4
@@ -19,7 +19,7 @@ jobs:
           pass_on_octokit_error: false
           configuration_path: ".github/pr-title-checker-config.json"
   breaking:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 10
     steps:
       - uses: thehanimo/pr-title-checker@v1.3.4

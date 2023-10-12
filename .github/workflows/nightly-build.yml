@@ -14,11 +14,11 @@ on:
         description: The runner uses to build linux-amd64 artifacts
         default: ec2-c6i.2xlarge-amd64
         options:
-          - ubuntu-latest
-          - ubuntu-latest-8-cores
-          - ubuntu-latest-16-cores
-          - ubuntu-latest-32-cores
-          - ubuntu-latest-64-cores
+          - ubuntu-20.04
+          - ubuntu-20.04-8-cores
+          - ubuntu-20.04-16-cores
+          - ubuntu-20.04-32-cores
+          - ubuntu-20.04-64-cores
           - ec2-c6i.xlarge-amd64 # 4C8G
           - ec2-c6i.2xlarge-amd64 # 8C16G
           - ec2-c6i.4xlarge-amd64 # 16C32G
@@ -70,7 +70,7 @@ jobs:
   allocate-runners:
     name: Allocate runners
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
@@ -175,7 +175,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       nightly-build-result: ${{ steps.set-nightly-build-result.outputs.nightly-build-result }}
     steps:
@@ -205,7 +205,7 @@ jobs:
       allocate-runners,
       release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
@@ -234,7 +234,7 @@ jobs:
     name: Stop linux-amd64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -259,7 +259,7 @@ jobs:
     name: Stop linux-arm64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-arm64-artifacts,
@@ -286,7 +286,7 @@ jobs:
     needs: [
       release-images-to-dockerhub
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:
