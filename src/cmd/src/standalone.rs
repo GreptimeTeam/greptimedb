@@ -99,6 +99,7 @@ pub struct StandaloneOptions {
     pub metadata_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
+    pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
 }
@@ -120,6 +121,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
                 RegionEngineConfig::File(FileEngineConfig::default()),
@@ -141,6 +143,7 @@ impl StandaloneOptions {
             prom_store: self.prom_store,
             meta_client: None,
             logging: self.logging,
+            user_provider: self.user_provider,
             ..Default::default()
         }
     }
@@ -278,6 +281,9 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb.enable = self.influxdb_enable;
         }
+
+        opts.user_provider = self.user_provider.clone();
+
         let metadata_store = opts.metadata_store.clone();
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
