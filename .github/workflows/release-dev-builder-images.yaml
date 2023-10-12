@@ -27,7 +27,7 @@ jobs:
   release-dev-builder-images:
     name: Release dev builder images
     if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }} # Only manually trigger this job.
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ubuntu-20.04-16-cores
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -46,7 +46,7 @@ jobs:
 
   release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
     name: Release dev builder images to CN region
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       release-dev-builder-images
     ]

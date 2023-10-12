@@ -34,7 +34,7 @@ env:
 jobs:
   typos:
     name: Spell Check with Typos
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
       - uses: crate-ci/typos@v1.13.10
@@ -42,7 +42,7 @@ jobs:
   check:
     name: Check
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -60,7 +60,7 @@ jobs:
   toml:
     name: Toml Check
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -80,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest-8-cores ]
+        os: [ ubuntu-20.04-8-cores ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -105,7 +105,7 @@ jobs:
   fmt:
     name: Rustfmt
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -124,7 +124,7 @@ jobs:
   clippy:
     name: Clippy
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -142,7 +142,7 @@ jobs:
 
   coverage:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3

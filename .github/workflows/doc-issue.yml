@@ -11,7 +11,7 @@ on:
 jobs:
   doc_issue:
     if: github.event.label.name == 'doc update required'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - name: create an issue in doc repo
         uses: dacbd/create-issue-action@main
@@ -25,7 +25,7 @@ jobs:
             ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
   cloud_issue:
     if: github.event.label.name == 'cloud followup required'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - name: create an issue in cloud repo
         uses: dacbd/create-issue-action@main
