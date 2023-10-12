@@ -1,0 +1,85 @@
+name: Release dev-builder images
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually.
+    inputs:
+      version:
+        description: Version of the dev-builder
+        required: false
+        default: latest
+      release_dev_builder_ubuntu_image:
+        type: boolean
+        description: Release dev-builder-ubuntu image
+        required: false
+        default: false
+      release_dev_builder_centos_image:
+        type: boolean
+        description: Release dev-builder-centos image
+        required: false
+        default: false
+      release_dev_builder_android_image:
+        type: boolean
+        description: Release dev-builder-android image
+        required: false
+        default: false
+
+jobs:
+  release-dev-builder-images:
+    name: Release dev builder images
+    if: ${{ inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image }} # Only manually trigger this job.
+    runs-on: ubuntu-20.04-16-cores
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Build and push dev builder images
+        uses: ./.github/actions/build-dev-builder-images
+        with:
+          version: ${{ inputs.version }}
+          dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
+          build-dev-builder-ubuntu: ${{ inputs.release_dev_builder_ubuntu_image }}
+          build-dev-builder-centos: ${{ inputs.release_dev_builder_centos_image }}
+          build-dev-builder-android: ${{ inputs.release_dev_builder_android_image }}
+
+  release-dev-builder-images-cn: # Note: Be careful issue: https://github.com/containers/skopeo/issues/1874 and we decide to use the latest stable skopeo container.
+    name: Release dev builder images to CN region
+    runs-on: ubuntu-20.04
+    needs: [
+      release-dev-builder-images
+    ]
+    steps:
+      - name: Push dev-builder-ubuntu image
+        shell: bash
+        if: ${{ inputs.release_dev_builder_ubuntu_image }}
+        env:
+          DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
+          DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
+        run: |
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-ubuntu:${{ inputs.version }}
+
+      - name: Push dev-builder-centos image
+        shell: bash
+        if: ${{ inputs.release_dev_builder_centos_image }}
+        env:
+          DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
+          DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
+        run: |
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-centos:${{ inputs.version }}
+
+      - name: Push dev-builder-android image
+        shell: bash
+        if: ${{ inputs.release_dev_builder_android_image }}
+        env:
+          DST_REGISTRY_USERNAME: ${{ secrets.ALICLOUD_USERNAME }}
+          DST_REGISTRY_PASSWORD: ${{ secrets.ALICLOUD_PASSWORD }}
+        run: |
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ vars.ACR_IMAGE_REGISTRY }}/${{ vars.IMAGE_NAMESPACE }}/dev-builder-android:${{ inputs.version }}

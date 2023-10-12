@@ -69,11 +69,11 @@ use crate::{metrics, QueryEngine};
 
 pub struct DatafusionQueryEngine {
     state: Arc<QueryEngineState>,
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
 }
 
 impl DatafusionQueryEngine {
-    pub fn new(state: Arc<QueryEngineState>, plugins: Arc<Plugins>) -> Self {
+    pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
     }
 

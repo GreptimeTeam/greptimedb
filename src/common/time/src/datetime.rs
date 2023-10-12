@@ -93,18 +93,22 @@ impl From<Date> for DateTime {
 }
 
 impl DateTime {
-    pub fn new(val: i64) -> Self {
-        Self(val)
+    /// Create a new [DateTime] from milliseconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch).
+    pub fn new(millis: i64) -> Self {
+        Self(millis)
     }
 
+    /// Get the milliseconds elapsed since "1970-01-01 00:00:00 UTC" (UNIX Epoch).
     pub fn val(&self) -> i64 {
         self.0
     }
 
+    /// Convert to [NaiveDateTime].
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         NaiveDateTime::from_timestamp_millis(self.0)
     }
 
+    /// Convert to [common_time::date].
     pub fn to_date(&self) -> Option<Date> {
         self.to_chrono_datetime().map(|d| Date::from(d.date()))
     }

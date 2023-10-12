@@ -98,7 +98,7 @@ impl QueryEngineFactory {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
-        plugins: Arc<Plugins>,
+        plugins: Plugins,
     ) -> Self {
         let state = Arc::new(QueryEngineState::new(
             catalog_manager,

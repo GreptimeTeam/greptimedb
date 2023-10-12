@@ -182,9 +182,6 @@ pub enum Error {
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, location: Location },
 
-    #[snafu(display("Table already exists: `{}`", table))]
-    TableAlreadyExist { table: String, location: Location },
-
     #[snafu(display("Failed to found context value: {}", key))]
     ContextValueNotFound { key: String, location: Location },
 
@@ -272,6 +269,9 @@ pub enum Error {
         source: operator::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid auth config"))]
+    IllegalAuthConfig { source: auth::error::Error },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -288,6 +288,7 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::MissingMetasrvOpts { .. }
             | Error::UnsupportedFormat { .. }
+            | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. } => StatusCode::InvalidArguments,
@@ -341,7 +342,6 @@ impl ErrorExt for Error {
             | Error::ExecLogicalPlan { source, .. } => source.status_code(),
 
             Error::LeaderNotFound { .. } => StatusCode::StorageUnavailable,
-            Error::TableAlreadyExist { .. } => StatusCode::TableAlreadyExists,
             Error::InvokeRegionServer { source, .. } => source.status_code(),
 
             Error::External { source, .. } => source.status_code(),

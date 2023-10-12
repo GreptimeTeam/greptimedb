@@ -12,11 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::time::Duration;
 
-use auth::UserProviderRef;
 use clap::Parser;
-use common_base::Plugins;
 use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
@@ -25,7 +23,7 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
-use crate::error::{self, IllegalAuthConfigSnafu, Result};
+use crate::error::{self, Result, StartFrontendSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -34,10 +32,11 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
-        self.frontend
-            .start()
+        plugins::start_frontend_plugins(self.frontend.plugins().clone())
             .await
-            .context(error::StartFrontendSnafu)
+            .context(StartFrontendSnafu)?;
+
+        self.frontend.start().await.context(StartFrontendSnafu)
     }
 
     pub async fn stop(&self) -> Result<()> {
@@ -87,6 +86,8 @@ impl SubCommand {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
+    #[clap(long)]
+    http_timeout: Option<u64>,
     #[clap(long)]
     grpc_addr: Option<String>,
     #[clap(long)]
@@ -141,6 +142,10 @@ impl StartCommand {
             opts.http.addr = addr.clone()
         }
 
+        if let Some(http_timeout) = self.http_timeout {
+            opts.http.timeout = Duration::from_secs(http_timeout)
+        }
+
         if let Some(disable_dashboard) = self.disable_dashboard {
             opts.http.disable_dashboard = disable_dashboard;
         }
@@ -177,36 +182,30 @@ impl StartCommand {
             opts.mode = Mode::Distributed;
         }
 
+        opts.user_provider = self.user_provider.clone();
+
         Ok(Options::Frontend(Box::new(opts)))
     }
 
-    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
+    async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+        let plugins = plugins::setup_frontend_plugins(&mut opts)
+            .await
+            .context(StartFrontendSnafu)?;
+
         logging::info!("Frontend start command: {:#?}", self);
         logging::info!("Frontend options: {:#?}", opts);
 
-        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-
         let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
             .await
-            .context(error::StartFrontendSnafu)?;
+            .context(StartFrontendSnafu)?;
 
         instance
             .build_servers(&opts)
             .await
-            .context(error::StartFrontendSnafu)?;
+            .context(StartFrontendSnafu)?;
 
         Ok(Instance { frontend: instance })
     }
-}
-
-pub fn load_frontend_plugins(user_provider: &Option<String>) -> Result<Plugins> {
-    let plugins = Plugins::new();
-
-    if let Some(provider) = user_provider {
-        let provider = auth::user_provider_from_option(provider).context(IllegalAuthConfigSnafu)?;
-        plugins.insert::<UserProviderRef>(provider);
-    }
-    Ok(plugins)
 }
 
 #[cfg(test)]
@@ -218,6 +217,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use frontend::service_config::GrpcOptions;
+    use servers::http::HttpOptions;
 
     use super::*;
     use crate::options::ENV_VAR_SEP;
@@ -303,14 +303,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let command = StartCommand {
+        let mut fe_opts = FrontendOptions {
+            http: HttpOptions {
+                disable_dashboard: false,
+                ..Default::default()
+            },
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
-            disable_dashboard: Some(false),
             ..Default::default()
         };
 
-        let plugins = load_frontend_plugins(&command.user_provider);
-        let plugins = plugins.unwrap();
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
             .authenticate(

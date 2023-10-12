@@ -278,8 +278,7 @@ pub enum Error {
     #[snafu(display("Failed to dump profile data"))]
     DumpProfileData {
         location: Location,
-        #[snafu(source)]
-        error: common_mem_prof::error::Error,
+        source: common_mem_prof::error::Error,
     },
 
     #[snafu(display("Invalid prepare statement: {}", err_msg))]
@@ -335,7 +334,9 @@ pub enum Error {
 
     #[cfg(feature = "pprof")]
     #[snafu(display("Failed to dump pprof data"))]
-    DumpPprof { source: common_pprof::Error },
+    DumpPprof {
+        source: crate::http::pprof::nix::Error,
+    },
 
     #[snafu(display(""))]
     Metrics { source: BoxedError },

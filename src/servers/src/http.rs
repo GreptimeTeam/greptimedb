@@ -19,7 +19,7 @@ pub mod influxdb;
 pub mod mem_prof;
 pub mod opentsdb;
 pub mod otlp;
-mod pprof;
+pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod script;
@@ -42,6 +42,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
+use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -103,8 +104,8 @@ pub struct HttpServer {
     shutdown_tx: Mutex<Option<Sender<()>>>,
     user_provider: Option<UserProviderRef>,
     metrics_handler: Option<MetricsHandler>,
-    configurator: Option<ConfiguratorRef>,
     greptime_config_options: Option<String>,
+    plugins: Plugins,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,8 +383,8 @@ impl HttpServerBuilder {
                 script_handler: None,
                 metrics_handler: None,
                 shutdown_tx: Mutex::new(None),
-                configurator: None,
                 greptime_config_options: None,
+                plugins: Default::default(),
             },
         }
     }
@@ -438,8 +439,8 @@ impl HttpServerBuilder {
         self
     }
 
-    pub fn with_configurator(&mut self, configurator: Option<ConfiguratorRef>) -> &mut Self {
-        self.inner.configurator = configurator;
+    pub fn with_plugins(&mut self, plugins: Plugins) -> &mut Self {
+        self.inner.plugins = plugins;
         self
     }
 
@@ -724,11 +725,13 @@ impl Server for HttpServer {
             );
 
             let mut app = self.make_app();
-            if let Some(configurator) = self.configurator.as_ref() {
+            if let Some(configurator) = self.plugins.get::<ConfiguratorRef>() {
                 app = configurator.config_http(app);
             }
             let app = self.build(app);
-            let server = axum::Server::bind(&listening).serve(app.into_make_service());
+            let server = axum::Server::bind(&listening)
+                .tcp_nodelay(true)
+                .serve(app.into_make_service());
 
             *shutdown_tx = Some(tx);
 

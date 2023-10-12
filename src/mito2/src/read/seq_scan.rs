@@ -110,9 +110,16 @@ impl SeqScan {
 
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
+        let cache_manager = self.cache_manager.clone();
         let stream = try_stream! {
-            while let Some(batch) = reader.next_batch().await.map_err(BoxedError::new).context(ExternalSnafu)? {
-                yield mapper.convert(&batch)?;
+            let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
+            while let Some(batch) = reader
+                .next_batch()
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+            {
+                yield mapper.convert(&batch, cache)?;
             }
         };
         let stream = Box::pin(RecordBatchStreamAdaptor::new(
@@ -128,8 +135,7 @@ impl SeqScan {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
         for mem in &self.memtables {
-            // TODO(hl): pass filters once memtable supports filter pushdown.
-            let iter = mem.iter(Some(self.mapper.column_ids()), &[]);
+            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
             builder.push_batch_iter(iter);
         }
         for file in &self.files {

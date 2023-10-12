@@ -14,5 +14,7 @@
 
 //! datanode metrics
 
-pub const HANDLE_SQL_ELAPSED: &str = "datanode.handle_sql_elapsed";
-pub const HANDLE_PROMQL_ELAPSED: &str = "datanode.handle_promql_elapsed";
+/// The elapsed time of handling a request in the region_server.
+pub const HANDLE_REGION_REQUEST_ELAPSED: &str = "datanode.handle_region_request_elapsed";
+/// Region request type label.
+pub const REGION_REQUEST_TYPE: &str = "datanode.region_request_type";

@@ -17,6 +17,7 @@ datafusion.workspace = true
 datatypes = { workspace = true }
 futures = "0.3"
 greptime-proto.workspace = true
+metrics = { workspace = true }
 promql-parser = "0.1.1"
 prost.workspace = true
 session = { workspace = true }

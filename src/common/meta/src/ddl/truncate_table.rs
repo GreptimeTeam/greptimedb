@@ -35,6 +35,7 @@ use crate::ddl::DdlContext;
 use crate::error::{Result, TableNotFoundSnafu};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
+use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::TruncateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
@@ -90,7 +91,7 @@ impl TruncateTableProcedure {
     pub(crate) fn new(
         cluster_id: u64,
         task: TruncateTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
         context: DdlContext,
     ) -> Self {
@@ -188,7 +189,7 @@ pub struct TruncateTableData {
     state: TruncateTableState,
     cluster_id: u64,
     task: TruncateTableTask,
-    table_info_value: TableInfoValue,
+    table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     region_routes: Vec<RegionRoute>,
 }
 
@@ -196,7 +197,7 @@ impl TruncateTableData {
     pub fn new(
         cluster_id: u64,
         task: TruncateTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
     ) -> Self {
         Self {

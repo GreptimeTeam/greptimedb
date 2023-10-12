@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::info;
+use metrics::increment_gauge;
 use object_store::util::join_path;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -25,6 +26,7 @@ use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
 use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{RegionWorkerLoop, DROPPING_MARKER_FILE};
@@ -68,6 +70,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .await?;
 
         info!("Region {} is opened", region_id);
+
+        increment_gauge!(REGION_COUNT, 1.0);
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

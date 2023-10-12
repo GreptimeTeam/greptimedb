@@ -12,15 +12,8 @@ EXPLAIN SELECT COUNT(*) FROM single_partition;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Aggregate: groupBy=[[]], aggr=[[COUNT(UInt8(1))]]_|
-|_|_Projection:_|
-|_|_MergeScan [is_placeholder=false]_|
-| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[COUNT(UInt8(1))]_|
-|_|_CoalescePartitionsExec_|
-|_|_AggregateExec: mode=Partial, gby=[], aggr=[COUNT(UInt8(1))]_|
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[]_|
-|_|_MergeScanExec: REDACTED
+| logical_plan_| MergeScan [is_placeholder=false]_|
+| physical_plan | MergeScanExec: REDACTED
 |_|_|
 +-+-+
 

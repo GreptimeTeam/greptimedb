@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::{fs, path};
 
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
-use common_config::{kv_store_dir, KvStoreConfig, WalConfig};
+use common_config::{metadata_store_dir, KvStoreConfig, WalConfig};
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
@@ -41,10 +42,9 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
-    StartDatanodeSnafu, StartFrontendSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
 };
-use crate::frontend::load_frontend_plugins;
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
 #[derive(Parser)]
@@ -96,7 +96,7 @@ pub struct StandaloneOptions {
     pub prom_store: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub kv_store: KvStoreConfig,
+    pub metadata_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
     /// Options for different store engines.
@@ -117,7 +117,7 @@ impl Default for StandaloneOptions {
             prom_store: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            kv_store: KvStoreConfig::default(),
+            metadata_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
             region_engine: vec![
@@ -278,7 +278,7 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb.enable = self.influxdb_enable;
         }
-        let kv_store = opts.kv_store.clone();
+        let metadata_store = opts.metadata_store.clone();
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
@@ -286,7 +286,7 @@ impl StartCommand {
 
         Ok(Options::Standalone(Box::new(MixOptions {
             procedure,
-            kv_store,
+            metadata_store,
             data_home: datanode.storage.data_home.to_string(),
             frontend,
             datanode,
@@ -298,8 +298,11 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let plugins = Arc::new(load_frontend_plugins(&self.user_provider)?);
-        let fe_opts = opts.frontend;
+        let mut fe_opts = opts.frontend;
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
+            .await
+            .context(StartFrontendSnafu)?;
+
         let dn_opts = opts.datanode;
 
         info!("Standalone start command: {:#?}", self);
@@ -308,14 +311,22 @@ impl StartCommand {
             fe_opts, dn_opts
         );
 
-        let kv_dir = kv_store_dir(&opts.data_home);
-        let (kv_store, procedure_manager) =
-            FeInstance::try_build_standalone_components(kv_dir, opts.kv_store, opts.procedure)
-                .await
-                .context(StartFrontendSnafu)?;
+        // Ensure the data_home directory exists.
+        fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
+            dir: &opts.data_home,
+        })?;
+
+        let metadata_dir = metadata_store_dir(&opts.data_home);
+        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
+            metadata_dir,
+            opts.metadata_store,
+            opts.procedure,
+        )
+        .await
+        .context(StartFrontendSnafu)?;
 
         let datanode =
-            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), plugins.clone())
+            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), Default::default())
                 .build()
                 .await
                 .context(StartDatanodeSnafu)?;
@@ -335,7 +346,7 @@ impl StartCommand {
 
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
-            plugins,
+            fe_plugins,
             kv_store,
             procedure_manager,
             catalog_manager,
@@ -354,7 +365,7 @@ impl StartCommand {
 
 /// Build frontend instance in standalone mode
 async fn build_frontend(
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
     kv_store: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
     catalog_manager: CatalogManagerRef,
@@ -388,13 +399,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let command = StartCommand {
+        let mut fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        let plugins = load_frontend_plugins(&command.user_provider);
-        let plugins = plugins.unwrap();
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
+
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
             .authenticate(
@@ -609,7 +620,7 @@ mod tests {
         assert_eq!(options.influxdb, default_options.influxdb);
         assert_eq!(options.prom_store, default_options.prom_store);
         assert_eq!(options.wal, default_options.wal);
-        assert_eq!(options.kv_store, default_options.kv_store);
+        assert_eq!(options.metadata_store, default_options.metadata_store);
         assert_eq!(options.procedure, default_options.procedure);
         assert_eq!(options.logging, default_options.logging);
         assert_eq!(options.region_engine, default_options.region_engine);

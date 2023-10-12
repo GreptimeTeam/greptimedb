@@ -43,7 +43,7 @@ impl HttpHandler for NodeLeaseHandler {
             .into_iter()
             .map(|(k, v)| HumanLease {
                 name: k,
-                human_time: common_time::DateTime::new(v.timestamp_millis / 1000).to_string(),
+                human_time: common_time::DateTime::new(v.timestamp_millis).to_string(),
                 lease: v,
             })
             .collect::<Vec<_>>();

@@ -71,7 +71,8 @@ impl PartitionRuleManager {
             .get(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?;
+            .context(error::FindTableRoutesSnafu { table_id })?
+            .into_inner();
 
         Ok(RegionRoutes(route.region_routes))
     }
@@ -87,7 +88,8 @@ impl PartitionRuleManager {
             .get(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?;
+            .context(error::FindTableRoutesSnafu { table_id })?
+            .into_inner();
         let mut datanodes = HashMap::with_capacity(regions.len());
         let region_map = convert_to_region_map(&route.region_routes);
         for region in regions.iter() {
@@ -110,7 +112,8 @@ impl PartitionRuleManager {
             .get(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?;
+            .context(error::FindTableRoutesSnafu { table_id })?
+            .into_inner();
         let mut peers = Vec::with_capacity(route.region_routes.len());
 
         for peer in &route.region_routes {
@@ -129,7 +132,8 @@ impl PartitionRuleManager {
             .get(table_id)
             .await
             .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?;
+            .context(error::FindTableRoutesSnafu { table_id })?
+            .into_inner();
         ensure!(
             !route.region_routes.is_empty(),
             error::FindTableRoutesSnafu { table_id }

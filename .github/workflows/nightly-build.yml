@@ -14,11 +14,11 @@ on:
         description: The runner uses to build linux-amd64 artifacts
         default: ec2-c6i.2xlarge-amd64
         options:
-          - ubuntu-latest
-          - ubuntu-latest-8-cores
-          - ubuntu-latest-16-cores
-          - ubuntu-latest-32-cores
-          - ubuntu-latest-64-cores
+          - ubuntu-20.04
+          - ubuntu-20.04-8-cores
+          - ubuntu-20.04-16-cores
+          - ubuntu-20.04-32-cores
+          - ubuntu-20.04-64-cores
           - ec2-c6i.xlarge-amd64 # 4C8G
           - ec2-c6i.2xlarge-amd64 # 8C16G
           - ec2-c6i.4xlarge-amd64 # 16C32G
@@ -70,7 +70,7 @@ jobs:
   allocate-runners:
     name: Allocate runners
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
@@ -147,11 +147,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-latest-artifacts: false
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -171,11 +166,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-latest-artifacts: false
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -185,7 +175,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       nightly-build-result: ${{ steps.set-nightly-build-result.outputs.nightly-build-result }}
     steps:
@@ -208,15 +198,14 @@ jobs:
         run: |
           echo "nightly-build-result=success" >> $GITHUB_OUTPUT
 
-  release-images-to-acr:
-    name: Build and push images to ACR
+  release-cn-artifacts:
+    name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
+      release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
@@ -226,21 +215,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build and push images to ACR
-        uses: ./.github/actions/build-images
+      - name: Release artifacts to CN region
+        uses: ./.github/actions/release-cn-artifacts
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
-          push-latest-tag: false # Don't push the latest tag to registry.
+          aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          push-latest-tag: false             # Don't push the latest tag to registry.
+          update-latest-version-info: false  # Don't update the latest version info in S3.
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -265,7 +259,7 @@ jobs:
     name: Stop linux-arm64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-arm64-artifacts,
@@ -292,7 +286,7 @@ jobs:
     needs: [
       release-images-to-dockerhub
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     env:
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
     steps:

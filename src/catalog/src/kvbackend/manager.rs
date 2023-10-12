@@ -18,9 +18,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, NUMBERS_TABLE_ID};
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::{
-    CacheInvalidator, Context, KvCacheInvalidatorRef, TableMetadataCacheInvalidator,
-};
+use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef, Context};
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::error::Result as MetaResult;
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -54,7 +52,7 @@ pub struct KvBackendCatalogManager {
     // TODO(LFC): Maybe use a real implementation for Standalone mode.
     // Now we use `NoopKvCacheInvalidator` for Standalone mode. In Standalone mode, the KV backend
     // is implemented by RaftEngine. Maybe we need a cache for it?
-    table_metadata_cache_invalidator: TableMetadataCacheInvalidator,
+    cache_invalidator: CacheInvalidatorRef,
     partition_manager: PartitionRuleManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     datanode_manager: DatanodeManagerRef,
@@ -65,13 +63,13 @@ pub struct KvBackendCatalogManager {
 #[async_trait::async_trait]
 impl CacheInvalidator for KvBackendCatalogManager {
     async fn invalidate_table_name(&self, ctx: &Context, table_name: TableName) -> MetaResult<()> {
-        self.table_metadata_cache_invalidator
+        self.cache_invalidator
             .invalidate_table_name(ctx, table_name)
             .await
     }
 
     async fn invalidate_table_id(&self, ctx: &Context, table_id: TableId) -> MetaResult<()> {
-        self.table_metadata_cache_invalidator
+        self.cache_invalidator
             .invalidate_table_id(ctx, table_id)
             .await
     }
@@ -80,15 +78,13 @@ impl CacheInvalidator for KvBackendCatalogManager {
 impl KvBackendCatalogManager {
     pub fn new(
         backend: KvBackendRef,
-        backend_cache_invalidator: KvCacheInvalidatorRef,
+        cache_invalidator: CacheInvalidatorRef,
         datanode_manager: DatanodeManagerRef,
     ) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             partition_manager: Arc::new(PartitionRuleManager::new(backend.clone())),
             table_metadata_manager: Arc::new(TableMetadataManager::new(backend)),
-            table_metadata_cache_invalidator: TableMetadataCacheInvalidator::new(
-                backend_cache_invalidator.clone(),
-            ),
+            cache_invalidator,
             datanode_manager,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
@@ -106,12 +102,6 @@ impl KvBackendCatalogManager {
 
     pub fn datanode_manager(&self) -> DatanodeManagerRef {
         self.datanode_manager.clone()
-    }
-
-    pub async fn invalidate_schema(&self, catalog: &str, schema: &str) {
-        self.table_metadata_cache_invalidator
-            .invalidate_schema(catalog, schema)
-            .await
     }
 }
 
@@ -229,6 +219,7 @@ impl CatalogManager for KvBackendCatalogManager {
             .get(table_id)
             .await
             .context(TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner())
         else {
             return Ok(None);
         };

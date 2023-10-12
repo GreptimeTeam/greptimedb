@@ -47,6 +47,12 @@ type = "File"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
 
+# Cache configuration for object storage such as 'S3' etc.
+# The local file cache directory
+# cache_path = "/path/local_cache"
+# The local file cache capacity in bytes.
+# cache_capacity = "256MB"
+
 # Compaction options, see `standalone.example.toml`.
 [storage.compaction]
 max_inflight_tasks = 4

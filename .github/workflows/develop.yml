@@ -34,7 +34,7 @@ env:
 jobs:
   typos:
     name: Spell Check with Typos
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
       - uses: crate-ci/typos@v1.13.10
@@ -42,7 +42,7 @@ jobs:
   check:
     name: Check
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -60,7 +60,7 @@ jobs:
   toml:
     name: Toml Check
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -80,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest-8-cores, windows-latest-8-cores ]
+        os: [ ubuntu-20.04-8-cores ]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -105,7 +105,7 @@ jobs:
   fmt:
     name: Rustfmt
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -124,7 +124,7 @@ jobs:
   clippy:
     name: Clippy
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -142,7 +142,7 @@ jobs:
 
   coverage:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v3
@@ -188,43 +188,3 @@ jobs:
           flags: rust
           fail_ci_if_error: false
           verbose: true
-
-  test-on-windows:
-    if: github.event.pull_request.draft == false
-    runs-on: windows-latest-8-cores
-    timeout-minutes: 60
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v3
-      - uses: arduino/setup-protoc@v1
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: llvm-tools-preview
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-      - name: Install Cargo Nextest
-        uses: taiki-e/install-action@nextest
-      - name: Install Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      - name: Install PyArrow Package
-        run: pip install pyarrow
-      - name: Install WSL distribution
-        uses: Vampire/setup-wsl@v2
-        with:
-         distribution: Ubuntu-22.04
-      - name: Running tests
-        run: cargo nextest run -F pyo3_backend,dashboard
-        env:
-          RUST_BACKTRACE: 1
-          CARGO_INCREMENTAL: 0
-          GT_S3_BUCKET: ${{ secrets.S3_BUCKET }}
-          GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
-          GT_S3_REGION: ${{ secrets.S3_REGION }}
-          UNITTEST_LOG_DIR: "__unittest_logs"

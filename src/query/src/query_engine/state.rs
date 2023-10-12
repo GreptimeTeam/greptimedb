@@ -34,7 +34,8 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
-use datafusion_optimizer::analyzer::Analyzer;
+use datafusion_optimizer::analyzer::count_wildcard_rule::CountWildcardRule;
+use datafusion_optimizer::analyzer::{Analyzer, AnalyzerRule};
 use datafusion_optimizer::optimizer::Optimizer;
 use promql::extension_plan::PromExtensionPlanner;
 use substrait::extension_serializer::ExtensionSerializer;
@@ -60,7 +61,7 @@ pub struct QueryEngineState {
     catalog_manager: CatalogManagerRef,
     table_mutation_handler: Option<TableMutationHandlerRef>,
     aggregate_functions: Arc<RwLock<HashMap<String, AggregateFunctionMetaRef>>>,
-    plugins: Arc<Plugins>,
+    plugins: Plugins,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -77,7 +78,7 @@ impl QueryEngineState {
         region_query_handler: Option<RegionQueryHandlerRef>,
         table_mutation_handler: Option<TableMutationHandlerRef>,
         with_dist_planner: bool,
-        plugins: Arc<Plugins>,
+        plugins: Plugins,
     ) -> Self {
         let runtime_env = Arc::new(RuntimeEnv::default());
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
@@ -88,6 +89,8 @@ impl QueryEngineState {
         }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
+        Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
+        analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
@@ -132,20 +135,15 @@ impl QueryEngineState {
         }
     }
 
+    fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
+        rules.retain(|rule| rule.name() != name);
+    }
+
     fn remove_physical_optimize_rule(
         rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
         name: &str,
     ) {
-        let mut index_to_move = None;
-        for (i, rule) in rules.iter().enumerate() {
-            if rule.name() == name {
-                index_to_move = Some(i);
-                break;
-            }
-        }
-        if let Some(index) = index_to_move {
-            let _ = rules.remove(index);
-        }
+        rules.retain(|rule| rule.name() != name);
     }
 
     /// Register a udf function

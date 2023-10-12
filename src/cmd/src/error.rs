@@ -85,12 +85,6 @@ pub enum Error {
     #[snafu(display("Illegal config: {}", msg))]
     IllegalConfig { msg: String, location: Location },
 
-    #[snafu(display("Illegal auth config"))]
-    IllegalAuthConfig {
-        location: Location,
-        source: auth::error::Error,
-    },
-
     #[snafu(display("Unsupported selector type: {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
@@ -212,6 +206,13 @@ pub enum Error {
         location: Location,
         database: String,
     },
+
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -235,9 +236,9 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
-            | Error::IllegalAuthConfig { .. }
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
+            | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
             | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
 

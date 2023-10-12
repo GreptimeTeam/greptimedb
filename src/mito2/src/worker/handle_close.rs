@@ -16,9 +16,11 @@
 
 use common_query::Output;
 use common_telemetry::info;
+use metrics::decrement_gauge;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metrics::REGION_COUNT;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -37,6 +39,8 @@ impl<S> RegionWorkerLoop<S> {
         self.compaction_scheduler.on_region_closed(region_id);
 
         info!("Region {} closed", region_id);
+
+        decrement_gauge!(REGION_COUNT, 1.0);
 
         Ok(Output::AffectedRows(0))
     }

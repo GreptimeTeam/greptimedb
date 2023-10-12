@@ -18,5 +18,6 @@
 pub mod error;
 pub mod extension_plan;
 pub mod functions;
+mod metrics;
 pub mod planner;
 pub mod range_array;

@@ -17,32 +17,38 @@ use std::time::Duration;
 
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
 use prost::Message;
 use snafu::{Location, ResultExt, Snafu};
 
-#[derive(Debug, Snafu)]
+#[derive(Snafu)]
+#[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Failed to create profiler guard"))]
     CreateGuard {
-        source: pprof::Error,
+        #[snafu(source)]
+        error: pprof::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to create report"))]
     CreateReport {
-        source: pprof::Error,
+        #[snafu(source)]
+        error: pprof::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to create flamegraph"))]
     CreateFlamegraph {
-        source: pprof::Error,
+        #[snafu(source)]
+        error: pprof::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to create pprof report"))]
     ReportPprof {
-        source: pprof::Error,
+        #[snafu(source)]
+        error: pprof::Error,
         location: Location,
     },
 }

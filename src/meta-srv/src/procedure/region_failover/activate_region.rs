@@ -70,6 +70,7 @@ impl ActivateRegion {
             .await
             .context(error::TableMetadataManagerSnafu)?
             .context(error::TableInfoNotFoundSnafu { table_id })?
+            .into_inner()
             .table_info;
 
         let region_storage_path =

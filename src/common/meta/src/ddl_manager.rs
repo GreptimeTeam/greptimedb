@@ -35,7 +35,7 @@ use crate::error::{
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::key::TableMetadataManagerRef;
+use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use crate::rpc::ddl::DdlTask::{AlterTable, CreateTable, DropTable, TruncateTable};
 use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
@@ -144,7 +144,7 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         alter_table_task: AlterTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -176,8 +176,8 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         drop_table_task: DropTableTask,
-        table_info_value: TableInfoValue,
-        table_route_value: TableRouteValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        table_route_value: DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -198,7 +198,7 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         truncate_table_task: TruncateTableTask,
-        table_info_value: TableInfoValue,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
@@ -252,7 +252,7 @@ async fn handle_truncate_table_task(
         table_name: table_ref.to_string(),
     })?;
 
-    let table_route = table_route_value.region_routes;
+    let table_route = table_route_value.into_inner().region_routes;
 
     let id = ddl_manager
         .submit_truncate_table_task(

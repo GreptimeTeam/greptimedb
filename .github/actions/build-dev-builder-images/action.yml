@@ -1,0 +1,76 @@
+name: Build and push dev-builder images
+description: Build and push dev-builder images to DockerHub and ACR
+inputs:
+  dockerhub-image-registry:
+    description: The dockerhub image registry to store the images
+    required: false
+    default: docker.io
+  dockerhub-image-registry-username:
+    description: The dockerhub username to login to the image registry
+    required: true
+  dockerhub-image-registry-token:
+    description: The dockerhub token to login to the image registry
+    required: true
+  dockerhub-image-namespace:
+    description: The dockerhub namespace of the image registry to store the images
+    required: false
+    default: greptime
+  version:
+    description: Version of the dev-builder
+    required: false
+    default: latest
+  build-dev-builder-ubuntu:
+    description: Build dev-builder-ubuntu image
+    required: false
+    default: 'true'
+  build-dev-builder-centos:
+    description: Build dev-builder-centos image
+    required: false
+    default: 'true'
+  build-dev-builder-android:
+    description: Build dev-builder-android image
+    required: false
+    default: 'true'
+runs:
+  using: composite
+  steps:
+    - name: Login to Dockerhub
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ inputs.dockerhub-image-registry }}
+        username: ${{ inputs.dockerhub-image-registry-username }}
+        password: ${{ inputs.dockerhub-image-registry-token }}
+
+    - name: Build and push dev-builder-ubuntu image
+      shell: bash
+      if: ${{ inputs.build-dev-builder-ubuntu == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=ubuntu \
+          BUILDX_MULTI_PLATFORM_BUILD=true \
+          IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }}
+
+    - name: Build and push dev-builder-centos image
+      shell: bash
+      if: ${{ inputs.build-dev-builder-centos == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=centos \
+          BUILDX_MULTI_PLATFORM_BUILD=true \
+          IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }}
+
+    - name: Build and push dev-builder-android image # Only build image for amd64 platform.
+      shell: bash
+      if: ${{ inputs.build-dev-builder-android == 'true' }}
+      run: |
+        make dev-builder \
+          BASE_IMAGE=android \
+          IMAGE_REGISTRY=${{ inputs.dockerhub-image-registry }} \
+          IMAGE_NAMESPACE=${{ inputs.dockerhub-image-namespace }} \
+          IMAGE_TAG=${{ inputs.version }} && \
+        
+        docker push ${{ inputs.dockerhub-image-registry }}/${{ inputs.dockerhub-image-namespace }}/dev-builder-android:${{ inputs.version }}

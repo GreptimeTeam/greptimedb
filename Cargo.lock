@@ -204,7 +204,7 @@ checksum = "8f1f8f5a6f3d50d89e3797d7593a50f96bb2aaa20ca0cc7be1fb673232c91d72"
 
 [[package]]
 name = "api"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "common-base",
  "common-error",
@@ -580,26 +580,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-io"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fc5b45d93ef0529756f812ca52e44c221b35341892d3dcc34132ac02f3dd2af"
-dependencies = [
- "async-lock",
- "autocfg",
- "cfg-if 1.0.0",
- "concurrent-queue",
- "futures-lite",
- "log",
- "parking",
- "polling",
- "rustix 0.37.23",
- "slab",
- "socket2 0.4.9",
- "waker-fn",
-]
-
-[[package]]
 name = "async-lock"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -686,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -859,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "benchmarks"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "clap 4.4.1",
@@ -1240,7 +1220,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catalog"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arc-swap",
@@ -1524,7 +1504,7 @@ checksum = "cd7cc57abe963c6d3b9d8be5b06ba7c8957a930305ca90304f24ef040aa6f961"
 
 [[package]]
 name = "client"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arrow-flight",
@@ -1554,7 +1534,7 @@ dependencies = [
  "rand",
  "session",
  "snafu",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "substrait 0.7.5",
  "tokio",
  "tokio-stream",
@@ -1591,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "cmd"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anymap",
  "async-trait",
@@ -1627,6 +1607,7 @@ dependencies = [
  "mito2",
  "nu-ansi-term",
  "partition",
+ "plugins",
  "prost",
  "query",
  "rand",
@@ -1638,7 +1619,7 @@ dependencies = [
  "servers",
  "session",
  "snafu",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "temp-env",
  "tikv-jemallocator",
@@ -1671,7 +1652,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
 name = "common-base"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anymap",
  "bitvec",
@@ -1686,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "common-catalog"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "common-error",
@@ -1699,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "common-config"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "common-base",
  "humantime-serde",
@@ -1708,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "common-datasource"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -1737,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "common-error"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "snafu",
  "strum 0.25.0",
@@ -1745,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "common-function"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "chrono-tz 0.6.3",
@@ -1768,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "common-greptimedb-telemetry"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "common-error",
@@ -1787,7 +1768,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arrow-flight",
@@ -1817,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "common-grpc-expr"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -1836,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "common-macro"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "backtrace",
@@ -1853,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "common-mem-prof"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "common-error",
  "common-macro",
@@ -1866,12 +1847,14 @@ dependencies = [
 
 [[package]]
 name = "common-meta"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arrow-flight",
  "async-stream",
  "async-trait",
+ "base64 0.21.3",
+ "bytes",
  "chrono",
  "common-catalog",
  "common-error",
@@ -1902,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1926,7 +1909,7 @@ dependencies = [
 
 [[package]]
 name = "common-procedure-test"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "common-procedure",
@@ -1934,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "common-query"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -1957,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "common-recordbatch"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "common-error",
  "common-macro",
@@ -1974,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "common-runtime"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "common-error",
@@ -1991,7 +1974,7 @@ dependencies = [
 
 [[package]]
 name = "common-telemetry"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "backtrace",
  "common-error",
@@ -2018,7 +2001,7 @@ dependencies = [
 
 [[package]]
 name = "common-test-util"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "once_cell",
  "rand",
@@ -2027,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "common-time"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -2042,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "common-version"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "build-data",
 ]
@@ -2496,7 +2479,7 @@ dependencies = [
 [[package]]
 name = "datafusion"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2544,7 +2527,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -2558,7 +2541,7 @@ dependencies = [
 [[package]]
 name = "datafusion-execution"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "dashmap",
  "datafusion-common",
@@ -2575,7 +2558,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2589,7 +2572,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2606,7 +2589,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "ahash 0.8.3",
  "arrow",
@@ -2641,7 +2624,7 @@ dependencies = [
 [[package]]
 name = "datafusion-row"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "datafusion-common",
@@ -2652,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -2665,7 +2648,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "27.0.0"
-source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=c0b0fca548e99d020c76e1a1cd7132aab26000e1#c0b0fca548e99d020c76e1a1cd7132aab26000e1"
+source = "git+https://github.com/waynexia/arrow-datafusion.git?rev=b6f3b28b6fe91924cc8dd3d83726b766f2a706ec#b6f3b28b6fe91924cc8dd3d83726b766f2a706ec"
 dependencies = [
  "async-recursion",
  "chrono",
@@ -2680,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "datanode"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arrow-flight",
@@ -2739,7 +2722,7 @@ dependencies = [
  "sql",
  "storage",
  "store-api",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "tokio",
  "tokio-stream",
@@ -2753,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "datatypes"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -3216,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "file-engine"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -3326,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arc-swap",
@@ -3390,7 +3373,7 @@ dependencies = [
  "storage",
  "store-api",
  "strfmt",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "tokio",
  "toml 0.7.6",
@@ -3525,21 +3508,6 @@ name = "futures-io"
 version = "0.3.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4fff74096e71ed47f8e023204cfd0aa1289cd54ae5430a9523be060cdb849964"
-
-[[package]]
-name = "futures-lite"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49a9d51ce47660b1e808d3c990b4709f2f415d928835a17dfd16991515c46bce"
-dependencies = [
- "fastrand 1.9.0",
- "futures-core",
- "futures-io",
- "memchr",
- "parking",
- "pin-project-lite",
- "waker-fn",
-]
 
 [[package]]
 name = "futures-macro"
@@ -4210,7 +4178,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=693128abe9adc70ba636010a172c9da55b206bba#693128abe9adc70ba636010a172c9da55b206bba"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1f1dd532a111e3834cc3019c5605e2993ffb9dc3#1f1dd532a111e3834cc3019c5605e2993ffb9dc3"
 dependencies = [
  "prost",
  "serde",
@@ -5014,12 +4982,6 @@ checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
 name = "linux-raw-sys"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef53942eb7bf7ff43a617b3e2c1c4a5ecf5944a7c1bc12d7ee39bbb15e5c1519"
-
-[[package]]
-name = "linux-raw-sys"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57bcfdad1b858c2db7c38303a6d2ad4dfaf5eb53dfeb0910128b2c26d6158503"
@@ -5042,7 +5004,7 @@ checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
 name = "log-store"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5120,15 +5082,6 @@ dependencies = [
  "sparsevec",
  "static_assertions",
  "vob",
-]
-
-[[package]]
-name = "lru"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e7d46de488603ffdd5f30afbc64fbba2378214a2c3a2fb83abf3d33126df17"
-dependencies = [
- "hashbrown 0.13.2",
 ]
 
 [[package]]
@@ -5321,7 +5274,7 @@ dependencies = [
 
 [[package]]
 name = "meta-client"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -5350,7 +5303,7 @@ dependencies = [
 
 [[package]]
 name = "meta-srv"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anymap",
  "api",
@@ -5542,11 +5495,12 @@ dependencies = [
 
 [[package]]
 name = "mito2"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anymap",
  "api",
  "aquamarine",
+ "arc-swap",
  "async-channel",
  "async-compat",
  "async-stream",
@@ -5598,12 +5552,12 @@ dependencies = [
 
 [[package]]
 name = "moka"
-version = "0.11.3"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa6e72583bf6830c956235bff0d5afec8cf2952f579ebad18ae7821a917d950f"
+checksum = "8dc65d4615c08c8a13d91fd404b5a2a4485ba35b4091e3315cf8798d280c2f29"
 dependencies = [
- "async-io",
  "async-lock",
+ "async-trait",
  "crossbeam-channel",
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -5612,7 +5566,6 @@ dependencies = [
  "parking_lot 0.12.1",
  "quanta 0.11.1",
  "rustc_version",
- "scheduled-thread-pool",
  "skeptic",
  "smallvec",
  "tagptr",
@@ -5666,7 +5619,7 @@ dependencies = [
  "futures-sink",
  "futures-util",
  "lazy_static",
- "lru 0.10.1",
+ "lru",
  "mio",
  "mysql_common",
  "once_cell",
@@ -6004,19 +5957,19 @@ dependencies = [
 
 [[package]]
 name = "object-store"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "common-runtime",
  "common-telemetry",
  "common-test-util",
  "futures",
- "lru 0.9.0",
  "md5",
  "metrics",
+ "moka",
  "opendal",
- "pin-project",
  "tokio",
  "uuid",
 ]
@@ -6228,7 +6181,7 @@ dependencies = [
 
 [[package]]
 name = "operator"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-compat",
@@ -6273,7 +6226,7 @@ dependencies = [
  "sqlparser 0.34.0",
  "storage",
  "store-api",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "tokio",
  "tonic 0.9.2",
@@ -6398,12 +6351,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parking"
-version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14f2252c834a40ed9bb5422029649578e63aa341ac401f74e719dd1afda8394e"
-
-[[package]]
 name = "parking_lot"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6499,7 +6446,7 @@ dependencies = [
 
 [[package]]
 name = "partition"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -6824,6 +6771,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugins"
+version = "0.4.0"
+dependencies = [
+ "auth",
+ "common-base",
+ "datanode",
+ "frontend",
+ "meta-srv",
+ "snafu",
+]
+
+[[package]]
 name = "pmutil"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6832,22 +6791,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "polling"
-version = "2.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b2d323e8ca7996b3e23126511a523f7e62924d93ecd5ae73b333815b0eb3dce"
-dependencies = [
- "autocfg",
- "bitflags 1.3.2",
- "cfg-if 1.0.0",
- "concurrent-queue",
- "libc",
- "log",
- "pin-project-lite",
- "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -7079,7 +7022,7 @@ dependencies = [
 
 [[package]]
 name = "promql"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -7093,6 +7036,7 @@ dependencies = [
  "datatypes",
  "futures",
  "greptime-proto",
+ "metrics",
  "promql-parser",
  "prost",
  "query",
@@ -7340,7 +7284,7 @@ dependencies = [
 
 [[package]]
 name = "query"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "ahash 0.8.3",
  "api",
@@ -7397,7 +7341,7 @@ dependencies = [
  "stats-cli",
  "store-api",
  "streaming-stats",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "tokio",
  "tokio-stream",
@@ -8060,20 +8004,6 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.37.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d69718bf81c6127a49dc64e44a742e8bb9213c0ff8869a22c308f84c1d4ab06"
-dependencies = [
- "bitflags 1.3.2",
- "errno 0.3.3",
- "io-lifetimes",
- "libc",
- "linux-raw-sys 0.3.8",
- "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "rustix"
 version = "0.38.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed6248e1caa625eb708e266e06159f135e8c26f2bb7ceb72dc4b2766d0340964"
@@ -8578,15 +8508,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scheduled-thread-pool"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbc66816425a074528352f5789333ecff06ca41b36b0b0efdfbb29edc391a19"
-dependencies = [
- "parking_lot 0.12.1",
-]
-
-[[package]]
 name = "schemars"
 version = "0.8.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8619,7 +8540,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "script"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arc-swap",
@@ -8899,7 +8820,7 @@ dependencies = [
 
 [[package]]
 name = "servers"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "aide",
  "api",
@@ -8993,8 +8914,9 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
+ "api",
  "arc-swap",
  "auth",
  "common-catalog",
@@ -9270,7 +9192,7 @@ dependencies = [
 
 [[package]]
 name = "sql"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "common-base",
@@ -9321,7 +9243,7 @@ dependencies = [
 
 [[package]]
 name = "sqlness-runner"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "clap 4.4.1",
@@ -9527,7 +9449,7 @@ dependencies = [
 
 [[package]]
 name = "storage"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "arc-swap",
@@ -9581,7 +9503,7 @@ dependencies = [
 
 [[package]]
 name = "store-api"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "aquamarine",
@@ -9600,6 +9522,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+ "strum 0.25.0",
  "tokio",
 ]
 
@@ -9718,7 +9641,7 @@ dependencies = [
 
 [[package]]
 name = "substrait"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -9876,7 +9799,7 @@ dependencies = [
 
 [[package]]
 name = "table"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "anymap",
  "async-trait",
@@ -9982,7 +9905,7 @@ dependencies = [
 
 [[package]]
 name = "tests-integration"
-version = "0.4.0-nightly"
+version = "0.4.0"
 dependencies = [
  "api",
  "async-trait",
@@ -10035,7 +9958,7 @@ dependencies = [
  "sql",
  "sqlx",
  "store-api",
- "substrait 0.4.0-nightly",
+ "substrait 0.4.0",
  "table",
  "tempfile",
  "tokio",
@@ -11195,12 +11118,6 @@ name = "volatile"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8e76fae08f03f96e166d2dfda232190638c10e0383841252416f9cfe2ae60e6"
-
-[[package]]
-name = "waker-fn"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d5b2c62b4012a3e1eca5a7e077d13b3bf498c4073e33ccd58626607748ceeca"
 
 [[package]]
 name = "walkdir"

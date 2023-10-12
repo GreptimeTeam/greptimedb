@@ -56,12 +56,17 @@ pub mod table_region;
 pub mod table_route;
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Debug;
+use std::ops::Deref;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
 use lazy_static::lazy_static;
 use regex::Regex;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, TableId};
@@ -155,6 +160,116 @@ macro_rules! ensure_values {
     };
 }
 
+/// A struct containing a deserialized value(`inner`) and an original bytes.
+///
+/// - Serialize behaviors:
+///
+/// The `inner` field will be ignored.
+///
+/// - Deserialize behaviors:
+///
+/// The `inner` field will be deserialized from the `bytes` field.
+pub struct DeserializedValueWithBytes<T: DeserializeOwned + Serialize> {
+    // The original bytes of the inner.
+    bytes: Bytes,
+    // The value was deserialized from the original bytes.
+    inner: T,
+}
+
+impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: DeserializeOwned + Serialize + Debug> Debug for DeserializedValueWithBytes<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "DeserializedValueWithBytes(inner: {:?}, bytes: {:?})",
+            self.inner, self.bytes
+        )
+    }
+}
+
+impl<T: DeserializeOwned + Serialize> Serialize for DeserializedValueWithBytes<T> {
+    /// - Serialize behaviors:
+    ///
+    /// The `inner` field will be ignored.
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Safety: The original bytes are always JSON encoded.
+        // It's more efficiently than `serialize_bytes`.
+        serializer.serialize_str(&String::from_utf8_lossy(&self.bytes))
+    }
+}
+
+impl<'de, T: DeserializeOwned + Serialize> Deserialize<'de> for DeserializedValueWithBytes<T> {
+    /// - Deserialize behaviors:
+    ///
+    /// The `inner` field will be deserialized from the `bytes` field.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let buf = String::deserialize(deserializer)?;
+        let bytes = Bytes::from(buf);
+
+        let value = DeserializedValueWithBytes::from_inner_bytes(bytes)
+            .map_err(|err| serde::de::Error::custom(err.to_string()))?;
+
+        Ok(value)
+    }
+}
+
+impl<T: Serialize + DeserializeOwned + Clone> Clone for DeserializedValueWithBytes<T> {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: Serialize + DeserializeOwned> DeserializedValueWithBytes<T> {
+    /// Returns a struct containing a deserialized value and an original `bytes`.
+    /// It accepts original bytes of inner.
+    pub fn from_inner_bytes(bytes: Bytes) -> Result<Self> {
+        let inner = serde_json::from_slice(&bytes).context(error::SerdeJsonSnafu)?;
+        Ok(Self { bytes, inner })
+    }
+
+    /// Returns a struct containing a deserialized value and an original `bytes`.
+    /// It accepts original bytes of inner.
+    pub fn from_inner_slice(bytes: &[u8]) -> Result<Self> {
+        Self::from_inner_bytes(Bytes::copy_from_slice(bytes))
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    /// Returns original `bytes`
+    pub fn into_bytes(&self) -> Vec<u8> {
+        self.bytes.to_vec()
+    }
+
+    #[cfg(feature = "testing")]
+    /// Notes: used for test purpose.
+    pub fn from_inner(inner: T) -> Self {
+        let bytes = serde_json::to_vec(&inner).unwrap();
+
+        Self {
+            bytes: Bytes::from(bytes),
+            inner,
+        }
+    }
+}
+
 impl TableMetadataManager {
     pub fn new(kv_backend: KvBackendRef) -> Self {
         TableMetadataManager {
@@ -212,7 +327,10 @@ impl TableMetadataManager {
     pub async fn get_full_table_info(
         &self,
         table_id: TableId,
-    ) -> Result<(Option<TableInfoValue>, Option<TableRouteValue>)> {
+    ) -> Result<(
+        Option<DeserializedValueWithBytes<TableInfoValue>>,
+        Option<DeserializedValueWithBytes<TableRouteValue>>,
+    )> {
         let (get_table_route_txn, table_route_decoder) =
             self.table_route_manager.build_get_txn(table_id);
 
@@ -291,15 +409,17 @@ impl TableMetadataManager {
 
         // Checks whether metadata was already created.
         if !r.succeeded {
-            let remote_table_info =
-                on_create_table_info_failure(&r.responses)?.context(error::UnexpectedSnafu {
+            let remote_table_info = on_create_table_info_failure(&r.responses)?
+                .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the create table metadata",
-                })?;
+                })?
+                .into_inner();
 
-            let remote_table_route =
-                on_create_table_route_failure(&r.responses)?.context(error::UnexpectedSnafu {
+            let remote_table_route = on_create_table_route_failure(&r.responses)?
+                .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table route during the create table metadata",
-                })?;
+                })?
+                .into_inner();
 
             let op_name = "the creating table metadata";
             ensure_values!(remote_table_info, table_info_value, op_name);
@@ -313,8 +433,8 @@ impl TableMetadataManager {
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata(
         &self,
-        table_info_value: &TableInfoValue,
-        table_route_value: &TableRouteValue,
+        table_info_value: &DeserializedValueWithBytes<TableInfoValue>,
+        table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<()> {
         let table_info = &table_info_value.table_info;
         let table_id = table_info.ident.table_id;
@@ -364,7 +484,7 @@ impl TableMetadataManager {
     /// and the new `TableNameKey` MUST be empty.
     pub async fn rename_table(
         &self,
-        current_table_info_value: TableInfoValue,
+        current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         new_table_name: String,
     ) -> Result<()> {
         let current_table_info = &current_table_info_value.table_info;
@@ -389,9 +509,11 @@ impl TableMetadataManager {
             table_id,
         )?;
 
-        let new_table_info_value = current_table_info_value.with_update(move |table_info| {
-            table_info.name = new_table_name;
-        });
+        let new_table_info_value = current_table_info_value
+            .inner
+            .with_update(move |table_info| {
+                table_info.name = new_table_name;
+            });
 
         // Updates table info.
         let (update_table_info_txn, on_update_table_info_failure) = self
@@ -404,10 +526,11 @@ impl TableMetadataManager {
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_info =
-                on_update_table_info_failure(&r.responses)?.context(error::UnexpectedSnafu {
+            let remote_table_info = on_update_table_info_failure(&r.responses)?
+                .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the rename table metadata",
-                })?;
+                })?
+                .into_inner();
 
             let op_name = "the renaming table metadata";
             ensure_values!(remote_table_info, new_table_info_value, op_name);
@@ -419,7 +542,7 @@ impl TableMetadataManager {
     /// Updates table info and returns an error if different metadata exists.
     pub async fn update_table_info(
         &self,
-        current_table_info_value: TableInfoValue,
+        current_table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         new_table_info: RawTableInfo,
     ) -> Result<()> {
         let table_id = current_table_info_value.table_info.ident.table_id;
@@ -435,10 +558,11 @@ impl TableMetadataManager {
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_info =
-                on_update_table_info_failure(&r.responses)?.context(error::UnexpectedSnafu {
+            let remote_table_info = on_update_table_info_failure(&r.responses)?
+                .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table info during the updating table info",
-                })?;
+                })?
+                .into_inner();
 
             let op_name = "the updating table info";
             ensure_values!(remote_table_info, new_table_info_value, op_name);
@@ -450,7 +574,7 @@ impl TableMetadataManager {
         &self,
         table_id: TableId,
         region_info: RegionInfo,
-        current_table_route_value: TableRouteValue,
+        current_table_route_value: DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
     ) -> Result<()> {
@@ -480,10 +604,11 @@ impl TableMetadataManager {
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
-            let remote_table_route =
-                on_update_table_route_failure(&r.responses)?.context(error::UnexpectedSnafu {
+            let remote_table_route = on_update_table_route_failure(&r.responses)?
+                .context(error::UnexpectedSnafu {
                     err_msg: "Reads the empty table route during the updating table route",
-                })?;
+                })?
+                .into_inner();
 
             let op_name = "the updating table route";
             ensure_values!(remote_table_route, new_table_route_value, op_name);
@@ -559,6 +684,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
     use std::sync::Arc;
 
+    use bytes::Bytes;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use futures::TryStreamExt;
@@ -570,10 +696,38 @@ mod tests {
     use crate::key::table_info::TableInfoValue;
     use crate::key::table_name::TableNameKey;
     use crate::key::table_route::TableRouteValue;
-    use crate::key::{to_removed_key, TableMetadataManager};
+    use crate::key::{to_removed_key, DeserializedValueWithBytes, TableMetadataManager};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{region_distribution, Region, RegionRoute};
+
+    #[test]
+    fn test_deserialized_value_with_bytes() {
+        let region_route = new_test_region_route();
+        let region_routes = vec![region_route.clone()];
+
+        let expected_region_routes =
+            TableRouteValue::new(vec![region_route.clone(), region_route.clone()]);
+        let expected = serde_json::to_vec(&expected_region_routes).unwrap();
+
+        // Serialize behaviors:
+        // The inner field will be ignored.
+        let value = DeserializedValueWithBytes {
+            // ignored
+            inner: TableRouteValue::new(region_routes.clone()),
+            bytes: Bytes::from(expected.clone()),
+        };
+
+        let encoded = serde_json::to_vec(&value).unwrap();
+
+        // Deserialize behaviors:
+        // The inner field will be deserialized from the bytes field.
+        let decoded: DeserializedValueWithBytes<TableRouteValue> =
+            serde_json::from_slice(&encoded).unwrap();
+
+        assert_eq!(decoded.inner, expected_region_routes);
+        assert_eq!(decoded.bytes, expected);
+    }
 
     #[test]
     fn test_to_removed_key() {
@@ -664,8 +818,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(remote_table_info.unwrap().table_info, table_info);
-        assert_eq!(remote_table_route.unwrap().region_routes, region_routes);
+        assert_eq!(
+            remote_table_info.unwrap().into_inner().table_info,
+            table_info
+        );
+        assert_eq!(
+            remote_table_route.unwrap().into_inner().region_routes,
+            region_routes
+        );
     }
 
     #[tokio::test]
@@ -678,7 +838,8 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
-        let table_route_value = TableRouteValue::new(region_routes.clone());
+        let table_route_value =
+            DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
 
         // creates metadata.
         table_metadata_manager
@@ -686,7 +847,8 @@ mod tests {
             .await
             .unwrap();
 
-        let table_info_value = TableInfoValue::new(table_info.clone());
+        let table_info_value =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
 
         // deletes metadata.
         table_metadata_manager
@@ -727,7 +889,8 @@ mod tests {
             .get_removed(table_id)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_inner();
         assert_eq!(removed_table_info.table_info, table_info);
 
         let removed_table_route = table_metadata_manager
@@ -735,7 +898,8 @@ mod tests {
             .get_removed(table_id)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_inner();
         assert_eq!(removed_table_route.region_routes, region_routes);
     }
 
@@ -754,7 +918,9 @@ mod tests {
             .await
             .unwrap();
         let new_table_name = "another_name".to_string();
-        let table_info_value = TableInfoValue::new(table_info.clone());
+        let table_info_value =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
+
         table_metadata_manager
             .rename_table(table_info_value.clone(), new_table_name.clone())
             .await
@@ -766,7 +932,8 @@ mod tests {
             .unwrap();
         let mut modified_table_info = table_info.clone();
         modified_table_info.name = "hi".to_string();
-        let modified_table_info_value = table_info_value.update(modified_table_info);
+        let modified_table_info_value =
+            DeserializedValueWithBytes::from_inner(table_info_value.update(modified_table_info));
         // if the table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
@@ -820,7 +987,8 @@ mod tests {
             .unwrap();
         let mut new_table_info = table_info.clone();
         new_table_info.name = "hi".to_string();
-        let current_table_info_value = TableInfoValue::new(table_info.clone());
+        let current_table_info_value =
+            DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
         // should be ok.
         table_metadata_manager
             .update_table_info(current_table_info_value.clone(), new_table_info.clone())
@@ -838,12 +1006,15 @@ mod tests {
             .get(table_id)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .into_inner();
         assert_eq!(updated_table_info.table_info, new_table_info);
 
         let mut wrong_table_info = table_info.clone();
         wrong_table_info.name = "wrong".to_string();
-        let wrong_table_info_value = current_table_info_value.update(wrong_table_info);
+        let wrong_table_info_value = DeserializedValueWithBytes::from_inner(
+            current_table_info_value.update(wrong_table_info),
+        );
         // if the current_table_info_value is wrong, it should return an error.
         // The ABA problem.
         assert!(table_metadata_manager
@@ -882,7 +1053,8 @@ mod tests {
         let engine = table_info.meta.engine.as_str();
         let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
-        let current_table_route_value = TableRouteValue::new(region_routes.clone());
+        let current_table_route_value =
+            DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
         // creates metadata.
         table_metadata_manager
             .create_table_metadata(table_info.clone(), region_routes.clone())
@@ -927,7 +1099,11 @@ mod tests {
             .await
             .unwrap();
 
-        let current_table_route_value = current_table_route_value.update(new_region_routes.clone());
+        let current_table_route_value = DeserializedValueWithBytes::from_inner(
+            current_table_route_value
+                .inner
+                .update(new_region_routes.clone()),
+        );
         let new_region_routes = vec![new_region_route(2, 4), new_region_route(5, 5)];
         // it should be ok.
         table_metadata_manager
@@ -948,12 +1124,13 @@ mod tests {
 
         // if the current_table_route_value is wrong, it should return an error.
         // The ABA problem.
-        let wrong_table_route_value = current_table_route_value.update(vec![
-            new_region_route(1, 1),
-            new_region_route(2, 2),
-            new_region_route(3, 3),
-            new_region_route(4, 4),
-        ]);
+        let wrong_table_route_value =
+            DeserializedValueWithBytes::from_inner(current_table_route_value.update(vec![
+                new_region_route(1, 1),
+                new_region_route(2, 2),
+                new_region_route(3, 3),
+                new_region_route(4, 4),
+            ]));
         assert!(table_metadata_manager
             .update_table_route(
                 table_id,

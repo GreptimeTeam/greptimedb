@@ -30,7 +30,7 @@ pub const ENV_LIST_SEP: &str = ",";
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,
-    pub kv_store: KvStoreConfig,
+    pub metadata_store: KvStoreConfig,
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,

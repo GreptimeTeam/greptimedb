@@ -20,7 +20,9 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
+use common_base::Plugins;
 use etcd_client::Client;
+use servers::configurator::ConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
@@ -53,22 +55,27 @@ pub struct MetaSrvInstance {
     opts: MetaSrvOptions,
 
     signal_sender: Option<Sender<()>>,
+
+    plugins: Plugins,
 }
 
 impl MetaSrvInstance {
-    pub async fn new(opts: MetaSrvOptions) -> Result<MetaSrvInstance> {
-        let meta_srv = build_meta_srv(&opts).await?;
+    pub async fn new(opts: MetaSrvOptions, plugins: Plugins) -> Result<MetaSrvInstance> {
+        let meta_srv = build_meta_srv(&opts, plugins.clone()).await?;
         let http_srv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
                 .with_greptime_config_options(opts.to_toml_string())
                 .build(),
         );
+        // put meta_srv into plugins for later use
+        plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
             opts,
             signal_sender: None,
+            plugins,
         })
     }
 
@@ -79,8 +86,12 @@ impl MetaSrvInstance {
 
         self.signal_sender = Some(tx);
 
-        let meta_srv =
-            bootstrap_meta_srv_with_router(&self.opts.bind_addr, router(self.meta_srv.clone()), rx);
+        let mut router = router(self.meta_srv.clone());
+        if let Some(configurator) = self.meta_srv.plugins().get::<ConfiguratorRef>() {
+            router = configurator.config_grpc(router);
+        }
+
+        let meta_srv = bootstrap_meta_srv_with_router(&self.opts.bind_addr, router, rx);
         let addr = self.opts.http.addr.parse().context(error::ParseAddrSnafu {
             addr: &self.opts.http.addr,
         })?;
@@ -109,6 +120,10 @@ impl MetaSrvInstance {
                 server: self.http_srv.name(),
             })?;
         Ok(())
+    }
+
+    pub fn plugins(&self) -> Plugins {
+        self.plugins.clone()
     }
 }
 
@@ -146,7 +161,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(admin::make_admin_service(meta_srv))
 }
 
-pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
+pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<MetaSrv> {
     let (kv_store, election, lock) = if opts.use_memory_store {
         (
             Arc::new(MemStore::new()) as _,
@@ -154,8 +169,13 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
             Some(Arc::new(MemLock::default()) as _),
         )
     } else {
-        let etcd_endpoints = [&opts.store_addr];
-        let etcd_client = Client::connect(etcd_endpoints, None)
+        let etcd_endpoints = opts
+            .store_addr
+            .split(',')
+            .map(|x| x.trim())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>();
+        let etcd_client = Client::connect(&etcd_endpoints, None)
             .await
             .context(error::ConnectEtcdSnafu)?;
         (
@@ -179,14 +199,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
         .selector(selector)
         .election(election)
         .lock(lock)
+        .plugins(plugins)
         .build()
         .await
-}
-
-pub async fn make_meta_srv(opts: &MetaSrvOptions) -> Result<MetaSrv> {
-    let meta_srv = build_meta_srv(opts).await?;
-
-    meta_srv.try_start().await?;
-
-    Ok(meta_srv)
 }

@@ -1,0 +1,13 @@
+[package]
+name = "plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+auth.workspace = true
+common-base.workspace = true
+datanode.workspace = true
+frontend.workspace = true
+meta-srv.workspace = true
+snafu.workspace = true

@@ -140,7 +140,9 @@ impl Categorizer {
             | Expr::Negative(_)
             | Expr::Between(_)
             | Expr::Sort(_)
-            | Expr::Exists(_) => Commutativity::Commutative,
+            | Expr::Exists(_)
+            | Expr::ScalarFunction(_)
+            | Expr::ScalarUDF(_) => Commutativity::Commutative,
 
             Expr::Like(_)
             | Expr::SimilarTo(_)
@@ -150,8 +152,6 @@ impl Categorizer {
             | Expr::Case(_)
             | Expr::Cast(_)
             | Expr::TryCast(_)
-            | Expr::ScalarFunction(_)
-            | Expr::ScalarUDF(_)
             | Expr::AggregateFunction(_)
             | Expr::WindowFunction(_)
             | Expr::AggregateUDF(_)

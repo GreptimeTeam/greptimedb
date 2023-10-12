@@ -1,0 +1,139 @@
+name: Release CN artifacts
+description: Release artifacts to CN region
+inputs:
+  image-registry:
+    description: The image registry to store the images
+    required: true
+  image-namespace:
+    description: The namespace of the image registry to store the images
+    required: true
+  image-name:
+    description: The name of the image to build
+    required: false
+    default: greptimedb
+  image-registry-username:
+    description: The username to login to the image registry
+    required: true
+  image-registry-password:
+    description: The password to login to the image registry
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  dev-mode:
+    description: Enable dev mode, only push standard greptime
+    required: false
+    default: 'false'
+  push-latest-tag:
+    description: Whether to push the latest tag
+    required: false
+    default: 'true'
+  aws-cn-s3-bucket:
+    description: S3 bucket to store released artifacts in CN region
+    required: true
+  aws-cn-access-key-id:
+    description: AWS access key id in CN region
+    required: true
+  aws-cn-secret-access-key:
+    description: AWS secret access key in CN region
+    required: true
+  aws-cn-region:
+    description: AWS region in CN
+    required: true
+  upload-to-s3:
+    description: Upload to S3
+    required: false
+    default: 'true'
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: false
+    default: 'artifacts'
+  update-latest-version-info:
+    description: Upload the latest version info in S3
+    required: false
+    default: 'true'
+  upload-max-retry-times:
+    description: Max retry times for uploading artifacts to S3
+    required: false
+    default: "20"
+  upload-retry-timeout:
+    description: Timeout for uploading artifacts to S3
+    required: false
+    default: "30" # minutes
+runs:
+  using: composite
+  steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: ${{ inputs.artifacts-dir }}
+
+    - name: Upload artifacts to aws-cn S3
+      if: ${{ inputs.upload-to-s3 == 'true' }}
+      uses: nick-invision/retry@v2
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-cn-region }}
+      with:
+        max_attempts: ${{ inputs.upload-max-retry-times }}
+        timeout_minutes: ${{ inputs.upload-retry-timeout }}
+        # The bucket layout will be:
+        # releases/greptimedb
+        # ├── v0.1.0
+        # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
+        # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
+        # └── v0.2.0
+        #    ├── greptime-darwin-amd64-pyo3-v0.2.0.sha256sum
+        #    └── greptime-darwin-amd64-pyo3-v0.2.0.tar.gz
+        command: |
+          cd ${{ inputs.artifacts-dir }} && \
+          aws s3 cp . s3://${{ inputs.aws-cn-s3-bucket }}/releases/greptimedb/${{ inputs.version }} \
+          --recursive --exclude "*" --include "greptime-*.tar.gz" --include "greptime-*.sha256sum"
+
+    - name: Update latest version info in aws-cn S3
+      if: ${{ inputs.upload-to-s3 == 'true' && inputs.update-latest-version-info == 'true' }} # We'll also upload the latest artifacts to S3 in the scheduled and formal release.
+      uses: nick-invision/retry@v2
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
+        AWS_DEFAULT_REGION: ${{ inputs.aws-cn-region }}
+      with:
+        max_attempts: ${{ inputs.upload-max-retry-times }}
+        timeout_minutes: ${{ inputs.upload-retry-timeout }}
+        command: |
+          echo "${{ inputs.version }}" > ${{ inputs.artifacts-dir }}/latest-version.txt && \
+          aws cp ${{ inputs.artifacts-dir }}/latest-version.txt s3://${{ inputs.aws-cn-s3-bucket }}/releases/greptimedb/latest-version.txt
+
+    - name: Push images from Dockerhub to ACR
+      shell: bash
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+      run: |
+        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}
+        
+        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:${{ inputs.version }}
+        fi
+
+    - name: Push latest images from Dockerhub to ACR
+      shell: bash
+      if: ${{ inputs.push-latest-tag == 'true' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+      run: |
+        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:latest
+
+        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
+          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
+            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
+            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:latest
+        fi

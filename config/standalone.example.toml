@@ -93,8 +93,8 @@ read_batch_size = 128
 # Whether to sync log file after every write.
 sync_write = false
 
-# Kv options.
-[kv_store]
+# Metadata storage options.
+[metadata_store]
 # Kv file size in bytes.
 file_size = "256MB"
 # Kv purge threshold.
@@ -115,6 +115,10 @@ data_home = "/tmp/greptimedb/"
 type = "File"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
+# Cache configuration for object storage such as 'S3' etc.
+# cache_path = "/path/local_cache"
+# The local file cache capacity in bytes.
+# cache_capacity = "256MB"
 
 # Compaction options.
 [storage.compaction]

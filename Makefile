@@ -55,11 +55,15 @@ else
 	BUILDX_MULTI_PLATFORM_BUILD_OPTS := -o type=docker
 endif
 
+ifneq ($(strip $(CARGO_BUILD_EXTRA_OPTS)),)
+	CARGO_BUILD_OPTS += ${CARGO_BUILD_EXTRA_OPTS}
+endif
+
 ##@ Build
 
 .PHONY: build
 build: ## Build debug version greptime.
-	cargo build ${CARGO_BUILD_OPTS}
+	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
 
 .POHNY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
@@ -67,11 +71,34 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:latest \
 	make build \
+	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
 	TARGET_DIR=${TARGET_DIR} \
 	TARGET=${TARGET} \
-	RELEASE=${RELEASE}
+	RELEASE=${RELEASE} \
+	CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}"
+
+.PHONY: build-android-bin
+build-android-bin: ## Build greptime binary for android.
+	docker run --network=host \
+	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
+	make build \
+	CARGO_EXTENSION="ndk --platform 23 -t aarch64-linux-android" \
+	CARGO_PROFILE=release \
+	FEATURES="${FEATURES}" \
+	TARGET_DIR="${TARGET_DIR}" \
+	TARGET="${TARGET}" \
+	RELEASE="${RELEASE}" \
+	CARGO_BUILD_EXTRA_OPTS="--bin greptime --no-default-features"
+
+.PHONY: strip-android-bin
+strip-android-bin: build-android-bin ## Strip greptime binary for android.
+	docker run --network=host \
+	-v ${PWD}:/greptimedb \
+	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:latest \
+	bash -c '$${NDK_ROOT}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip /greptimedb/target/aarch64-linux-android/release/greptime'
 
 .PHONY: clean
 clean: ## Clean the project.

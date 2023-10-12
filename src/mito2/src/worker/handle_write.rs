@@ -17,11 +17,17 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
+use common_telemetry::timer;
+use metrics::counter;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{RejectWriteSnafu, Result};
+use crate::metrics::{
+    STAGE_LABEL, TYPE_LABEL, WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED,
+    WRITE_STALL_TOTAL,
+};
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
 use crate::worker::RegionWorkerLoop;
@@ -50,7 +56,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            // TODO(yingwen): stalled metrics.
+            counter!(WRITE_STALL_TOTAL, write_requests.len() as u64);
+
             self.stalled_requests.append(&mut write_requests);
             self.listener.on_write_stall();
             return;
@@ -59,24 +66,36 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut region_ctxs = self.prepare_region_write_ctx(write_requests);
 
         // Write to WAL.
-        let mut wal_writer = self.wal.writer();
-        for region_ctx in region_ctxs.values_mut() {
-            if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
-                region_ctx.set_error(e);
+        {
+            let _timer = timer!(WRITE_STAGE_ELAPSED, &[(STAGE_LABEL, "write_wal")]);
+            let mut wal_writer = self.wal.writer();
+            for region_ctx in region_ctxs.values_mut() {
+                if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
+                    region_ctx.set_error(e);
+                }
             }
-        }
-        if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
-            // Failed to write wal.
-            for mut region_ctx in region_ctxs.into_values() {
-                region_ctx.set_error(e.clone());
+            if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
+                // Failed to write wal.
+                for mut region_ctx in region_ctxs.into_values() {
+                    region_ctx.set_error(e.clone());
+                }
+                return;
             }
-            return;
         }
 
+        let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
-        for mut region_ctx in region_ctxs.into_values() {
-            region_ctx.write_memtable();
+        {
+            let _timer = timer!(WRITE_STAGE_ELAPSED, &[(STAGE_LABEL, "write_memtable")]);
+            for mut region_ctx in region_ctxs.into_values() {
+                region_ctx.write_memtable();
+                put_rows += region_ctx.put_num;
+                delete_rows += region_ctx.delete_num;
+            }
         }
+
+        counter!(WRITE_ROWS_TOTAL, put_rows as u64, TYPE_LABEL => "put");
+        counter!(WRITE_ROWS_TOTAL, delete_rows as u64, TYPE_LABEL => "delete");
     }
 }
 
@@ -148,6 +167,8 @@ impl<S> RegionWorkerLoop<S> {
 
 /// Send rejected error to all `write_requests`.
 fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
+    counter!(WRITE_REJECT_TOTAL, write_requests.len() as u64);
+
     for req in write_requests {
         req.sender.send(
             RejectWriteSnafu {

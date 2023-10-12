@@ -31,6 +31,10 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
+        plugins::start_datanode_plugins(self.datanode.plugins())
+            .await
+            .context(StartDatanodeSnafu)?;
+
         self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
@@ -159,11 +163,15 @@ impl StartCommand {
         Ok(Options::Datanode(Box::new(opts)))
     }
 
-    async fn build(self, opts: DatanodeOptions) -> Result<Instance> {
+    async fn build(self, mut opts: DatanodeOptions) -> Result<Instance> {
+        let plugins = plugins::setup_datanode_plugins(&mut opts)
+            .await
+            .context(StartDatanodeSnafu)?;
+
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = DatanodeBuilder::new(opts, None, Default::default())
+        let datanode = DatanodeBuilder::new(opts, None, plugins)
             .build()
             .await
             .context(StartDatanodeSnafu)?;

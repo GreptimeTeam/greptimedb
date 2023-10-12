@@ -31,6 +31,7 @@ use common_meta::ddl::create_table::*;
 use common_meta::ddl::drop_table::DropTableProcedure;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::DeserializedValueWithBytes;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
 use common_meta::rpc::router::{find_leaders, RegionRoute};
 use common_procedure::Status;
@@ -235,8 +236,8 @@ async fn test_on_datanode_drop_regions() {
     let procedure = DropTableProcedure::new(
         1,
         drop_table_task,
-        TableRouteValue::new(region_routes),
-        TableInfoValue::new(test_data::new_table_info()),
+        DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes)),
+        DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
         test_data::new_ddl_context(datanode_manager),
     );
 
@@ -299,7 +300,7 @@ fn test_create_alter_region_request() {
     let procedure = AlterTableProcedure::new(
         1,
         alter_table_task,
-        TableInfoValue::new(test_data::new_table_info()),
+        DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     )
     .unwrap();
@@ -364,7 +365,7 @@ async fn test_submit_alter_region_requests() {
     let mut procedure = AlterTableProcedure::new(
         1,
         alter_table_task,
-        TableInfoValue::new(table_info),
+        DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
         context,
     )
     .unwrap();

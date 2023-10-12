@@ -18,11 +18,11 @@ on:
         description: The runner uses to build linux-amd64 artifacts
         default: ec2-c6i.4xlarge-amd64
         options:
-          - ubuntu-latest
-          - ubuntu-latest-8-cores
-          - ubuntu-latest-16-cores
-          - ubuntu-latest-32-cores
-          - ubuntu-latest-64-cores
+          - ubuntu-20.04
+          - ubuntu-20.04-8-cores
+          - ubuntu-20.04-16-cores
+          - ubuntu-20.04-32-cores
+          - ubuntu-20.04-64-cores
           - ec2-c6i.xlarge-amd64 # 4C8G
           - ec2-c6i.2xlarge-amd64 # 8C16G
           - ec2-c6i.4xlarge-amd64 # 16C32G
@@ -63,7 +63,12 @@ on:
         description: Build macos artifacts
         required: false
         default: false
-      release_artifacts:
+      build_windows_artifacts:
+        type: boolean
+        description: Build Windows artifacts
+        required: false
+        default: false
+      publish_github_release:
         type: boolean
         description: Create GitHub release and upload artifacts
         required: false
@@ -71,11 +76,6 @@ on:
       release_images:
         type: boolean
         description: Build and push images to DockerHub and ACR
-        required: false
-        default: false
-      release_dev_builder_image:
-        type: boolean
-        description: Release dev-builder image
         required: false
         default: false
 
@@ -91,17 +91,18 @@ env:
   # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nigthly-20230313;
   NIGHTLY_RELEASE_PREFIX: nightly
   # Note: The NEXT_RELEASE_VERSION should be modified manually by every formal release.
-  NEXT_RELEASE_VERSION: v0.4.0
+  NEXT_RELEASE_VERSION: v0.5.0
 
 jobs:
   allocate-runners:
     name: Allocate runners
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     outputs:
       linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
       linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
       macos-runner: ${{ inputs.macos_runner || vars.DEFAULT_MACOS_RUNNER }}
+      windows-runner: windows-latest-8-cores
 
       # The following EC2 resource id will be used for resource releasing.
       linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}
@@ -177,11 +178,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -201,11 +197,6 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -247,12 +238,43 @@ jobs:
           features: ${{ matrix.features }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
           artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          upload-to-s3: ${{ vars.UPLOAD_TO_S3 }}
+
+  build-windows-artifacts:
+    name: Build Windows artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ${{ needs.allocate-runners.outputs.windows-runner }}
+            arch: x86_64-pc-windows-msvc
+            features: servers/dashboard
+            artifacts-dir-prefix: greptime-windows-amd64
+          - os: ${{ needs.allocate-runners.outputs.windows-runner }}
+            arch: x86_64-pc-windows-msvc
+            features: pyo3_backend,servers/dashboard
+            artifacts-dir-prefix: greptime-windows-amd64-pyo3
+    runs-on: ${{ matrix.os }}
+    needs: [
+      allocate-runners,
+    ]
+    if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    steps:
+      - run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/build-windows-artifacts
+        with:
+          arch: ${{ matrix.arch }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          features: ${{ matrix.features }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          artifacts-dir: ${{ matrix.artifacts-dir-prefix }}-${{ needs.allocate-runners.outputs.version }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -277,15 +299,14 @@ jobs:
           image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
           version: ${{ needs.allocate-runners.outputs.version }}
 
-  release-images-to-acr:
-    name: Build and push images to ACR
+  release-cn-artifacts:
+    name: Release artifacts to CN region
     if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
-      build-linux-amd64-artifacts,
-      build-linux-arm64-artifacts,
+      release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-2004-16-cores
+    runs-on: ubuntu-20.04
     # When we push to ACR, it's easy to fail due to some unknown network issues.
     # However, we don't want to fail the whole workflow because of this.
     # The ACR have daily sync with DockerHub, so don't worry about the image not being updated.
@@ -295,18 +316,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build and push images to ACR
-        uses: ./.github/actions/build-images
+      - name: Release artifacts to CN region
+        uses: ./.github/actions/release-cn-artifacts
         with:
           image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           version: ${{ needs.allocate-runners.outputs.version }}
+          aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
+          aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
+          aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
+          aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
 
-  release-artifacts:
+  publish-github-release:
     name: Create GitHub release and upload artifacts
-    if: ${{ inputs.release_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule' }}
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -314,35 +339,16 @@ jobs:
       build-macos-artifacts,
       release-images-to-dockerhub,
     ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
 
-      - name: Release artifacts
-        uses: ./.github/actions/release-artifacts
+      - name: Publish GitHub release
+        uses: ./.github/actions/publish-github-release
         with:
           version: ${{ needs.allocate-runners.outputs.version }}
-
-  release-dev-builder-image:
-    name: Release dev builder image
-    if: ${{ inputs.release_dev_builder_image }} # Only manually trigger this job.
-    runs-on: ubuntu-latest-16-cores
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Build and push dev builder image
-        uses: ./.github/actions/build-dev-builder-image
-        with:
-          dockerhub-image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-image-registry-token: ${{ secrets.DOCKERHUB_TOKEN }}
-          acr-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          acr-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
-          acr-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
 
   ### Stop runners ###
   # It's very necessary to split the job of releasing runners into 'stop-linux-amd64-runner' and 'stop-linux-arm64-runner'.
@@ -351,7 +357,7 @@ jobs:
     name: Stop linux-amd64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -376,7 +382,7 @@ jobs:
     name: Stop linux-arm64 runner
     # Only run this job when the runner is allocated.
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     needs: [
       allocate-runners,
       build-linux-arm64-artifacts,

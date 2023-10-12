@@ -10,34 +10,6 @@ inputs:
   version:
     description: Version of the artifact
     required: true
-  release-to-s3-bucket:
-    description: S3 bucket to store released artifacts
-    required: true
-  aws-access-key-id:
-    description: AWS access key id
-    required: true
-  aws-secret-access-key:
-    description: AWS secret access key
-    required: true
-  aws-region:
-    description: AWS region
-    required: true
-  upload-to-s3:
-    description: Upload to S3
-    required: false
-    default: 'true'
-  upload-latest-artifacts:
-    description: Upload the latest artifacts to S3
-    required: false
-    default: 'true'
-  upload-max-retry-times:
-    description: Max retry times for uploading artifacts to S3
-    required: false
-    default: "20"
-  upload-retry-timeout:
-    description: Timeout for uploading artifacts to S3
-    required: false
-    default: "30" # minutes
   working-dir:
     description: Working directory to upload the artifacts
     required: false
@@ -61,8 +33,20 @@ runs:
       working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
-        tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }} && \
+        tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }}
+
+    - name: Calculate checksum
+      if: runner.os != 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+      run: |
         echo $(shasum -a 256 ${{ inputs.artifacts-dir }}.tar.gz | cut -f1 -d' ') > ${{ inputs.artifacts-dir }}.sha256sum
+
+    - name: Calculate checksum on Windows
+      if: runner.os == 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: pwsh
+      run: Get-FileHash ${{ inputs.artifacts-dir }}.tar.gz -Algorithm SHA256 | select -ExpandProperty Hash > ${{ inputs.artifacts-dir }}.sha256sum
 
     # Note: The artifacts will be double zip compressed(related issue: https://github.com/actions/upload-artifact/issues/39).
     # However, when we use 'actions/download-artifact@v3' to download the artifacts, it will be automatically unzipped.
@@ -77,49 +61,3 @@ runs:
       with:
         name: ${{ inputs.artifacts-dir }}.sha256sum
         path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum
-
-    - name: Upload artifacts to S3
-      if: ${{ inputs.upload-to-s3 == 'true' }}
-      uses: nick-invision/retry@v2
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
-      with:
-        max_attempts: ${{ inputs.upload-max-retry-times }}
-        timeout_minutes: ${{ inputs.upload-retry-timeout }}
-        # The bucket layout will be:
-        # releases/greptimedb
-        # ├── v0.1.0
-        # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
-        # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
-        # └── v0.2.0
-        #    ├── greptime-darwin-amd64-pyo3-v0.2.0.sha256sum
-        #    └── greptime-darwin-amd64-pyo3-v0.2.0.tar.gz
-        command: |
-          cd ${{ inputs.working-dir }} && \
-          aws s3 cp \
-            ${{ inputs.artifacts-dir }}.tar.gz \
-            s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/${{ inputs.version }}/${{ inputs.artifacts-dir }}.tar.gz && \
-          aws s3 cp \
-            ${{ inputs.artifacts-dir }}.sha256sum \
-            s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/${{ inputs.version }}/${{ inputs.artifacts-dir }}.sha256sum
-
-    - name: Upload latest artifacts to S3
-      if: ${{ inputs.upload-to-s3 == 'true' && inputs.upload-latest-artifacts == 'true' }} # We'll also upload the latest artifacts to S3 in the scheduled and formal release.
-      uses: nick-invision/retry@v2
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
-      with:
-        max_attempts: ${{ inputs.upload-max-retry-times }}
-        timeout_minutes: ${{ inputs.upload-retry-timeout }}
-        command: |
-          cd ${{ inputs.working-dir }} && \
-          aws s3 cp \
-            ${{ inputs.artifacts-dir }}.tar.gz \
-            s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/latest/${{ inputs.artifacts-dir }}.tar.gz && \
-          aws s3 cp \
-            ${{ inputs.artifacts-dir }}.sha256sum \
-            s3://${{ inputs.release-to-s3-bucket }}/releases/greptimedb/latest/${{ inputs.artifacts-dir }}.sha256sum

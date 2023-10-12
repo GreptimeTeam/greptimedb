@@ -12,6 +12,8 @@ api = { workspace = true }
 arrow-flight.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+base64 = "0.21"
+bytes = "1.4"
 common-catalog = { workspace = true }
 common-error = { workspace = true }
 common-grpc-expr.workspace = true

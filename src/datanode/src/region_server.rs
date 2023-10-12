@@ -28,7 +28,7 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
-use common_telemetry::{info, warn};
+use common_telemetry::{info, timer, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
 use datafusion::catalog::{CatalogList, CatalogProvider};
@@ -44,7 +44,7 @@ use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use session::context::QueryContext;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
@@ -227,7 +227,11 @@ impl RegionServerInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<Output> {
-        // TODO(ruihang): add some metrics
+        let request_type = request.request_type();
+        let _timer = timer!(
+            crate::metrics::HANDLE_REGION_REQUEST_ELAPSED,
+            &[(crate::metrics::REGION_REQUEST_TYPE, request_type),]
+        );
 
         let region_change = match &request {
             RegionRequest::Create(create) => RegionChange::Register(create.engine.clone()),
@@ -285,11 +289,16 @@ impl RegionServerInner {
         // TODO(ruihang): add metrics and set trace id
 
         let QueryRequest {
-            header: _,
+            header,
             region_id,
             plan,
         } = request;
         let region_id = RegionId::from_u64(region_id);
+
+        let ctx: QueryContextRef = header
+            .as_ref()
+            .map(|h| Arc::new(h.into()))
+            .unwrap_or_else(|| QueryContextBuilder::default().build());
 
         // build dummy catalog list
         let engine = self
@@ -306,7 +315,7 @@ impl RegionServerInner {
             .context(DecodeLogicalPlanSnafu)?;
         let result = self
             .query_engine
-            .execute(logical_plan.into(), QueryContext::arc())
+            .execute(logical_plan.into(), ctx)
             .await
             .context(ExecuteLogicalPlanSnafu)?;
 

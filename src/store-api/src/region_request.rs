@@ -19,6 +19,7 @@ use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
 use api::v1::{self, Rows, SemanticType};
 use snafu::{ensure, OptionExt};
+use strum::IntoStaticStr;
 
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
@@ -27,9 +28,8 @@ use crate::metadata::{
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
-#[derive(Debug)]
+#[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
-    // TODO: rename to InsertRequest
     Put(RegionPutRequest),
     Delete(RegionDeleteRequest),
     Create(RegionCreateRequest),
@@ -43,6 +43,23 @@ pub enum RegionRequest {
 }
 
 impl RegionRequest {
+    /// Returns the type name of the [RegionRequest].
+    #[inline]
+    pub fn request_type(&self) -> &'static str {
+        match &self {
+            RegionRequest::Put(_) => "put",
+            RegionRequest::Delete(_) => "delete",
+            RegionRequest::Create(_) => "create",
+            RegionRequest::Drop(_) => "drop",
+            RegionRequest::Open(_) => "open",
+            RegionRequest::Close(_) => "close",
+            RegionRequest::Alter(_) => "alter",
+            RegionRequest::Flush(_) => "flush",
+            RegionRequest::Compact(_) => "compact",
+            RegionRequest::Truncate(_) => "truncate",
+        }
+    }
+
     /// Convert [Body](region_request::Body) to a group of [RegionRequest] with region id.
     /// Inserts/Deletes request might become multiple requests. Others are one-to-one.
     pub fn try_from_request_body(body: region_request::Body) -> Result<Vec<(RegionId, Self)>> {
@@ -110,7 +127,9 @@ impl RegionRequest {
             )]),
             region_request::Body::Flush(flush) => Ok(vec![(
                 flush.region_id.into(),
-                Self::Flush(RegionFlushRequest {}),
+                Self::Flush(RegionFlushRequest {
+                    row_group_size: None,
+                }),
             )]),
             region_request::Body::Compact(compact) => Ok(vec![(
                 compact.region_id.into(),
@@ -121,6 +140,11 @@ impl RegionRequest {
                 Self::Truncate(RegionTruncateRequest {}),
             )]),
         }
+    }
+
+    /// Returns the type name of the request.
+    pub fn type_name(&self) -> &'static str {
+        self.into()
     }
 }
 
@@ -415,8 +439,10 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
     }
 }
 
-#[derive(Debug)]
-pub struct RegionFlushRequest {}
+#[derive(Debug, Default)]
+pub struct RegionFlushRequest {
+    pub row_group_size: Option<usize>,
+}
 
 #[derive(Debug)]
 pub struct RegionCompactRequest {}

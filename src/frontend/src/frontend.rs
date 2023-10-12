@@ -41,6 +41,7 @@ pub struct FrontendOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub datanode: DatanodeOptions,
+    pub user_provider: Option<String>,
 }
 
 impl Default for FrontendOptions {
@@ -60,6 +61,7 @@ impl Default for FrontendOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             datanode: DatanodeOptions::default(),
+            user_provider: None,
         }
     }
 }
