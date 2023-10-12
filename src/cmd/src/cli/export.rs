@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
-use client::{Client, Database};
+use client::{Client, Database, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::util::collect;
 use common_telemetry::{debug, error, info};
 use datatypes::scalars::ScalarVector;
-use datatypes::vectors::StringVector;
+use datatypes::vectors::{StringVector, Vector};
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
@@ -31,7 +31,7 @@ use tokio::sync::Semaphore;
 use crate::cli::{Instance, Tool};
 use crate::error::{
     CollectRecordBatchesSnafu, ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu,
-    NotDataFromOutputSnafu, RequestDatabaseSnafu, Result,
+    InvalidDatabaseNameSnafu, NotDataFromOutputSnafu, RequestDatabaseSnafu, Result,
 };
 
 type TableReference = (String, String, String);
@@ -55,13 +55,9 @@ pub struct ExportCommand {
     #[clap(long)]
     output_dir: String,
 
-    /// The name of the catalog to export. Default to all catalogs.
+    /// The name of the catalog to export. Default to "greptime-*"".
     #[clap(long, default_value = "")]
-    catalog: String,
-
-    /// The name of the database to export. Default to all databases.
-    #[clap(long, default_value = "")]
-    schema: String,
+    database: String,
 
     /// Parallelism of the export.
     #[clap(long, short = 'j', default_value = "1")]
@@ -85,12 +81,17 @@ impl ExportCommand {
             .with_context(|_| ConnectServerSnafu {
                 addr: self.addr.clone(),
             })?;
-        let database_client = Database::new(self.catalog.clone(), self.schema.clone(), client);
+        let (catalog, schema) = split_database(&self.database)?;
+        let database_client = Database::new(
+            catalog.clone(),
+            schema.clone().unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
+            client,
+        );
 
         Ok(Instance::Tool(Box::new(Export {
             client: database_client,
-            catalog: self.catalog.clone(),
-            schema: self.schema.clone(),
+            catalog,
+            schema,
             output_dir: self.output_dir.clone(),
             parallelism: self.export_jobs,
             target: self.target.clone(),
@@ -101,7 +102,7 @@ impl ExportCommand {
 pub struct Export {
     client: Database,
     catalog: String,
-    schema: String,
+    schema: Option<String>,
     output_dir: String,
     parallelism: usize,
     target: ExportTarget,
@@ -112,10 +113,37 @@ impl Export {
     ///
     /// Newbie: `db_name` is catalog + schema.
     async fn iter_db_names(&self) -> Result<Vec<(String, String)>> {
-        if !self.schema.is_empty() {
-            Ok(vec![(self.catalog.clone(), self.schema.clone())])
+        if let Some(schema) = &self.schema {
+            Ok(vec![(self.catalog.clone(), schema.clone())])
         } else {
-            Ok(vec![])
+            let mut client = self.client.clone();
+            client.set_catalog(self.catalog.clone());
+            let result =
+                client
+                    .sql("show databases")
+                    .await
+                    .with_context(|_| RequestDatabaseSnafu {
+                        sql: "show databases".to_string(),
+                    })?;
+            let Output::Stream(stream) = result else {
+                NotDataFromOutputSnafu.fail()?
+            };
+            let record_batch = collect(stream)
+                .await
+                .context(CollectRecordBatchesSnafu)?
+                .pop()
+                .context(EmptyResultSnafu)?;
+            let schemas = record_batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringVector>()
+                .unwrap();
+            let mut result = Vec::with_capacity(schemas.len());
+            for i in 0..schemas.len() {
+                let schema = schemas.get_data(i).unwrap().to_owned();
+                result.push((self.catalog.clone(), schema));
+            }
+            Ok(result)
         }
     }
 
@@ -216,6 +244,7 @@ impl Export {
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await.unwrap();
                 let table_list = self.get_table_list(&catalog, &schema).await?;
+                let table_count = table_list.len();
                 tokio::fs::create_dir_all(&self.output_dir)
                     .await
                     .context(FileIoSnafu)?;
@@ -234,7 +263,7 @@ impl Export {
                         }
                     }
                 }
-                info!("finished exporting catalog {catalog} schema {schema}");
+                info!("finished exporting {catalog}.{schema} with {table_count} tables",);
                 Ok::<(), Error>(())
             });
         }
@@ -264,5 +293,19 @@ impl Tool for Export {
             ExportTarget::CreateTable => self.export_create_table().await,
             ExportTarget::TableData => unimplemented!("export table data"),
         }
+    }
+}
+
+/// Split at `-`.
+fn split_database(database: &str) -> Result<(String, Option<String>)> {
+    let (catalog, schema) = database
+        .split_once('-')
+        .with_context(|| InvalidDatabaseNameSnafu {
+            database: database.to_string(),
+        })?;
+    if schema == "*" {
+        Ok((catalog.to_string(), None))
+    } else {
+        Ok((catalog.to_string(), Some(schema.to_string())))
     }
 }

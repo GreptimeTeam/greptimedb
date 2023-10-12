@@ -206,6 +206,12 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
+
+    #[snafu(display("Invalid database name: {}", database))]
+    InvalidDatabaseName {
+        location: Location,
+        database: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -232,7 +238,8 @@ impl ErrorExt for Error {
             | Error::IllegalAuthConfig { .. }
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
-            | Error::EmptyResult { .. } => StatusCode::InvalidArguments,
+            | Error::EmptyResult { .. }
+            | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
 
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
