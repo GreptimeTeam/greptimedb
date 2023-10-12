@@ -5334,6 +5334,7 @@ dependencies = [
  "datatypes",
  "etcd-client",
  "futures",
+ "humantime-serde",
  "meta-srv",
  "rand",
  "serde",

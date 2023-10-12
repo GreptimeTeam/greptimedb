@@ -110,6 +110,12 @@ impl Options {
         if let Some(config_file) = config_file {
             layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
+        let oapts = layered_config
+            .clone()
+            .build()
+            .context(LoadLayeredConfigSnafu)?;
+
+        dbg!(oapts);
 
         let opts = layered_config
             .build()
@@ -144,8 +150,8 @@ mod tests {
             mysql_runtime_size = 2
 
             [meta_client]
-            timeout_millis = 3000
-            connect_timeout_millis = 5000
+            timeout = "3s"
+            connect_timeout = "5s"
             tcp_nodelay = true
 
             [wal]

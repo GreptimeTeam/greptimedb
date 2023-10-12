@@ -139,11 +139,19 @@ impl Client {
     }
 
     fn max_grpc_recv_message_size(&self) -> usize {
-        self.inner.channel_manager.config().max_recv_message_size
+        self.inner
+            .channel_manager
+            .config()
+            .max_recv_message_size
+            .as_bytes() as usize
     }
 
     fn max_grpc_send_message_size(&self) -> usize {
-        self.inner.channel_manager.config().max_send_message_size
+        self.inner
+            .channel_manager
+            .config()
+            .max_send_message_size
+            .as_bytes() as usize
     }
 
     pub(crate) fn make_flight_client(&self) -> Result<FlightClient> {

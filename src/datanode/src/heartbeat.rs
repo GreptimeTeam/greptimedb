@@ -332,14 +332,14 @@ pub async fn new_metasrv_client(
     let member_id = node_id;
 
     let config = ChannelConfig::new()
-        .timeout(meta_config.timeout_millis)
-        .connect_timeout(meta_config.connect_timeout_millis)
+        .timeout(meta_config.timeout)
+        .connect_timeout(meta_config.connect_timeout)
         .tcp_nodelay(meta_config.tcp_nodelay);
     let channel_manager = ChannelManager::with_config(config.clone());
     let heartbeat_channel_manager = ChannelManager::with_config(
         config
-            .timeout(meta_config.heartbeat_timeout_millis)
-            .connect_timeout(meta_config.heartbeat_timeout_millis),
+            .timeout(meta_config.timeout)
+            .connect_timeout(meta_config.connect_timeout),
     );
 
     let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)

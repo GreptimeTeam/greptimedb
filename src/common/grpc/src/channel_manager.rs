@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
@@ -31,8 +32,8 @@ use crate::error::{CreateChannelSnafu, InvalidConfigFilePathSnafu, InvalidTlsCon
 const RECYCLE_CHANNEL_INTERVAL_SECS: u64 = 60;
 pub const DEFAULT_GRPC_REQUEST_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_GRPC_CONNECT_TIMEOUT_SECS: u64 = 1;
-pub const DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
-pub const DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
+pub const DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE: ReadableSize = ReadableSize::mb(512);
+pub const DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE: ReadableSize = ReadableSize::mb(512);
 
 lazy_static! {
     static ref ID: AtomicU64 = AtomicU64::new(0);
@@ -250,9 +251,9 @@ pub struct ChannelConfig {
     pub tcp_nodelay: bool,
     pub client_tls: Option<ClientTlsOption>,
     // Max gRPC receiving(decoding) message size
-    pub max_recv_message_size: usize,
+    pub max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
-    pub max_send_message_size: usize,
+    pub max_send_message_size: ReadableSize,
 }
 
 impl Default for ChannelConfig {

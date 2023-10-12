@@ -198,9 +198,9 @@ mod tests {
 
             [meta_client]
             metasrv_addrs = ["127.0.0.1:3002"]
-            timeout_millis = 3000
-            connect_timeout_millis = 5000
-            ddl_timeout_millis= 10000
+            timeout = "3s"
+            connect_timeout = "5s"
+            ddl_timeout = "10s"
             tcp_nodelay = true
 
             [wal]
@@ -251,17 +251,17 @@ mod tests {
 
         let MetaClientOptions {
             metasrv_addrs: metasrv_addr,
-            timeout_millis,
-            connect_timeout_millis,
+            timeout: timeout_millis,
+            connect_timeout: connect_timeout_millis,
             tcp_nodelay,
-            ddl_timeout_millis,
+            ddl_timeout: ddl_timeout_millis,
             ..
         } = options.meta_client.unwrap();
 
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
-        assert_eq!(5000, connect_timeout_millis);
-        assert_eq!(10000, ddl_timeout_millis);
-        assert_eq!(3000, timeout_millis);
+        assert_eq!(5000, connect_timeout_millis.as_millis());
+        assert_eq!(10000, ddl_timeout_millis.as_millis());
+        assert_eq!(3000, timeout_millis.as_millis());
         assert!(tcp_nodelay);
         assert_eq!("/tmp/greptimedb/", options.storage.data_home);
         assert!(matches!(
@@ -355,8 +355,8 @@ mod tests {
             rpc_runtime_size = 8
 
             [meta_client]
-            timeout_millis = 3000
-            connect_timeout_millis = 5000
+            timeout = "3s"
+            connect_timeout = "5s"
             tcp_nodelay = true
 
             [wal]

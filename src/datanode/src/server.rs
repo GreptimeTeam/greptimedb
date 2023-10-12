@@ -40,8 +40,8 @@ impl Services {
         let region_server_handler = Some(Arc::new(region_server.clone()) as _);
         let runtime = region_server.runtime();
         let grpc_config = GrpcServerConfig {
-            max_recv_message_size: opts.rpc_max_recv_message_size,
-            max_send_message_size: opts.rpc_max_send_message_size,
+            max_recv_message_size: opts.rpc_max_recv_message_size.as_bytes() as usize,
+            max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
         };
 
         Ok(Self {

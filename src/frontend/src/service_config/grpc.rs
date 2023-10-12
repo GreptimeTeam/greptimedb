@@ -33,8 +33,8 @@ impl Default for GrpcOptions {
         Self {
             addr: "127.0.0.1:4001".to_string(),
             runtime_size: 8,
-            max_recv_message_size: ReadableSize(DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE as u64),
-            max_send_message_size: ReadableSize(DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE as u64),
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
         }
     }
 }
