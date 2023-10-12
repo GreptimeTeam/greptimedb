@@ -610,13 +610,13 @@ node_id = 0
 require_lease_before_startup = true
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
-rpc_max_recv_message_size = 536870912
-rpc_max_send_message_size = 536870912
+rpc_max_recv_message_size = "512MiB"
+rpc_max_send_message_size = "512MiB"
 enable_telemetry = true
 
 [heartbeat]
-interval_millis = 3000
-retry_interval_millis = 3000
+interval = "3s"
+retry_interval = "3s"
 
 [http]
 addr = "127.0.0.1:4000"
