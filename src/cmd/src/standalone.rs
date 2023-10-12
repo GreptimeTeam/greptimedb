@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::{fs, path};
 
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
@@ -41,8 +42,8 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
-    StartDatanodeSnafu, StartFrontendSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
 };
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
@@ -309,6 +310,11 @@ impl StartCommand {
             "Standalone frontend options: {:#?}, datanode options: {:#?}",
             fe_opts, dn_opts
         );
+
+        // Ensure the data_home directory exists.
+        fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
+            dir: &opts.data_home,
+        })?;
 
         let metadata_dir = metadata_store_dir(&opts.data_home);
         let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(

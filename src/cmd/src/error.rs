@@ -180,6 +180,12 @@ pub enum Error {
         error: serde_json::error::Error,
         location: Location,
     },
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -202,6 +208,7 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
+            | Error::CreateDir { .. }
             | Error::ConnectEtcd { .. } => StatusCode::InvalidArguments,
 
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
