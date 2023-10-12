@@ -33,8 +33,20 @@ runs:
       working-directory: ${{ inputs.working-dir }}
       shell: bash
       run: |
-        tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }} && \
+        tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }}
+
+    - name: Calculate checksum
+      if: runner.os != 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+      run: |
         echo $(shasum -a 256 ${{ inputs.artifacts-dir }}.tar.gz | cut -f1 -d' ') > ${{ inputs.artifacts-dir }}.sha256sum
+
+    - name: Calculate checksum on Windows
+      if: runner.os == 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: pwsh
+      run: Get-FileHash ${{ inputs.artifacts-dir }}.tar.gz -Algorithm SHA256 | select -ExpandProperty Hash > ${{ inputs.artifacts-dir }}.sha256sum
 
     # Note: The artifacts will be double zip compressed(related issue: https://github.com/actions/upload-artifact/issues/39).
     # However, when we use 'actions/download-artifact@v3' to download the artifacts, it will be automatically unzipped.

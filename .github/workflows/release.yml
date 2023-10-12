@@ -249,11 +249,11 @@ jobs:
           - os: ${{ needs.allocate-runners.outputs.windows-runner }}
             arch: x86_64-pc-windows-msvc
             features: servers/dashboard
-            artifacts-dir-prefix: greptime-windows-x86_64
+            artifacts-dir-prefix: greptime-windows-amd64
           - os: ${{ needs.allocate-runners.outputs.windows-runner }}
             arch: x86_64-pc-windows-msvc
             features: pyo3_backend,servers/dashboard
-            artifacts-dir-prefix: greptime-windows-x86_64-pyo3
+            artifacts-dir-prefix: greptime-windows-amd64-pyo3
     runs-on: ${{ matrix.os }}
     needs: [
       allocate-runners,
