@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct HeartbeatOptions {
-    pub interval_millis: Duration,
-    pub retry_interval_millis: Duration,
+    pub interval: Duration,
+    pub retry_interval: Duration,
 }
 
 impl HeartbeatOptions {
@@ -32,10 +32,10 @@ impl HeartbeatOptions {
     pub fn frontend_default() -> Self {
         Self {
             // Frontend can send heartbeat with a longer interval.
-            interval_millis: Duration::from_millis(
+            interval: Duration::from_millis(
                 distributed_time_constants::FRONTEND_HEARTBEAT_INTERVAL_MILLIS,
             ),
-            retry_interval_millis: Duration::from_millis(
+            retry_interval: Duration::from_millis(
                 distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
             ),
         }
@@ -45,10 +45,8 @@ impl HeartbeatOptions {
 impl Default for HeartbeatOptions {
     fn default() -> Self {
         Self {
-            interval_millis: Duration::from_millis(
-                distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
-            ),
-            retry_interval_millis: Duration::from_millis(
+            interval: Duration::from_millis(distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS),
+            retry_interval: Duration::from_millis(
                 distributed_time_constants::HEARTBEAT_INTERVAL_MILLIS,
             ),
         }
