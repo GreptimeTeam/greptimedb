@@ -78,7 +78,7 @@ impl Command {
 
 #[derive(Parser)]
 enum SubCommand {
-    Attach(AttachCommand),
+    // Attach(AttachCommand),
     Upgrade(UpgradeCommand),
     Bench(BenchTableMetadataCommand),
 }
@@ -86,7 +86,7 @@ enum SubCommand {
 impl SubCommand {
     async fn build(self) -> Result<Instance> {
         match self {
-            SubCommand::Attach(cmd) => cmd.build().await,
+            // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Upgrade(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build().await,
         }
@@ -104,51 +104,9 @@ pub(crate) struct AttachCommand {
 }
 
 impl AttachCommand {
+    #[allow(dead_code)]
     async fn build(self) -> Result<Instance> {
         let repl = Repl::try_new(&self).await?;
         Ok(Instance::Repl(repl))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_load_options() {
-        let cmd = Command {
-            cmd: SubCommand::Attach(AttachCommand {
-                grpc_addr: String::from(""),
-                meta_addr: None,
-                disable_helper: false,
-            }),
-        };
-
-        let opts = cmd.load_options(TopLevelOptions::default()).unwrap();
-        let logging_opts = opts.logging_options();
-        assert_eq!("/tmp/greptimedb/logs", logging_opts.dir);
-        assert!(logging_opts.level.is_none());
-        assert!(!logging_opts.enable_jaeger_tracing);
-    }
-
-    #[test]
-    fn test_top_level_options() {
-        let cmd = Command {
-            cmd: SubCommand::Attach(AttachCommand {
-                grpc_addr: String::from(""),
-                meta_addr: None,
-                disable_helper: false,
-            }),
-        };
-
-        let opts = cmd
-            .load_options(TopLevelOptions {
-                log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
-                log_level: Some("debug".to_string()),
-            })
-            .unwrap();
-        let logging_opts = opts.logging_options();
-        assert_eq!("/tmp/greptimedb/test/logs", logging_opts.dir);
-        assert_eq!("debug", logging_opts.level.as_ref().unwrap());
     }
 }
