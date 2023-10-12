@@ -154,6 +154,12 @@ impl RegionManifestManager {
         let inner = self.inner.read().await;
         inner.store.clone()
     }
+
+    /// Returns total manifest size.
+    pub async fn manifest_size(&self) -> u64 {
+        let inner = self.inner.read().await;
+        inner.manifest_size()
+    }
 }
 
 #[cfg(test)]
@@ -186,7 +192,7 @@ impl RegionManifestManagerInner {
     /// Creates a new manifest.
     async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
         // construct storage
-        let store = ManifestObjectStore::new(
+        let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
@@ -232,7 +238,7 @@ impl RegionManifestManagerInner {
     /// Returns `Ok(None)` if no such manifest.
     async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
         // construct storage
-        let store = ManifestObjectStore::new(
+        let mut store = ManifestObjectStore::new(
             &options.manifest_dir,
             options.object_store.clone(),
             options.compress_type,
@@ -241,7 +247,7 @@ impl RegionManifestManagerInner {
         // recover from storage
         // construct manifest builder
         let mut version = MIN_VERSION;
-        let checkpoint = Self::last_checkpoint(&store).await?;
+        let checkpoint = Self::last_checkpoint(&mut store).await?;
         let last_checkpoint_version = checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.last_version)
@@ -251,6 +257,10 @@ impl RegionManifestManagerInner {
                 "Recover region manifest {} from checkpoint version {}",
                 options.manifest_dir, checkpoint.last_version
             );
+            // set manifest size before last checkpoint
+            store
+                .set_manifest_size_until(last_checkpoint_version)
+                .await?;
             version = version.max(checkpoint.last_version + 1);
             RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
         } else {
@@ -265,6 +275,8 @@ impl RegionManifestManagerInner {
         let mut action_iter = store.scan(version, MAX_VERSION).await?;
         while let Some((manifest_version, raw_action_list)) = action_iter.next_log().await? {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
+            // set manifest size after last checkpoint
+            store.set_delta_file_size(manifest_version, raw_action_list.len() as u64);
             for action in action_list.actions {
                 match action {
                     RegionMetaAction::Change(action) => {
@@ -343,6 +355,11 @@ impl RegionManifestManagerInner {
 
         Ok(version)
     }
+
+    /// Returns total manifest size.
+    pub(crate) fn manifest_size(&self) -> u64 {
+        self.store.get_manifest_size()
+    }
 }
 
 impl RegionManifestManagerInner {
@@ -369,8 +386,8 @@ impl RegionManifestManagerInner {
     }
 
     /// Make a new checkpoint. Return the fresh one if there are some actions to compact.
-    async fn do_checkpoint(&self) -> Result<Option<RegionCheckpoint>> {
-        let last_checkpoint = Self::last_checkpoint(&self.store).await?;
+    async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
+        let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
         let current_version = self.last_version;
 
         let (start_version, mut manifest_builder) = if let Some(checkpoint) = last_checkpoint {
@@ -439,9 +456,9 @@ impl RegionManifestManagerInner {
         Ok(Some(checkpoint))
     }
 
-    /// Fetch the last [RegionCheckpoint] from storage.
+    /// Fetch the last Checkpoint size and [RegionCheckpoint] from storage.
     pub(crate) async fn last_checkpoint(
-        store: &ManifestObjectStore,
+        store: &mut ManifestObjectStore,
     ) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = store.load_last_checkpoint().await?;
 
@@ -545,5 +562,50 @@ mod test {
             .unwrap()
             .unwrap();
         manager.validate_manifest(&new_metadata, 1).await;
+    }
+
+    #[tokio::test]
+    async fn test_manifest_size() {
+        let metadata = Arc::new(basic_region_metadata());
+        let env = TestEnv::new();
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut new_metadata_builder = RegionMetadataBuilder::from_existing((*metadata).clone());
+        new_metadata_builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("val2", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 252,
+        });
+        let new_metadata = Arc::new(new_metadata_builder.build().unwrap());
+
+        let action_list =
+            RegionMetaActionList::with_action(RegionMetaAction::Change(RegionChange {
+                metadata: new_metadata.clone(),
+            }));
+
+        let current_version = manager.update(action_list).await.unwrap();
+        assert_eq!(current_version, 1);
+        manager.validate_manifest(&new_metadata, 1).await;
+
+        // get manifest size
+        let manifest_size = manager.manifest_size().await;
+        assert_eq!(manifest_size, 1557);
+
+        // Reopen the manager.
+        manager.stop().await.unwrap();
+        let manager = env
+            .create_manifest_manager(CompressionType::Uncompressed, 10, None)
+            .await
+            .unwrap()
+            .unwrap();
+        manager.validate_manifest(&new_metadata, 1).await;
+
+        // get manifest size again
+        let manifest_size = manager.manifest_size().await;
+        assert_eq!(manifest_size, 1557);
     }
 }

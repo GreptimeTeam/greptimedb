@@ -134,6 +134,9 @@ pub struct ManifestObjectStore {
     object_store: ObjectStore,
     compress_type: CompressionType,
     path: String,
+    /// Stores the size of each manifest file.
+    /// K is the path of the manifest file, V is the size.
+    manifest_size_map: HashMap<String, u64>,
 }
 
 impl ManifestObjectStore {
@@ -142,6 +145,7 @@ impl ManifestObjectStore {
             object_store,
             compress_type,
             path: util::normalize_dir(path),
+            manifest_size_map: HashMap::new(),
         }
     }
 
@@ -213,7 +217,7 @@ impl ManifestObjectStore {
     }
 
     pub async fn delete_until(
-        &self,
+        &mut self,
         end: ManifestVersion,
         keep_last_checkpoint: bool,
     ) -> Result<usize> {
@@ -277,6 +281,12 @@ impl ManifestObjectStore {
             paths,
         );
 
+        // delete manifest size from paths
+        paths.iter().for_each(|path| {
+            let path = format!("{}{}", self.path, path);
+            self.manifest_size_map.remove(&path);
+        });
+
         self.object_store
             .remove(paths)
             .await
@@ -285,7 +295,7 @@ impl ManifestObjectStore {
         Ok(ret)
     }
 
-    pub async fn save(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub async fn save(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.delta_file_path(version);
         debug!("Save log to manifest storage, version: {}", version);
         let data = self
@@ -296,13 +306,14 @@ impl ManifestObjectStore {
                 compress_type: self.compress_type,
                 path: &path,
             })?;
+        self.set_manifest_size_by_path(&path, data.len() as u64);
         self.object_store
             .write(&path, data)
             .await
             .context(OpenDalSnafu)
     }
 
-    pub async fn save_checkpoint(&self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
+    pub async fn save_checkpoint(&mut self, version: ManifestVersion, bytes: &[u8]) -> Result<()> {
         let path = self.checkpoint_file_path(version);
         let data = self
             .compress_type
@@ -312,6 +323,7 @@ impl ManifestObjectStore {
                 compress_type: self.compress_type,
                 path: &path,
             })?;
+        self.set_manifest_size_by_path(&path, data.len() as u64);
         self.object_store
             .write(&path, data)
             .await
@@ -342,63 +354,66 @@ impl ManifestObjectStore {
     }
 
     pub async fn load_checkpoint(
-        &self,
+        &mut self,
         version: ManifestVersion,
     ) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let path = self.checkpoint_file_path(version);
         // Due to backward compatibility, it is possible that the user's checkpoint not compressed,
         // so if we don't find file by compressed type. fall back to checkpoint not compressed find again.
-        let checkpoint_data =
-            match self.object_store.read(&path).await {
-                Ok(checkpoint) => {
-                    let decompress_data = self.compress_type.decode(checkpoint).await.context(
-                        DecompressObjectSnafu {
+        let checkpoint_data = match self.object_store.read(&path).await {
+            Ok(checkpoint) => {
+                let decompress_data =
+                    self.compress_type
+                        .decode(checkpoint)
+                        .await
+                        .context(DecompressObjectSnafu {
                             compress_type: self.compress_type,
-                            path,
-                        },
-                    )?;
-                    Ok(Some(decompress_data))
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::NotFound {
-                        if self.compress_type != FALL_BACK_COMPRESS_TYPE {
-                            let fall_back_path = gen_path(
-                                &self.path,
-                                &checkpoint_file(version),
-                                FALL_BACK_COMPRESS_TYPE,
-                            );
-                            debug!(
-                                "Failed to load checkpoint from path: {}, fall back to path: {}",
-                                path, fall_back_path
-                            );
-                            match self.object_store.read(&fall_back_path).await {
-                                Ok(checkpoint) => {
-                                    let decompress_data = FALL_BACK_COMPRESS_TYPE
-                                        .decode(checkpoint)
-                                        .await
-                                        .context(DecompressObjectSnafu {
-                                            compress_type: FALL_BACK_COMPRESS_TYPE,
-                                            path,
-                                        })?;
-                                    Ok(Some(decompress_data))
-                                }
-                                Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-                                Err(e) => Err(e).context(OpenDalSnafu),
+                            path: path.clone(),
+                        })?;
+                self.set_manifest_size_by_path(&path, decompress_data.len() as u64);
+                Ok(Some(decompress_data))
+            }
+            Err(e) => {
+                if e.kind() == ErrorKind::NotFound {
+                    if self.compress_type != FALL_BACK_COMPRESS_TYPE {
+                        let fall_back_path = gen_path(
+                            &self.path,
+                            &checkpoint_file(version),
+                            FALL_BACK_COMPRESS_TYPE,
+                        );
+                        debug!(
+                            "Failed to load checkpoint from path: {}, fall back to path: {}",
+                            path, fall_back_path
+                        );
+                        match self.object_store.read(&fall_back_path).await {
+                            Ok(checkpoint) => {
+                                let decompress_data = FALL_BACK_COMPRESS_TYPE
+                                    .decode(checkpoint)
+                                    .await
+                                    .context(DecompressObjectSnafu {
+                                        compress_type: FALL_BACK_COMPRESS_TYPE,
+                                        path: path.clone(),
+                                    })?;
+                                self.set_manifest_size_by_path(&path, decompress_data.len() as u64);
+                                Ok(Some(decompress_data))
                             }
-                        } else {
-                            Ok(None)
+                            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+                            Err(e) => Err(e).context(OpenDalSnafu),
                         }
                     } else {
-                        Err(e).context(OpenDalSnafu)
+                        Ok(None)
                     }
+                } else {
+                    Err(e).context(OpenDalSnafu)
                 }
-            }?;
+            }
+        }?;
         Ok(checkpoint_data.map(|data| (version, data)))
     }
 
     /// Load the latest checkpoint.
     /// Return manifest version and the raw [RegionCheckpoint](crate::manifest::action::RegionCheckpoint) content if any
-    pub async fn load_last_checkpoint(&self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
+    pub async fn load_last_checkpoint(&mut self) -> Result<Option<(ManifestVersion, Vec<u8>)>> {
         let last_checkpoint_path = self.last_checkpoint_path();
         let last_checkpoint_data = match self.object_store.read(&last_checkpoint_path).await {
             Ok(data) => data,
@@ -411,6 +426,8 @@ impl ManifestObjectStore {
         };
 
         let checkpoint_metadata = CheckpointMetadata::decode(&last_checkpoint_data)?;
+        // set last checkpoint size
+        self.set_manifest_size_by_path(&last_checkpoint_path, last_checkpoint_data.len() as u64);
 
         debug!(
             "Load checkpoint in path: {}, metadata: {:?}",
@@ -425,30 +442,58 @@ impl ManifestObjectStore {
         self.object_store.read(path).await.context(OpenDalSnafu)
     }
 
+    /// Compute the size(Byte) in manifest size map.
+    pub fn get_manifest_size(&self) -> u64 {
+        self.manifest_size_map.values().sum()
+    }
+
     /// Get the total size(Byte) of all manifest files.
-    pub async fn get_total_manifest_size(&self) -> Result<u64> {
+    pub async fn set_total_manifest_size(&mut self) -> Result<u64> {
+        self.set_manifest_size_until(ManifestVersion::MAX).await
+    }
+
+    /// Get the total size(Byte) of exist manifest files before end version(not included).
+    /// If end == ManifestVersion::MIN, return 0.
+    pub async fn set_manifest_size_until(&mut self, end: ManifestVersion) -> Result<u64> {
         let entries = self
             .get_paths(|entry| {
                 let file_name = entry.name();
                 if is_delta_file(file_name) || is_checkpoint_file(file_name) {
-                    return Some(entry);
+                    let file_version = file_version(file_name);
+                    if file_version < end {
+                        return Some(entry);
+                    }
                 }
                 None
             })
             .await?;
-        let mut size = 0;
         for entry in entries {
             let bytes = self
                 .object_store
                 .read(entry.path())
                 .await
                 .context(OpenDalSnafu)?;
-            size += bytes.len() as u64;
+            self.set_manifest_size_by_path(entry.path(), bytes.len() as u64);
         }
 
-        // last checkpoint file only contains size ,version and checksum,
-        // which is very tiny, maybe we don't need add it.
-        Ok(size)
+        Ok(self.get_manifest_size())
+    }
+
+    /// Set the size of the manifest file by path.
+    pub fn set_manifest_size_by_path(&mut self, path: &str, size: u64) {
+        self.manifest_size_map.insert(path.to_string(), size);
+    }
+
+    /// Set the size of the delta file by delta version.
+    pub fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
+        self.manifest_size_map
+            .insert(self.delta_file_path(version), size);
+    }
+
+    /// Set the size of the checkpoint file by checkpoint version.
+    pub fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
+        self.manifest_size_map
+            .insert(self.checkpoint_file_path(version), size);
     }
 }
 
@@ -515,7 +560,7 @@ mod tests {
         test_manifest_log_store_case(log_store).await;
     }
 
-    async fn test_manifest_log_store_case(log_store: ManifestObjectStore) {
+    async fn test_manifest_log_store_case(mut log_store: ManifestObjectStore) {
         for v in 0..5 {
             log_store
                 .save(v, format!("hello, {v}").as_bytes())
@@ -628,9 +673,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_manifest_files_size() {
+    async fn test_uncompressed_manifest_files_size() {
         let mut log_store = new_test_manifest_store();
-        // write manifest files
+        // write 5 manifest files
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
@@ -642,13 +687,63 @@ mod tests {
             .save_checkpoint(5, "checkpoint_uncompressed".as_bytes())
             .await
             .unwrap();
-        // get manifest files size
-        assert_eq!(log_store.get_total_manifest_size().await.unwrap(), 63);
 
-        // delete some manifest files
+        // manifest files size
+        assert_eq!(log_store.get_manifest_size(), 63);
+
+        // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
-        // get manifest files size after delete
-        assert_eq!(log_store.get_total_manifest_size().await.unwrap(), 39);
+        // manifest files size after delete
+        assert_eq!(log_store.get_manifest_size(), 39);
+
+        // delete all manifest files
+        assert_eq!(
+            log_store
+                .delete_until(ManifestVersion::MAX, false)
+                .await
+                .unwrap(),
+            3
+        );
+
+        assert_eq!(log_store.get_manifest_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_compressed_manifest_files_size() {
+        let mut log_store = new_test_manifest_store();
+        // Test with compressed manifest files
+        log_store.compress_type = CompressionType::Gzip;
+        // write 5 manifest files
+        for v in 0..5 {
+            log_store
+                .save(v, format!("hello, {v}").as_bytes())
+                .await
+                .unwrap();
+        }
+        log_store
+            .save_checkpoint(5, "checkpoint_compressed".as_bytes())
+            .await
+            .unwrap();
+
+        // manifest files size
+        assert_eq!(log_store.get_manifest_size(), 181);
+
+        // delete 3 manifest files
+        assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
+
+        // manifest files size after delete
+        assert_eq!(log_store.get_manifest_size(), 97);
+
+        // delete all manifest files
+        assert_eq!(
+            log_store
+                .delete_until(ManifestVersion::MAX, false)
+                .await
+                .unwrap(),
+            3
+        );
+
+        assert_eq!(log_store.get_manifest_size(), 0);
     }
 }
