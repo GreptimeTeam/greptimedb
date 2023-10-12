@@ -115,7 +115,6 @@ impl RegionManifestManager {
     /// Construct a region's manifest and persist it.
     pub async fn new(metadata: RegionMetadataRef, options: RegionManifestOptions) -> Result<Self> {
         let inner = RegionManifestManagerInner::new(metadata, options).await?;
-        debug!("new: total manifest size: {}", inner.manifest_size());
         Ok(Self {
             inner: RwLock::new(inner),
         })
@@ -124,7 +123,6 @@ impl RegionManifestManager {
     /// Open an existing manifest.
     pub async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
         if let Some(inner) = RegionManifestManagerInner::open(options).await? {
-            debug!("open: total manifest size: {}", inner.manifest_size());
             Ok(Some(Self {
                 inner: RwLock::new(inner),
             }))
@@ -136,16 +134,13 @@ impl RegionManifestManager {
     /// Stop background tasks gracefully.
     pub async fn stop(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
-        debug!("stop: total manifest size: {}", inner.manifest_size());
         inner.stop().await
     }
 
     /// Update the manifest. Return the current manifest version number.
     pub async fn update(&self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let mut inner = self.inner.write().await;
-        let res = inner.update(action_list).await;
-        debug!("update: total manifest size: {}", inner.manifest_size());
-        res
+        inner.update(action_list).await
     }
 
     /// Retrieve the current [RegionManifest].
@@ -163,7 +158,7 @@ impl RegionManifestManager {
     /// Returns total manifest size.
     pub async fn manifest_size(&self) -> u64 {
         let inner = self.inner.read().await;
-        inner.manifest_size()
+        inner.total_manifest_size()
     }
 }
 
@@ -329,6 +324,7 @@ impl RegionManifestManagerInner {
         Ok(())
     }
 
+    /// Update the manifest. Return the current manifest version number.
     async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let version = self.increase_version();
         self.store.save(version, &action_list.encode()?).await?;
@@ -362,8 +358,8 @@ impl RegionManifestManagerInner {
     }
 
     /// Returns total manifest size.
-    pub(crate) fn manifest_size(&self) -> u64 {
-        self.store.get_manifest_size()
+    pub(crate) fn total_manifest_size(&self) -> u64 {
+        self.store.get_total_manifest_size()
     }
 }
 
@@ -461,7 +457,7 @@ impl RegionManifestManagerInner {
         Ok(Some(checkpoint))
     }
 
-    /// Fetch the last Checkpoint size and [RegionCheckpoint] from storage.
+    /// Fetch the last [RegionCheckpoint] from storage.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
     ) -> Result<Option<RegionCheckpoint>> {
@@ -478,14 +474,16 @@ impl RegionManifestManagerInner {
 
 #[cfg(test)]
 mod test {
+
     use api::v1::SemanticType;
     use common_datasource::compression::CompressionType;
+    use common_test_util::temp_dir::create_temp_dir;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
 
     use super::*;
-    use crate::manifest::action::RegionChange;
+    use crate::manifest::action::{RegionChange, RegionEdit};
     use crate::manifest::tests::utils::basic_region_metadata;
     use crate::test_util::TestEnv;
 
@@ -569,10 +567,36 @@ mod test {
         manager.validate_manifest(&new_metadata, 1).await;
     }
 
+    /// Just for test, the manifest size is the sum of all checkpoint files and delta files,
+    /// refer to wal_dir_usage in src/store-api/src/logstore.rs.
+    async fn manifest_dir_usage(path: &str) -> u64 {
+        let mut size = 0;
+        let mut read_dir = tokio::fs::read_dir(path).await.unwrap();
+        while let Ok(dir_entry) = read_dir.next_entry().await {
+            let Some(entry) = dir_entry else {
+                break;
+            };
+            if entry.file_type().await.unwrap().is_file() {
+                let file_name = entry.file_name().into_string().unwrap();
+                if file_name.contains(".checkpoint") || file_name.contains(".json") {
+                    let file_size = entry.metadata().await.unwrap().len() as usize;
+                    debug!("File: {file_name:?}, size: {file_size}");
+                    size += file_size;
+                }
+            }
+        }
+        size as u64
+    }
+
     #[tokio::test]
     async fn test_manifest_size() {
         let metadata = Arc::new(basic_region_metadata());
-        let env = TestEnv::new();
+        let data_home = create_temp_dir("");
+        let data_home_path = data_home.path().to_str().unwrap().to_string();
+        let env = TestEnv::with_data_home(data_home);
+
+        let manifest_dir = format!("{}/manifest", data_home_path);
+
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, Some(metadata.clone()))
             .await
@@ -598,7 +622,27 @@ mod test {
 
         // get manifest size
         let manifest_size = manager.manifest_size().await;
-        assert_eq!(manifest_size, 1557);
+        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+
+        // update 10 times nop_action to trigger checkpoint
+        for _ in 0..10 {
+            manager
+                .update(RegionMetaActionList::new(vec![RegionMetaAction::Edit(
+                    RegionEdit {
+                        files_to_add: vec![],
+                        files_to_remove: vec![],
+                        compaction_time_window: None,
+                        flushed_entry_id: None,
+                        flushed_sequence: None,
+                    },
+                )]))
+                .await
+                .unwrap();
+        }
+
+        // check manifest size again
+        let manifest_size = manager.manifest_size().await;
+        assert_eq!(manifest_size, 1453);
 
         // Reopen the manager.
         manager.stop().await.unwrap();
@@ -607,10 +651,10 @@ mod test {
             .await
             .unwrap()
             .unwrap();
-        manager.validate_manifest(&new_metadata, 1).await;
+        manager.validate_manifest(&new_metadata, 11).await;
 
         // get manifest size again
         let manifest_size = manager.manifest_size().await;
-        assert_eq!(manifest_size, 1557);
+        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
     }
 }

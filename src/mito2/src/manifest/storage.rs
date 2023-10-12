@@ -148,7 +148,8 @@ pub struct ManifestObjectStore {
     compress_type: CompressionType,
     path: String,
     /// Stores the size of each manifest file.
-    /// K is the path of the manifest file, V is the size.
+    /// K is the manifest file name(such as "0000000000000000006.checkpoint"
+    /// or "0000000000000000006.json"), and V is the file size.
     manifest_size_map: HashMap<String, u64>,
 }
 
@@ -230,9 +231,10 @@ impl ManifestObjectStore {
         })
     }
 
-    /// Delete all manifest files in the range of [start, end).
+    /// Delete manifest files that version < end.
     /// If keep_last_checkpoint is true, the last checkpoint file will be kept.
-    /// Return the number of deleted files.
+    /// ### Return
+    /// The number of deleted files.
     pub async fn delete_until(
         &mut self,
         end: ManifestVersion,
@@ -459,25 +461,41 @@ impl ManifestObjectStore {
         self.object_store.read(path).await.context(OpenDalSnafu)
     }
 
+    /// Get the size(Byte) of the delta file by delta version.
+    /// If the delta file does not exist, return None.
+    pub fn delta_file_size(&self, version: ManifestVersion) -> Option<u64> {
+        self.manifest_size_map.get(&delta_file(version)).copied()
+    }
+
+    /// Get the size(Byte) of the checkpoint file by checkpoint version.
+    /// If the checkpoint file does not exist, return None.
+    pub fn checkpoint_file_size(&self, version: ManifestVersion) -> Option<u64> {
+        self.manifest_size_map
+            .get(&checkpoint_file(version))
+            .copied()
+    }
+
     /// Compute the size(Byte) in manifest size map.
-    pub fn get_manifest_size(&self) -> u64 {
+    pub fn get_total_manifest_size(&self) -> u64 {
         self.manifest_size_map.values().sum()
     }
 
     /// Get the total size(Byte) of all manifest files.
     pub async fn set_total_manifest_size(&mut self) -> Result<u64> {
-        self.set_manifest_size_until(ManifestVersion::MAX).await
+        self.set_manifest_size_until(ManifestVersion::MAX).await?;
+        Ok(self.get_total_manifest_size())
     }
 
-    /// Get the total size(Byte) of exist manifest files before end version(not included).
-    /// If end == ManifestVersion::MIN, return 0.
-    pub async fn set_manifest_size_until(&mut self, end: ManifestVersion) -> Result<u64> {
+    /// Count the total size(Byte) of exist manifest files which satisfy:
+    /// delta file version <= end and checkpoint file version < end.
+    /// Notice: this function will read files from object store.
+    pub async fn set_manifest_size_until(&mut self, end: ManifestVersion) -> Result<()> {
         let entries = self
             .get_paths(|entry| {
                 let file_name = entry.name();
                 if is_delta_file(file_name) || is_checkpoint_file(file_name) {
                     let file_version = file_version(file_name);
-                    if file_version < end {
+                    if file_version < end || (file_version == end && is_delta_file(file_name)) {
                         return Some(entry);
                     }
                 }
@@ -493,7 +511,7 @@ impl ManifestObjectStore {
             self.set_manifest_size_by_path(entry.path(), bytes.len() as u64);
         }
 
-        Ok(self.get_manifest_size())
+        Ok(())
     }
 
     /// Set the size of the manifest file by path.
@@ -725,15 +743,20 @@ mod tests {
             .save_checkpoint(5, "checkpoint_uncompressed".as_bytes())
             .await
             .unwrap();
+        // single delta file size
+        assert_eq!(log_store.delta_file_size(0), Some(8));
+
+        // single checkpoint file size
+        assert_eq!(log_store.checkpoint_file_size(5), Some(23));
 
         // manifest files size
-        assert_eq!(log_store.get_manifest_size(), 63);
+        assert_eq!(log_store.get_total_manifest_size(), 63);
 
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
         // manifest files size after delete
-        assert_eq!(log_store.get_manifest_size(), 39);
+        assert_eq!(log_store.get_total_manifest_size(), 39);
 
         // delete all manifest files
         assert_eq!(
@@ -744,7 +767,7 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.get_manifest_size(), 0);
+        assert_eq!(log_store.get_total_manifest_size(), 0);
     }
 
     #[tokio::test]
@@ -765,13 +788,13 @@ mod tests {
             .unwrap();
 
         // manifest files size
-        assert_eq!(log_store.get_manifest_size(), 181);
+        assert_eq!(log_store.get_total_manifest_size(), 181);
 
         // delete 3 manifest files
         assert_eq!(log_store.delete_until(3, false).await.unwrap(), 3);
 
         // manifest files size after delete
-        assert_eq!(log_store.get_manifest_size(), 97);
+        assert_eq!(log_store.get_total_manifest_size(), 97);
 
         // delete all manifest files
         assert_eq!(
@@ -782,6 +805,6 @@ mod tests {
             3
         );
 
-        assert_eq!(log_store.get_manifest_size(), 0);
+        assert_eq!(log_store.get_total_manifest_size(), 0);
     }
 }
