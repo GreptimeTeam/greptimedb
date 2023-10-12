@@ -180,6 +180,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig};
+    use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
     use super::*;
@@ -195,6 +196,9 @@ mod tests {
             rpc_addr = "127.0.0.1:3001"
             rpc_hostname = "127.0.0.1"
             rpc_runtime_size = 8
+
+            [heartbeat]
+            interval = "300ms"
 
             [meta_client]
             metasrv_addrs = ["127.0.0.1:3002"]
@@ -249,19 +253,26 @@ mod tests {
         assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
         assert!(!options.wal.sync_write);
 
+        let HeartbeatOptions {
+            interval: heart_beat_interval,
+            ..
+        } = options.heartbeat;
+
+        assert_eq!(300, heart_beat_interval.as_millis());
+
         let MetaClientOptions {
             metasrv_addrs: metasrv_addr,
-            timeout: timeout_millis,
-            connect_timeout: connect_timeout_millis,
+            timeout,
+            connect_timeout,
+            ddl_timeout,
             tcp_nodelay,
-            ddl_timeout: ddl_timeout_millis,
             ..
         } = options.meta_client.unwrap();
 
         assert_eq!(vec!["127.0.0.1:3002".to_string()], metasrv_addr);
-        assert_eq!(5000, connect_timeout_millis.as_millis());
-        assert_eq!(10000, ddl_timeout_millis.as_millis());
-        assert_eq!(3000, timeout_millis.as_millis());
+        assert_eq!(5000, connect_timeout.as_millis());
+        assert_eq!(10000, ddl_timeout.as_millis());
+        assert_eq!(3000, timeout.as_millis());
         assert!(tcp_nodelay);
         assert_eq!("/tmp/greptimedb/", options.storage.data_home);
         assert!(matches!(

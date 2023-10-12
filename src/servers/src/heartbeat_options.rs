@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct HeartbeatOptions {
+    #[serde(with = "humantime_serde")]
     pub interval: Duration,
+    #[serde(with = "humantime_serde")]
     pub retry_interval: Duration,
 }
 
