@@ -95,7 +95,7 @@ pub struct StandaloneOptions {
     pub prom_store: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub kv_store: KvStoreConfig,
+    pub metadata_store: KvStoreConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
     /// Options for different store engines.
@@ -116,7 +116,7 @@ impl Default for StandaloneOptions {
             prom_store: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            kv_store: KvStoreConfig::default(),
+            metadata_store: KvStoreConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
             region_engine: vec![
@@ -277,7 +277,7 @@ impl StartCommand {
         if self.influxdb_enable {
             opts.influxdb.enable = self.influxdb_enable;
         }
-        let kv_store = opts.kv_store.clone();
+        let metadata_store = opts.metadata_store.clone();
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
@@ -285,7 +285,7 @@ impl StartCommand {
 
         Ok(Options::Standalone(Box::new(MixOptions {
             procedure,
-            kv_store,
+            metadata_store,
             data_home: datanode.storage.data_home.to_string(),
             frontend,
             datanode,
@@ -313,7 +313,7 @@ impl StartCommand {
         let metadata_dir = metadata_store_dir(&opts.data_home);
         let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
-            opts.kv_store,
+            opts.metadata_store,
             opts.procedure,
         )
         .await
@@ -614,7 +614,7 @@ mod tests {
         assert_eq!(options.influxdb, default_options.influxdb);
         assert_eq!(options.prom_store, default_options.prom_store);
         assert_eq!(options.wal, default_options.wal);
-        assert_eq!(options.kv_store, default_options.kv_store);
+        assert_eq!(options.metadata_store, default_options.metadata_store);
         assert_eq!(options.procedure, default_options.procedure);
         assert_eq!(options.logging, default_options.logging);
         assert_eq!(options.region_engine, default_options.region_engine);
