@@ -248,7 +248,7 @@ jobs:
         with:
           src-image-registry: docker.io
           src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          src-image-name: greptimedb
+          src-image-name: ${{ env.IMAGE_NAME }}
           dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
           dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
           dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
