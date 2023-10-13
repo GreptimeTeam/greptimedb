@@ -113,7 +113,7 @@ async fn write_data(
         };
 
         let now = Instant::now();
-        let _ = db.insert(requests).await.unwrap();
+        db.insert(requests).await.unwrap();
         let elapsed = now.elapsed();
         total_rpc_elapsed_ms += elapsed.as_millis();
         progress_bar.inc(row_count as _);
@@ -131,6 +131,11 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
 
     for (array, field) in record_batch.columns().iter().zip(fields.iter()) {
         let (values, datatype) = build_values(array);
+        let semantic_type = match field.name().as_str() {
+            "VendorID" => SemanticType::Tag,
+            "tpep_pickup_datetime" => SemanticType::Timestamp,
+            _ => SemanticType::Field,
+        };
 
         let column = Column {
             column_name: field.name().clone(),
@@ -141,7 +146,7 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
                 .map(|bitmap| bitmap.buffer().as_slice().to_vec())
                 .unwrap_or_default(),
             datatype: datatype.into(),
-            // datatype and semantic_type are set to default
+            semantic_type: semantic_type as i32,
             ..Default::default()
         };
         columns.push(column);
@@ -261,7 +266,7 @@ fn create_table_expr() -> CreateTableExpr {
             ColumnDef {
                 name: "tpep_pickup_datetime".to_string(),
                 data_type: ColumnDataType::TimestampMicrosecond as i32,
-                is_nullable: true,
+                is_nullable: false,
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
                 comment: String::new(),
@@ -405,7 +410,7 @@ fn create_table_expr() -> CreateTableExpr {
         ],
         time_index: "tpep_pickup_datetime".to_string(),
         primary_keys: vec!["VendorID".to_string()],
-        create_if_not_exists: false,
+        create_if_not_exists: true,
         table_options: Default::default(),
         table_id: None,
         engine: "mito".to_string(),
