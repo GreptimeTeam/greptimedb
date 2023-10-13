@@ -14,6 +14,7 @@ common-macro = { workspace = true }
 common-meta = { workspace = true }
 common-telemetry = { workspace = true }
 etcd-client.workspace = true
+humantime-serde.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -353,8 +353,8 @@ mod tests {
             addr = "127.0.0.1:4000"
 
             [meta_client]
-            timeout_millis = 3000
-            connect_timeout_millis = 5000
+            timeout = "3s"
+            connect_timeout = "5s"
             tcp_nodelay = true
 
             [mysql]

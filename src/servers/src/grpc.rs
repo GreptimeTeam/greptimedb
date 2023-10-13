@@ -95,8 +95,8 @@ pub struct GrpcServerConfig {
 impl Default for GrpcServerConfig {
     fn default() -> Self {
         Self {
-            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE,
-            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
+            max_recv_message_size: DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE.as_bytes() as usize,
+            max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
         }
     }
 }

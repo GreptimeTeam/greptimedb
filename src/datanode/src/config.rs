@@ -333,9 +333,9 @@ pub struct DatanodeOptions {
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
     // Max gRPC receiving(decoding) message size
-    pub rpc_max_recv_message_size: usize,
+    pub rpc_max_recv_message_size: ReadableSize,
     // Max gRPC sending(encoding) message size
-    pub rpc_max_send_message_size: usize,
+    pub rpc_max_send_message_size: ReadableSize,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,

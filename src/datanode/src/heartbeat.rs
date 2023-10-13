@@ -69,7 +69,7 @@ impl HeartbeatTask {
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
-            opts.heartbeat.interval_millis,
+            opts.heartbeat.interval.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -86,7 +86,7 @@ impl HeartbeatTask {
             running: Arc::new(AtomicBool::new(false)),
             meta_client: Arc::new(meta_client),
             region_server,
-            interval: opts.heartbeat.interval_millis,
+            interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
             region_alive_keeper,
         })
@@ -332,14 +332,14 @@ pub async fn new_metasrv_client(
     let member_id = node_id;
 
     let config = ChannelConfig::new()
-        .timeout(Duration::from_millis(meta_config.timeout_millis))
-        .connect_timeout(Duration::from_millis(meta_config.connect_timeout_millis))
+        .timeout(meta_config.timeout)
+        .connect_timeout(meta_config.connect_timeout)
         .tcp_nodelay(meta_config.tcp_nodelay);
     let channel_manager = ChannelManager::with_config(config.clone());
     let heartbeat_channel_manager = ChannelManager::with_config(
         config
-            .timeout(Duration::from_millis(meta_config.heartbeat_timeout_millis))
-            .connect_timeout(Duration::from_millis(meta_config.heartbeat_timeout_millis)),
+            .timeout(meta_config.timeout)
+            .connect_timeout(meta_config.connect_timeout),
     );
 
     let mut meta_client = MetaClientBuilder::new(cluster_id, member_id, Role::Datanode)
