@@ -218,17 +218,21 @@ jobs:
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
         with:
-          image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
-          image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          src-image-registry: docker.io
+          src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          src-image-name: greptimedb
+          dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          dst-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
-          push-latest-tag: false             # Don't push the latest tag to registry.
-          update-latest-version-info: false  # Don't update the latest version info in S3.
+          dev-mode: false
+          update-version-info: false  # Don't update version info in S3.
+          push-latest-tag: false      # Don't push the latest tag to registry.
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner

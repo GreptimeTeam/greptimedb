@@ -25,6 +25,7 @@ function upload_artifacts() {
   # The bucket layout will be:
   # releases/greptimedb
   # ├── latest-version.txt
+  # ├── latest-nightly-version.txt
   # ├── v0.1.0
   # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
   # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
@@ -37,12 +38,24 @@ function upload_artifacts() {
   done
 }
 
-# Updates the latest version information in AWS S3 if UPDATE_LATEST_VERSION_INFO is true.
-function update_latest_version() {
-  if [ "$UPDATE_LATEST_VERSION_INFO" == "true" ]; then
-    echo "$VERSION" > latest-version.txt
-    aws s3 cp \
-      latest-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-version.txt"
+# Updates the latest version information in AWS S3 if UPDATE_VERSION_INFO is true.
+function update_version_info() {
+  if [ "$UPDATE_VERSION_INFO" == "true" ]; then
+    # If it's the officail release(like v1.0.0, v1.0.1, v1.0.2, etc.), update latest-version.txt.
+    if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "Updating latest-version.txt"
+      echo "$VERSION" > latest-version.txt
+      aws s3 cp \
+        latest-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-version.txt"
+    fi
+
+    # If it's the nightly release, update latest-nightly-version.txt.
+    if [[ "$VERSION" == *"nightly"* ]]; then
+      echo "Updating latest-nightly-version.txt"
+      echo "$VERSION" > latest-nightly-version.txt
+      aws s3 cp \
+        latest-nightly-version.txt "s3://$AWS_S3_BUCKET/$RELEASE_DIRS/latest-nightly-version.txt"
+    fi
   fi
 }
 
@@ -76,14 +89,14 @@ function main() {
   check_vars
   download_artifacts_from_github
   upload_artifacts
-  update_latest_version
+  update_version_info
 }
 
 # Usage example:
 #   AWS_ACCESS_KEY_ID=<your_access_key_id> \
 #   AWS_SECRET_ACCESS_KEY=<your_secret_access_key> \
 #   AWS_DEFAULT_REGION=<your_region> \
-#   UPDATE_LATEST_VERSION_INFO=true \
+#   UPDATE_VERSION_INFO=true \
 #   DOWNLOAD_ARTIFACTS_FROM_GITHUB=false \
 #     ./upload-artifacts-to-s3.sh <artifacts-dir> <version> <aws-s3-bucket>
 main

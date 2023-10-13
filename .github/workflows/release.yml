@@ -319,15 +319,21 @@ jobs:
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
         with:
-          image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
-          image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          src-image-registry: docker.io
+          src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          src-image-name: greptimedb
+          dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          dst-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
           aws-cn-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
+          dev-mode: false
+          update-version-info: true
+          push-latest-tag: true
 
   publish-github-release:
     name: Create GitHub release and upload artifacts

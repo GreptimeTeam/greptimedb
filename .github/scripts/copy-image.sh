@@ -26,9 +26,14 @@ function copy_images_from_dockerhub() {
     exit 1
   fi
 
+  # Extract the name and tag of the source image.
+  IMAGE_NAME=$(echo "$SRC_IMAGE" | sed "s/.*\///")
+
+  echo "Copying $SRC_IMAGE to $DST_REGISTRY/$IMAGE_NAME"
+
   docker run "$SKOPEO_STABLE_IMAGE" copy -a docker://"$SRC_IMAGE" \
     --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-    docker://"$DST_REGISTRY/$SRC_IMAGE"
+    docker://"$DST_REGISTRY/$IMAGE_NAME"
 }
 
 function main() {
