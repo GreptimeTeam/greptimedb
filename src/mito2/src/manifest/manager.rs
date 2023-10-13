@@ -357,7 +357,7 @@ impl RegionManifestManagerInner {
             && self.options.checkpoint_distance != 0
         {
             debug!(
-                "Going to do checkpoint for version [{} ~ {}]",
+                "Going to do checkpoint for version [{} ~ {})",
                 self.last_checkpoint_version, version
             );
             if let Some(checkpoint) = self.do_checkpoint().await? {
@@ -430,7 +430,9 @@ impl RegionManifestManagerInner {
             .save_checkpoint(last_version, &checkpoint.encode()?)
             .await?;
         // TODO(ruihang): this task can be detached
-        self.store.delete_until(last_version, true).await?;
+        // delete old delta manifest files, we should last_version + 1, because delete_until is
+        // exclusive `end`.
+        self.store.delete_until(last_version + 1, true).await?;
 
         info!(
             "Done manifest checkpoint for region {}, version: [{}, {}], current latest version: {}, compacted {} actions.",
