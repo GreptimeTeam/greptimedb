@@ -152,7 +152,6 @@ fn convert_record_batch(record_batch: RecordBatch) -> (Vec<Column>, u32) {
                 .unwrap_or_default(),
             datatype: datatype.into(),
             semantic_type: semantic_type as i32,
-            ..Default::default()
         };
         columns.push(column);
     }
