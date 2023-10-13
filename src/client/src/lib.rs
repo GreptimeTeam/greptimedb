@@ -26,6 +26,8 @@ use api::v1::greptime_response::Response;
 use api::v1::{AffectedRows, GreptimeResponse};
 pub use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::status_code::StatusCode;
+pub use common_query::Output;
+pub use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use snafu::OptionExt;
 
 pub use self::client::Client;

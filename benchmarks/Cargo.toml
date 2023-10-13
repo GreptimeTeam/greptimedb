@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 arrow.workspace = true
+chrono.workspace = true
 clap = { version = "4.0", features = ["derive"] }
 client = { workspace = true }
+futures-util.workspace = true
 indicatif = "0.17.1"
 itertools.workspace = true
 parquet.workspace = true
