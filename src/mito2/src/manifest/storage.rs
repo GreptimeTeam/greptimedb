@@ -215,7 +215,7 @@ impl ManifestObjectStore {
     pub async fn delete_until(
         &self,
         end: ManifestVersion,
-        keep_last_checkpoint: bool,
+        keep_max_version_checkpoint: bool,
     ) -> Result<usize> {
         // Stores (entry, is_checkpoint, version) in a Vec.
         let entries: Vec<_> = self
@@ -231,7 +231,7 @@ impl ManifestObjectStore {
                 None
             })
             .await?;
-        let checkpoint_version = if keep_last_checkpoint {
+        let checkpoint_version = if keep_max_version_checkpoint {
             // Note that the order of entries is unspecific.
             entries
                 .iter()
@@ -253,7 +253,7 @@ impl ManifestObjectStore {
             .filter(|(_e, is_checkpoint, version)| {
                 if let Some(max_version) = checkpoint_version {
                     if *is_checkpoint {
-                        // We need to keep the checkpoint file.
+                        // We need to keep the max version checkpoint file.
                         version < max_version
                     } else {
                         // We can delete the log file with max_version as the checkpoint
@@ -272,7 +272,7 @@ impl ManifestObjectStore {
             "Deleting {} logs from manifest storage path {} until {}, checkpoint: {:?}, paths: {:?}",
             ret,
             self.path,
-            end,
+            end - 1,
             checkpoint_version,
             paths,
         );

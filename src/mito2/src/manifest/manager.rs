@@ -353,12 +353,19 @@ impl RegionManifestManagerInner {
     }
 
     pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
-        if version - self.last_checkpoint_version >= self.options.checkpoint_distance
+        // For case where there is no checkpoint.
+        let start_version = if self.last_checkpoint_version == 0 {
+            self.last_checkpoint_version
+        } else {
+            self.last_checkpoint_version + 1
+        };
+
+        if version - start_version >= self.options.checkpoint_distance
             && self.options.checkpoint_distance != 0
         {
             debug!(
                 "Going to do checkpoint for version [{} ~ {})",
-                self.last_checkpoint_version, version
+                start_version, version
             );
             if let Some(checkpoint) = self.do_checkpoint().await? {
                 self.last_checkpoint_version = checkpoint.last_version();
@@ -435,8 +442,8 @@ impl RegionManifestManagerInner {
         self.store.delete_until(last_version + 1, true).await?;
 
         info!(
-            "Done manifest checkpoint for region {}, version: [{}, {}], current latest version: {}, compacted {} actions.",
-            self.manifest.metadata.region_id, start_version, end_version, last_version, compacted_actions
+            "Done manifest checkpoint for region {}, version: [{}, {}), current latest version: {}, compacted {} actions.",
+            self.manifest.metadata.region_id, start_version, end_version, last_version + 1, compacted_actions
         );
         Ok(Some(checkpoint))
     }
