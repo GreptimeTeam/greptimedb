@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_runtime::{RepeatedTask, TaskFunction};
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
 use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::Notify;
 
 use crate::error::{
-    DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ProcedureManagerStopSnafu, Result,
+    DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ProcedureManagerNotStartSnafu, Result,
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
 use crate::local::lock::LockMap;
@@ -427,7 +427,7 @@ impl LocalManager {
     ) -> Result<Watcher> {
         ensure!(
             self.running.load(Ordering::Relaxed),
-            ProcedureManagerStopSnafu
+            ProcedureManagerNotStartSnafu
         );
 
         let meta = Arc::new(ProcedureMeta::new(procedure_id, None, procedure.lock_key()));
@@ -473,7 +473,8 @@ impl ProcedureManager for LocalManager {
     }
 
     fn start(&self) -> Result<()> {
-        if !self.running.load(Ordering::Relaxed) {
+        // The previous value should be false
+        if !self.running.swap(true, Ordering::Relaxed) {
             let mut state = self.state.lock().unwrap();
 
             let task = state
@@ -484,14 +485,15 @@ impl ProcedureManager for LocalManager {
                 .context(StartRemoveOutdatedMetaTaskSnafu)?;
 
             self.running.store(true, Ordering::Relaxed);
-            logging::info!("LocalManager is started.");
+            info!("LocalManager is started.");
         }
 
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
-        if self.running.load(Ordering::Relaxed) {
+        // The previous value should be true
+        if self.running.swap(false, Ordering::Relaxed) {
             let remove_outdated_meta_task =
                 self.state.lock().unwrap().remove_outdated_meta_task.take();
 
@@ -500,7 +502,7 @@ impl ProcedureManager for LocalManager {
             }
 
             self.running.store(false, Ordering::Relaxed);
-            logging::info!("LocalManager is stopped.");
+            info!("LocalManager is stopped.");
         }
 
         Ok(())
@@ -944,7 +946,7 @@ mod tests {
                 })
                 .await
                 .unwrap_err(),
-            error::Error::ProcedureManagerStop { .. }
+            error::Error::ProcedureManagerNotStart { .. }
         );
     }
 

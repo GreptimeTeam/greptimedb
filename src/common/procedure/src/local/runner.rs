@@ -201,7 +201,7 @@ impl Runner {
             // Don't store state if `ProcedureManager` is stopped.
             if !self.running() {
                 self.meta.set_state(ProcedureState::Failed {
-                    error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                    error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
                 });
                 return;
             }
@@ -260,7 +260,7 @@ impl Runner {
                 // Don't store state if `ProcedureManager` is stopped.
                 if !self.running() {
                     self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                        error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
                     });
                     return ExecResult::Failed;
                 }
@@ -307,7 +307,7 @@ impl Runner {
                 // Don't store state if `ProcedureManager` is stopped.
                 if !self.running() {
                     self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ProcedureManagerStopSnafu {}.build()),
+                        error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
                     });
                     return ExecResult::Failed;
                 }
