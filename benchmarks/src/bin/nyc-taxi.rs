@@ -37,7 +37,6 @@ use tokio::task::JoinSet;
 
 const CATALOG_NAME: &str = "greptime";
 const SCHEMA_NAME: &str = "public";
-const TABLE_NAME_PREFIX: &str = "nyc_taxi";
 
 #[derive(Parser)]
 #[command(name = "NYC benchmark runner")]
@@ -76,7 +75,7 @@ fn get_file_list<P: AsRef<Path>>(path: P) -> Vec<PathBuf> {
 }
 
 fn new_table_name() -> String {
-    format!("{}_{}", TABLE_NAME_PREFIX, chrono::Utc::now().timestamp())
+    format!("nyc_taxi_{}", chrono::Utc::now().timestamp())
 }
 
 async fn write_data(
