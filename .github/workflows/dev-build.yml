@@ -164,12 +164,7 @@ jobs:
           cargo-profile: ${{ env.CARGO_PROFILE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
-          release-to-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
-          aws-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_CN_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
           dev-mode: true # Only build the standard greptime binary.
-          upload-to-s3: false # No need to upload to S3.
           working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
 
   build-linux-arm64-artifacts:
@@ -251,10 +246,13 @@ jobs:
       - name: Release artifacts to CN region
         uses: ./.github/actions/release-cn-artifacts
         with:
-          image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
-          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
-          image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
-          image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          src-image-registry: docker.io
+          src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          src-image-name: greptimedb
+          dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          dst-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
           version: ${{ needs.allocate-runners.outputs.version }}
           aws-cn-s3-bucket: ${{ vars.AWS_RELEASE_BUCKET }}
           aws-cn-access-key-id: ${{ secrets.AWS_CN_ACCESS_KEY_ID }}
@@ -262,7 +260,7 @@ jobs:
           aws-cn-region: ${{ vars.AWS_RELEASE_BUCKET_REGION }}
           dev-mode: true                     # Only build the standard images(exclude centos images).
           push-latest-tag: false             # Don't push the latest tag to registry.
-          update-latest-version-info: false  # Don't update the latest version info in S3.
+          update-version-info: false         # Don't update the version info in S3.
 
   stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
     name: Stop linux-amd64 runner

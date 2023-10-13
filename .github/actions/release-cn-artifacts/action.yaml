@@ -1,20 +1,29 @@
 name: Release CN artifacts
 description: Release artifacts to CN region
 inputs:
-  image-registry:
-    description: The image registry to store the images
+  src-image-registry:
+    description: The source image registry to store the images
     required: true
-  image-namespace:
-    description: The namespace of the image registry to store the images
+    default: docker.io
+  src-image-namespace:
+    description: The namespace of the source image registry to store the images
     required: true
-  image-name:
-    description: The name of the image to build
+    default: greptime
+  src-image-name:
+    description: The name of the source image
     required: false
     default: greptimedb
-  image-registry-username:
+  dst-image-registry:
+    description: The destination image registry to store the images
+    required: true
+  dst-image-namespace:
+    description: The namespace of the destination image registry to store the images
+    required: true
+    default: greptime
+  dst-image-registry-username:
     description: The username to login to the image registry
     required: true
-  image-registry-password:
+  dst-image-registry-password:
     description: The password to login to the image registry
     required: true
   version:
@@ -25,7 +34,7 @@ inputs:
     required: false
     default: 'false'
   push-latest-tag:
-    description: Whether to push the latest tag
+    description: Whether to push the latest tag of the image
     required: false
     default: 'true'
   aws-cn-s3-bucket:
@@ -48,8 +57,8 @@ inputs:
     description: Directory to store artifacts
     required: false
     default: 'artifacts'
-  update-latest-version-info:
-    description: Upload the latest version info in S3
+  update-version-info:
+    description: Update the version info in S3
     required: false
     default: 'true'
   upload-max-retry-times:
@@ -68,72 +77,62 @@ runs:
       with:
         path: ${{ inputs.artifacts-dir }}
 
-    - name: Upload artifacts to aws-cn S3
+    - name: Release artifacts to cn region
+      uses: nick-invision/retry@v2
       if: ${{ inputs.upload-to-s3 == 'true' }}
-      uses: nick-invision/retry@v2
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
         AWS_DEFAULT_REGION: ${{ inputs.aws-cn-region }}
-      with:
-        max_attempts: ${{ inputs.upload-max-retry-times }}
-        timeout_minutes: ${{ inputs.upload-retry-timeout }}
-        # The bucket layout will be:
-        # releases/greptimedb
-        # ├── v0.1.0
-        # │   ├── greptime-darwin-amd64-pyo3-v0.1.0.sha256sum
-        # │   └── greptime-darwin-amd64-pyo3-v0.1.0.tar.gz
-        # └── v0.2.0
-        #    ├── greptime-darwin-amd64-pyo3-v0.2.0.sha256sum
-        #    └── greptime-darwin-amd64-pyo3-v0.2.0.tar.gz
-        command: |
-          cd ${{ inputs.artifacts-dir }} && \
-          aws s3 cp . s3://${{ inputs.aws-cn-s3-bucket }}/releases/greptimedb/${{ inputs.version }} \
-          --recursive --exclude "*" --include "greptime-*.tar.gz" --include "greptime-*.sha256sum"
-
-    - name: Update latest version info in aws-cn S3
-      if: ${{ inputs.upload-to-s3 == 'true' && inputs.update-latest-version-info == 'true' }} # We'll also upload the latest artifacts to S3 in the scheduled and formal release.
-      uses: nick-invision/retry@v2
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.aws-cn-access-key-id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-cn-secret-access-key }}
-        AWS_DEFAULT_REGION: ${{ inputs.aws-cn-region }}
+        UPDATE_VERSION_INFO: ${{ inputs.update-version-info }}
       with:
         max_attempts: ${{ inputs.upload-max-retry-times }}
         timeout_minutes: ${{ inputs.upload-retry-timeout }}
         command: |
-          echo "${{ inputs.version }}" > ${{ inputs.artifacts-dir }}/latest-version.txt && \
-          aws cp ${{ inputs.artifacts-dir }}/latest-version.txt s3://${{ inputs.aws-cn-s3-bucket }}/releases/greptimedb/latest-version.txt
+          ./.github/scripts/upload-artifacts-to-s3.sh \
+            ${{ inputs.artifacts-dir }} \
+            ${{ inputs.version }} \
+            ${{ inputs.aws-cn-s3-bucket }}
 
-    - name: Push images from Dockerhub to ACR
+    - name: Push greptimedb image from Dockerhub to ACR
       shell: bash
       env:
-        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
-        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
       run: |
-        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }}
-        
-        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:${{ inputs.version }}
-        fi
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}:${{ inputs.version }} \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
 
-    - name: Push latest images from Dockerhub to ACR
+    - name: Push latest greptimedb image from Dockerhub to ACR
       shell: bash
       if: ${{ inputs.push-latest-tag == 'true' }}
       env:
-        DST_REGISTRY_USERNAME: ${{ inputs.image-registry-username }}
-        DST_REGISTRY_PASSWORD: ${{ inputs.image-registry-password }}
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
       run: |
-        docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-          --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-          docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}:latest
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}:latest \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
 
-        if [[ "${{ inputs.dev-mode }}" == "false" ]]; then
-          docker run quay.io/skopeo/stable:latest copy -a docker://docker.io/${{ inputs.image-namespace }}/${{ inputs.image-name }}:${{ inputs.version }} \
-            --dest-creds "$DST_REGISTRY_USERNAME":"$DST_REGISTRY_PASSWORD" \
-            docker://${{ inputs.image-registry }}/${{ inputs.image-namespace }}/${{ inputs.image-name }}-centos:latest
-        fi
+    - name: Push greptimedb-centos image from DockerHub to ACR
+      shell: bash
+      if: ${{ inputs.dev-mode == 'false' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:latest \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
+
+    - name: Push greptimedb-centos image from DockerHub to ACR
+      shell: bash
+      if: ${{ inputs.dev-mode == 'false' && inputs.push-latest-tag == 'true' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:latest \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
