@@ -29,7 +29,8 @@ use client::api::v1::column::Values;
 use client::api::v1::{
     Column, ColumnDataType, ColumnDef, CreateTableExpr, InsertRequest, InsertRequests, SemanticType,
 };
-use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use client::{Client, Database, Output, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use futures_util::TryStreamExt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use tokio::task::JoinSet;
@@ -481,13 +482,19 @@ async fn do_query(num_iter: usize, db: &Database, table_name: &str) {
         println!("Running query: {query}");
         for i in 0..num_iter {
             let now = Instant::now();
-            let _res = db.sql(&query).await.unwrap();
+            let res = db.sql(&query).await.unwrap();
+            match res {
+                Output::AffectedRows(_) | Output::RecordBatches(_) => (),
+                Output::Stream(stream) => {
+                    stream.try_collect::<Vec<_>>().await.unwrap();
+                }
+            }
             let elapsed = now.elapsed();
             println!(
                 "query {}, iteration {}: {}ms",
                 query_name,
                 i,
-                elapsed.as_millis()
+                elapsed.as_millis(),
             );
         }
     }
