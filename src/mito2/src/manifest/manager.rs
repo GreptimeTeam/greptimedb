@@ -355,7 +355,7 @@ impl RegionManifestManagerInner {
     pub(crate) async fn may_do_checkpoint(&mut self, version: ManifestVersion) -> Result<()> {
         // For case where there is no checkpoint.
         let start_version = if self.last_checkpoint_version == 0 {
-            self.last_checkpoint_version
+            0
         } else {
             self.last_checkpoint_version + 1
         };

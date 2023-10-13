@@ -261,6 +261,7 @@ impl ManifestObjectStore {
                         version <= max_version
                     }
                 } else {
+                    // We will delete all file that version < end
                     true
                 }
             })
