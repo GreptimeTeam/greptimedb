@@ -13,8 +13,8 @@ rpc_runtime_size = 8
 require_lease_before_startup = false
 
 [heartbeat]
-# Interval for sending heartbeat messages to the Metasrv, 3000 milliseconds by default.
-interval = "3000ms"
+# Interval for sending heartbeat messages to the Metasrv, 3 seconds by default.
+interval = "3s"
 
 # Metasrv client options.
 [meta_client]

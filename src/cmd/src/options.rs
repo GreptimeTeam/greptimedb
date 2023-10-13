@@ -110,12 +110,6 @@ impl Options {
         if let Some(config_file) = config_file {
             layered_config = layered_config.add_source(File::new(config_file, FileFormat::Toml));
         }
-        let oapts = layered_config
-            .clone()
-            .build()
-            .context(LoadLayeredConfigSnafu)?;
-
-        dbg!(oapts);
 
         let opts = layered_config
             .build()

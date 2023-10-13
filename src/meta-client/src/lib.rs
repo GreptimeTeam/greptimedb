@@ -44,14 +44,22 @@ fn default_ddl_timeout() -> Duration {
     Duration::from_millis(10_000u64)
 }
 
+fn default_connect_timeout() -> Duration {
+    Duration::from_millis(1_000u64)
+}
+
+fn default_timeout() -> Duration {
+    Duration::from_millis(3_000u64)
+}
+
 impl Default for MetaClientOptions {
     fn default() -> Self {
         Self {
             metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
-            timeout: Duration::from_millis(3_000u64),
+            timeout: default_timeout(),
             heartbeat_timeout: default_heartbeat_timeout(),
             ddl_timeout: default_ddl_timeout(),
-            connect_timeout: Duration::from_millis(1_000u64),
+            connect_timeout: default_connect_timeout(),
             tcp_nodelay: true,
         }
     }

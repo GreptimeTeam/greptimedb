@@ -69,7 +69,7 @@ impl HeartbeatTask {
     ) -> Result<Self> {
         let region_alive_keeper = Arc::new(RegionAliveKeeper::new(
             region_server.clone(),
-            opts.heartbeat.interval.as_secs(),
+            opts.heartbeat.interval.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
             Arc::new(ParseMailboxMessageHandler),
@@ -86,7 +86,7 @@ impl HeartbeatTask {
             running: Arc::new(AtomicBool::new(false)),
             meta_client: Arc::new(meta_client),
             region_server,
-            interval: opts.heartbeat.interval.as_secs(),
+            interval: opts.heartbeat.interval.as_millis() as u64,
             resp_handler_executor,
             region_alive_keeper,
         })
