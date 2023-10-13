@@ -842,6 +842,7 @@ name = "benchmarks"
 version = "0.4.0"
 dependencies = [
  "arrow",
+ "chrono",
  "clap 4.4.1",
  "client",
  "indicatif",
