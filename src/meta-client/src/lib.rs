@@ -23,6 +23,7 @@ pub mod error;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetaClientOptions {
     pub metasrv_addrs: Vec<String>,
+    #[serde(default = "default_timeout")]
     #[serde(with = "humantime_serde")]
     pub timeout: Duration,
     #[serde(default = "default_heartbeat_timeout")]
@@ -31,6 +32,7 @@ pub struct MetaClientOptions {
     #[serde(default = "default_ddl_timeout")]
     #[serde(with = "humantime_serde")]
     pub ddl_timeout: Duration,
+    #[serde(default = "default_connect_timeout")]
     #[serde(with = "humantime_serde")]
     pub connect_timeout: Duration,
     pub tcp_nodelay: bool,
