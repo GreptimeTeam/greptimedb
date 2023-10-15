@@ -82,6 +82,8 @@ enable = true
 
 # WAL options.
 [wal]
+# WAL data directory
+# dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
 file_size = "256MB"
 # WAL purge threshold.

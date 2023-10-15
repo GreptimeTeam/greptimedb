@@ -367,7 +367,10 @@ impl DatanodeBuilder {
     /// Build [RaftEngineLogStore]
     async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
         let data_home = normalize_dir(&opts.storage.data_home);
-        let wal_dir = format!("{}{WAL_DIR}", data_home);
+        let wal_dir = match &opts.wal.dir {
+            Some(dir) => dir.clone(),
+            None => format!("{}{WAL_DIR}", data_home),
+        };
         let wal_config = opts.wal.clone();
 
         // create WAL directory

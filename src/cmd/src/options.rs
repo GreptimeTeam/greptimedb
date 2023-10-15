@@ -263,6 +263,9 @@ mod tests {
                     ]
                 );
 
+                // Should be the values from config file, not environment variables.
+                assert_eq!(opts.wal.dir.unwrap(), "/tmp/greptimedb/wal");
+
                 // Should be default values.
                 assert_eq!(opts.node_id, None);
             },
