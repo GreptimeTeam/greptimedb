@@ -89,7 +89,7 @@ pub struct StartCommand {
     #[clap(long)]
     http_timeout: Option<u64>,
     #[clap(long)]
-    grpc_addr: Option<String>,
+    rpc_addr: Option<String>,
     #[clap(long)]
     mysql_addr: Option<String>,
     #[clap(long)]
@@ -150,7 +150,7 @@ impl StartCommand {
             opts.http.disable_dashboard = disable_dashboard;
         }
 
-        if let Some(addr) = &self.grpc_addr {
+        if let Some(addr) = &self.rpc_addr {
             opts.grpc.addr = addr.clone()
         }
 
