@@ -19,6 +19,9 @@ use metrics::counter;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::otlp;
 use servers::query_handler::OpenTelemetryProtocolHandler;
@@ -26,7 +29,7 @@ use session::context::QueryContextRef;
 use snafu::ResultExt;
 
 use crate::instance::Instance;
-use crate::metrics::OTLP_METRICS_ROWS;
+use crate::metrics::{OTLP_METRICS_ROWS, OTLP_TRACES_ROWS};
 
 #[async_trait]
 impl OpenTelemetryProtocolHandler for Instance {
@@ -40,7 +43,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
-        let (requests, rows) = otlp::to_grpc_insert_requests(request)?;
+        let (requests, rows) = otlp::metrics::to_grpc_insert_requests(request)?;
         let _ = self
             .handle_row_inserts(requests, ctx)
             .await
@@ -51,6 +54,34 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         let resp = ExportMetricsServiceResponse {
             // TODO(sunng87): add support for partial_success in future patch
+            partial_success: None,
+        };
+        Ok(resp)
+    }
+
+    async fn traces(
+        &self,
+        request: ExportTraceServiceRequest,
+        ctx: QueryContextRef,
+    ) -> ServerResult<ExportTraceServiceResponse> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Otlp)
+            .context(AuthSnafu)?;
+
+        let (requests, rows) = otlp::traces::to_grpc_insert_requests(request)?;
+
+        let _ = self
+            .handle_row_inserts(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        counter!(OTLP_TRACES_ROWS, rows as u64);
+
+        let resp = ExportTraceServiceResponse {
+            // TODO(fys): add support for partial_success in future patch
             partial_success: None,
         };
         Ok(resp)

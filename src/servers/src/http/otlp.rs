@@ -21,6 +21,9 @@ use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use prost::Message;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -33,16 +36,19 @@ pub async fn metrics(
     State(handler): State<OpenTelemetryProtocolHandlerRef>,
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
-) -> Result<OtlpResponse> {
+) -> Result<OtlpMetricsResponse> {
     let _timer = timer!(
-        crate::metrics::METRIC_HTTP_OPENTELEMETRY_ELAPSED,
+        crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED,
         &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
     );
-    let request = parse_body(body).await?;
-    handler.metrics(request, query_ctx).await.map(OtlpResponse)
+    let request = parse_metrics_body(body).await?;
+    handler
+        .metrics(request, query_ctx)
+        .await
+        .map(OtlpMetricsResponse)
 }
 
-async fn parse_body(body: Body) -> Result<ExportMetricsServiceRequest> {
+async fn parse_metrics_body(body: Body) -> Result<ExportMetricsServiceRequest> {
     hyper::body::to_bytes(body)
         .await
         .context(error::HyperSnafu)
@@ -51,9 +57,47 @@ async fn parse_body(body: Body) -> Result<ExportMetricsServiceRequest> {
         })
 }
 
-pub struct OtlpResponse(ExportMetricsServiceResponse);
+pub struct OtlpMetricsResponse(ExportMetricsServiceResponse);
 
-impl IntoResponse for OtlpResponse {
+impl IntoResponse for OtlpMetricsResponse {
+    fn into_response(self) -> axum::response::Response {
+        (
+            [(header::CONTENT_TYPE, "application/x-protobuf")],
+            self.0.encode_to_vec(),
+        )
+            .into_response()
+    }
+}
+
+#[axum_macros::debug_handler]
+pub async fn traces(
+    State(handler): State<OpenTelemetryProtocolHandlerRef>,
+    Extension(query_ctx): Extension<QueryContextRef>,
+    RawBody(body): RawBody,
+) -> Result<OtlpTracesResponse> {
+    let _timer = timer!(
+        crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED,
+        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
+    );
+    let request = parse_traces_body(body).await?;
+    handler
+        .traces(request, query_ctx)
+        .await
+        .map(OtlpTracesResponse)
+}
+
+async fn parse_traces_body(body: Body) -> Result<ExportTraceServiceRequest> {
+    hyper::body::to_bytes(body)
+        .await
+        .context(error::HyperSnafu)
+        .and_then(|buf| {
+            ExportTraceServiceRequest::decode(&buf[..]).context(error::DecodeOtlpRequestSnafu)
+        })
+}
+
+pub struct OtlpTracesResponse(ExportTraceServiceResponse);
+
+impl IntoResponse for OtlpTracesResponse {
     fn into_response(self) -> axum::response::Response {
         (
             [(header::CONTENT_TYPE, "application/x-protobuf")],
