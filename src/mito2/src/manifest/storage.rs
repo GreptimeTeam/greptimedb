@@ -84,7 +84,6 @@ pub fn file_version(path: &str) -> ManifestVersion {
 /// Just use for .json and .checkpoint file
 /// ### Panics
 /// Panics if the file path is not a valid delta or checkpoint file.
-#[inline]
 pub fn file_name(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or("").to_string();
     if !is_checkpoint_file(&name) && !is_delta_file(&name) {
@@ -301,10 +300,10 @@ impl ManifestObjectStore {
         );
 
         // delete the manifest'size in paths
-        paths.iter().for_each(|path| {
+        for path in &paths {
             let name = file_name(path);
             self.manifest_size_map.remove(&name);
-        });
+        }
 
         self.object_store
             .remove(paths)
