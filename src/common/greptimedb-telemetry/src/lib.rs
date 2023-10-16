@@ -24,7 +24,7 @@ use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 
 /// The URL to report telemetry data.
-pub const TELEMETRY_URL: &str = "https://api.greptime.cloud/db/otel/statistics";
+pub const TELEMETRY_URL: &str = "https://telemetry.greptimestats.com/db/otel/statistics";
 /// The local installation uuid cache file
 const UUID_FILE_NAME: &str = ".greptimedb-telemetry-uuid";
 
