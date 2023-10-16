@@ -480,12 +480,6 @@ impl ManifestObjectStore {
         self.manifest_size_map.values().sum()
     }
 
-    /// Get the total size(Byte) of all manifest files.
-    pub async fn set_total_manifest_size(&mut self) -> Result<u64> {
-        self.set_manifest_size_until(ManifestVersion::MAX).await?;
-        Ok(self.get_total_manifest_size())
-    }
-
     /// Count the total size(Byte) of exist manifest files which satisfy:
     /// delta file version <= end and checkpoint file version < end.
     /// Notice: this function will read files from object store.
