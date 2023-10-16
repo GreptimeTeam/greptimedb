@@ -356,7 +356,7 @@ impl RegionManifestManagerInner {
 
     /// Returns total manifest size.
     pub(crate) fn total_manifest_size(&self) -> u64 {
-        self.store.get_total_manifest_size()
+        self.store.total_manifest_size()
     }
 }
 
