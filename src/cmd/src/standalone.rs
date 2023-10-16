@@ -493,6 +493,8 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
+        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
+
         match &dn_opts.storage.store {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(

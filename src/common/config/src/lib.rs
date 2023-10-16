@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct WalConfig {
+    // wal directory
+    pub dir: Option<String>,
     // wal file size in bytes
     pub file_size: ReadableSize,
     // wal purge threshold in bytes
@@ -36,7 +38,8 @@ pub struct WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            file_size: ReadableSize::mb(256),     // log file size 256MB
+            dir: None,
+            file_size: ReadableSize::mb(256), // log file size 256MB
             purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
             purge_interval: Duration::from_secs(600),
             read_batch_size: 128,

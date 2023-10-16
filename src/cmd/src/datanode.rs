@@ -96,6 +96,8 @@ struct StartCommand {
     #[clap(long)]
     data_home: Option<String>,
     #[clap(long)]
+    wal_dir: Option<String>,
+    #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
@@ -147,6 +149,10 @@ impl StartCommand {
 
         if let Some(data_home) = &self.data_home {
             opts.storage.data_home = data_home.clone();
+        }
+
+        if let Some(wal_dir) = &self.wal_dir {
+            opts.wal.dir = Some(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -255,6 +261,7 @@ mod tests {
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
+        assert_eq!("/other/wal", options.wal.dir.unwrap());
 
         assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
         assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
@@ -439,6 +446,7 @@ mod tests {
             || {
                 let command = StartCommand {
                     config_file: Some(file.path().to_str().unwrap().to_string()),
+                    wal_dir: Some("/other/wal/dir".to_string()),
                     env_prefix: env_prefix.to_string(),
                     ..Default::default()
                 };
@@ -465,6 +473,9 @@ mod tests {
 
                 // Should be read from config file, config file > env > default values.
                 assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+
+                // Should be read from cli, cli > config file > env > default values.
+                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(
