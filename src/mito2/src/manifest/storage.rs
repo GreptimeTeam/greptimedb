@@ -391,6 +391,7 @@ impl ManifestObjectStore {
                             compress_type: self.compress_type,
                             path: path.clone(),
                         })?;
+                // set the checkpoint size
                 self.set_manifest_size_by_path(&path, decompress_data.len() as u64);
                 Ok(Some(decompress_data))
             }

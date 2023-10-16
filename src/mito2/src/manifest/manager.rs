@@ -246,6 +246,7 @@ impl RegionManifestManagerInner {
 
         // recover from storage
         // construct manifest builder
+        // calculate the manifest size from the latest checkpoint
         let mut version = MIN_VERSION;
         let checkpoint = Self::last_checkpoint(&mut store).await?;
         let last_checkpoint_version = checkpoint
@@ -257,10 +258,6 @@ impl RegionManifestManagerInner {
                 "Recover region manifest {} from checkpoint version {}",
                 options.manifest_dir, checkpoint.last_version
             );
-            // set manifest size before last checkpoint
-            store
-                .set_manifest_size_until(last_checkpoint_version)
-                .await?;
             version = version.max(checkpoint.last_version + 1);
             RegionManifestBuilder::with_checkpoint(checkpoint.checkpoint)
         } else {
@@ -567,8 +564,7 @@ mod test {
         manager.validate_manifest(&new_metadata, 1).await;
     }
 
-    /// Just for test, the manifest size is the sum of all checkpoint files and delta files,
-    /// refer to wal_dir_usage in src/store-api/src/logstore.rs.
+    /// Just for test, refer to wal_dir_usage in src/store-api/src/logstore.rs.
     async fn manifest_dir_usage(path: &str) -> u64 {
         let mut size = 0;
         let mut read_dir = tokio::fs::read_dir(path).await.unwrap();
@@ -642,9 +638,10 @@ mod test {
 
         // check manifest size again
         let manifest_size = manager.manifest_size().await;
-        assert_eq!(manifest_size, 1453);
+        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
 
-        // Reopen the manager.
+        // Reopen the manager,
+        // we just calculate the size from the latest checkpoint file
         manager.stop().await.unwrap();
         let manager = env
             .create_manifest_manager(CompressionType::Uncompressed, 10, None)
@@ -655,6 +652,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_size().await;
-        assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
+        assert_eq!(manifest_size, 1312);
     }
 }
