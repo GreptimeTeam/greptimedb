@@ -41,6 +41,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to start telemetry task"))]
+    StartTelemetryTask {
+        location: Location,
+        source: common_runtime::error::Error,
+    },
+
     #[snafu(display("Failed to submit ddl task"))]
     SubmitDdlTask {
         location: Location,
@@ -634,6 +640,7 @@ impl ErrorExt for Error {
             Error::ListCatalogs { source, .. } | Error::ListSchemas { source, .. } => {
                 source.status_code()
             }
+            Error::StartTelemetryTask { source, .. } => source.status_code(),
 
             Error::RegionFailoverCandidatesNotFound { .. } => StatusCode::RuntimeResourcesExhausted,
             Error::NextSequence { source, .. } => source.status_code(),

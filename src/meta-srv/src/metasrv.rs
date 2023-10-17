@@ -28,7 +28,7 @@ use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use snafu::ResultExt;
@@ -38,7 +38,8 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    InitMetadataSnafu, Result, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
@@ -171,6 +172,37 @@ pub struct SelectorContext {
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
 pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
+pub struct MetaStateHandler {
+    procedure_manager: ProcedureManagerRef,
+    subscribe_manager: Option<SubscribeManagerRef>,
+    greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+}
+
+impl MetaStateHandler {
+    pub async fn on_become_leader(&self) {
+        if let Err(e) = self.procedure_manager.start().await {
+            error!(e; "Failed to start procedure manager");
+        }
+        self.greptimedb_telemetry_task.should_report(true);
+    }
+
+    pub async fn on_become_follower(&self) {
+        // Stops the procedures.
+        if let Err(e) = self.procedure_manager.stop().await {
+            error!(e; "Failed to stop procedure manager");
+        }
+        // Suspends reporting.
+        self.greptimedb_telemetry_task.should_report(false);
+
+        if let Some(sub_manager) = self.subscribe_manager.clone() {
+            info!("Leader changed, un_subscribe all");
+            if let Err(e) = sub_manager.un_subscribe_all() {
+                error!("Failed to un_subscribe all, error: {}", e);
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct MetaSrv {
     started: Arc<AtomicBool>,
@@ -214,7 +246,15 @@ impl MetaSrv {
             let leader_cached_kv_store = self.leader_cached_kv_store.clone();
             let subscribe_manager = self.subscribe_manager();
             let mut rx = election.subscribe_leader_change();
-            let task_handler = self.greptimedb_telemetry_task.clone();
+            let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
+            greptimedb_telemetry_task
+                .start()
+                .context(StartTelemetryTaskSnafu)?;
+            let state_handler = MetaStateHandler {
+                greptimedb_telemetry_task,
+                subscribe_manager,
+                procedure_manager,
+            };
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
                     match rx.recv().await {
@@ -227,31 +267,12 @@ impl MetaSrv {
                             );
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
-                                    if let Err(e) = procedure_manager.start().await {
-                                        error!(e; "Failed to start procedure manager");
-                                    }
-                                    let _ = task_handler.start().map_err(|e| {
-                                        debug!(
-                                            "Failed to start greptimedb telemetry task, error: {e}"
-                                        );
-                                    });
+                                    state_handler.on_become_leader().await;
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
-                                    if let Err(e) = procedure_manager.stop().await {
-                                        error!(e; "Failed to stop procedure manager");
-                                    }
-                                    if let Some(sub_manager) = subscribe_manager.clone() {
-                                        info!("Leader changed, un_subscribe all");
-                                        if let Err(e) = sub_manager.un_subscribe_all() {
-                                            error!("Failed to un_subscribe all, error: {}", e);
-                                        }
-                                    }
                                     error!("Leader :{:?} step down", leader);
-                                    let _ = task_handler.stop().await.map_err(|e| {
-                                        debug!(
-                                            "Failed to stop greptimedb telemetry task, error: {e}"
-                                        );
-                                    });
+
+                                    state_handler.on_become_follower().await;
                                 }
                             }
                         }
@@ -265,9 +286,7 @@ impl MetaSrv {
                     }
                 }
 
-                if let Err(e) = procedure_manager.stop().await {
-                    error!(e; "Failed to stop procedure manager");
-                }
+                state_handler.on_become_follower().await;
             });
 
             let election = election.clone();
