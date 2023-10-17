@@ -332,16 +332,20 @@ impl Export {
                     .into_iter()
                     .map(|file| {
                         let file = file.unwrap();
-                        let filename = file.file_name().into_string().unwrap();
+                        let table_name = file
+                            .file_name()
+                            .into_string()
+                            .unwrap()
+                            .replace(".parquet", "");
 
                         format!(
                             "copy {} from '{}' with (format='parquet');\n",
-                            filename.replace(".parquet", ""),
+                            table_name,
                             file.path().to_str().unwrap()
                         )
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
+
                 file.write_all(copy_from_sql.as_bytes())
                     .await
                     .context(FileIoSnafu)?;
