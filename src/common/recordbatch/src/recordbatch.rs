@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::slice;
 use std::sync::Arc;
 
+use datafusion::arrow::util::pretty::pretty_format_batches;
 use datatypes::schema::SchemaRef;
 use datatypes::value::Value;
 use datatypes::vectors::{Helper, VectorRef};
@@ -168,6 +170,13 @@ impl RecordBatch {
         }
 
         Ok(vectors)
+    }
+
+    /// Pretty display this record batch like a table
+    pub fn pretty_print(&self) -> String {
+        pretty_format_batches(slice::from_ref(&self.df_record_batch))
+            .map(|t| t.to_string())
+            .unwrap_or("failed to pretty display a record batch".to_string())
     }
 }
 

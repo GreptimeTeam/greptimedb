@@ -14,6 +14,7 @@
 
 mod bench;
 mod cmd;
+mod export;
 mod helper;
 mod repl;
 // TODO(weny): Removes it
@@ -27,6 +28,7 @@ use common_telemetry::logging::LoggingOptions;
 pub use repl::Repl;
 use upgrade::UpgradeCommand;
 
+use self::export::ExportCommand;
 use crate::error::Result;
 use crate::options::{Options, TopLevelOptions};
 
@@ -81,6 +83,7 @@ enum SubCommand {
     // Attach(AttachCommand),
     Upgrade(UpgradeCommand),
     Bench(BenchTableMetadataCommand),
+    Export(ExportCommand),
 }
 
 impl SubCommand {
@@ -89,6 +92,7 @@ impl SubCommand {
             // SubCommand::Attach(cmd) => cmd.build().await,
             SubCommand::Upgrade(cmd) => cmd.build().await,
             SubCommand::Bench(cmd) => cmd.build().await,
+            SubCommand::Export(cmd) => cmd.build().await,
         }
     }
 }

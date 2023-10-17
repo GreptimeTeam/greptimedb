@@ -35,6 +35,8 @@ pub struct TableReference<'a> {
     pub table: &'a str,
 }
 
+pub type OwnedTableReference = TableReference<'static>;
+
 // TODO(LFC): Find a better place for `TableReference`,
 // so that we can reuse the default catalog and schema consts.
 // Could be done together with issue #559.

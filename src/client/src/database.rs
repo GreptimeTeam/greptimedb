@@ -167,11 +167,14 @@ impl Database {
         }
     }
 
-    pub async fn sql(&self, sql: &str) -> Result<Output> {
+    pub async fn sql<S>(&self, sql: S) -> Result<Output>
+    where
+        S: AsRef<str>,
+    {
         let _timer = timer!(metrics::METRIC_GRPC_SQL);
         self.do_get(
             Request::Query(QueryRequest {
-                query: Some(Query::Sql(sql.to_string())),
+                query: Some(Query::Sql(sql.as_ref().to_string())),
             }),
             0,
         )
