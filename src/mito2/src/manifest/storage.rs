@@ -488,29 +488,13 @@ impl ManifestObjectStore {
         self.object_store.read(path).await.context(OpenDalSnafu)
     }
 
-    /// Get the size(Byte) of the delta file by delta version.
-    /// If the delta file does not exist, return None.
-    pub fn delta_file_size(&self, version: ManifestVersion) -> Option<u64> {
-        self.manifest_size_map
-            .get(&FileKey::Delta(version))
-            .copied()
-    }
-
-    /// Get the size(Byte) of the checkpoint file by checkpoint version.
-    /// If the checkpoint file does not exist, return None.
-    pub fn checkpoint_file_size(&self, version: ManifestVersion) -> Option<u64> {
-        self.manifest_size_map
-            .get(&FileKey::Checkpoint(version))
-            .copied()
-    }
-
     /// Compute the size(Byte) in manifest size map.
-    pub fn total_manifest_size(&self) -> u64 {
+    pub(crate) fn total_manifest_size(&self) -> u64 {
         self.manifest_size_map.values().sum()
     }
 
     /// Set the size of the manifest file by path.
-    pub fn set_manifest_size_by_path(&mut self, path: &str, size: u64) {
+    pub(crate) fn set_manifest_size_by_path(&mut self, path: &str, size: u64) {
         if let Some(name) = file_name(path) {
             if let Some(file_key) = FileKey::new(&name) {
                 self.manifest_size_map.insert(file_key, size);
@@ -519,14 +503,8 @@ impl ManifestObjectStore {
     }
 
     /// Set the size of the delta file by delta version.
-    pub fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
+    pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
         self.manifest_size_map.insert(FileKey::Delta(version), size);
-    }
-
-    /// Set the size of the checkpoint file by checkpoint version.
-    pub fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
-        self.manifest_size_map
-            .insert(FileKey::Checkpoint(version), size);
     }
 }
 
@@ -730,7 +708,7 @@ mod tests {
     #[tokio::test]
     async fn test_uncompressed_manifest_files_size() {
         let mut log_store = new_test_manifest_store();
-        // write 5 manifest files
+        // write 5 manifest files with uncompressed（8B per file）
         log_store.compress_type = CompressionType::Uncompressed;
         for v in 0..5 {
             log_store
@@ -738,15 +716,11 @@ mod tests {
                 .await
                 .unwrap();
         }
+        // write 1 checkpoint file with uncompressed（23B）
         log_store
             .save_checkpoint(5, "checkpoint_uncompressed".as_bytes())
             .await
             .unwrap();
-        // single delta file size
-        assert_eq!(log_store.delta_file_size(0), Some(8));
-
-        // single checkpoint file size
-        assert_eq!(log_store.checkpoint_file_size(5), Some(23));
 
         // manifest files size
         assert_eq!(log_store.total_manifest_size(), 63);
