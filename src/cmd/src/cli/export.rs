@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -328,23 +329,24 @@ impl Export {
                     Path::new(&self.output_dir).join(format!("{catalog}-{schema}_copy_from.sql"));
                 let mut file = File::create(copy_from_file).await.context(FileIoSnafu)?;
 
-                let copy_from_sql = dir_filenames
-                    .into_iter()
-                    .map(|file| {
-                        let file = file.unwrap();
-                        let table_name = file
-                            .file_name()
-                            .into_string()
-                            .unwrap()
-                            .replace(".parquet", "");
-
-                        format!(
-                            "copy {} from '{}' with (format='parquet');\n",
-                            table_name,
-                            file.path().to_str().unwrap()
-                        )
-                    })
-                    .collect::<String>();
+                let copy_from_sql =
+                    dir_filenames
+                        .into_iter()
+                        .fold(String::new(), |mut acc, file| {
+                            let file = file.unwrap();
+                            let table_name = file
+                                .file_name()
+                                .into_string()
+                                .unwrap()
+                                .replace(".parquet", "");
+                            let _ = write!(
+                                acc,
+                                "copy {} from '{}' with (format='parquet');\n",
+                                table_name,
+                                file.path().to_str().unwrap()
+                            );
+                            acc
+                        });
 
                 file.write_all(copy_from_sql.as_bytes())
                     .await
