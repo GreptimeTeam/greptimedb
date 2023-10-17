@@ -142,6 +142,9 @@ impl Export {
             let mut result = Vec::with_capacity(schemas.len());
             for i in 0..schemas.len() {
                 let schema = schemas.get_data(i).unwrap().to_owned();
+                if schema == common_catalog::consts::INFORMATION_SCHEMA_NAME {
+                    continue;
+                }
                 result.push((self.catalog.clone(), schema));
             }
             Ok(result)
