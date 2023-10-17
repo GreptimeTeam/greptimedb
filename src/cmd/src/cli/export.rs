@@ -342,9 +342,9 @@ impl Export {
                                 .into_string()
                                 .unwrap()
                                 .replace(".parquet", "");
-                            let _ = write!(
+                            let _ = writeln!(
                                 acc,
-                                "copy {} from '{}' with (format='parquet');\n",
+                                "copy {} from '{}' with (format='parquet');",
                                 table_name,
                                 file.path().to_str().unwrap()
                             );
