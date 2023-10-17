@@ -532,6 +532,10 @@ impl ProcedureManager for LocalManager {
     async fn start(&self) -> Result<()> {
         let mut task = self.remove_outdated_meta_task.lock().await;
 
+        if task.is_some() {
+            return Ok(());
+        }
+
         let task_inner = self.build_remove_outdated_meta_task();
 
         task_inner
