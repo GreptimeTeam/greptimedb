@@ -42,9 +42,9 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, RecoverProceduresSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
@@ -175,12 +175,8 @@ impl Instance {
 
         self.procedure_manager
             .start()
-            .context(StartProcedureManagerSnafu)?;
-
-        self.procedure_manager
-            .recover()
             .await
-            .context(RecoverProceduresSnafu)?;
+            .context(StartProcedureManagerSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())

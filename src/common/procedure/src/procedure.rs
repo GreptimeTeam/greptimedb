@@ -279,19 +279,20 @@ pub trait ProcedureManager: Send + Sync + 'static {
     /// Registers loader for specific procedure type `name`.
     fn register_loader(&self, name: &str, loader: BoxedProcedureLoader) -> Result<()>;
 
-    fn start(&self) -> Result<()>;
+    /// Starts the background GC task.
+    ///
+    /// Recovers unfinished procedures and reruns them.
+    ///
+    /// Callers should ensure all loaders are registered.
+    async fn start(&self) -> Result<()>;
 
+    /// Stops the background GC task.
     async fn stop(&self) -> Result<()>;
 
     /// Submits a procedure to execute.
     ///
     /// Returns a [Watcher] to watch the created procedure.
     async fn submit(&self, procedure: ProcedureWithId) -> Result<Watcher>;
-
-    /// Recovers unfinished procedures and reruns them.
-    ///
-    /// Callers should ensure all loaders are registered.
-    async fn recover(&self) -> Result<()>;
 
     /// Query the procedure state.
     ///

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,9 +102,7 @@ impl Drop for ProcedureGuard {
     }
 }
 
-// TODO(yingwen): Support cancellation.
 pub(crate) struct Runner {
-    pub(crate) running: Arc<AtomicBool>,
     pub(crate) meta: ProcedureMetaRef,
     pub(crate) procedure: BoxedProcedure,
     pub(crate) manager_ctx: Arc<ManagerContext>,
@@ -118,7 +115,7 @@ pub(crate) struct Runner {
 impl Runner {
     /// Return `ProcedureManager` is running.
     pub(crate) fn running(&self) -> bool {
-        self.running.load(Ordering::Relaxed)
+        self.manager_ctx.running()
     }
 
     /// Run the procedure.
@@ -154,16 +151,17 @@ impl Runner {
         // Release locks and notify parent procedure.
         guard.finish();
 
-        // If `ProcedureManager` is stopped, it stops the current task immediately without deleting the procedure.
-        if !self.running() {
-            return;
-        }
-
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
             let procedure_ids = self.manager_ctx.procedures_in_tree(&self.meta);
             // Clean resources.
             self.manager_ctx.on_procedures_finish(&procedure_ids);
+
+            // If `ProcedureManager` is stopped, it stops the current task immediately without deleting the procedure.
+            if !self.running() {
+                return;
+            }
+
             for id in procedure_ids {
                 if let Err(e) = self.store.delete_procedure(id).await {
                     logging::error!(
@@ -201,7 +199,7 @@ impl Runner {
             // Don't store state if `ProcedureManager` is stopped.
             if !self.running() {
                 self.meta.set_state(ProcedureState::Failed {
-                    error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
+                    error: Arc::new(error::ManagerNotStartSnafu {}.build()),
                 });
                 return;
             }
@@ -260,7 +258,7 @@ impl Runner {
                 // Don't store state if `ProcedureManager` is stopped.
                 if !self.running() {
                     self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
+                        error: Arc::new(error::ManagerNotStartSnafu {}.build()),
                     });
                     return ExecResult::Failed;
                 }
@@ -299,17 +297,17 @@ impl Runner {
                     e.is_retry_later(),
                 );
 
-                if e.is_retry_later() {
-                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
-                    return ExecResult::RetryLater;
-                }
-
                 // Don't store state if `ProcedureManager` is stopped.
                 if !self.running() {
                     self.meta.set_state(ProcedureState::Failed {
-                        error: Arc::new(error::ProcedureManagerNotStartSnafu {}.build()),
+                        error: Arc::new(error::ManagerNotStartSnafu {}.build()),
                     });
                     return ExecResult::Failed;
+                }
+
+                if e.is_retry_later() {
+                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                    return ExecResult::RetryLater;
                 }
 
                 // Write rollback key so we can skip this procedure while recovering procedures.
@@ -343,7 +341,6 @@ impl Runner {
             procedure.lock_key(),
         ));
         let runner = Runner {
-            running: self.running.clone(),
             meta: meta.clone(),
             procedure,
             manager_ctx: self.manager_ctx.clone(),
@@ -510,7 +507,6 @@ mod tests {
         store: Arc<ProcedureStore>,
     ) -> Runner {
         Runner {
-            running: Arc::new(AtomicBool::new(true)),
             meta,
             procedure,
             manager_ctx: Arc::new(ManagerContext::new()),
@@ -618,6 +614,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
+        runner.manager_ctx.start();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_continue(), "{res:?}");
@@ -678,6 +675,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta, Box::new(suspend), procedure_store);
+        runner.manager_ctx.start();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_continue(), "{res:?}");
@@ -779,6 +777,7 @@ mod tests {
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store.clone());
         let manager_ctx = Arc::new(ManagerContext::new());
+        manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta));
         // Replace the manager ctx.
@@ -821,6 +820,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
+        runner.manager_ctx.start();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_continue(), "{res:?}");
@@ -832,7 +832,7 @@ mod tests {
         )
         .await;
 
-        runner.running.store(false, Ordering::Relaxed);
+        runner.manager_ctx.stop();
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed());
         // Shouldn't write any files
@@ -861,7 +861,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta, Box::new(normal), procedure_store.clone());
-        runner.running.store(false, Ordering::Relaxed);
+        runner.manager_ctx.stop();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed(), "{res:?}");
@@ -885,6 +885,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(fail), procedure_store.clone());
+        runner.manager_ctx.start();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_failed(), "{res:?}");
@@ -926,6 +927,7 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(retry_later), procedure_store.clone());
+        runner.manager_ctx.start();
 
         let res = runner.execute_once(&ctx).await;
         assert!(res.is_retry_later(), "{res:?}");
@@ -963,6 +965,8 @@ mod tests {
             Box::new(exceed_max_retry_later),
             procedure_store,
         );
+        runner.manager_ctx.start();
+
         runner.exponential_builder = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(1))
             .with_max_times(3);
@@ -1033,8 +1037,8 @@ mod tests {
         let object_store = test_util::new_object_store(&dir);
         let procedure_store = Arc::new(ProcedureStore::from_object_store(object_store.clone()));
         let mut runner = new_runner(meta.clone(), Box::new(parent), procedure_store);
-
         let manager_ctx = Arc::new(ManagerContext::new());
+        manager_ctx.start();
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
         // Replace the manager ctx.

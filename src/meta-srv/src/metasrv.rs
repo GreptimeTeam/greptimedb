@@ -38,8 +38,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    InitMetadataSnafu, RecoverProcedureSnafu, Result, StartProcedureManagerSnafu,
-    StopProcedureManagerSnafu,
+    InitMetadataSnafu, Result, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
@@ -228,11 +227,8 @@ impl MetaSrv {
                             );
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
-                                    if let Err(e) = procedure_manager.start() {
-                                        error!("Failed to start procedure manager, error: {e}");
-                                    }
-                                    if let Err(e) = procedure_manager.recover().await {
-                                        error!("Failed to recover procedures, error: {e}");
+                                    if let Err(e) = procedure_manager.start().await {
+                                        error!(e; "Failed to start procedure manager");
                                     }
                                     let _ = task_handler.start().map_err(|e| {
                                         debug!(
@@ -242,7 +238,7 @@ impl MetaSrv {
                                 }
                                 LeaderChangeMessage::StepDown(leader) => {
                                     if let Err(e) = procedure_manager.stop().await {
-                                        error!("Failed to stop procedure manager, error: {e}");
+                                        error!(e; "Failed to stop procedure manager");
                                     }
                                     if let Some(sub_manager) = subscribe_manager.clone() {
                                         info!("Leader changed, un_subscribe all");
@@ -270,7 +266,7 @@ impl MetaSrv {
                 }
 
                 if let Err(e) = procedure_manager.stop().await {
-                    error!("Failed to stop procedure manager, error: {e}");
+                    error!(e; "Failed to stop procedure manager");
                 }
             });
 
@@ -289,11 +285,8 @@ impl MetaSrv {
         } else {
             self.procedure_manager
                 .start()
-                .context(StartProcedureManagerSnafu)?;
-            self.procedure_manager
-                .recover()
                 .await
-                .context(RecoverProcedureSnafu)?;
+                .context(StartProcedureManagerSnafu)?;
         }
 
         info!("MetaSrv started");

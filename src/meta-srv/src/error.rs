@@ -405,12 +405,6 @@ pub enum Error {
         source: common_procedure::Error,
     },
 
-    #[snafu(display("Failed to recover procedure"))]
-    RecoverProcedure {
-        location: Location,
-        source: common_procedure::Error,
-    },
-
     #[snafu(display("Failed to wait procedure done"))]
     WaitProcedure {
         location: Location,
@@ -628,9 +622,9 @@ impl ErrorExt for Error {
             Error::RequestDatanode { source, .. } => source.status_code(),
             Error::InvalidCatalogValue { source, .. }
             | Error::InvalidFullTableName { source, .. } => source.status_code(),
-            Error::RecoverProcedure { source, .. }
-            | Error::SubmitProcedure { source, .. }
-            | Error::WaitProcedure { source, .. } => source.status_code(),
+            Error::SubmitProcedure { source, .. } | Error::WaitProcedure { source, .. } => {
+                source.status_code()
+            }
             Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
                 source.status_code()
             }

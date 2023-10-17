@@ -35,7 +35,7 @@ pub enum Error {
     LoaderConflict { name: String, location: Location },
 
     #[snafu(display("Procedure Manager is stopped"))]
-    ProcedureManagerNotStart { location: Location },
+    ManagerNotStart { location: Location },
 
     #[snafu(display("Failed to serialize to json"))]
     ToJson {
@@ -152,7 +152,7 @@ impl ErrorExt for Error {
             | Error::RetryTimesExceeded { .. }
             | Error::RetryLater { .. }
             | Error::WaitWatcher { .. }
-            | Error::ProcedureManagerNotStart { .. } => StatusCode::Internal,
+            | Error::ManagerNotStart { .. } => StatusCode::Internal,
             Error::LoaderConflict { .. } | Error::DuplicateProcedure { .. } => {
                 StatusCode::InvalidArguments
             }

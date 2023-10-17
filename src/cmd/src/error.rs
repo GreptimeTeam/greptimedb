@@ -49,12 +49,6 @@ pub enum Error {
         source: common_procedure::error::Error,
     },
 
-    #[snafu(display("Failed to start procedures"))]
-    RecoverProcedures {
-        location: Location,
-        source: common_procedure::error::Error,
-    },
-
     #[snafu(display("Failed to start datanode"))]
     StartDatanode {
         location: Location,
@@ -260,9 +254,7 @@ impl ErrorExt for Error {
             | Error::EmptyResult { .. }
             | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
             Error::StartProcedureManager { source, .. }
-            | Error::StopProcedureManager { source, .. }
-            | Error::RecoverProcedures { source, .. } => source.status_code(),
-
+            | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
