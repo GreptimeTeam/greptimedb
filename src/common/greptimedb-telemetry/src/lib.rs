@@ -15,6 +15,8 @@
 use std::env;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
@@ -36,13 +38,26 @@ const GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT: Duration = Duration::from_sec
 const GREPTIMEDB_TELEMETRY_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub enum GreptimeDBTelemetryTask {
-    Enable(RepeatedTask<Error>),
+    Enable((RepeatedTask<Error>, Arc<AtomicBool>)),
     Disable,
 }
 
 impl GreptimeDBTelemetryTask {
-    pub fn enable(interval: Duration, task_fn: BoxedTaskFunction<Error>) -> Self {
-        GreptimeDBTelemetryTask::Enable(RepeatedTask::new(interval, task_fn))
+    pub fn should_report(&self, value: bool) {
+        match self {
+            GreptimeDBTelemetryTask::Enable((_, should_report)) => {
+                should_report.store(value, Ordering::Relaxed);
+            }
+            GreptimeDBTelemetryTask::Disable => {}
+        }
+    }
+
+    pub fn enable(
+        interval: Duration,
+        task_fn: BoxedTaskFunction<Error>,
+        should_report: Arc<AtomicBool>,
+    ) -> Self {
+        GreptimeDBTelemetryTask::Enable((RepeatedTask::new(interval, task_fn), should_report))
     }
 
     pub fn disable() -> Self {
@@ -51,7 +66,7 @@ impl GreptimeDBTelemetryTask {
 
     pub fn start(&self) -> Result<()> {
         match self {
-            GreptimeDBTelemetryTask::Enable(task) => {
+            GreptimeDBTelemetryTask::Enable((task, _)) => {
                 print_anonymous_usage_data_disclaimer();
                 task.start(common_runtime::bg_runtime())
             }
@@ -61,7 +76,7 @@ impl GreptimeDBTelemetryTask {
 
     pub async fn stop(&self) -> Result<()> {
         match self {
-            GreptimeDBTelemetryTask::Enable(task) => task.stop().await,
+            GreptimeDBTelemetryTask::Enable((task, _)) => task.stop().await,
             GreptimeDBTelemetryTask::Disable => Ok(()),
         }
     }
@@ -191,6 +206,7 @@ pub struct GreptimeDBTelemetry {
     client: Option<Client>,
     working_home: Option<String>,
     telemetry_url: &'static str,
+    should_report: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -200,13 +216,19 @@ impl TaskFunction<Error> for GreptimeDBTelemetry {
     }
 
     async fn call(&mut self) -> Result<()> {
-        self.report_telemetry_info().await;
+        if self.should_report.load(Ordering::Relaxed) {
+            self.report_telemetry_info().await;
+        }
         Ok(())
     }
 }
 
 impl GreptimeDBTelemetry {
-    pub fn new(working_home: Option<String>, statistics: Box<dyn Collector + Send + Sync>) -> Self {
+    pub fn new(
+        working_home: Option<String>,
+        statistics: Box<dyn Collector + Send + Sync>,
+        should_report: Arc<AtomicBool>,
+    ) -> Self {
         let client = Client::builder()
             .connect_timeout(GREPTIMEDB_TELEMETRY_CLIENT_CONNECT_TIMEOUT)
             .timeout(GREPTIMEDB_TELEMETRY_CLIENT_REQUEST_TIMEOUT)
@@ -216,6 +238,7 @@ impl GreptimeDBTelemetry {
             statistics,
             client: client.ok(),
             telemetry_url: TELEMETRY_URL,
+            should_report,
         }
     }
 
@@ -250,7 +273,8 @@ impl GreptimeDBTelemetry {
 mod tests {
     use std::convert::Infallible;
     use std::env;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::Arc;
     use std::time::Duration;
 
     use common_test_util::ports;
@@ -370,7 +394,11 @@ mod tests {
         let working_home = working_home_temp.path().to_str().unwrap().to_string();
 
         let test_statistic = Box::new(TestStatistic);
-        let mut test_report = GreptimeDBTelemetry::new(Some(working_home.clone()), test_statistic);
+        let mut test_report = GreptimeDBTelemetry::new(
+            Some(working_home.clone()),
+            test_statistic,
+            Arc::new(AtomicBool::new(true)),
+        );
         let url = Box::leak(format!("{}:{}", "http://localhost", port).into_boxed_str());
         test_report.telemetry_url = url;
         let response = test_report.report_telemetry_info().await.unwrap();
@@ -384,7 +412,11 @@ mod tests {
         assert_eq!(1, body.nodes.unwrap());
 
         let failed_statistic = Box::new(FailedStatistic);
-        let mut failed_report = GreptimeDBTelemetry::new(Some(working_home), failed_statistic);
+        let mut failed_report = GreptimeDBTelemetry::new(
+            Some(working_home),
+            failed_statistic,
+            Arc::new(AtomicBool::new(true)),
+        );
         failed_report.telemetry_url = url;
         let response = failed_report.report_telemetry_info().await;
         assert!(response.is_none());
