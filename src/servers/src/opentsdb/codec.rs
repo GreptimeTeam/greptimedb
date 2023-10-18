@@ -19,7 +19,7 @@ use crate::error::{self, Result};
 pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 pub const OPENTSDB_FIELD_COLUMN_NAME: &str = "greptime_value";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DataPoint {
     metric: String,
     ts_millis: i64,
