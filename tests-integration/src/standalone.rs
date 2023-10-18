@@ -92,7 +92,7 @@ impl GreptimeDbStandaloneBuilder {
             .init()
             .await
             .unwrap();
-
+        procedure_manager.start().await.unwrap();
         let instance = Instance::try_new_standalone(
             kv_store,
             procedure_manager,

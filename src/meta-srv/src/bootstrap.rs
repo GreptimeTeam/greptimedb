@@ -111,8 +111,7 @@ impl MetaSrvInstance {
                 .await
                 .context(error::SendShutdownSignalSnafu)?;
         }
-
-        self.meta_srv.shutdown();
+        self.meta_srv.shutdown().await?;
         self.http_srv
             .shutdown()
             .await

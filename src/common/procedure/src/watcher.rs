@@ -71,6 +71,7 @@ mod tests {
         };
         let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
         let manager = LocalManager::new(config, state_store);
+        manager.start().await.unwrap();
 
         #[derive(Debug)]
         struct MockProcedure {

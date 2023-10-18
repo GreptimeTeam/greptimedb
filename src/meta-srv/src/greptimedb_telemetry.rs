@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -63,7 +64,8 @@ pub async fn get_greptimedb_telemetry_task(
     if !enable || cfg!(test) || cfg!(debug_assertions) {
         return Arc::new(GreptimeDBTelemetryTask::disable());
     }
-
+    // Controlled by meta server state, only leader reports the info.
+    let should_report = Arc::new(AtomicBool::new(false));
     Arc::new(GreptimeDBTelemetryTask::enable(
         TELEMETRY_INTERVAL,
         Box::new(GreptimeDBTelemetry::new(
@@ -73,6 +75,8 @@ pub async fn get_greptimedb_telemetry_task(
                 uuid: default_get_uuid(&working_home),
                 retry: 0,
             }),
+            should_report.clone(),
         )),
+        should_report,
     ))
 }

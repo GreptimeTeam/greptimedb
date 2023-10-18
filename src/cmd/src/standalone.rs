@@ -43,7 +43,8 @@ use snafu::ResultExt;
 
 use crate::error::{
     CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
+    StopProcedureManagerSnafu,
 };
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
@@ -163,6 +164,7 @@ impl StandaloneOptions {
 pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl Instance {
@@ -170,6 +172,11 @@ impl Instance {
         // Start datanode instance before starting services, to avoid requests come in before internal components are started.
         self.datanode.start().await.context(StartDatanodeSnafu)?;
         info!("Datanode instance started");
+
+        self.procedure_manager
+            .start()
+            .await
+            .context(StartProcedureManagerSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
@@ -180,6 +187,11 @@ impl Instance {
             .shutdown()
             .await
             .context(ShutdownFrontendSnafu)?;
+
+        self.procedure_manager
+            .stop()
+            .await
+            .context(StopProcedureManagerSnafu)?;
 
         self.datanode
             .shutdown()
@@ -354,7 +366,7 @@ impl StartCommand {
         let mut frontend = build_frontend(
             fe_plugins,
             kv_store,
-            procedure_manager,
+            procedure_manager.clone(),
             catalog_manager,
             region_server,
         )
@@ -365,7 +377,11 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance { datanode, frontend })
+        Ok(Instance {
+            datanode,
+            frontend,
+            procedure_manager,
+        })
     }
 }
 

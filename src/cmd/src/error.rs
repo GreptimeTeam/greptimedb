@@ -37,6 +37,18 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to start procedure manager"))]
+    StartProcedureManager {
+        location: Location,
+        source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to stop procedure manager"))]
+    StopProcedureManager {
+        location: Location,
+        source: common_procedure::error::Error,
+    },
+
     #[snafu(display("Failed to start datanode"))]
     StartDatanode {
         location: Location,
@@ -241,7 +253,8 @@ impl ErrorExt for Error {
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
             | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
-
+            Error::StartProcedureManager { source, .. }
+            | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
