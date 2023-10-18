@@ -32,18 +32,13 @@ use crate::error::Result;
 use crate::rpc::{util, KeyValue};
 
 pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-    if range_end.is_empty() {
-        (Bound::Included(key.clone()), Bound::Included(key.clone()))
-    } else if range_end.len() == 1 && range_end[0] == 0 {
+    match (&key[..], &range_end[..]) {
+        (_, []) => (Bound::Included(key.clone()), Bound::Included(key)),
         // If both key and range_end are ‘\0’, then range represents all keys.
-        if key.len() == 1 && key[0] == 0 {
-            (Bound::Unbounded, Bound::Unbounded)
-        } else {
-            // If range_end is ‘\0’, the range is all keys greater than or equal to the key argument.
-            (Bound::Included(key), Bound::Unbounded)
-        }
-    } else {
-        (Bound::Included(key), Bound::Excluded(range_end))
+        ([0], [0]) => (Bound::Unbounded, Bound::Unbounded),
+        // If range_end is ‘\0’, the range is all keys greater than or equal to the key argument.
+        (_, [0]) => (Bound::Included(key), Bound::Unbounded),
+        (_, _) => (Bound::Included(key), Bound::Excluded(range_end)),
     }
 }
 
