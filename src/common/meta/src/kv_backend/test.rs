@@ -266,6 +266,7 @@ pub async fn test_kv_delete_range(kv_store: impl KvBackend) {
 
     let resp = kv_store.delete_range(req).await.unwrap();
     assert_eq!(1, resp.prev_kvs.len());
+    assert_eq!(1, resp.deleted);
     assert_eq!(b"key3", resp.prev_kvs[0].key());
     assert_eq!(b"val3", resp.prev_kvs[0].value());
 
@@ -279,6 +280,7 @@ pub async fn test_kv_delete_range(kv_store: impl KvBackend) {
     };
 
     let resp = kv_store.delete_range(req).await.unwrap();
+    assert_eq!(1, resp.deleted);
     assert!(resp.prev_kvs.is_empty());
 
     let resp = kv_store.get(b"key2").await.unwrap();

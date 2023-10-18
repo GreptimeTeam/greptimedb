@@ -226,6 +226,7 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         } else {
             vec![]
         };
+        let deleted = keys.len() as i64;
 
         for key in keys {
             if let Some(value) = kvs.remove(&key) {
@@ -235,10 +236,7 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
             }
         }
 
-        Ok(DeleteRangeResponse {
-            deleted: prev_kvs.len() as i64,
-            prev_kvs: if prev_kv { prev_kvs } else { vec![] },
-        })
+        Ok(DeleteRangeResponse { deleted, prev_kvs })
     }
 
     async fn batch_delete(
