@@ -31,4 +31,7 @@ lazy_static! {
         register_histogram_vec!("meta_handler_execute", "meta handler execute", &["name"]).unwrap();
     pub static ref METRIC_META_INACTIVE_REGIONS: IntGauge =
         register_int_gauge!("meta_inactive_regions", "meta inactive regions").unwrap();
+    pub static ref METRIC_META_LEADER_CACHED_KV_LOAD: HistogramVec =
+        register_histogram_vec!("meta_leader_cache_kv_load", "meta load cache", &["prefix"])
+            .unwrap();
 }

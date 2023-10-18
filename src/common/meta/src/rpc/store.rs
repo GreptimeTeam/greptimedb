@@ -145,6 +145,14 @@ impl RangeRequest {
         self
     }
 
+    /// Gets all keys
+    #[inline]
+    pub fn with_all(mut self) -> Self {
+        self.key = vec![0];
+        self.range_end = vec![0];
+        self
+    }
+
     /// limit is a limit on the number of keys returned for the request. When
     /// limit is set to 0, it is treated as no limit.
     #[inline]

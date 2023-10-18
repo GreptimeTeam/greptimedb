@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use common_meta::error::{Error, Result};
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -30,6 +30,8 @@ use common_meta::rpc::store::{
 };
 use common_meta::rpc::KeyValue;
 
+use crate::state::State;
+
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
 
 pub trait CheckLeader: Sync + Send {
@@ -41,6 +43,12 @@ struct AlwaysLeader;
 impl CheckLeader for AlwaysLeader {
     fn check(&self) -> bool {
         true
+    }
+}
+
+impl CheckLeader for RwLock<State> {
+    fn check(&self) -> bool {
+        self.read().unwrap().enable_leader_cache()
     }
 }
 
@@ -77,6 +85,19 @@ impl LeaderCachedKvBackend {
     /// mainly used in test scenarios.
     pub fn with_always_leader(store: KvBackendRef) -> Self {
         Self::new(Arc::new(AlwaysLeader), store)
+    }
+
+    /// The caller MUST ensure during the loading, there are no mutation requests reaching the `LeaderCachedKvStore`.
+    pub async fn load(&self) -> Result<()> {
+        let result = self.store.range(RangeRequest::new().with_all()).await?;
+        self.cache
+            .batch_put(BatchPutRequest {
+                kvs: result.kvs,
+                prev_kv: false,
+            })
+            .await?;
+
+        Ok(())
     }
 
     #[inline]
