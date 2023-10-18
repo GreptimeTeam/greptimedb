@@ -50,7 +50,7 @@ Error: 2000(InvalidSyntax), sql parser error: Can't use the RANGE keyword in Exp
 -- 2.2 no align param
 SELECT min(val) RANGE '5s' FROM host;
 
-Error: 1003(Internal), Error during planning: Illegal argument in range select query
+Error: 1003(Internal), Error during planning: Missing argument in range select query
 
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';

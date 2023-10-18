@@ -52,6 +52,19 @@ pub struct RangeExprRewriter<'a> {
     sub_aggr: &'a Aggregate,
 }
 
+#[inline]
+fn dispose_parse_error(expr: Option<&Expr>) -> DataFusionError {
+    DataFusionError::Plan(
+        expr.map(|x| {
+            format!(
+                "Illegal argument `{}` in range select query",
+                x.display_name().unwrap_or_default()
+            )
+        })
+        .unwrap_or("Missing argument in range select query".into()),
+    )
+}
+
 impl<'a> RangeExprRewriter<'a> {
     pub fn get_range_expr(&self, args: &[Expr], i: usize) -> DFResult<Expr> {
         match args.get(i) {
@@ -66,9 +79,7 @@ impl<'a> RangeExprRewriter<'a> {
                         "Range expr not found in underlying Aggregate Plan".into(),
                     ))
             }
-            _ => Err(DataFusionError::Plan(
-                "Illegal range expr in range select query".into(),
-            )),
+            other => Err(dispose_parse_error(other)),
         }
     }
 }
@@ -76,9 +87,7 @@ impl<'a> RangeExprRewriter<'a> {
 fn parse_str_expr(args: &[Expr], i: usize) -> DFResult<&str> {
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => Ok(str.as_str()),
-        _ => Err(DataFusionError::Plan(
-            "Illegal argument in range select query".into(),
-        )),
+        other => Err(dispose_parse_error(other)),
     }
 }
 
@@ -93,10 +102,8 @@ fn parse_expr_list(args: &[Expr], start: usize, len: usize) -> DFResult<Vec<Expr
                 | Expr::ScalarFunction(_)
                 | Expr::ScalarUDF(_),
             ) => args[i].clone(),
-            _ => {
-                return Err(DataFusionError::Plan(
-                    "Illegal expr argument in range select query".into(),
-                ))
+            other => {
+                return Err(dispose_parse_error(*other));
             }
         });
     }
@@ -342,6 +349,8 @@ fn have_range_in_exprs(exprs: &[Expr]) -> bool {
 #[cfg(test)]
 mod test {
 
+    use std::error::Error;
+
     use catalog::memory::MemoryCatalogManager;
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -549,6 +558,38 @@ mod test {
         assert_eq!(
             do_query(query).await.unwrap_err().to_string(),
             "Range Query: Nest Range Query is not allowed"
+        )
+    }
+
+    #[tokio::test]
+    /// Start directly from the rewritten SQL and check whether the error reported by the range expression rewriting is as expected.
+    /// the right argument is `range_fn(avg(field_0), '5m', 'NULL', '0', '1h')`
+    async fn range_argument_err_1() {
+        let query = r#"SELECT range_fn('5m', avg(field_0), 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
+        let error = do_query(query)
+            .await
+            .unwrap_err()
+            .source()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "Error during planning: Illegal argument `Utf8(\"5m\")` in range select query"
+        )
+    }
+
+    #[tokio::test]
+    async fn range_argument_err_2() {
+        let query = r#"SELECT range_fn(avg(field_0), 5, 'NULL', '1', tag_0, '1h') FROM test group by tag_0;"#;
+        let error = do_query(query)
+            .await
+            .unwrap_err()
+            .source()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            error,
+            "Error during planning: Illegal argument `Int64(5)` in range select query"
         )
     }
 }

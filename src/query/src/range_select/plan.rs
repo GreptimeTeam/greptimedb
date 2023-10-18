@@ -387,6 +387,21 @@ impl RangeSelect {
             .map(|range_fn| {
                 let expr = match &range_fn.expr {
                     Expr::AggregateFunction(aggr) => {
+                        let order_by = if let Some(exprs) = &aggr.order_by {
+                            exprs
+                                .iter()
+                                .map(|x| {
+                                    create_physical_sort_expr(
+                                        x,
+                                        input_dfschema,
+                                        &input_schema,
+                                        session_state.execution_props(),
+                                    )
+                                })
+                                .collect::<DfResult<Vec<_>>>()?
+                        } else {
+                            vec![]
+                        };
                         let expr = create_aggr_expr(
                             &aggr.fun,
                             false,
@@ -396,21 +411,7 @@ impl RangeSelect {
                                 &input_schema,
                                 session_state,
                             )?,
-                            &if let Some(exprs) = &aggr.order_by {
-                                exprs
-                                    .iter()
-                                    .map(|x| {
-                                        create_physical_sort_expr(
-                                            x,
-                                            input_dfschema,
-                                            &input_schema,
-                                            session_state.execution_props(),
-                                        )
-                                    })
-                                    .collect::<DfResult<Vec<_>>>()?
-                            } else {
-                                vec![]
-                            },
+                            &order_by,
                             &input_schema,
                             range_fn.expr.display_name()?,
                         )?;
@@ -674,7 +675,7 @@ fn align_to_calendar(
     }
 }
 
-fn cast_scalar_array(values: &mut [ScalarValue], data_type: &DataType) -> DfResult<()> {
+fn cast_scalar_values(values: &mut [ScalarValue], data_type: &DataType) -> DfResult<()> {
     let array = ScalarValue::iter_to_array(values.to_vec())?;
     let cast_array = cast_with_options(&array, data_type, &CastOptions::default())?;
     for (i, value) in values.iter_mut().enumerate() {
@@ -836,7 +837,7 @@ impl RangeSelectStream {
                 let time_series_data =
                     &mut all_scalar[i][start_index..start_index + align_ts_accumulator.len()];
                 if let Some(data_type) = need_cast {
-                    cast_scalar_array(time_series_data, data_type)?;
+                    cast_scalar_values(time_series_data, data_type)?;
                 }
                 fill.apply_fill_strategy(time_series_data)?;
             }

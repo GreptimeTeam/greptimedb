@@ -20,6 +20,8 @@ INSERT INTO TABLE host VALUES
 
 SELECT ts, length(host), max(val) RANGE '5s' FROM host ALIGN '20s' BY (length(host)) ORDER BY ts;
 
+SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' BY (2) ORDER BY ts;
+
 SELECT ts, CAST(length(host) as INT64) + 2, max(val) RANGE '5s' FROM host ALIGN '20s' BY (CAST(length(host) as INT64) + 2) ORDER BY ts;
 
 DROP TABLE host;
