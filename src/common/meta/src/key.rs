@@ -258,7 +258,6 @@ impl<T: Serialize + DeserializeOwned> DeserializedValueWithBytes<T> {
         self.bytes.to_vec()
     }
 
-    #[cfg(feature = "testing")]
     /// Notes: used for test purpose.
     pub fn from_inner(inner: T) -> Self {
         let bytes = serde_json::to_vec(&inner).unwrap();

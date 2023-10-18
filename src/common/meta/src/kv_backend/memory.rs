@@ -17,7 +17,6 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::ops::Range;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -85,20 +84,14 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
+        let range = req.range();
         let RangeRequest {
-            key,
-            range_end,
-            limit,
-            keys_only,
+            limit, keys_only, ..
         } = req;
 
         let kvs = self.kvs.read().unwrap();
+        let iter = kvs.range(range);
 
-        let iter: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = if range_end.is_empty() {
-            Box::new(kvs.get_key_value(&key).into_iter())
-        } else {
-            Box::new(kvs.range(key..range_end))
-        };
         let mut kvs = iter
             .map(|(k, v)| {
                 let key = k.clone();
@@ -215,31 +208,23 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         &self,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse, Self::Error> {
-        let DeleteRangeRequest {
-            key,
-            range_end,
-            prev_kv,
-        } = req;
+        let range = req.range();
+        let DeleteRangeRequest { prev_kv, .. } = req;
 
         let mut kvs = self.kvs.write().unwrap();
 
-        let prev_kvs = if range_end.is_empty() {
-            kvs.remove(&key)
-                .into_iter()
-                .map(|value| KeyValue {
-                    key: key.clone(),
-                    value,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            let range = Range {
-                start: key,
-                end: range_end,
-            };
-            kvs.extract_if(|key, _| range.contains(key))
-                .map(Into::into)
-                .collect::<Vec<_>>()
-        };
+        let keys = kvs
+            .range(range)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+
+        let mut prev_kvs = Vec::with_capacity(keys.len());
+
+        for key in keys {
+            if let Some(value) = kvs.remove(&key) {
+                prev_kvs.push((key.clone(), value).into())
+            }
+        }
 
         Ok(DeleteRangeResponse {
             deleted: prev_kvs.len() as i64,
@@ -502,6 +487,43 @@ mod tests {
         assert_eq!(1, resp.kvs.len());
         assert_eq!(b"key1", resp.kvs[0].key());
         assert_eq!(b"val1", resp.kvs[0].value());
+    }
+
+    #[tokio::test]
+    async fn test_range_2() {
+        let kv = MemoryKvBackend::<Error>::new();
+
+        kv.put(PutRequest::new().with_key("atest").with_value("value"))
+            .await
+            .unwrap();
+
+        kv.put(PutRequest::new().with_key("test").with_value("value"))
+            .await
+            .unwrap();
+
+        // If both key and range_end are ‘\0’, then range represents all keys.
+        let result = kv
+            .range(RangeRequest::new().with_range(b"\0".to_vec(), b"\0".to_vec()))
+            .await
+            .unwrap();
+
+        assert_eq!(result.kvs.len(), 2);
+
+        // If range_end is ‘\0’, the range is all keys greater than or equal to the key argument.
+        let result = kv
+            .range(RangeRequest::new().with_range(b"a".to_vec(), b"\0".to_vec()))
+            .await
+            .unwrap();
+
+        assert_eq!(result.kvs.len(), 2);
+
+        let result = kv
+            .range(RangeRequest::new().with_range(b"b".to_vec(), b"\0".to_vec()))
+            .await
+            .unwrap();
+
+        assert_eq!(result.kvs.len(), 1);
+        assert_eq!(result.kvs[0].key, b"test");
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt::{Display, Formatter};
+use std::ops::Bound;
 
 use api::v1::meta::{
     BatchDeleteRequest as PbBatchDeleteRequest, BatchDeleteResponse as PbBatchDeleteResponse,
@@ -29,6 +30,22 @@ use api::v1::meta::{
 use crate::error;
 use crate::error::Result;
 use crate::rpc::{util, KeyValue};
+
+pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    if range_end.is_empty() {
+        (Bound::Included(key.clone()), Bound::Included(key))
+    } else if range_end.len() == 1 && range_end[0] == 0 {
+        // If both key and range_end are ‘\0’, then range represents all keys.
+        if key.len() == 1 && key[0] == 0 {
+            (Bound::Unbounded, Bound::Unbounded)
+        } else {
+            // If range_end is ‘\0’, the range is all keys greater than or equal to the key argument.
+            (Bound::Included(key), Bound::Unbounded)
+        }
+    } else {
+        (Bound::Included(key), Bound::Excluded(range_end))
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct RangeRequest {
@@ -94,6 +111,11 @@ impl RangeRequest {
             limit: 0,
             keys_only: false,
         }
+    }
+
+    /// Returns the `RangeBounds`.
+    pub fn range(&self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        to_range(self.key.clone(), self.range_end.clone())
     }
 
     /// key is the first key for the range, If range_end is not given, the
@@ -688,6 +710,11 @@ impl DeleteRangeRequest {
             range_end: vec![],
             prev_kv: false,
         }
+    }
+
+    /// Returns the `RangeBounds`.
+    pub fn range(&self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        to_range(self.key.clone(), self.range_end.clone())
     }
 
     /// key is the first key to delete in the range. If range_end is not given,

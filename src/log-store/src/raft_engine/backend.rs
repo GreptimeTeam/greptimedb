@@ -137,29 +137,48 @@ impl KvBackend for RaftEngineBackend {
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
         let mut res = vec![];
+        let (start, end) = req.range();
+        let RangeRequest { limit, .. } = req;
+
+        let start_key = match start {
+            std::ops::Bound::Included(key) => Some(key),
+            std::ops::Bound::Excluded(_) => unreachable!(),
+            std::ops::Bound::Unbounded => None,
+        };
+
+        let end_key = match end {
+            std::ops::Bound::Included(_) => unreachable!(),
+            std::ops::Bound::Excluded(key) => Some(key),
+            std::ops::Bound::Unbounded => None,
+        };
+        let mut more = false;
+
         self.engine
             .read()
             .unwrap()
             .scan_raw_messages(
                 SYSTEM_NAMESPACE,
-                Some(&req.key),
-                Some(&req.range_end),
+                start_key.as_deref(),
+                end_key.as_deref(),
                 false,
                 |key, value| {
                     res.push(KeyValue {
                         key: key.to_vec(),
                         value: value.to_vec(),
                     });
-                    true
+                    if limit > 0 && limit as usize == res.len() {
+                        more = true;
+                        false
+                    } else {
+                        // continue
+                        true
+                    }
                 },
             )
             .context(RaftEngineSnafu)
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
-        Ok(RangeResponse {
-            kvs: res,
-            more: false,
-        })
+        Ok(RangeResponse { kvs: res, more })
     }
 
     async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error> {
