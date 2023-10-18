@@ -93,13 +93,13 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         let iter = kvs.range(range);
 
         let mut more = false;
-        let mut counter = 0usize;
+        let mut took = 0;
 
         let kvs = iter
             .take_while(|_| {
-                let take = counter != limit as usize || limit == 0;
-                counter += 1;
-                more = counter > limit as usize && limit != 0;
+                let take = limit == 0 || took != limit;
+                took += 1;
+                more = limit > 0 && took > limit;
 
                 take
             })

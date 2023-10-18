@@ -145,9 +145,7 @@ impl KvBackend for RaftEngineBackend {
         } = req;
 
         let (start_key, end_key) = match (start, end) {
-            (Included(start), Included(_)) => {
-                (Some(start.clone()), Some(get_next_prefix_key(&start)))
-            }
+            (Included(start), Included(end)) => (Some(start), Some(get_next_prefix_key(&end))),
             (Unbounded, Unbounded) => (None, None),
             (Included(start), Excluded(end)) => (Some(start), Some(end)),
             (Included(start), Unbounded) => (Some(start), None),
