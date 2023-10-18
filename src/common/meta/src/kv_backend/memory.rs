@@ -90,16 +90,16 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         } = req;
 
         let kvs = self.kvs.read().unwrap();
-        let iter = kvs.range(range);
+        let values = kvs.range(range);
 
         let mut more = false;
-        let mut took = 0;
+        let mut iter: i64 = 0;
 
-        let kvs = iter
+        let kvs = values
             .take_while(|_| {
-                let take = limit == 0 || took != limit;
-                took += 1;
-                more = limit > 0 && took > limit;
+                let take = limit == 0 || iter != limit;
+                iter += 1;
+                more = limit > 0 && iter > limit;
 
                 take
             })

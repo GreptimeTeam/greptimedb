@@ -152,6 +152,7 @@ impl KvBackend for RaftEngineBackend {
             _ => unreachable!(),
         };
         let mut more = false;
+        let mut iter = 0;
 
         self.engine
             .read()
@@ -162,17 +163,18 @@ impl KvBackend for RaftEngineBackend {
                 end_key.as_deref(),
                 false,
                 |key, value| {
-                    res.push(KeyValue {
-                        key: key.to_vec(),
-                        value: if keys_only { vec![] } else { value.to_vec() },
-                    });
-                    if limit > 0 && limit as usize == res.len() {
-                        more = true;
-                        false
-                    } else {
-                        // continue
-                        true
+                    let take = limit == 0 || iter != limit;
+                    iter += 1;
+                    more = limit > 0 && iter > limit;
+
+                    if take {
+                        res.push(KeyValue {
+                            key: key.to_vec(),
+                            value: if keys_only { vec![] } else { value.to_vec() },
+                        });
                     }
+
+                    take
                 },
             )
             .context(RaftEngineSnafu)

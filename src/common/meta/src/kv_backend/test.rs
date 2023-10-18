@@ -195,6 +195,18 @@ pub async fn test_kv_range_2(kv_store: impl KvBackend) {
     assert_eq!(result.kvs.len(), 1);
     assert!(result.more);
 
+    // Fetches the keys >= "a", set limit to 2, the `more` should be false.
+    let result = kv_store
+        .range(
+            RangeRequest::new()
+                .with_range(b"a".to_vec(), b"\0".to_vec())
+                .with_limit(2),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.kvs.len(), 2);
+    assert!(!result.more);
+
     // Fetches the keys >= "a", set limit to 3, the `more` should be false.
     let result = kv_store
         .range(
