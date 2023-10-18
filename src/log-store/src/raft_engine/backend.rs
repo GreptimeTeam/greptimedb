@@ -15,6 +15,7 @@
 //! [KvBackend] implementation based on [raft_engine::Engine].
 
 use std::any::Any;
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::RwLock;
 
 use common_error::ext::BoxedError;
@@ -28,6 +29,7 @@ use common_meta::rpc::store::{
     RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
+use common_meta::util::get_next_prefix_key;
 use raft_engine::{Config, Engine, LogBatch};
 use snafu::ResultExt;
 
@@ -138,18 +140,18 @@ impl KvBackend for RaftEngineBackend {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
         let mut res = vec![];
         let (start, end) = req.range();
-        let RangeRequest { limit, .. } = req;
+        let RangeRequest {
+            keys_only, limit, ..
+        } = req;
 
-        let start_key = match start {
-            std::ops::Bound::Included(key) => Some(key),
-            std::ops::Bound::Excluded(_) => unreachable!(),
-            std::ops::Bound::Unbounded => None,
-        };
-
-        let end_key = match end {
-            std::ops::Bound::Included(_) => unreachable!(),
-            std::ops::Bound::Excluded(key) => Some(key),
-            std::ops::Bound::Unbounded => None,
+        let (start_key, end_key) = match (start, end) {
+            (Included(start), Included(_)) => {
+                (Some(start.clone()), Some(get_next_prefix_key(&start)))
+            }
+            (Unbounded, Unbounded) => (None, None),
+            (Included(start), Excluded(end)) => (Some(start), Some(end)),
+            (Included(start), Unbounded) => (Some(start), None),
+            _ => unreachable!(),
         };
         let mut more = false;
 
@@ -164,7 +166,7 @@ impl KvBackend for RaftEngineBackend {
                 |key, value| {
                     res.push(KeyValue {
                         key: key.to_vec(),
-                        value: value.to_vec(),
+                        value: if keys_only { vec![] } else { value.to_vec() },
                     });
                     if limit > 0 && limit as usize == res.len() {
                         more = true;
@@ -294,7 +296,7 @@ impl KvBackend for RaftEngineBackend {
             key,
             range_end,
             limit: 0,
-            keys_only: true,
+            keys_only: false,
         };
         let range_resp = self.range(range).await?;
 
@@ -402,7 +404,12 @@ fn engine_delete(engine: &Engine, key: &[u8]) -> meta_error::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
+    use common_meta::kv_backend::test::{
+        prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
+        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
+    };
     use common_test_util::temp_dir::create_temp_dir;
     use raft_engine::{Config, ReadableSize, RecoveryMode};
 
@@ -633,5 +640,67 @@ mod tests {
                 .collect::<HashSet<_>>(),
             keys
         );
+    }
+
+    #[tokio::test]
+    async fn test_range() {
+        let dir = create_temp_dir("range");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_range(backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_range_2() {
+        let dir = create_temp_dir("range2");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+
+        test_kv_range_2(backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_put() {
+        let dir = create_temp_dir("put");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_put(backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_get() {
+        let dir = create_temp_dir("batch_get");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_batch_get(backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_batch_delete() {
+        let dir = create_temp_dir("batch_delete");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_batch_delete(backend).await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_range() {
+        let dir = create_temp_dir("delete_range");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_delete_range(backend).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_compare_and_put_2() {
+        let dir = create_temp_dir("compare_and_put");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        prepare_kv(&backend).await;
+
+        test_kv_compare_and_put(Arc::new(backend)).await;
     }
 }

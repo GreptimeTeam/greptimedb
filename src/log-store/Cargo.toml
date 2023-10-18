@@ -19,7 +19,7 @@ common-base = { workspace = true }
 common-config = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
-common-meta = { workspace = true }
+common-meta = { workspace = true, features = ["testing"] }
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 futures-util.workspace = true

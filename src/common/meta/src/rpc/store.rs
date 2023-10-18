@@ -33,7 +33,7 @@ use crate::rpc::{util, KeyValue};
 
 pub fn to_range(key: Vec<u8>, range_end: Vec<u8>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
     if range_end.is_empty() {
-        (Bound::Included(key.clone()), Bound::Included(key))
+        (Bound::Included(key.clone()), Bound::Included(key.clone()))
     } else if range_end.len() == 1 && range_end[0] == 0 {
         // If both key and range_end are ‘\0’, then range represents all keys.
         if key.len() == 1 && key[0] == 0 {
