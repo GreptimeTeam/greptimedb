@@ -14,10 +14,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This file is copied from https://github.com/tikv/raft-engine/blob/8dd2a39f359ff16f5295f35343f626e0c10132fa/src/util.rs without any modification.
+// This file is copied from https://github.com/tikv/raft-engine/blob/8dd2a39f359ff16f5295f35343f626e0c10132fa/src/util.rs
 
-use std::fmt;
-use std::fmt::{Display, Write};
+use std::fmt::{self, Debug, Display, Write};
 use std::ops::{Div, Mul};
 use std::str::FromStr;
 
@@ -34,7 +33,7 @@ pub const GIB: u64 = MIB * BINARY_DATA_MAGNITUDE;
 pub const TIB: u64 = GIB * BINARY_DATA_MAGNITUDE;
 pub const PIB: u64 = TIB * BINARY_DATA_MAGNITUDE;
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq, PartialOrd)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub struct ReadableSize(pub u64);
 
 impl ReadableSize {
@@ -152,6 +151,12 @@ impl FromStr for ReadableSize {
             Ok(n) => Ok(ReadableSize((n * unit as f64) as u64)),
             Err(_) => Err(format!("invalid size string: {:?}", s)),
         }
+    }
+}
+
+impl Debug for ReadableSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
     }
 }
 
