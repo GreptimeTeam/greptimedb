@@ -984,7 +984,7 @@ mod tests {
             .is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_remove_outdated_meta_task() {
         let dir = create_temp_dir("remove_outdated_meta_task");
         let object_store = test_util::new_object_store(&dir);
@@ -1013,7 +1013,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         manager.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(manager
             .procedure_state(procedure_id)
             .await
@@ -1036,7 +1036,7 @@ mod tests {
             .is_ok());
         let mut watcher = manager.procedure_watcher(procedure_id).unwrap();
         watcher.changed().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(manager
             .procedure_state(procedure_id)
             .await
@@ -1058,7 +1058,7 @@ mod tests {
         watcher.changed().await.unwrap();
 
         manager.start().await.unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(manager
             .procedure_state(procedure_id)
             .await
