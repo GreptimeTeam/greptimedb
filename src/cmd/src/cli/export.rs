@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::{Parser, ValueEnum};
+use client::api::v1::auth_header::AuthScheme;
+use client::api::v1::Basic;
 use client::{Client, Database, DEFAULT_SCHEMA_NAME};
 use common_query::Output;
 use common_recordbatch::util::collect;
@@ -32,7 +34,8 @@ use tokio::sync::Semaphore;
 use crate::cli::{Instance, Tool};
 use crate::error::{
     CollectRecordBatchesSnafu, ConnectServerSnafu, EmptyResultSnafu, Error, FileIoSnafu,
-    InvalidDatabaseNameSnafu, NotDataFromOutputSnafu, RequestDatabaseSnafu, Result,
+    IllegalConfigSnafu, InvalidDatabaseNameSnafu, NotDataFromOutputSnafu, RequestDatabaseSnafu,
+    Result,
 };
 
 type TableReference = (String, String, String);
@@ -71,6 +74,10 @@ pub struct ExportCommand {
     /// Things to export
     #[clap(long, short = 't', value_enum)]
     target: ExportTarget,
+
+    /// basic authentication for connecting to the server
+    #[clap(long)]
+    auth_basic: Option<String>,
 }
 
 impl ExportCommand {
@@ -83,11 +90,21 @@ impl ExportCommand {
                 addr: self.addr.clone(),
             })?;
         let (catalog, schema) = split_database(&self.database)?;
-        let database_client = Database::new(
+        let mut database_client = Database::new(
             catalog.clone(),
             schema.clone().unwrap_or(DEFAULT_SCHEMA_NAME.to_string()),
             client,
         );
+
+        if let Some(auth_basic) = &self.auth_basic {
+            let (username, password) = auth_basic.split_once(':').context(IllegalConfigSnafu {
+                msg: "auth_basic cannot be split by ':'".to_string(),
+            })?;
+            database_client.set_auth(AuthScheme::Basic(Basic {
+                username: username.to_string(),
+                password: password.to_string(),
+            }));
+        }
 
         Ok(Instance::Tool(Box::new(Export {
             client: database_client,
