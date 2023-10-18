@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub mod metrics;
-pub mod traces;
+pub mod plugin;
+pub mod trace;
