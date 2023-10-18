@@ -392,7 +392,6 @@ impl ErrorExt for Error {
             Internal { .. }
             | InternalIo { .. }
             | TokioIo { .. }
-            | CollectRecordbatch { .. }
             | StartHttp { .. }
             | StartGrpc { .. }
             | AlreadyStarted { .. }
@@ -402,6 +401,8 @@ impl ErrorExt for Error {
             | CatalogError { .. }
             | GrpcReflectionService { .. }
             | BuildHttpResponse { .. } => StatusCode::Internal,
+
+            CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
             InsertScript { source, .. }
             | ExecuteScript { source, .. }
