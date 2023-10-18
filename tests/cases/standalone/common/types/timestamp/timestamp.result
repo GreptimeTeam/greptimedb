@@ -83,19 +83,19 @@ Error: 3000(PlanQuery), Error during planning: The function Avg does not support
 
 SELECT t+t FROM timestamp;
 
-Error: 1003(Internal), Cast error: Cannot perform arithmetic operation between array of type Timestamp(Millisecond, None) and array of type Timestamp(Millisecond, None)
+Error: 3001(EngineExecuteQuery), Cast error: Cannot perform arithmetic operation between array of type Timestamp(Millisecond, None) and array of type Timestamp(Millisecond, None)
 
 SELECT t*t FROM timestamp;
 
-Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
 
 SELECT t/t FROM timestamp;
 
-Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
 
 SELECT t%t FROM timestamp;
 
-Error: 1003(Internal), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
 
 -- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
 -- SELECT t-t FROM timestamp; --
