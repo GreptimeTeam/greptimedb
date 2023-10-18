@@ -14,6 +14,7 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
+use std::mem::size_of;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -654,6 +655,16 @@ impl ListValue {
             Arc::new(new_item_field(output_type.item_type().as_arrow_type())),
         ))
     }
+
+    fn byte_size(&self) -> usize {
+        let mut size = size_of::<ConcreteDataType>();
+        if let Some(items) = self.items() {
+            for item in items.iter() {
+                size += item.as_value_ref().byte_size();
+            }
+        }
+        size
+    }
 }
 
 impl Default for ListValue {
@@ -1090,12 +1101,44 @@ impl<'a> PartialOrd for ListValueRef<'a> {
     }
 }
 
+impl<'a> ValueRef<'a> {
+    pub fn byte_size(&self) -> usize {
+        match *self {
+            ValueRef::Null => 0,
+            ValueRef::Boolean(_) => 1,
+            ValueRef::UInt8(_) => 1,
+            ValueRef::UInt16(_) => 2,
+            ValueRef::UInt32(_) => 4,
+            ValueRef::UInt64(_) => 8,
+            ValueRef::Int8(_) => 1,
+            ValueRef::Int16(_) => 2,
+            ValueRef::Int32(_) => 4,
+            ValueRef::Int64(_) => 8,
+            ValueRef::Float32(_) => 4,
+            ValueRef::Float64(_) => 8,
+            ValueRef::String(v) => std::mem::size_of_val(v),
+            ValueRef::Binary(v) => std::mem::size_of_val(v),
+            ValueRef::Date(_) => 4,
+            ValueRef::DateTime(_) => 8,
+            ValueRef::Timestamp(_) => 16,
+            ValueRef::Time(_) => 16,
+            ValueRef::Duration(_) => 16,
+            ValueRef::Interval(_) => 24,
+            ValueRef::List(v) => match v {
+                ListValueRef::Indexed { vector, idx } => vector.get(idx).as_value_ref().byte_size(),
+                ListValueRef::Ref { val } => val.byte_size(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
     use num_traits::Float;
 
     use super::*;
+    use crate::vectors::ListVectorBuilder;
 
     #[test]
     fn test_try_from_scalar_value() {
@@ -2157,5 +2200,94 @@ mod tests {
             ScalarValue::DurationNanosecond(Some(1)),
             duration_to_scalar_value(TimeUnit::Nanosecond, Some(1))
         );
+    }
+
+    fn check_value_ref_size_eq(value_ref: &ValueRef, size: usize) {
+        assert_eq!(value_ref.byte_size(), size);
+    }
+
+    #[test]
+    fn test_value_ref_estimated_size() {
+        assert_eq!(std::mem::size_of::<ValueRef>(), 24);
+
+        check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
+        check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
+        check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
+        check_value_ref_size_eq(&ValueRef::UInt32(1), 4);
+        check_value_ref_size_eq(&ValueRef::UInt64(1), 8);
+        check_value_ref_size_eq(&ValueRef::Int8(1), 1);
+        check_value_ref_size_eq(&ValueRef::Int16(1), 2);
+        check_value_ref_size_eq(&ValueRef::Int32(1), 4);
+        check_value_ref_size_eq(&ValueRef::Int64(1), 8);
+        check_value_ref_size_eq(&ValueRef::Float32(1.0.into()), 4);
+        check_value_ref_size_eq(&ValueRef::Float64(1.0.into()), 8);
+        check_value_ref_size_eq(&ValueRef::String("greptimedb"), 10);
+        check_value_ref_size_eq(&ValueRef::Binary(b"greptimedb"), 10);
+        check_value_ref_size_eq(&ValueRef::Date(Date::new(1)), 4);
+        check_value_ref_size_eq(&ValueRef::DateTime(DateTime::new(1)), 8);
+        check_value_ref_size_eq(&ValueRef::Timestamp(Timestamp::new_millisecond(1)), 16);
+        check_value_ref_size_eq(&ValueRef::Time(Time::new_millisecond(1)), 16);
+        check_value_ref_size_eq(
+            &ValueRef::Interval(Interval::from_month_day_nano(1, 2, 3)),
+            24,
+        );
+        check_value_ref_size_eq(&ValueRef::Duration(Duration::new_millisecond(1)), 16);
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Ref {
+                val: &ListValue {
+                    items: Some(Box::new(
+                        vec![
+                            Value::String("hello world".into()),
+                            Value::String("greptimedb".into()),
+                        ]
+                        .into(),
+                    )),
+                    datatype: ConcreteDataType::string_datatype(),
+                },
+            }),
+            11 + 10 + 24,
+        );
+
+        let data = vec![
+            Some(vec![Some(1), Some(2), Some(3)]),
+            None,
+            Some(vec![Some(4), None, Some(6)]),
+        ];
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 8);
+        for vec_opt in &data {
+            if let Some(vec) = vec_opt {
+                let values = vec.iter().map(|v| Value::from(*v)).collect();
+                let values = Some(Box::new(values));
+                let list_value = ListValue::new(values, ConcreteDataType::int32_datatype());
+
+                builder.push(Some(ListValueRef::Ref { val: &list_value }));
+            } else {
+                builder.push(None);
+            }
+        }
+        let vector = builder.finish();
+
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 0,
+            }),
+            36,
+        );
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 1,
+            }),
+            0,
+        );
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 2,
+            }),
+            32,
+        )
     }
 }
