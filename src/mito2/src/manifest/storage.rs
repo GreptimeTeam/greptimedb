@@ -148,20 +148,6 @@ enum FileKey {
     Checkpoint(ManifestVersion),
 }
 
-impl FileKey {
-    /// New a FileKey, if the file name is not a valid delta
-    /// or checkpoint file, return None.
-    pub fn new(file_name: &str) -> Option<Self> {
-        if is_delta_file(file_name) {
-            Some(FileKey::Delta(file_version(file_name)))
-        } else if is_checkpoint_file(file_name) {
-            Some(FileKey::Checkpoint(file_version(file_name)))
-        } else {
-            None
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct ManifestObjectStore {
     object_store: ObjectStore,
@@ -289,7 +275,7 @@ impl ManifestObjectStore {
         } else {
             None
         };
-        let paths: Vec<_> = entries
+        let del_entries: Vec<_> = entries
             .iter()
             .filter(|(_e, is_checkpoint, version)| {
                 if let Some(max_version) = checkpoint_version {
@@ -305,8 +291,11 @@ impl ManifestObjectStore {
                     true
                 }
             })
-            .map(|e| e.0.path().to_string())
             .collect();
+        let paths = del_entries
+            .iter()
+            .map(|(e, _, _)| e.path().to_string())
+            .collect::<Vec<_>>();
         let ret = paths.len();
 
         debug!(
@@ -318,19 +307,20 @@ impl ManifestObjectStore {
             paths,
         );
 
-        // delete the manifest'size in paths
-        for path in &paths {
-            if let Some(name) = file_name(path) {
-                if let Some(file_key) = FileKey::new(&name) {
-                    self.manifest_size_map.remove(&file_key);
-                }
-            }
-        }
-
         self.object_store
             .remove(paths)
             .await
             .context(OpenDalSnafu)?;
+
+        // delete the manifest'size
+        for (_, is_checkpoint, version) in &del_entries {
+            if *is_checkpoint {
+                self.manifest_size_map
+                    .remove(&FileKey::Checkpoint(*version));
+            } else {
+                self.manifest_size_map.remove(&FileKey::Delta(*version));
+            }
+        }
 
         Ok(ret)
     }
@@ -348,12 +338,11 @@ impl ManifestObjectStore {
                 path: &path,
             })?;
         let delta_size = data.len();
-        let _ = self
-            .object_store
+        self.object_store
             .write(&path, data)
             .await
-            .context(OpenDalSnafu);
-        self.set_manifest_size_by_path(&path, delta_size as u64);
+            .context(OpenDalSnafu)?;
+        self.set_delta_file_size(version, delta_size as u64);
         Ok(())
     }
 
@@ -373,7 +362,7 @@ impl ManifestObjectStore {
             .write(&path, data)
             .await
             .context(OpenDalSnafu)?;
-        self.set_manifest_size_by_path(&path, checkpoint_size as u64);
+        self.set_checkpoint_file_size(version, checkpoint_size as u64);
 
         // Because last checkpoint file only contain size and version, which is tiny, so we don't compress it.
         let last_checkpoint_path = self.last_checkpoint_path();
@@ -417,7 +406,7 @@ impl ManifestObjectStore {
                         },
                     )?;
                     // set the checkpoint size
-                    self.set_manifest_size_by_path(&path, checkpoint_size as u64);
+                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
                     Ok(Some(decompress_data))
                 }
                 Err(e) => {
@@ -442,7 +431,7 @@ impl ManifestObjectStore {
                                             compress_type: FALL_BACK_COMPRESS_TYPE,
                                             path: path.clone(),
                                         })?;
-                                    self.set_manifest_size_by_path(&path, checkpoint_size as u64);
+                                    self.set_checkpoint_file_size(version, checkpoint_size as u64);
                                     Ok(Some(decompress_data))
                                 }
                                 Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
@@ -493,18 +482,15 @@ impl ManifestObjectStore {
         self.manifest_size_map.values().sum()
     }
 
-    /// Set the size of the manifest file by path.
-    pub(crate) fn set_manifest_size_by_path(&mut self, path: &str, size: u64) {
-        if let Some(name) = file_name(path) {
-            if let Some(file_key) = FileKey::new(&name) {
-                self.manifest_size_map.insert(file_key, size);
-            }
-        }
-    }
-
     /// Set the size of the delta file by delta version.
     pub(crate) fn set_delta_file_size(&mut self, version: ManifestVersion, size: u64) {
         self.manifest_size_map.insert(FileKey::Delta(version), size);
+    }
+
+    /// Set the size of the checkpoint file by checkpoint version.
+    pub(crate) fn set_checkpoint_file_size(&mut self, version: ManifestVersion, size: u64) {
+        self.manifest_size_map
+            .insert(FileKey::Checkpoint(version), size);
     }
 }
 
