@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use ahash::RandomState;
-use arrow::compute;
+use arrow::compute::{self, cast_with_options, CastOptions};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use common_query::DfPhysicalPlan;
 use common_recordbatch::DfSendableRecordBatchStream;
@@ -33,6 +33,7 @@ use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_ex
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream,
 };
+use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::utils::get_arrayref_at_indices;
 use datafusion_common::{DFField, DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::utils::exprlist_to_fields;
@@ -54,22 +55,135 @@ use crate::error::{DataFusionSnafu, Result};
 
 type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(PartialEq, Eq, Debug, Hash, Clone)]
+pub enum Fill {
+    Null,
+    Prev,
+    Linear,
+    Const(ScalarValue),
+}
+
+impl Display for Fill {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fill::Null => write!(f, "NULL"),
+            Fill::Prev => write!(f, "PREV"),
+            Fill::Linear => write!(f, "LINEAR"),
+            Fill::Const(x) => write!(f, "{}", x),
+        }
+    }
+}
+
+impl Fill {
+    pub fn try_from_str(value: &str, datatype: &DataType) -> DfResult<Self> {
+        let s = value.to_uppercase();
+        match s.as_str() {
+            "NULL" | "" => Ok(Self::Null),
+            "PREV" => Ok(Self::Prev),
+            "LINEAR" => {
+                if datatype.is_numeric() {
+                    Ok(Self::Linear)
+                } else {
+                    Err(DataFusionError::Plan(format!(
+                        "Use FILL LINEAR on Non-numeric DataType {}",
+                        datatype
+                    )))
+                }
+            }
+            _ => ScalarValue::try_from_string(s.clone(), datatype)
+                .map_err(|err| {
+                    DataFusionError::Plan(format!(
+                        "{} is not a valid fill option, fail to convert to a const value. {{ {} }}",
+                        s, err
+                    ))
+                })
+                .map(Fill::Const),
+        }
+    }
+
+    /// The input `data` contains data on a complete time series.
+    /// If the filling strategy is `PREV` or `LINEAR`, caller must be ensured that the incoming `data` is ascending time order.
+    pub fn apply_fill_strategy(&self, data: &mut [ScalarValue]) -> DfResult<()> {
+        let len = data.len();
+        for i in 0..len {
+            if data[i].is_null() {
+                match self {
+                    Fill::Null => continue,
+                    Fill::Prev => {
+                        if i != 0 {
+                            data[i] = data[i - 1].clone()
+                        }
+                    }
+                    Fill::Linear => {
+                        if 0 < i && i < len - 1 {
+                            match (&data[i - 1], &data[i + 1]) {
+                                (ScalarValue::Float64(Some(a)), ScalarValue::Float64(Some(b))) => {
+                                    data[i] = ScalarValue::Float64(Some((a + b) / 2.0));
+                                }
+                                (ScalarValue::Float32(Some(a)), ScalarValue::Float32(Some(b))) => {
+                                    data[i] = ScalarValue::Float32(Some((a + b) / 2.0));
+                                }
+                                (a, b) => {
+                                    if !a.is_null() && !b.is_null() {
+                                        return Err(DataFusionError::Execution(
+                                            "RangePlan: Apply Fill LINEAR strategy on Non-floating type".to_string()));
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Fill::Const(v) => data[i] = v.clone(),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Eq, Clone, Debug)]
 pub struct RangeFn {
+    /// with format like `max(a) 300s null`
+    pub name: String,
+    pub data_type: DataType,
     pub expr: Expr,
     pub range: Duration,
-    pub fill: String,
+    pub fill: Fill,
+    /// If the `FIll` strategy is `Linear` and the output is an integer,
+    /// it is possible to calculate a floating point number.
+    /// So for `FILL==LINEAR`, the entire data will be implicitly converted to Float type
+    /// If `need_cast==true`, `data_type` may not consist with type `expr` generated.
+    pub need_cast: bool,
+}
+
+impl PartialEq for RangeFn {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl PartialOrd for RangeFn {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RangeFn {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.name.cmp(&other.name)
+    }
+}
+
+impl std::hash::Hash for RangeFn {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
 }
 
 impl Display for RangeFn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RangeFn {{ expr:{} range:{}s fill:{} }}",
-            self.expr.display_name().unwrap_or("?".into()),
-            self.range.as_secs(),
-            self.fill,
-        )
+        write!(f, "{}", self.name)
     }
 }
 
@@ -105,16 +219,21 @@ impl RangeSelect {
     ) -> Result<Self> {
         let mut fields = range_expr
             .iter()
-            .map(|RangeFn { expr, .. }| {
-                Ok(DFField::new_unqualified(
-                    &expr.display_name()?,
-                    expr.get_type(input.schema())?,
-                    // TODO(Taylor-lagrange): We have not implemented fill currently,
-                    // it is possible that some columns may not be able to aggregate data,
-                    // so we temporarily set that all data is nullable
-                    true,
-                ))
-            })
+            .map(
+                |RangeFn {
+                     name,
+                     data_type,
+                     fill,
+                     ..
+                 }| {
+                    Ok(DFField::new_unqualified(
+                        name,
+                        data_type.clone(),
+                        // Only when data fill with Const option, the data can't be null
+                        !matches!(fill, Fill::Const(..)),
+                    ))
+                },
+            )
             .collect::<DfResult<Vec<_>>>()
             .context(DataFusionSnafu)?;
         // add align_ts
@@ -135,10 +254,8 @@ impl RangeSelect {
             DFSchema::new_with_metadata(by_fields, input.schema().metadata().clone())
                 .context(DataFusionSnafu)?,
         );
-        // If the result of the project plan happens to be the schema of the range plan, no project plan is required
-        // that need project is identical to range plan schema.
-        // 1. all exprs in project must belong to range schema
-        // 2. range schema and project exprs must have same size
+        // If the results of project plan can be obtained directly from range plan without any additional calculations, no project plan is required.
+        // We can simply project the final output of the range plan to produce the final result.
         let schema_project = projection_expr
             .iter()
             .map(|project_expr| {
@@ -268,52 +385,68 @@ impl RangeSelect {
             .range_expr
             .iter()
             .map(|range_fn| {
-                let (expr, args) = match &range_fn.expr {
+                let expr = match &range_fn.expr {
                     Expr::AggregateFunction(aggr) => {
-                        let args = self.create_physical_expr_list(
-                            &aggr.args,
-                            input_dfschema,
-                            &input_schema,
-                            session_state,
-                        )?;
-                        Ok((
-                            create_aggr_expr(
-                                &aggr.fun,
-                                false,
-                                &args,
-                                &[],
+                        let order_by = if let Some(exprs) = &aggr.order_by {
+                            exprs
+                                .iter()
+                                .map(|x| {
+                                    create_physical_sort_expr(
+                                        x,
+                                        input_dfschema,
+                                        &input_schema,
+                                        session_state.execution_props(),
+                                    )
+                                })
+                                .collect::<DfResult<Vec<_>>>()?
+                        } else {
+                            vec![]
+                        };
+                        let expr = create_aggr_expr(
+                            &aggr.fun,
+                            false,
+                            &self.create_physical_expr_list(
+                                &aggr.args,
+                                input_dfschema,
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                session_state,
                             )?,
-                            args,
-                        ))
+                            &order_by,
+                            &input_schema,
+                            range_fn.expr.display_name()?,
+                        )?;
+                        Ok(expr)
                     }
                     Expr::AggregateUDF(aggr_udf) => {
-                        let args = self.create_physical_expr_list(
-                            &aggr_udf.args,
-                            input_dfschema,
-                            &input_schema,
-                            session_state,
-                        )?;
-                        Ok((
-                            create_aggr_udf_expr(
-                                &aggr_udf.fun,
-                                &args,
+                        let expr = create_aggr_udf_expr(
+                            &aggr_udf.fun,
+                            &self.create_physical_expr_list(
+                                &aggr_udf.args,
+                                input_dfschema,
                                 &input_schema,
-                                range_fn.expr.display_name()?,
+                                session_state,
                             )?,
-                            args,
-                        ))
+                            &input_schema,
+                            range_fn.expr.display_name()?,
+                        )?;
+                        Ok(expr)
                     }
                     _ => Err(DataFusionError::Plan(format!(
                         "Unexpected Expr:{} in RangeSelect",
                         range_fn.expr.display_name()?
                     ))),
                 }?;
+                let args = expr.expressions();
                 Ok(RangeFnExec {
                     expr,
                     args,
                     range: range_fn.range.as_millis() as Millisecond,
+                    fill: range_fn.fill.clone(),
+                    need_cast: if range_fn.need_cast {
+                        Some(range_fn.data_type.clone())
+                    } else {
+                        None
+                    },
                 })
             })
             .collect::<DfResult<Vec<_>>>()?;
@@ -348,6 +481,8 @@ struct RangeFnExec {
     pub expr: Arc<dyn AggregateExpr>,
     pub args: Vec<Arc<dyn PhysicalExpr>>,
     pub range: Millisecond,
+    pub fill: Fill,
+    pub need_cast: Option<DataType>,
 }
 
 #[derive(Debug)]
@@ -540,6 +675,15 @@ fn align_to_calendar(
     }
 }
 
+fn cast_scalar_values(values: &mut [ScalarValue], data_type: &DataType) -> DfResult<()> {
+    let array = ScalarValue::iter_to_array(values.to_vec())?;
+    let cast_array = cast_with_options(&array, data_type, &CastOptions::default())?;
+    for (i, value) in values.iter_mut().enumerate() {
+        *value = ScalarValue::try_from_array(&cast_array, i)?;
+    }
+    Ok(())
+}
+
 impl RangeSelectStream {
     fn evaluate_many(
         &self,
@@ -648,20 +792,57 @@ impl RangeSelectStream {
         let mut columns: Vec<Arc<dyn Array>> =
             Vec::with_capacity(1 + self.range_exec.len() + self.by.len());
         let mut ts_builder = TimestampMillisecondBuilder::with_capacity(self.output_num_rows);
-        let mut all_scalar = vec![vec![]; self.range_exec.len()];
+        let mut all_scalar = vec![Vec::with_capacity(self.output_num_rows); self.range_exec.len()];
         let mut by_rows = Vec::with_capacity(self.output_num_rows);
+        let mut start_index = 0;
+        // RangePlan is calculated on a row basis. If a column uses the PREV or LINEAR filling strategy,
+        // we must arrange the data in the entire data row to determine the NULL filling value.
+        let need_sort_output = self
+            .range_exec
+            .iter()
+            .any(|range| range.fill == Fill::Linear || range.fill == Fill::Prev);
         for SeriesState {
             row,
             align_ts_accumulator,
         } in self.series_map.values()
         {
-            for (ts, accumulators) in align_ts_accumulator {
-                for (i, accumulator) in accumulators.iter().enumerate() {
-                    all_scalar[i].push(accumulator.evaluate()?);
+            // collect data on time series
+            if !need_sort_output {
+                for (ts, accumulators) in align_ts_accumulator {
+                    for (i, accumulator) in accumulators.iter().enumerate() {
+                        all_scalar[i].push(accumulator.evaluate()?);
+                    }
+                    ts_builder.append_value(*ts);
                 }
-                by_rows.push(row.row());
-                ts_builder.append_value(*ts);
+            } else {
+                let mut keys = align_ts_accumulator.keys().copied().collect::<Vec<_>>();
+                keys.sort();
+                for key in &keys {
+                    for (i, accumulator) in
+                        align_ts_accumulator.get(key).unwrap().iter().enumerate()
+                    {
+                        all_scalar[i].push(accumulator.evaluate()?);
+                    }
+                }
+                ts_builder.append_slice(&keys);
             }
+            // apply fill strategy on time series
+            for (
+                i,
+                RangeFnExec {
+                    fill, need_cast, ..
+                },
+            ) in self.range_exec.iter().enumerate()
+            {
+                let time_series_data =
+                    &mut all_scalar[i][start_index..start_index + align_ts_accumulator.len()];
+                if let Some(data_type) = need_cast {
+                    cast_scalar_values(time_series_data, data_type)?;
+                }
+                fill.apply_fill_strategy(time_series_data)?;
+            }
+            by_rows.resize(by_rows.len() + align_ts_accumulator.len(), row.row());
+            start_index += align_ts_accumulator.len();
         }
         for column_scalar in all_scalar {
             columns.push(ScalarValue::iter_to_array(column_scalar)?);
@@ -720,15 +901,15 @@ impl Stream for RangeSelectStream {
                 }
                 ExecutionState::ProducingOutput => {
                     let result = self.generate_output();
-                    match result {
+                    return match result {
                         // made output
                         Ok(batch) => {
                             self.exec_state = ExecutionState::Done;
-                            return Poll::Ready(Some(Ok(batch)));
+                            Poll::Ready(Some(Ok(batch)))
                         }
                         // error making output
-                        Err(error) => return Poll::Ready(Some(Err(error))),
-                    }
+                        Err(error) => Poll::Ready(Some(Err(error))),
+                    };
                 }
                 ExecutionState::Done => return Poll::Ready(None),
             }
@@ -738,6 +919,34 @@ impl Stream for RangeSelectStream {
 
 #[cfg(test)]
 mod test {
+    macro_rules! nullable_array {
+        ($builder:ident,) => {
+        };
+        ($array_type:ident ; $($tail:tt)*) => {
+            paste::item! {
+                {
+                    let mut builder = arrow::array::[<$array_type Builder>]::new();
+                    nullable_array!(builder, $($tail)*);
+                    builder.finish()
+                }
+            }
+        };
+        ($builder:ident, null) => {
+            $builder.append_null();
+        };
+        ($builder:ident, null, $($tail:tt)*) => {
+            $builder.append_null();
+            nullable_array!($builder, $($tail)*);
+        };
+        ($builder:ident, $value:literal) => {
+            $builder.append_value($value);
+        };
+        ($builder:ident, $value:literal, $($tail:tt)*) => {
+            $builder.append_value($value);
+            nullable_array!($builder, $($tail)*);
+        };
+    }
+
     use arrow_schema::SortOptions;
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
@@ -747,33 +956,45 @@ mod test {
     use datafusion::prelude::SessionContext;
     use datafusion_physical_expr::expressions::{self, Column};
     use datafusion_physical_expr::PhysicalSortExpr;
-    use datatypes::arrow::array::{Int64Array, TimestampMillisecondArray};
+    use datatypes::arrow::array::TimestampMillisecondArray;
     use datatypes::arrow_array::StringArray;
 
     use super::*;
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
-    fn prepare_test_data() -> MemoryExec {
+    fn prepare_test_data(is_float: bool) -> MemoryExec {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
-            Field::new("value", DataType::Int64, true),
+            Field::new(
+                "value",
+                if is_float {
+                    DataType::Float64
+                } else {
+                    DataType::Int64
+                },
+                true,
+            ),
             Field::new("host", DataType::Utf8, true),
         ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
-            // host 1 every 5s
-            0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000, 40_000,
-            // host 2 every 5s
-            0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 35_000, 40_000,
+        let timestamp_column: Arc<dyn Array> = Arc::new(TimestampMillisecondArray::from(vec![
+            0, 5_000, 10_000, 15_000, 20_000, // host 1 every 5s
+            0, 5_000, 10_000, 15_000, 20_000, // host 2 every 5s
         ])) as _;
-        let values = vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, // data for host 1
-            9, 10, 11, 12, 13, 14, 15, 16, 17, // data for host 2
-        ];
-        let mut host = vec!["host1"; 9];
-        host.extend(vec!["host2"; 9]);
-        let value_column = Arc::new(Int64Array::from(values)) as _;
-        let host_column = Arc::new(StringArray::from(host)) as _;
+        let mut host = vec!["host1"; 5];
+        host.extend(vec!["host2"; 5]);
+        let value_column: Arc<dyn Array> = if is_float {
+            Arc::new(nullable_array!(Float64;
+                0.0, null, 1.0, null, 2.0, // data for host 1
+                3.0, null, 4.0, null, 5.0 // data for host 2
+            )) as _
+        } else {
+            Arc::new(nullable_array!(Int64;
+                0, null, 1, null, 2, // data for host 1
+                3, null, 4, null, 5 // data for host 2
+            )) as _
+        };
+        let host_column: Arc<dyn Array> = Arc::new(StringArray::from(host)) as _;
         let data = RecordBatch::try_new(
             schema.clone(),
             vec![timestamp_column, value_column, host_column],
@@ -787,12 +1008,25 @@ mod test {
         range1: Millisecond,
         range2: Millisecond,
         align: Millisecond,
+        fill: Fill,
+        is_float: bool,
         expected: String,
     ) {
-        let memory_exec = Arc::new(prepare_test_data());
+        let data_type = if is_float {
+            DataType::Float64
+        } else {
+            DataType::Int64
+        };
+        let (need_cast, schema_data_type) = if !is_float && fill == Fill::Linear {
+            // data_type = DataType::Float64;
+            (Some(DataType::Float64), DataType::Float64)
+        } else {
+            (None, data_type.clone())
+        };
+        let memory_exec = Arc::new(prepare_test_data(is_float));
         let schema = Arc::new(Schema::new(vec![
-            Field::new("MIN(value)", DataType::Int64, true),
-            Field::new("MAX(value)", DataType::Int64, true),
+            Field::new("MIN(value)", schema_data_type.clone(), true),
+            Field::new("MAX(value)", schema_data_type, true),
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("host", DataType::Utf8, true),
         ]));
@@ -803,19 +1037,23 @@ mod test {
                     expr: Arc::new(expressions::Min::new(
                         Arc::new(Column::new("value", 1)),
                         "MIN(value)",
-                        DataType::Int64,
+                        data_type.clone(),
                     )),
                     args: vec![Arc::new(Column::new("value", 1))],
                     range: range1,
+                    fill: fill.clone(),
+                    need_cast: need_cast.clone(),
                 },
                 RangeFnExec {
                     expr: Arc::new(expressions::Max::new(
                         Arc::new(Column::new("value", 1)),
                         "MAX(value)",
-                        DataType::Int64,
+                        data_type,
                     )),
                     args: vec![Arc::new(Column::new("value", 1))],
                     range: range2,
+                    fill,
+                    need_cast,
                 },
             ],
             align,
@@ -852,42 +1090,11 @@ mod test {
                 .await
                 .unwrap();
 
-        let result_literal = datatypes::arrow::util::pretty::pretty_format_batches(&result)
+        let result_literal = arrow::util::pretty::pretty_format_batches(&result)
             .unwrap()
             .to_string();
 
         assert_eq!(result_literal, expected);
-    }
-
-    #[tokio::test]
-    async fn range_10s_align_5s() {
-        let expected = String::from(
-            "+------------+------------+---------------------+-------+\
-            \n| MIN(value) | MAX(value) | timestamp           | host  |\
-            \n+------------+------------+---------------------+-------+\
-            \n| 0          | 0          | 1970-01-01T00:00:00 | host1 |\
-            \n| 0          | 1          | 1970-01-01T00:00:05 | host1 |\
-            \n| 1          | 2          | 1970-01-01T00:00:10 | host1 |\
-            \n| 2          | 3          | 1970-01-01T00:00:15 | host1 |\
-            \n| 3          | 4          | 1970-01-01T00:00:20 | host1 |\
-            \n| 4          | 5          | 1970-01-01T00:00:25 | host1 |\
-            \n| 5          | 6          | 1970-01-01T00:00:30 | host1 |\
-            \n| 6          | 7          | 1970-01-01T00:00:35 | host1 |\
-            \n| 7          | 8          | 1970-01-01T00:00:40 | host1 |\
-            \n| 8          | 8          | 1970-01-01T00:00:45 | host1 |\
-            \n| 9          | 9          | 1970-01-01T00:00:00 | host2 |\
-            \n| 9          | 10         | 1970-01-01T00:00:05 | host2 |\
-            \n| 10         | 11         | 1970-01-01T00:00:10 | host2 |\
-            \n| 11         | 12         | 1970-01-01T00:00:15 | host2 |\
-            \n| 12         | 13         | 1970-01-01T00:00:20 | host2 |\
-            \n| 13         | 14         | 1970-01-01T00:00:25 | host2 |\
-            \n| 14         | 15         | 1970-01-01T00:00:30 | host2 |\
-            \n| 15         | 16         | 1970-01-01T00:00:35 | host2 |\
-            \n| 16         | 17         | 1970-01-01T00:00:40 | host2 |\
-            \n| 17         | 17         | 1970-01-01T00:00:45 | host2 |\
-            \n+------------+------------+---------------------+-------+",
-        );
-        do_range_select_test(10_000, 10_000, 5_000, expected).await;
     }
 
     #[tokio::test]
@@ -896,41 +1103,212 @@ mod test {
             "+------------+------------+---------------------+-------+\
             \n| MIN(value) | MAX(value) | timestamp           | host  |\
             \n+------------+------------+---------------------+-------+\
-            \n| 0          | 0          | 1970-01-01T00:00:00 | host1 |\
-            \n| 9          | 9          | 1970-01-01T00:00:00 | host2 |\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 10_000, 1_000_000, expected).await;
+        do_range_select_test(10_000, 10_000, 1_000_000, Fill::Null, true, expected).await;
     }
 
     #[tokio::test]
-    async fn range_10s_5s_align_5s() {
+    async fn range_fill_null() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        |            | 1970-01-01T00:00:05 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 1.0        |            | 1970-01-01T00:00:15 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:20 | host1 |\
+            \n| 2.0        |            | 1970-01-01T00:00:25 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 3.0        |            | 1970-01-01T00:00:05 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 4.0        |            | 1970-01-01T00:00:15 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
+            \n| 5.0        |            | 1970-01-01T00:00:25 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(10_000, 5_000, 5_000, Fill::Null, true, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_prev() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:05 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:15 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:20 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:25 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:05 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:15 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:25 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(10_000, 5_000, 5_000, Fill::Prev, true, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_linear() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        | 0.5        | 1970-01-01T00:00:05 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 1.0        | 1.5        | 1970-01-01T00:00:15 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:20 | host1 |\
+            \n| 2.0        |            | 1970-01-01T00:00:25 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 3.0        | 3.5        | 1970-01-01T00:00:05 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 4.0        | 4.5        | 1970-01-01T00:00:15 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
+            \n| 5.0        |            | 1970-01-01T00:00:25 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(10_000, 5_000, 5_000, Fill::Linear, true, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_integer_null() {
         let expected = String::from(
             "+------------+------------+---------------------+-------+\
             \n| MIN(value) | MAX(value) | timestamp           | host  |\
             \n+------------+------------+---------------------+-------+\
             \n| 0          | 0          | 1970-01-01T00:00:00 | host1 |\
-            \n| 0          | 1          | 1970-01-01T00:00:05 | host1 |\
-            \n| 1          | 2          | 1970-01-01T00:00:10 | host1 |\
-            \n| 2          | 3          | 1970-01-01T00:00:15 | host1 |\
-            \n| 3          | 4          | 1970-01-01T00:00:20 | host1 |\
-            \n| 4          | 5          | 1970-01-01T00:00:25 | host1 |\
-            \n| 5          | 6          | 1970-01-01T00:00:30 | host1 |\
-            \n| 6          | 7          | 1970-01-01T00:00:35 | host1 |\
-            \n| 7          | 8          | 1970-01-01T00:00:40 | host1 |\
-            \n| 8          |            | 1970-01-01T00:00:45 | host1 |\
-            \n| 9          | 9          | 1970-01-01T00:00:00 | host2 |\
-            \n| 9          | 10         | 1970-01-01T00:00:05 | host2 |\
-            \n| 10         | 11         | 1970-01-01T00:00:10 | host2 |\
-            \n| 11         | 12         | 1970-01-01T00:00:15 | host2 |\
-            \n| 12         | 13         | 1970-01-01T00:00:20 | host2 |\
-            \n| 13         | 14         | 1970-01-01T00:00:25 | host2 |\
-            \n| 14         | 15         | 1970-01-01T00:00:30 | host2 |\
-            \n| 15         | 16         | 1970-01-01T00:00:35 | host2 |\
-            \n| 16         | 17         | 1970-01-01T00:00:40 | host2 |\
-            \n| 17         |            | 1970-01-01T00:00:45 | host2 |\
+            \n| 0          |            | 1970-01-01T00:00:05 | host1 |\
+            \n| 1          | 1          | 1970-01-01T00:00:10 | host1 |\
+            \n| 1          |            | 1970-01-01T00:00:15 | host1 |\
+            \n| 2          | 2          | 1970-01-01T00:00:20 | host1 |\
+            \n| 2          |            | 1970-01-01T00:00:25 | host1 |\
+            \n| 3          | 3          | 1970-01-01T00:00:00 | host2 |\
+            \n| 3          |            | 1970-01-01T00:00:05 | host2 |\
+            \n| 4          | 4          | 1970-01-01T00:00:10 | host2 |\
+            \n| 4          |            | 1970-01-01T00:00:15 | host2 |\
+            \n| 5          | 5          | 1970-01-01T00:00:20 | host2 |\
+            \n| 5          |            | 1970-01-01T00:00:25 | host2 |\
             \n+------------+------------+---------------------+-------+",
         );
-        do_range_select_test(10_000, 5_000, 5_000, expected).await;
+        do_range_select_test(10_000, 5_000, 5_000, Fill::Null, false, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_integer_linear() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        | 0.5        | 1970-01-01T00:00:05 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 1.0        | 1.5        | 1970-01-01T00:00:15 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:20 | host1 |\
+            \n| 2.0        |            | 1970-01-01T00:00:25 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 3.0        | 3.5        | 1970-01-01T00:00:05 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 4.0        | 4.5        | 1970-01-01T00:00:15 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
+            \n| 5.0        |            | 1970-01-01T00:00:25 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(10_000, 5_000, 5_000, Fill::Linear, false, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_fill_const() {
+        let expected = String::from(
+            "+------------+------------+---------------------+-------+\
+            \n| MIN(value) | MAX(value) | timestamp           | host  |\
+            \n+------------+------------+---------------------+-------+\
+            \n| 0.0        | 0.0        | 1970-01-01T00:00:00 | host1 |\
+            \n| 0.0        | 6.6        | 1970-01-01T00:00:05 | host1 |\
+            \n| 1.0        | 1.0        | 1970-01-01T00:00:10 | host1 |\
+            \n| 1.0        | 6.6        | 1970-01-01T00:00:15 | host1 |\
+            \n| 2.0        | 2.0        | 1970-01-01T00:00:20 | host1 |\
+            \n| 2.0        | 6.6        | 1970-01-01T00:00:25 | host1 |\
+            \n| 3.0        | 3.0        | 1970-01-01T00:00:00 | host2 |\
+            \n| 3.0        | 6.6        | 1970-01-01T00:00:05 | host2 |\
+            \n| 4.0        | 4.0        | 1970-01-01T00:00:10 | host2 |\
+            \n| 4.0        | 6.6        | 1970-01-01T00:00:15 | host2 |\
+            \n| 5.0        | 5.0        | 1970-01-01T00:00:20 | host2 |\
+            \n| 5.0        | 6.6        | 1970-01-01T00:00:25 | host2 |\
+            \n+------------+------------+---------------------+-------+",
+        );
+        do_range_select_test(
+            10_000,
+            5_000,
+            5_000,
+            Fill::Const(ScalarValue::Float64(Some(6.6))),
+            true,
+            expected,
+        )
+        .await;
+    }
+
+    #[test]
+    fn fill_test() {
+        assert!(Fill::try_from_str("Linear", &DataType::UInt8).unwrap() == Fill::Linear);
+        assert_eq!(
+            Fill::try_from_str("Linear", &DataType::Boolean)
+                .unwrap_err()
+                .to_string(),
+            "Error during planning: Use FILL LINEAR on Non-numeric DataType Boolean"
+        );
+        assert_eq!(
+            Fill::try_from_str("WHAT", &DataType::UInt8)
+                .unwrap_err()
+                .to_string(),
+                "Error during planning: WHAT is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string 'WHAT' to value of UInt8 type }"
+        );
+        assert_eq!(
+            Fill::try_from_str("8.0", &DataType::UInt8)
+                .unwrap_err()
+                .to_string(),
+                "Error during planning: 8.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '8.0' to value of UInt8 type }"
+        );
+        assert!(
+            Fill::try_from_str("8", &DataType::UInt8).unwrap()
+                == Fill::Const(ScalarValue::UInt8(Some(8)))
+        );
+        let mut test1 = vec![
+            ScalarValue::UInt8(Some(8)),
+            ScalarValue::UInt8(None),
+            ScalarValue::UInt8(Some(9)),
+        ];
+        Fill::Null.apply_fill_strategy(&mut test1).unwrap();
+        assert_eq!(test1[1], ScalarValue::UInt8(None));
+        Fill::Prev.apply_fill_strategy(&mut test1).unwrap();
+        assert_eq!(test1[1], ScalarValue::UInt8(Some(8)));
+        test1[1] = ScalarValue::UInt8(None);
+        Fill::Const(ScalarValue::UInt8(Some(10)))
+            .apply_fill_strategy(&mut test1)
+            .unwrap();
+        assert_eq!(test1[1], ScalarValue::UInt8(Some(10)));
+        test1[1] = ScalarValue::UInt8(None);
+        assert_eq!(
+            Fill::Linear
+                .apply_fill_strategy(&mut test1)
+                .unwrap_err()
+                .to_string(),
+            "Execution error: RangePlan: Apply Fill LINEAR strategy on Non-floating type"
+        );
+        let mut test2 = vec![
+            ScalarValue::Float32(Some(8.0)),
+            ScalarValue::Float32(None),
+            ScalarValue::Float32(Some(9.0)),
+        ];
+        Fill::Linear.apply_fill_strategy(&mut test2).unwrap();
+        assert_eq!(test2[1], ScalarValue::Float32(Some(8.5)));
     }
 }

@@ -14,7 +14,7 @@
 
 use std::ops::Deref;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, Value};
@@ -28,7 +28,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, Error, OtherSnafu, Result};
+use crate::error::{self, Error, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -148,7 +148,11 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             .await?
                         }
                         Err(e) => {
-                            return Err(e).map_err(BoxedError::new).context(OtherSnafu);
+                            let err = e.to_string();
+                            row_writer
+                                .finish_error(ErrorKind::ER_INTERNAL_ERROR, &err.as_bytes())
+                                .await?;
+                            return Ok(());
                         }
                     }
                 }

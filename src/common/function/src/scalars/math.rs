@@ -58,9 +58,15 @@ impl Function for RangeFunction {
         "range_fn"
     }
 
-    // range_fn will never been used, return_type could be arbitrary value, is not important
-    fn return_type(&self, _input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
-        Ok(ConcreteDataType::float64_datatype())
+    // The first argument to range_fn is the expression to be evaluated
+    fn return_type(&self, input_types: &[ConcreteDataType]) -> Result<ConcreteDataType> {
+        input_types
+            .first()
+            .cloned()
+            .ok_or(DataFusionError::Internal(
+                "No expr found in range_fn".into(),
+            ))
+            .context(GeneralDataFusionSnafu)
     }
 
     /// `range_fn` will never been used. As long as a legal signature is returned, the specific content of the signature does not matter.

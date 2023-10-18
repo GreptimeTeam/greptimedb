@@ -274,6 +274,9 @@ pub enum Error {
 
     #[snafu(display("Missing table mutation handler"))]
     MissingTableMutationHandler { location: Location },
+
+    #[snafu(display("Range Query: {}", msg))]
+    RangeQuery { msg: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -281,7 +284,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            QueryParse { .. } | MultipleStatements { .. } => StatusCode::InvalidSyntax,
+            QueryParse { .. } | MultipleStatements { .. } | RangeQuery { .. } => {
+                StatusCode::InvalidSyntax
+            }
             UnsupportedExpr { .. }
             | Unimplemented { .. }
             | CatalogNotFound { .. }

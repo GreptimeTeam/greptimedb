@@ -1,0 +1,82 @@
+CREATE TABLE host (
+  ts timestamp(3) time index,
+  host STRING PRIMARY KEY,
+  val BIGINT,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host VALUES
+    (0,     'host1', 0),
+    (5000,  'host1', null),
+    (10000, 'host1', 1),
+    (15000, 'host1', null),
+    (20000, 'host1', 2),
+    (0,     'host2', 3),
+    (5000,  'host2', null),
+    (10000, 'host2', 4),
+    (15000, 'host2', null),
+    (20000, 'host2', 5);
+
+Affected Rows: 10
+
+-- Test Invalid cases
+-- 1. error timestamp
+SELECT min(val) RANGE 'not_time' FROM host ALIGN '5s';
+
+Error: 2000(InvalidSyntax), sql parser error: not a valid duration string: not_time
+
+SELECT min(val) RANGE '5s' FROM host ALIGN 'not_time';
+
+Error: 2000(InvalidSyntax), sql parser error: not a valid duration string: not_time
+
+-- 2.1 no range param
+SELECT min(val) FROM host ALIGN '5s';
+
+Error: 2000(InvalidSyntax), sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+
+SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
+
+Error: 1003(Internal), No field named "MAX(host.val)". Valid fields are "MIN(host.val) RANGE 10s FILL NULL", host.ts, host.host.
+
+SELECT min(val) * 2 RANGE '10s' FROM host ALIGN '5s';
+
+Error: 2000(InvalidSyntax), sql parser error: Can't use the RANGE keyword in Expr 2 without function
+
+SELECT 1 RANGE '10s' FILL NULL FROM host ALIGN '1h' FILL NULL;
+
+Error: 2000(InvalidSyntax), sql parser error: Can't use the RANGE keyword in Expr 1 without function
+
+-- 2.2 no align param
+SELECT min(val) RANGE '5s' FROM host;
+
+Error: 1003(Internal), Error during planning: Missing argument in range select query
+
+-- 2.3 type mismatch
+SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
+
+Error: 1003(Internal), Internal error: Unsupported data type Int64 for function ceil. This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+
+-- 2.4 nest query
+SELECT min(max(val) RANGE '20s') RANGE '20s' FROM host ALIGN '10s';
+
+Error: 2000(InvalidSyntax), Range Query: Nest Range Query is not allowed
+
+-- 2.5 wrong Aggregate
+SELECT rank() OVER (PARTITION BY host ORDER BY ts DESC) RANGE '10s' FROM host ALIGN '5s';
+
+Error: 2000(InvalidSyntax), Range Query: Window functions is not allowed in Range Query
+
+-- 2.6 invalid fill
+SELECT min(val) RANGE '5s', min(val) RANGE '5s' FILL NULL FROM host ALIGN '5s';
+
+Error: 1003(Internal), Schema contains duplicate unqualified field name "MIN(host.val) RANGE 5s FILL NULL"
+
+SELECT min(val) RANGE '5s' FROM host ALIGN '5s' FILL 3.0;
+
+Error: 1003(Internal), Error during planning: 3.0 is not a valid fill option, fail to convert to a const value. { Arrow error: Cast error: Cannot cast string '3.0' to value of Int64 type }
+
+DROP TABLE host;
+
+Affected Rows: 0
+
