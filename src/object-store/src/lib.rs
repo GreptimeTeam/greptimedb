@@ -19,7 +19,9 @@ pub use opendal::{
     Operator as ObjectStore, Reader, Result, Writer,
 };
 
+pub mod error;
 pub mod layers;
 mod metrics;
+pub mod object_store_manager;
 pub mod test_util;
 pub mod util;

@@ -5965,6 +5965,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "common-error",
+ "common-macro",
  "common-runtime",
  "common-telemetry",
  "common-test-util",
@@ -5973,6 +5975,7 @@ dependencies = [
  "metrics",
  "moka",
  "opendal",
+ "snafu",
  "tokio",
  "uuid",
 ]
