@@ -2235,13 +2235,10 @@ mod tests {
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Ref {
                 val: &ListValue {
-                    items: Some(Box::new(
-                        vec![
-                            Value::String("hello world".into()),
-                            Value::String("greptimedb".into()),
-                        ]
-                        .into(),
-                    )),
+                    items: Some(Box::new(vec![
+                        Value::String("hello world".into()),
+                        Value::String("greptimedb".into()),
+                    ])),
                     datatype: ConcreteDataType::string_datatype(),
                 },
             }),
