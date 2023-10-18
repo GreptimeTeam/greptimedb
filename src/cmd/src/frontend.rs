@@ -201,7 +201,7 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         instance
-            .build_servers(&opts)
+            .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;
 

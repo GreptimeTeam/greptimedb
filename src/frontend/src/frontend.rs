@@ -76,6 +76,16 @@ impl FrontendOptions {
     }
 }
 
+pub trait TomlSerializable {
+    fn to_toml(&self) -> String;
+}
+
+impl TomlSerializable for FrontendOptions {
+    fn to_toml(&self) -> String {
+        toml::to_string(&self).unwrap()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

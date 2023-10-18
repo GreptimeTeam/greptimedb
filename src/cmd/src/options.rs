@@ -16,7 +16,7 @@ use common_config::KvBackendConfig;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
-use frontend::frontend::FrontendOptions;
+use frontend::frontend::{FrontendOptions, TomlSerializable};
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -27,6 +27,7 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 /// Options mixed up from datanode, frontend and metasrv.
+#[derive(Serialize)]
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,
@@ -34,6 +35,18 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
+}
+
+impl From<MixOptions> for FrontendOptions {
+    fn from(value: MixOptions) -> Self {
+        value.frontend
+    }
+}
+
+impl TomlSerializable for MixOptions {
+    fn to_toml(&self) -> String {
+        toml::to_string(self).unwrap()
+    }
 }
 
 pub enum Options {

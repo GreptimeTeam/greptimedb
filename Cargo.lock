@@ -9263,6 +9263,7 @@ dependencies = [
  "catalog",
  "chrono",
  "client",
+ "cmd",
  "common-base",
  "common-catalog",
  "common-config",

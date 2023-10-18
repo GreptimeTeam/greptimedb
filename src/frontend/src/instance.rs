@@ -88,7 +88,7 @@ use crate::error::{
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
     TableOperationSnafu,
 };
-use crate::frontend::FrontendOptions;
+use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics;
@@ -358,7 +358,10 @@ impl Instance {
         })
     }
 
-    pub async fn build_servers(&mut self, opts: &FrontendOptions) -> Result<()> {
+    pub async fn build_servers(
+        &mut self,
+        opts: impl Into<FrontendOptions> + TomlSerializable,
+    ) -> Result<()> {
         let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
         self.servers = Arc::new(servers);
 

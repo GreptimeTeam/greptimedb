@@ -32,6 +32,7 @@ use datanode::config::{
     AzblobConfig, DatanodeOptions, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
     StorageConfig,
 };
+use frontend::frontend::TomlSerializable;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
 use object_store::services::{Azblob, Gcs, Oss, S3};
@@ -376,7 +377,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
             instance.instance.clone(),
         ))
         .with_script_handler(instance.instance.clone())
-        .with_greptime_config_options(instance.datanode_opts.to_toml_string());
+        .with_greptime_config_options(instance.mix_options.to_toml());
 
     if let Some(user_provider) = user_provider {
         http_server.with_user_provider(user_provider);

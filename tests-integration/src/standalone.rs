@@ -15,12 +15,15 @@
 use std::sync::Arc;
 
 use catalog::kvbackend::KvBackendCatalogManager;
+use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_procedure::options::ProcedureConfig;
+use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
+use frontend::frontend::FrontendOptions;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -28,6 +31,7 @@ use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, Test
 pub struct GreptimeDbStandalone {
     pub instance: Arc<Instance>,
     pub datanode_opts: DatanodeOptions,
+    pub mix_options: MixOptions,
     pub guard: TestGuard,
 }
 
@@ -66,10 +70,12 @@ impl GreptimeDbStandaloneBuilder {
 
         let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, &self.instance_name);
 
+        let procedure_config = ProcedureConfig::default();
+        let kv_backend_config = KvBackendConfig::default();
         let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
             format!("{}/kv", &opts.storage.data_home),
-            KvBackendConfig::default(),
-            ProcedureConfig::default(),
+            kv_backend_config.clone(),
+            procedure_config.clone(),
         )
         .await
         .unwrap();
@@ -110,7 +116,15 @@ impl GreptimeDbStandaloneBuilder {
 
         GreptimeDbStandalone {
             instance: Arc::new(instance),
-            datanode_opts: opts,
+            datanode_opts: opts.clone(),
+            mix_options: MixOptions {
+                data_home: opts.storage.data_home.to_string(),
+                procedure: procedure_config,
+                metadata_store: kv_backend_config,
+                frontend: FrontendOptions::default(),
+                datanode: opts,
+                logging: LoggingOptions::default(),
+            },
             guard,
         }
     }
