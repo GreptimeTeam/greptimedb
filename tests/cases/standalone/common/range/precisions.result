@@ -1,0 +1,44 @@
+CREATE TABLE host_sec (
+  ts timestamp(0) time index,
+  host STRING PRIMARY KEY,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host_sec VALUES
+    (0,  'host1', 0),
+    (5,  'host1', null),
+    (10, 'host1', 1),
+    (15, 'host1', null),
+    (20, 'host1', 2),
+    (0,  'host2', 3),
+    (5,  'host2', null),
+    (10, 'host2', 4),
+    (15, 'host2', null),
+    (20, 'host2', 5);
+
+Affected Rows: 10
+
+-- Test on Timestamps of different precisions
+SELECT ts, host, min(val) RANGE '5s' FROM host_sec ALIGN '5s' ORDER BY host, ts;
+
++---------------------+-------+--------------------------------------+
+| ts                  | host  | MIN(host_sec.val) RANGE 5s FILL NULL |
++---------------------+-------+--------------------------------------+
+| 1970-01-01T00:00:00 | host1 | 0.0                                  |
+| 1970-01-01T00:00:05 | host1 |                                      |
+| 1970-01-01T00:00:10 | host1 | 1.0                                  |
+| 1970-01-01T00:00:15 | host1 |                                      |
+| 1970-01-01T00:00:20 | host1 | 2.0                                  |
+| 1970-01-01T00:00:00 | host2 | 3.0                                  |
+| 1970-01-01T00:00:05 | host2 |                                      |
+| 1970-01-01T00:00:10 | host2 | 4.0                                  |
+| 1970-01-01T00:00:15 | host2 |                                      |
+| 1970-01-01T00:00:20 | host2 | 5.0                                  |
++---------------------+-------+--------------------------------------+
+
+DROP TABLE host_sec;
+
+Affected Rows: 0
+

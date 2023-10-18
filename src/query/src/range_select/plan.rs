@@ -115,7 +115,7 @@ impl Fill {
                         }
                     }
                     Fill::Linear => {
-                        if 1 <= i && i <= len - 2 {
+                        if 0 < i && i < len - 1 {
                             match (&data[i - 1], &data[i + 1]) {
                                 (ScalarValue::Float64(Some(a)), ScalarValue::Float64(Some(b))) => {
                                     data[i] = ScalarValue::Float64(Some((a + b) / 2.0));
