@@ -14,7 +14,6 @@
 
 use std::cmp::Ordering;
 use std::fmt::{Display, Formatter};
-use std::mem::size_of;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -656,14 +655,15 @@ impl ListValue {
         ))
     }
 
-    fn byte_size(&self) -> usize {
-        let mut size = size_of::<ConcreteDataType>();
-        if let Some(items) = self.items() {
-            for item in items.iter() {
-                size += item.as_value_ref().byte_size();
+    /// use 'the first item size' * 'length of items' to estimate the size.
+    /// it could be inaccurate.
+    fn estimated_size(&self) -> usize {
+        if let Some(items) = &self.items {
+            if let Some(item) = items.first() {
+                return item.as_value_ref().data_size() * items.len();
             }
         }
-        size
+        0
     }
 }
 
@@ -1102,7 +1102,9 @@ impl<'a> PartialOrd for ListValueRef<'a> {
 }
 
 impl<'a> ValueRef<'a> {
-    pub fn byte_size(&self) -> usize {
+    /// Returns the size of the underlying data in bytes,
+    /// The size is estimated and only considers the data size.
+    pub fn data_size(&self) -> usize {
         match *self {
             ValueRef::Null => 0,
             ValueRef::Boolean(_) => 1,
@@ -1125,8 +1127,8 @@ impl<'a> ValueRef<'a> {
             ValueRef::Duration(_) => 16,
             ValueRef::Interval(_) => 24,
             ValueRef::List(v) => match v {
-                ListValueRef::Indexed { vector, idx } => vector.get(idx).as_value_ref().byte_size(),
-                ListValueRef::Ref { val } => val.byte_size(),
+                ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
+                ListValueRef::Ref { val } => val.estimated_size(),
             },
         }
     }
@@ -2203,7 +2205,7 @@ mod tests {
     }
 
     fn check_value_ref_size_eq(value_ref: &ValueRef, size: usize) {
-        assert_eq!(value_ref.byte_size(), size);
+        assert_eq!(value_ref.data_size(), size);
     }
 
     #[test]
@@ -2242,7 +2244,7 @@ mod tests {
                     datatype: ConcreteDataType::string_datatype(),
                 },
             }),
-            11 + 10 + 24,
+            22,
         );
 
         let data = vec![
@@ -2270,21 +2272,21 @@ mod tests {
                 vector: &vector,
                 idx: 0,
             }),
-            36,
+            85,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 1,
             }),
-            0,
+            85,
         );
         check_value_ref_size_eq(
             &ValueRef::List(ListValueRef::Indexed {
                 vector: &vector,
                 idx: 2,
             }),
-            32,
+            85,
         )
     }
 }
