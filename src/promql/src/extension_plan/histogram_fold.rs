@@ -21,7 +21,7 @@ use std::time::Instant;
 use common_recordbatch::RecordBatch as GtRecordBatch;
 use common_telemetry::warn;
 use datafusion::arrow::array::AsArray;
-use datafusion::arrow::compute::{self, concat_batches};
+use datafusion::arrow::compute::{self, concat_batches, SortOptions};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFField, DFSchema, DFSchemaRef};
@@ -52,7 +52,7 @@ use futures::{ready, Stream, StreamExt};
 /// Due to the folding or sampling, the output rows number will become `input_rows` / `bucket_num`.
 ///
 /// # Requirement
-/// - Input should be sorted on `<tag list>, le, ts`. ASC/DES doesn't matter.
+/// - Input should be sorted on `<tag list>, le ASC, ts`.
 /// - The value set of `le` should be same. I.e., buckets of every series should be same.
 ///
 /// [1]: https://prometheus.io/docs/concepts/metric_types/#histogram
@@ -107,6 +107,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
 }
 
 impl HistogramFold {
+    #[allow(dead_code)]
     pub fn new(
         le_column: String,
         field_column: String,
@@ -142,7 +143,7 @@ impl HistogramFold {
                         field: Box::new(Column::new(None::<String>, col)),
                         valid_fields: input_schema
                             .fields()
-                            .into_iter()
+                            .iter()
                             .map(|f| f.qualified_column())
                             .collect(),
                     },
@@ -157,6 +158,7 @@ impl HistogramFold {
         check_column(field_column)
     }
 
+    #[allow(dead_code)]
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let input_schema = self.input.schema();
         // safety: those fields are checked in `check_schema()`
@@ -263,16 +265,35 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
-        let tag_cols = self
+        let mut cols = self
             .tag_col_exprs()
             .into_iter()
             .map(|expr| PhysicalSortRequirement {
                 expr,
                 options: None,
             })
-            .collect();
+            .collect::<Vec<PhysicalSortRequirement>>();
+        // add le ASC
+        cols.push(PhysicalSortRequirement {
+            expr: Arc::new(PhyColumn::new(
+                self.output_schema.field(self.le_column).name(),
+                self.le_column,
+            )),
+            options: Some(SortOptions {
+                descending: false,  // +INF in the last
+                nulls_first: false, // not nullable
+            }),
+        });
+        // add ts
+        cols.push(PhysicalSortRequirement {
+            expr: Arc::new(PhyColumn::new(
+                self.output_schema.field(self.ts_column).name(),
+                self.ts_column,
+            )),
+            options: None,
+        });
 
-        vec![Some(tag_cols)]
+        vec![Some(cols)]
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -479,7 +500,7 @@ impl HistogramFoldStream {
             return Ok(Some(size));
         }
 
-        let inf_pos = self.find_positive_inf(&batch)?;
+        let inf_pos = self.find_positive_inf(batch)?;
         if inf_pos == batch.num_rows() {
             // no positive inf found, append to buffer and wait for next batch
             self.push_input_buf(batch.clone());
@@ -577,17 +598,17 @@ impl HistogramFoldStream {
         // overwrite default list datatype to change field name
         columns[self.le_index] = compute::cast(
             &columns[self.le_index],
-            &self.output_schema.field(self.le_index).data_type(),
+            self.output_schema.field(self.le_index).data_type(),
         )?;
         columns[self.field_index] = compute::cast(
             &columns[self.field_index],
-            &self.output_schema.field(self.field_index).data_type(),
+            self.output_schema.field(self.field_index).data_type(),
         )?;
 
         self.output_buffered_rows = 0;
         RecordBatch::try_new(self.output_schema.clone(), columns)
             .map(Some)
-            .map_err(|e| DataFusionError::ArrowError(e))
+            .map_err(DataFusionError::ArrowError)
     }
 
     /// Find the first `+Inf` which indicates the end of the bucket group
