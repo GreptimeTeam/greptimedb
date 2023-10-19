@@ -41,22 +41,40 @@ pub type BoxedTaskFunction<E> = Box<dyn TaskFunction<E> + Send + Sync + 'static>
 struct TaskInner<E> {
     /// The repeated task handle. This handle is Some if the task is started.
     task_handle: Option<JoinHandle<()>>,
+
     /// The task_fn to run. This is Some if the task is not started.
     task_fn: Option<BoxedTaskFunction<E>>,
+
     /// Generates the next interval.
     interval_generator: Option<Box<dyn IntervalGenerator>>,
 }
 
 pub trait IntervalGenerator: Send + Sync {
+    /// return the next interval.
     fn next(&mut self) -> Duration;
-    fn is_regular(&self) -> bool {
-        true
+
+    /// return whether the interval is regular and the interval if it is regular.
+    fn is_regular(&self) -> (bool, Option<Duration>);
+}
+
+impl std::fmt::Debug for dyn IntervalGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut binding = f.debug_struct("IntervalGenerator");
+        let mut builder = binding.field("is_regular", &self.is_regular().0);
+        if self.is_regular().0 {
+            builder = builder.field("interval", &self.is_regular().1);
+        }
+        builder.finish()
     }
 }
 
 impl IntervalGenerator for Duration {
     fn next(&mut self) -> Duration {
         *self
+    }
+
+    fn is_regular(&self) -> (bool, Option<Duration>) {
+        (true, Some(*self))
     }
 }
 
@@ -66,12 +84,12 @@ impl From<Duration> for Box<dyn IntervalGenerator> {
     }
 }
 
-pub struct ImmediatelyInterval {
+pub struct FirstZeroInterval {
     first: bool,
     interval: Duration,
 }
 
-impl ImmediatelyInterval {
+impl FirstZeroInterval {
     pub fn new(interval: Duration) -> Self {
         Self {
             first: false,
@@ -80,7 +98,7 @@ impl ImmediatelyInterval {
     }
 }
 
-impl IntervalGenerator for ImmediatelyInterval {
+impl IntervalGenerator for FirstZeroInterval {
     fn next(&mut self) -> Duration {
         if !self.first {
             self.first = true;
@@ -90,13 +108,13 @@ impl IntervalGenerator for ImmediatelyInterval {
         }
     }
 
-    fn is_regular(&self) -> bool {
-        false
+    fn is_regular(&self) -> (bool, Option<Duration>) {
+        (false, None)
     }
 }
 
-impl From<ImmediatelyInterval> for Box<dyn IntervalGenerator> {
-    fn from(value: ImmediatelyInterval) -> Self {
+impl From<FirstZeroInterval> for Box<dyn IntervalGenerator> {
+    fn from(value: FirstZeroInterval) -> Self {
         Box::new(value)
     }
 }
@@ -163,11 +181,7 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         // Safety: The task is not started.
         let mut task_fn = inner.task_fn.take().unwrap();
         let interval = interval_generator.next();
-        let interval_str = if interval_generator.is_regular() {
-            format!("{:?}", interval)
-        } else {
-            "irregular".to_string()
-        };
+        let interval_str = format!("{:?}", interval_generator);
         // TODO(hl): Maybe spawn to a blocking runtime.
         let handle = runtime.spawn(async move {
             let sleep = tokio::time::sleep(interval);
@@ -269,7 +283,7 @@ mod tests {
 
         let n = Arc::new(AtomicI32::new(0));
         let task_fn = TickTask { n: n.clone() };
-        let interval = ImmediatelyInterval::new(Duration::from_millis(100));
+        let interval = FirstZeroInterval::new(Duration::from_millis(100));
         let task = RepeatedTask::new(interval, Box::new(task_fn));
 
         task.start(crate::bg_runtime()).unwrap();
