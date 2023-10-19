@@ -111,9 +111,7 @@ pub async fn put(
         };
 
         for (idx, data_point) in data_points.into_iter().enumerate() {
-            let result = opentsdb_handler
-                .exec(vec![data_point.clone()], ctx.clone())
-                .await;
+            let result = opentsdb_handler.exec(vec![data_point], ctx.clone()).await;
             match result {
                 Ok(affected_rows) => response.on_success(affected_rows),
                 Err(e) => {
