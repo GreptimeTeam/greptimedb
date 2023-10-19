@@ -19,6 +19,8 @@ use snafu::ensure;
 use crate::error::Result;
 use crate::{error, ObjectStore};
 
+/// Manages multiple object stores so that users can configure a storage for each table.
+/// This struct certainly have one default object storage, and can have zero or more object stores.
 pub struct ObjectStoreManager {
     stores: HashMap<String, ObjectStore>,
     default_object_store: String,
