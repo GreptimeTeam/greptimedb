@@ -38,7 +38,7 @@ impl OpentsdbProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
             .context(AuthSnafu)?;
 
-        let (requests, no_of_rows) = data_point_to_grpc_row_insert_requests(data_points)?;
+        let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
         let output = self
             .handle_row_inserts(requests, ctx)
             .await
@@ -47,7 +47,7 @@ impl OpentsdbProtocolHandler for Instance {
 
         Ok(match output {
             common_query::Output::AffectedRows(rows) => rows,
-            _ => no_of_rows,
+            _ => unreachable!(),
         })
     }
 }

@@ -141,9 +141,10 @@ pub fn data_point_to_grpc_row_insert_requests(
         let tags = data_point.tags().clone();
         let value = data_point.value();
         let timestamp = data_point.ts_millis();
+        //length of tags + 1 extra column for greptime_timestamp
         let num_columns = tags.len() + 1;
 
-        let table_data = multi_table_data.get_or_default_table_data(table_name, num_columns, 0);
+        let table_data = multi_table_data.get_or_default_table_data(table_name, num_columns, 1);
         let mut one_row = table_data.alloc_one_row();
 
         //tags
