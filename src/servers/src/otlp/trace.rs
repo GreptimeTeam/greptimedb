@@ -126,6 +126,7 @@ pub fn vec_kv_to_string(vec: &[KeyValue]) -> String {
 
     serde_json::to_string(&vs).unwrap_or_else(|_| "{}".into())
 }
+
 pub fn kvlist_to_string(kvlist: &KeyValueList) -> String {
     vec_kv_to_string(&kvlist.values)
 }
@@ -247,4 +248,117 @@ fn write_span_timestamp(writer: &mut TableData, row: &mut Vec<Value>, span: &Spa
         Precision::Nanosecond,
         row,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use common_time::time::Time;
+    use opentelemetry_proto::tonic::common::v1::{
+        any_value, AnyValue, ArrayValue, KeyValue, KeyValueList,
+    };
+    use opentelemetry_proto::tonic::trace::v1::span::Event;
+    use opentelemetry_proto::tonic::trace::v1::Status;
+    use serde_json::json;
+
+    use crate::otlp::trace::{
+        arr_vals_to_string, bytes_to_hex_string, event_to_string, kvlist_to_string,
+        status_to_string, vec_kv_to_string,
+    };
+
+    #[test]
+    fn test_bytes_to_hex_string() {
+        assert_eq!(
+            "24fe79948641b110a29bc27859307e8d",
+            bytes_to_hex_string(&vec![
+                36, 254, 121, 148, 134, 65, 177, 16, 162, 155, 194, 120, 89, 48, 126, 141,
+            ])
+        );
+
+        assert_eq!(
+            "baffeedd7b8debc0",
+            bytes_to_hex_string(&vec![186, 255, 238, 221, 123, 141, 235, 192,])
+        );
+    }
+
+    #[test]
+    fn test_arr_vals_to_string() {
+        assert_eq!("[]", arr_vals_to_string(&ArrayValue { values: vec![] }));
+
+        let arr = ArrayValue {
+            values: vec![
+                AnyValue {
+                    value: Some(any_value::Value::StringValue("string_value".into())),
+                },
+                AnyValue {
+                    value: Some(any_value::Value::BoolValue(true)),
+                },
+                AnyValue {
+                    value: Some(any_value::Value::IntValue(1)),
+                },
+                AnyValue {
+                    value: Some(any_value::Value::DoubleValue(1.2)),
+                },
+            ],
+        };
+        let expect = json!(["string_value", "true", "1", "1.2"]).to_string();
+        assert_eq!(expect, arr_vals_to_string(&arr));
+    }
+
+    #[test]
+    fn test_kv_list_to_string() {
+        let kvlist = KeyValueList {
+            values: vec![KeyValue {
+                key: "str_key".into(),
+                value: Some(AnyValue {
+                    value: Some(any_value::Value::StringValue("val1".into())),
+                }),
+            }],
+        };
+        let expect = json!({
+            "str_key": "val1",
+        })
+        .to_string();
+        assert_eq!(expect, kvlist_to_string(&kvlist))
+    }
+
+    #[test]
+    fn test_event_to_string() {
+        let attributes = vec![KeyValue {
+            key: "str_key".into(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue("val1".into())),
+            }),
+        }];
+        let event = Event {
+            time_unix_nano: 1697620662450128000_u64,
+            name: "event_name".into(),
+            attributes,
+            dropped_attributes_count: 0,
+        };
+        let event_string = event_to_string(&event);
+        let expect = json!({
+            "name": event.name,
+            "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
+            "attrs": vec_kv_to_string(&event.attributes),
+        });
+
+        assert_eq!(
+            expect,
+            serde_json::from_str::<serde_json::value::Value>(event_string.as_str()).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_status_to_string() {
+        let message = String::from("status message");
+        let status = Status {
+            code: 1,
+            message: message.clone(),
+        };
+
+        assert_eq!(
+            ("STATUS_CODE_OK".into(), message),
+            status_to_string(&Some(status)),
+        );
+    }
 }
