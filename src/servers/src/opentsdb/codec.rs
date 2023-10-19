@@ -115,6 +115,10 @@ impl DataPoint {
         &self.tags
     }
 
+    pub fn tags_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.tags
+    }
+
     pub fn ts_millis(&self) -> i64 {
         self.ts_millis
     }

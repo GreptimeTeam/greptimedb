@@ -38,7 +38,7 @@ impl OpentsdbProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
             .context(AuthSnafu)?;
 
-        let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
+        let (requests, _) = data_point_to_grpc_row_insert_requests(data_points.to_vec())?;
         let output = self
             .handle_row_inserts(requests, ctx)
             .await
