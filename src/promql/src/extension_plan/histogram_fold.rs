@@ -566,6 +566,8 @@ impl HistogramFoldStream {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use datafusion::arrow::array::Float64Array;
     use datafusion::arrow::datatypes::Schema;
     use datafusion::common::ToDFSchema;
@@ -675,7 +677,32 @@ mod test {
         assert_eq!(result_literal, expected);
     }
 
-    // test schema
+    #[test]
+    fn confirm_schema() {
+        let input_schema = Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+        ])
+        .to_dfschema_ref()
+        .unwrap();
+        let expected_output_schema = Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new(
+                "le",
+                DataType::List(Arc::new(Field::new("le", DataType::Float64, true))),
+                false,
+            ),
+            Field::new(
+                "val",
+                DataType::List(Arc::new(Field::new("val", DataType::Float64, true))),
+                false,
+            ),
+        ])
+        .to_dfschema_ref()
+        .unwrap();
 
-    // test bucket num
+        let actual = HistogramFold::convert_schema(&input_schema, "le", "val").unwrap();
+        assert_eq!(actual, expected_output_schema)
+    }
 }
