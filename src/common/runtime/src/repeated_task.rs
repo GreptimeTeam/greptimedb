@@ -50,6 +50,7 @@ pub struct RepeatedTask<E> {
     inner: Mutex<TaskInner<E>>,
     started: AtomicBool,
     interval: Duration,
+    prior_exec: bool,
 }
 
 impl<E> std::fmt::Display for RepeatedTask<E> {
@@ -85,11 +86,35 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             }),
             started: AtomicBool::new(false),
             interval,
+            prior_exec: false,
         }
+    }
+
+    pub fn new_prior_exec(interval: Duration, task_fn: BoxedTaskFunction<E>) -> Self {
+        let mut task = Self::new(interval, task_fn);
+        task.set_prior_exec(true);
+        task
+    }
+
+    fn set_prior_exec(&mut self, prior_exec: bool) {
+        self.prior_exec = prior_exec;
     }
 
     pub fn started(&self) -> bool {
         self.started.load(Ordering::Relaxed)
+    }
+
+    async fn sleep_or_canceled(interval: &Duration, child: &CancellationToken) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(*interval) => { false }
+            _ = child.cancelled() => { true }
+        }
+    }
+
+    async fn run(task_fn: &mut Box<dyn TaskFunction<E> + Send + Sync>) {
+        if let Err(e) = task_fn.call().await {
+            logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
+        }
     }
 
     pub fn start(&self, runtime: Runtime) -> Result<()> {
@@ -103,17 +128,20 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         let child = self.cancel_token.child_token();
         // Safety: The task is not started.
         let mut task_fn = inner.task_fn.take().unwrap();
+        let prior_exec = self.prior_exec;
         // TODO(hl): Maybe spawn to a blocking runtime.
         let handle = runtime.spawn(async move {
             loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = child.cancelled() => {
-                        return;
+                if prior_exec {
+                    Self::run(&mut task_fn).await;
+                    if Self::sleep_or_canceled(&interval, &child).await {
+                        break;
                     }
-                }
-                if let Err(e) = task_fn.call().await {
-                    logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
+                } else {
+                    if Self::sleep_or_canceled(&interval, &child).await {
+                        break;
+                    }
+                    Self::run(&mut task_fn).await;
                 }
             }
         });
@@ -191,5 +219,21 @@ mod tests {
         task.stop().await.unwrap();
 
         assert_eq!(n.load(Ordering::Relaxed), 5);
+    }
+
+    #[tokio::test]
+    async fn test_repeated_task_prior_exec() {
+        common_telemetry::init_default_ut_logging();
+
+        let n = Arc::new(AtomicI32::new(0));
+        let task_fn = TickTask { n: n.clone() };
+
+        let task = RepeatedTask::new_prior_exec(Duration::from_millis(100), Box::new(task_fn));
+
+        task.start(crate::bg_runtime()).unwrap();
+        tokio::time::sleep(Duration::from_millis(550)).await;
+        task.stop().await.unwrap();
+
+        assert_eq!(n.load(Ordering::Relaxed), 6);
     }
 }
