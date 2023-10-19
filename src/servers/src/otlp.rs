@@ -15,3 +15,7 @@
 pub mod metrics;
 pub mod plugin;
 pub mod trace;
+
+const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
+const GREPTIME_VALUE: &str = "greptime_value";
+const GREPTIME_COUNT: &str = "greptime_count";

@@ -18,12 +18,10 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::common::v1::{any_value, KeyValue};
 use opentelemetry_proto::tonic::metrics::v1::{metric, number_data_point, *};
 
+use super::{GREPTIME_COUNT, GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
-const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
-const GREPTIME_VALUE: &str = "greptime_value";
-const GREPTIME_COUNT: &str = "greptime_count";
 /// the default column count for table writer
 const APPROXIMATE_COLUMN_COUNT: usize = 8;
 
