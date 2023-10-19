@@ -29,7 +29,7 @@ use crate::instance::Instance;
 impl OpentsdbProtocolHandler for Instance {
     async fn exec(
         &self,
-        data_points: &[DataPoint],
+        data_points: Vec<DataPoint>,
         ctx: QueryContextRef,
     ) -> server_error::Result<usize> {
         self.plugins
@@ -38,7 +38,7 @@ impl OpentsdbProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
             .context(AuthSnafu)?;
 
-        let (requests, _) = data_point_to_grpc_row_insert_requests(data_points.to_vec())?;
+        let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
         let output = self
             .handle_row_inserts(requests, ctx)
             .await

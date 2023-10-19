@@ -91,7 +91,7 @@ pub async fn put(
         .collect::<Vec<_>>();
 
     let response = if !summary && !details {
-        if let Err(e) = opentsdb_handler.exec(&data_points, ctx.clone()).await {
+        if let Err(e) = opentsdb_handler.exec(data_points, ctx.clone()).await {
             // Not debugging purpose, failed fast.
             return error::InternalSnafu {
                 err_msg: e.to_string(),
@@ -112,7 +112,7 @@ pub async fn put(
 
         for (idx, data_point) in data_points.into_iter().enumerate() {
             let result = opentsdb_handler
-                .exec(&[data_point.clone()], ctx.clone())
+                .exec(vec![data_point.clone()], ctx.clone())
                 .await;
             match result {
                 Ok(affected_rows) => response.on_success(affected_rows),

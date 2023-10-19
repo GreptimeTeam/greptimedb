@@ -51,7 +51,7 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyInstance {
-    async fn exec(&self, data_points: &[DataPoint], _ctx: QueryContextRef) -> Result<usize> {
+    async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
         let data_point = data_points.first().unwrap();
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {

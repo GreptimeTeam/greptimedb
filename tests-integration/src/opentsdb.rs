@@ -73,7 +73,7 @@ mod tests {
         let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
 
         let data_points = vec![data_point1, data_point2, data_point3];
-        instance.exec(&data_points, ctx.clone()).await.unwrap();
+        instance.exec(data_points, ctx.clone()).await.unwrap();
 
         let output = instance
             .do_query(

@@ -37,7 +37,7 @@ struct DummyOpentsdbInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
-    async fn exec(&self, data_points: &[DataPoint], _ctx: QueryContextRef) -> Result<usize> {
+    async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
         let metric = data_points.first().unwrap().metric();
         if metric == "should_failed" {
             return server_error::InternalSnafu {
