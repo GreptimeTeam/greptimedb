@@ -33,7 +33,7 @@ use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 16;
-const TRACE_TABLE_NAME: &str = "traces_preview";
+const TRACE_TABLE_NAME: &str = "traces_preview_v01";
 
 /// Convert OpenTelemetry traces to GreptimeDB row insert requests
 ///
@@ -87,9 +87,9 @@ fn write_span(
 
 fn write_span_tags(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) -> Result<()> {
     let iter = vec![
-        ("trace_id", bytes_to_string(&span.trace_id)),
-        ("span_id", bytes_to_string(&span.span_id)),
-        ("parent_span_id", bytes_to_string(&span.parent_span_id)),
+        ("trace_id", bytes_to_hex_string(&span.trace_id)),
+        ("span_id", bytes_to_hex_string(&span.span_id)),
+        ("parent_span_id", bytes_to_hex_string(&span.parent_span_id)),
     ]
     .into_iter()
     .map(|(col, val)| (col.into(), val));
@@ -97,11 +97,11 @@ fn write_span_tags(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) ->
     row_writer::write_tags(writer, iter, row)
 }
 
-fn bytes_to_string(bs: &[u8]) -> String {
+pub fn bytes_to_hex_string(bs: &[u8]) -> String {
     bs.iter().map(|b| format!("{:02x}", b)).join("")
 }
 
-fn arr_vals_to_string(arr: &ArrayValue) -> String {
+pub fn arr_vals_to_string(arr: &ArrayValue) -> String {
     let vs: Vec<String> = arr
         .values
         .iter()
@@ -111,7 +111,7 @@ fn arr_vals_to_string(arr: &ArrayValue) -> String {
     serde_json::to_string(&vs).unwrap_or_else(|_| "[]".into())
 }
 
-fn vec_kv_to_string(vec: &[KeyValue]) -> String {
+pub fn vec_kv_to_string(vec: &[KeyValue]) -> String {
     let vs: HashMap<String, String> = vec
         .iter()
         .map(|kv| {
@@ -126,11 +126,11 @@ fn vec_kv_to_string(vec: &[KeyValue]) -> String {
 
     serde_json::to_string(&vs).unwrap_or_else(|_| "{}".into())
 }
-fn kvlist_to_string(kvlist: &KeyValueList) -> String {
+pub fn kvlist_to_string(kvlist: &KeyValueList) -> String {
     vec_kv_to_string(&kvlist.values)
 }
 
-fn any_value_to_string(val: AnyValue) -> Option<String> {
+pub fn any_value_to_string(val: AnyValue) -> Option<String> {
     val.value.map(|value| match value {
         OtlpValue::StringValue(s) => s,
         OtlpValue::BoolValue(b) => b.to_string(),
@@ -138,11 +138,11 @@ fn any_value_to_string(val: AnyValue) -> Option<String> {
         OtlpValue::DoubleValue(d) => d.to_string(),
         OtlpValue::ArrayValue(arr) => arr_vals_to_string(&arr),
         OtlpValue::KvlistValue(kv) => kvlist_to_string(&kv),
-        OtlpValue::BytesValue(bs) => bytes_to_string(&bs),
+        OtlpValue::BytesValue(bs) => bytes_to_hex_string(&bs),
     })
 }
 
-fn event_to_string(event: &Event) -> String {
+pub fn event_to_string(event: &Event) -> String {
     json!({
         "name": event.name,
         "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
@@ -151,12 +151,12 @@ fn event_to_string(event: &Event) -> String {
     .to_string()
 }
 
-fn events_to_string(events: &[Event]) -> String {
+pub fn events_to_string(events: &[Event]) -> String {
     let v: Vec<String> = events.iter().map(event_to_string).collect();
     serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
 }
 
-fn link_to_string(link: &Link) -> String {
+pub fn link_to_string(link: &Link) -> String {
     json!({
         "trace_id": link.trace_id,
         "span_id": link.span_id,
@@ -166,12 +166,12 @@ fn link_to_string(link: &Link) -> String {
     .to_string()
 }
 
-fn links_to_string(links: &[Link]) -> String {
+pub fn links_to_string(links: &[Link]) -> String {
     let v: Vec<String> = links.iter().map(link_to_string).collect();
     serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
 }
 
-fn status_to_string(status: &Option<Status>) -> (String, String) {
+pub fn status_to_string(status: &Option<Status>) -> (String, String) {
     match status {
         Some(status) => (status.code().as_str_name().into(), status.message.clone()),
         None => ("".into(), "".into()),

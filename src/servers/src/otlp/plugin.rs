@@ -15,22 +15,23 @@
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+
+use crate::error::Result;
 
 /// Transformer helps to transform ExportTraceServiceRequest based on logic, like:
 ///   - uplift some fields from Attributes (Map type) to column
-pub trait TraceTransformer: Send + Sync {
-    fn transform(&self, request: RowInsertRequests) -> RowInsertRequests {
-        request
-    }
+pub trait TraceParser: Send + Sync {
+    fn parse(&self, request: ExportTraceServiceRequest) -> Result<(RowInsertRequests, usize)>;
 }
 
-pub type TraceTransformerRef = Arc<dyn TraceTransformer>;
+pub type TraceParserRef = Arc<dyn TraceParser>;
 
-impl TraceTransformer for Option<&TraceTransformerRef> {
-    fn transform(&self, request: RowInsertRequests) -> RowInsertRequests {
+impl TraceParser for Option<&TraceParserRef> {
+    fn parse(&self, request: ExportTraceServiceRequest) -> Result<(RowInsertRequests, usize)> {
         match self {
-            Some(this) => this.transform(request),
-            None => request,
+            Some(this) => this.parse(request),
+            None => super::trace::to_grpc_insert_requests(request),
         }
     }
 }
