@@ -19,8 +19,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     pkg-config \
     python3.10 \
-    python3.10-dev \
-    python3-pip
+    python3.10-dev
+
+# Remove Python 3.8 and install pip.
+RUN apt-get -y purge python3.8 && \
+    apt-get -y autoremove && \
+    ln -s /usr/bin/python3.10 /usr/bin/python3 && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
 
 RUN git config --global --add safe.directory /greptimedb
 
