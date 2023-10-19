@@ -20,6 +20,7 @@ use common_error::ext::ErrorExt;
 use common_telemetry::logging;
 use snafu::{ensure, ResultExt};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{IllegalStateSnafu, Result, WaitGcTaskStopSnafu};
@@ -42,6 +43,62 @@ struct TaskInner<E> {
     task_handle: Option<JoinHandle<()>>,
     /// The task_fn to run. This is Some if the task is not started.
     task_fn: Option<BoxedTaskFunction<E>>,
+    /// Generates the next interval.
+    interval_generator: Option<Box<dyn IntervalGenerator>>,
+}
+
+pub trait IntervalGenerator: Send + Sync {
+    fn next(&mut self) -> Duration;
+    fn is_regular(&self) -> bool {
+        true
+    }
+}
+
+impl IntervalGenerator for Duration {
+    fn next(&mut self) -> Duration {
+        *self
+    }
+}
+
+impl From<Duration> for Box<dyn IntervalGenerator> {
+    fn from(value: Duration) -> Self {
+        Box::new(value)
+    }
+}
+
+pub struct ImmediatelyInterval {
+    first: bool,
+    interval: Duration,
+}
+
+impl ImmediatelyInterval {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            first: false,
+            interval,
+        }
+    }
+}
+
+impl IntervalGenerator for ImmediatelyInterval {
+    fn next(&mut self) -> Duration {
+        if !self.first {
+            self.first = true;
+            Duration::ZERO
+        } else {
+            self.interval
+        }
+    }
+
+    fn is_regular(&self) -> bool {
+        false
+    }
+}
+
+impl From<ImmediatelyInterval> for Box<dyn IntervalGenerator> {
+    fn from(value: ImmediatelyInterval) -> Self {
+        Box::new(value)
+    }
 }
 
 pub struct RepeatedTask<E> {
@@ -49,8 +106,6 @@ pub struct RepeatedTask<E> {
     cancel_token: CancellationToken,
     inner: Mutex<TaskInner<E>>,
     started: AtomicBool,
-    interval: Duration,
-    prior_exec: bool,
 }
 
 impl<E> std::fmt::Display for RepeatedTask<E> {
@@ -76,45 +131,24 @@ impl<E> Drop for RepeatedTask<E> {
 }
 
 impl<E: ErrorExt + 'static> RepeatedTask<E> {
-    pub fn new(interval: Duration, task_fn: BoxedTaskFunction<E>) -> Self {
+    pub fn new<I: Into<Box<dyn IntervalGenerator>>>(
+        interval: I,
+        task_fn: BoxedTaskFunction<E>,
+    ) -> Self {
         Self {
             name: task_fn.name().to_string(),
             cancel_token: CancellationToken::new(),
             inner: Mutex::new(TaskInner {
                 task_handle: None,
                 task_fn: Some(task_fn),
+                interval_generator: Some(interval.into()),
             }),
             started: AtomicBool::new(false),
-            interval,
-            prior_exec: false,
         }
-    }
-
-    pub fn new_prior_exec(interval: Duration, task_fn: BoxedTaskFunction<E>) -> Self {
-        let mut task = Self::new(interval, task_fn);
-        task.set_prior_exec(true);
-        task
-    }
-
-    fn set_prior_exec(&mut self, prior_exec: bool) {
-        self.prior_exec = prior_exec;
     }
 
     pub fn started(&self) -> bool {
         self.started.load(Ordering::Relaxed)
-    }
-
-    async fn sleep_or_canceled(interval: &Duration, child: &CancellationToken) -> bool {
-        tokio::select! {
-            _ = tokio::time::sleep(*interval) => { false }
-            _ = child.cancelled() => { true }
-        }
-    }
-
-    async fn run(task_fn: &mut Box<dyn TaskFunction<E> + Send + Sync>) {
-        if let Err(e) = task_fn.call().await {
-            logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
-        }
     }
 
     pub fn start(&self, runtime: Runtime) -> Result<()> {
@@ -124,24 +158,32 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
             IllegalStateSnafu { name: &self.name }
         );
 
-        let interval = self.interval;
+        let mut interval_generator = inner.interval_generator.take().unwrap();
         let child = self.cancel_token.child_token();
         // Safety: The task is not started.
         let mut task_fn = inner.task_fn.take().unwrap();
-        let prior_exec = self.prior_exec;
+        let interval = interval_generator.next();
+        let interval_str = if interval_generator.is_regular() {
+            format!("{:?}", interval)
+        } else {
+            "irregular".to_string()
+        };
         // TODO(hl): Maybe spawn to a blocking runtime.
         let handle = runtime.spawn(async move {
+            let sleep = tokio::time::sleep(interval);
+
+            tokio::pin!(sleep);
             loop {
-                if prior_exec {
-                    Self::run(&mut task_fn).await;
-                    if Self::sleep_or_canceled(&interval, &child).await {
-                        break;
-                    }
-                } else {
-                    if Self::sleep_or_canceled(&interval, &child).await {
-                        break;
-                    }
-                    Self::run(&mut task_fn).await;
+                tokio::select! {
+                _ = &mut sleep => {
+                    let interval = interval_generator.next();
+                    sleep.as_mut().reset(Instant::now() + interval);
+                }
+                _ = child.cancelled() => {
+                    return;
+                }}
+                if let Err(e) = task_fn.call().await {
+                    logging::error!(e; "Failed to run repeated task: {}", task_fn.name());
                 }
             }
         });
@@ -149,9 +191,9 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         self.started.store(true, Ordering::Relaxed);
 
         logging::debug!(
-            "Repeated task {} started with interval: {:?}",
+            "Repeated task {} started with interval: {}",
             self.name,
-            self.interval
+            interval_str
         );
 
         Ok(())
@@ -227,8 +269,8 @@ mod tests {
 
         let n = Arc::new(AtomicI32::new(0));
         let task_fn = TickTask { n: n.clone() };
-
-        let task = RepeatedTask::new_prior_exec(Duration::from_millis(100), Box::new(task_fn));
+        let interval = ImmediatelyInterval::new(Duration::from_millis(100));
+        let task = RepeatedTask::new(interval, Box::new(task_fn));
 
         task.start(crate::bg_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;

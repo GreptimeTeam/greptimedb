@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_runtime::error::{Error, Result};
-use common_runtime::{BoxedTaskFunction, RepeatedTask, TaskFunction};
+use common_runtime::{BoxedTaskFunction, ImmediatelyInterval, RepeatedTask, TaskFunction};
 use common_telemetry::{debug, info};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,7 @@ impl GreptimeDBTelemetryTask {
         should_report: Arc<AtomicBool>,
     ) -> Self {
         GreptimeDBTelemetryTask::Enable((
-            RepeatedTask::new_prior_exec(interval, task_fn),
+            RepeatedTask::new(ImmediatelyInterval::new(interval), task_fn),
             should_report,
         ))
     }
