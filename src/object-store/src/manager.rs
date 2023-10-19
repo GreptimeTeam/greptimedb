@@ -19,7 +19,6 @@ use snafu::ensure;
 use crate::error::Result;
 use crate::{error, ObjectStore};
 
-#[derive(Clone)]
 pub struct ObjectStoreManager {
     stores: HashMap<String, ObjectStore>,
     global_object_store: String,

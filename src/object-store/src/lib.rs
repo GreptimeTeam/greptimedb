@@ -21,7 +21,7 @@ pub use opendal::{
 
 pub mod error;
 pub mod layers;
+pub mod manager;
 mod metrics;
-pub mod object_store_manager;
 pub mod test_util;
 pub mod util;
