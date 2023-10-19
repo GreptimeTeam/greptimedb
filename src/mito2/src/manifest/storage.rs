@@ -80,16 +80,6 @@ pub fn file_version(path: &str) -> ManifestVersion {
     s.parse().unwrap_or_else(|_| panic!("Invalid file: {path}"))
 }
 
-/// Return the file name from path.
-/// Just for (`.json`) and (`.checkpoint`) file, other file will return None.
-pub fn file_name(path: &str) -> Option<String> {
-    let name = path.rsplit('/').next().unwrap_or("").to_string();
-    if !is_checkpoint_file(&name) && !is_delta_file(&name) {
-        return None;
-    }
-    Some(name)
-}
-
 /// Return's the file compress algorithm by file extension.
 ///
 /// for example file
@@ -312,7 +302,7 @@ impl ManifestObjectStore {
             .await
             .context(OpenDalSnafu)?;
 
-        // delete the manifest'size
+        // delete manifest sizes
         for (_, is_checkpoint, version) in &del_entries {
             if *is_checkpoint {
                 self.manifest_size_map
@@ -402,7 +392,7 @@ impl ManifestObjectStore {
                     let decompress_data = self.compress_type.decode(checkpoint).await.context(
                         DecompressObjectSnafu {
                             compress_type: self.compress_type,
-                            path: path.clone(),
+                            path,
                         },
                     )?;
                     // set the checkpoint size
@@ -429,7 +419,7 @@ impl ManifestObjectStore {
                                         .await
                                         .context(DecompressObjectSnafu {
                                             compress_type: FALL_BACK_COMPRESS_TYPE,
-                                            path: path.clone(),
+                                            path,
                                         })?;
                                     self.set_checkpoint_file_size(version, checkpoint_size as u64);
                                     Ok(Some(decompress_data))
@@ -670,17 +660,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_name() {
-        let name = file_name(
-            "data/greptime/public/1054/1054_0000000000/manifest/00000000000000000007.json",
-        );
-        assert_eq!(name.unwrap(), "00000000000000000007.json");
-
-        let name = file_name(
-            "/data/greptime/public/1054/1054_0000000000/manifest/00000000000000000007.checkpoint",
-        );
-        assert_eq!(name.unwrap(), "00000000000000000007.checkpoint");
-
+    async fn test_file_version() {
         let version = file_version("00000000000000000007.checkpoint");
         assert_eq!(version, 7);
 
