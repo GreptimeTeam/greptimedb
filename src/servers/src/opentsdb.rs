@@ -137,7 +137,7 @@ pub fn data_point_to_grpc_row_insert_requests(
     let mut multi_table_data = MultiTableData::new();
 
     for mut data_point in data_points {
-        let tags: Vec<(String, String)> = std::mem::take(&mut data_point.tags_mut());
+        let tags: Vec<(String, String)> = std::mem::take(data_point.tags_mut());
         let table_name = data_point.metric();
         let value = data_point.value();
         let timestamp = data_point.ts_millis();
