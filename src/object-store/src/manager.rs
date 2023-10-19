@@ -21,32 +21,37 @@ use crate::{error, ObjectStore};
 
 pub struct ObjectStoreManager {
     stores: HashMap<String, ObjectStore>,
-    global_object_store: String,
+    default_object_store: String,
 }
 
 impl ObjectStoreManager {
     pub fn try_new(
         stores: HashMap<String, ObjectStore>,
-        global_object_store: &str,
+        default_object_store: &str,
     ) -> Result<Self> {
         ensure!(
-            stores.keys().any(|key| key == global_object_store),
-            error::GlobalStorageNotFoundSnafu {
-                global_object_store: global_object_store.to_string()
+            stores.keys().any(|key| key == default_object_store),
+            error::DefaultStorageNotFoundSnafu {
+                default_object_store: default_object_store.to_string()
             }
         );
 
         Ok(ObjectStoreManager {
             stores,
-            global_object_store: global_object_store.to_string(),
+            default_object_store: default_object_store.to_string(),
         })
     }
+
     pub fn find(&self, name: &str) -> Option<ObjectStore> {
         self.stores.get(name).cloned()
     }
-    pub fn global_object_store(&self) -> ObjectStore {
+
+    pub fn default_object_store(&self) -> ObjectStore {
         // Safety: We've already checked in the new method whether this exists.
-        self.stores.get(&self.global_object_store).cloned().unwrap()
+        self.stores
+            .get(&self.default_object_store)
+            .cloned()
+            .unwrap()
     }
 }
 
@@ -81,7 +86,7 @@ mod tests {
 
         assert!(matches!(
             ObjectStoreManager::try_new(stores, "Gcs"),
-            Err(Error::GlobalStorageNotFound { .. })
+            Err(Error::DefaultStorageNotFound { .. })
         ));
     }
 
@@ -102,6 +107,6 @@ mod tests {
         assert!(object_store_manager.find("Gcs").is_none());
 
         // Panic should not happen.
-        object_store_manager.global_object_store();
+        object_store_manager.default_object_store();
     }
 }

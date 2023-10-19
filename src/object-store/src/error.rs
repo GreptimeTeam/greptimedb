@@ -23,10 +23,10 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Global storage not found: {}", global_object_store))]
-    GlobalStorageNotFound {
+    #[snafu(display("Default storage not found: {}", default_object_store))]
+    DefaultStorageNotFound {
         location: Location,
-        global_object_store: String,
+        default_object_store: String,
     },
 }
 
@@ -35,7 +35,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::GlobalStorageNotFound { .. } => StatusCode::StorageUnavailable,
+            Error::DefaultStorageNotFound { .. } => StatusCode::StorageUnavailable,
         }
     }
 
