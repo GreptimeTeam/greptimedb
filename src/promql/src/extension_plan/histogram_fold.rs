@@ -29,10 +29,11 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
+use datafusion::physical_plan::expressions::Column as PhyColumn;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PhysicalExpr,
+    RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 use datafusion::prelude::{Column, Expr};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
@@ -51,7 +52,7 @@ use futures::{ready, Stream, StreamExt};
 /// Due to the folding or sampling, the output rows number will become `input_rows` / `bucket_num`.
 ///
 /// # Requirement
-/// - Input should be sorted on `ts, <tag list>, le`. Ordering doesn't matter.
+/// - Input should be sorted on `<tag list>, le, ts`. ASC/DES doesn't matter.
 /// - The value set of `le` should be same. I.e., buckets of every series should be same.
 ///
 /// [1]: https://prometheus.io/docs/concepts/metric_types/#histogram
@@ -61,6 +62,7 @@ pub struct HistogramFold {
     /// for implementing conventional histogram. It's a string column
     /// with "literal" float value, like "+Inf", "0.001" etc.
     le_column: String,
+    ts_column: String,
     input: LogicalPlan,
     field_column: String,
     output_schema: DFSchemaRef,
@@ -80,7 +82,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        todo!()
+        vec![]
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -94,6 +96,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     fn from_template(&self, _exprs: &[Expr], inputs: &[LogicalPlan]) -> Self {
         Self {
             le_column: self.le_column.clone(),
+            ts_column: self.ts_column.clone(),
             input: inputs[0].clone(),
             field_column: self.field_column.clone(),
             // This method cannot return error. Otherwise we should re-calculate
@@ -106,14 +109,16 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
 impl HistogramFold {
     pub fn new(
         le_column: String,
-        input: LogicalPlan,
         field_column: String,
+        ts_column: String,
+        input: LogicalPlan,
     ) -> DataFusionResult<Self> {
         let input_schema = input.schema();
-        Self::check_schema(input_schema, &le_column, &field_column)?;
+        Self::check_schema(input_schema, &le_column, &field_column, &ts_column)?;
         let output_schema = Self::convert_schema(input_schema, &le_column, &field_column)?;
         Ok(Self {
             le_column,
+            ts_column,
             input,
             field_column,
             output_schema,
@@ -128,6 +133,7 @@ impl HistogramFold {
         input_schema: &DFSchemaRef,
         le_column: &str,
         field_column: &str,
+        ts_column: &str,
     ) -> DataFusionResult<()> {
         let check_column = |col| {
             if !input_schema.has_column_with_unqualified_name(col) {
@@ -147,6 +153,7 @@ impl HistogramFold {
         };
 
         check_column(le_column)?;
+        check_column(ts_column)?;
         check_column(field_column)
     }
 
@@ -161,10 +168,15 @@ impl HistogramFold {
             .index_of_column_by_name(None, &self.field_column)
             .unwrap()
             .unwrap();
+        let ts_column_idx = input_schema
+            .index_of_column_by_name(None, &self.ts_column)
+            .unwrap()
+            .unwrap();
 
         Arc::new(HistogramFoldExec {
             le_column: le_column_idx,
             field_column: field_column_idx,
+            ts_column: ts_column_idx,
             input: exec_input,
             output_schema: Arc::new(self.output_schema.as_ref().into()),
             metric: ExecutionPlanMetricsSet::new(),
@@ -229,6 +241,7 @@ pub struct HistogramFoldExec {
     output_schema: SchemaRef,
     /// Index for field column in the schema of input.
     field_column: usize,
+    ts_column: usize,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -238,7 +251,7 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn schema(&self) -> SchemaRef {
-        todo!()
+        self.output_schema.clone()
     }
 
     fn output_partitioning(&self) -> Partitioning {
@@ -250,7 +263,21 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn required_input_ordering(&self) -> Vec<Option<Vec<PhysicalSortRequirement>>> {
-        todo!()
+        let tag_cols = self
+            .tag_col_exprs()
+            .into_iter()
+            .map(|expr| PhysicalSortRequirement {
+                expr,
+                options: None,
+            })
+            .collect();
+
+        vec![Some(tag_cols)]
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        // partition on all tag columns, i.e., non-le, non-ts and non-field columns
+        vec![Distribution::HashPartitioned(self.tag_col_exprs())]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -261,11 +288,20 @@ impl ExecutionPlan for HistogramFoldExec {
         vec![self.input.clone()]
     }
 
+    // cannot change schema with this method
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        todo!()
+        assert!(!children.is_empty());
+        Ok(Arc::new(Self {
+            input: children[0].clone(),
+            metric: self.metric.clone(),
+            le_column: self.le_column,
+            ts_column: self.ts_column,
+            output_schema: self.output_schema.clone(),
+            field_column: self.field_column,
+        }))
     }
 
     fn execute(
@@ -303,7 +339,33 @@ impl ExecutionPlan for HistogramFoldExec {
     }
 
     fn statistics(&self) -> Statistics {
-        todo!()
+        Statistics {
+            num_rows: None,
+            total_byte_size: None,
+            column_statistics: None,
+            is_exact: false,
+        }
+    }
+}
+
+impl HistogramFoldExec {
+    /// Return all the [PhysicalExpr] of tag columns in order.
+    ///
+    /// Tag columns are all columns except `le`, `field` and `ts` columns.
+    pub fn tag_col_exprs(&self) -> Vec<Arc<dyn PhysicalExpr>> {
+        self.input
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, field)| {
+                if idx == self.le_column || idx == self.field_column || idx == self.ts_column {
+                    None
+                } else {
+                    Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
+                }
+            })
+            .collect()
     }
 }
 
@@ -650,6 +712,7 @@ mod test {
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column: 1,
             field_column: 2,
+            ts_column: 9999, // not exist but doesn't matter
             input: memory_exec,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
