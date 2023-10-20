@@ -24,5 +24,5 @@ pub use global::{
     spawn_read, spawn_write, write_runtime,
 };
 
-pub use crate::repeated_task::{BoxedTaskFunction, FirstZeroInterval, RepeatedTask, TaskFunction};
+pub use crate::repeated_task::{BoxedTaskFunction, RepeatedTask, TaskFunction};
 pub use crate::runtime::{Builder, JoinError, JoinHandle, Runtime};
