@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use common_meta::error::{Error, Result};
+use common_meta::key::CACHE_KEY_PREFIXES;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{
@@ -30,6 +31,7 @@ use common_meta::rpc::store::{
 };
 use common_meta::rpc::KeyValue;
 
+use crate::metrics;
 use crate::state::State;
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
@@ -89,13 +91,20 @@ impl LeaderCachedKvBackend {
 
     /// The caller MUST ensure during the loading, there are no mutation requests reaching the `LeaderCachedKvStore`.
     pub async fn load(&self) -> Result<()> {
-        let result = self.store.range(RangeRequest::new().with_all()).await?;
-        self.cache
-            .batch_put(BatchPutRequest {
-                kvs: result.kvs,
-                prev_kv: false,
-            })
-            .await?;
+        for prefix in &CACHE_KEY_PREFIXES[..] {
+            let _timer = metrics::METRIC_META_LEADER_CACHED_KV_LOAD.with_label_values(&[prefix]);
+
+            let result = self
+                .store
+                .range(RangeRequest::new().with_prefix(prefix.as_bytes()))
+                .await?;
+            self.cache
+                .batch_put(BatchPutRequest {
+                    kvs: result.kvs,
+                    prev_kv: false,
+                })
+                .await?;
+        }
 
         Ok(())
     }

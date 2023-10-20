@@ -91,12 +91,20 @@ pub const REMOVED_PREFIX: &str = "__removed";
 const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
-const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
-const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
-const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
-const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
-const TABLE_ROUTE_PREFIX: &str = "__table_route";
+
+pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
+pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
+pub const CATALOG_NAME_KEY_PREFIX: &str = "__catalog_name";
+pub const SCHEMA_NAME_KEY_PREFIX: &str = "__schema_name";
+pub const TABLE_ROUTE_PREFIX: &str = "__table_route";
+
+pub const CACHE_KEY_PREFIXES: [&str; 4] = [
+    TABLE_NAME_KEY_PREFIX,
+    CATALOG_NAME_KEY_PREFIX,
+    SCHEMA_NAME_KEY_PREFIX,
+    TABLE_ROUTE_PREFIX,
+];
 
 pub type RegionDistribution = BTreeMap<DatanodeId, Vec<RegionNumber>>;
 
