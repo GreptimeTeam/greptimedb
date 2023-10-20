@@ -302,14 +302,14 @@ mod tests {
     fn test_bytes_to_hex_string() {
         assert_eq!(
             "24fe79948641b110a29bc27859307e8d",
-            bytes_to_hex_string(&vec![
+            bytes_to_hex_string(&[
                 36, 254, 121, 148, 134, 65, 177, 16, 162, 155, 194, 120, 89, 48, 126, 141,
             ])
         );
 
         assert_eq!(
             "baffeedd7b8debc0",
-            bytes_to_hex_string(&vec![186, 255, 238, 221, 123, 141, 235, 192,])
+            bytes_to_hex_string(&[186, 255, 238, 221, 123, 141, 235, 192,])
         );
     }
 
