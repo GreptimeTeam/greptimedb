@@ -35,6 +35,32 @@ use crate::row_writer::{self, MultiTableData, TableData};
 const APPROXIMATE_COLUMN_COUNT: usize = 16;
 const TRACE_TABLE_NAME: &str = "traces_preview_v01";
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct TraceSpan {
+    // the following are tags
+    trace_id: String,
+    span_id: String,
+    parent_span_id: String,
+
+    // the following are fields
+    resource_attributes: String, // Map in the future
+    scope_name: String,
+    scope_version: String,
+    scope_attributes: String, // Map in the future
+    trace_state: String,
+    span_name: String,
+    span_kind: String,
+    span_status_code: String,
+    span_status_message: String,
+    span_attributes: String, // Map in the future
+    span_events: String,     // List in the future
+    span_links: String,      // List in the future
+    start: u64,              // in nanosecond
+    end: u64,                // in nanosecend
+
+    ts: i64, // timestamp
+}
+
 /// Convert OpenTelemetry traces to GreptimeDB row insert requests
 ///
 /// See
@@ -51,6 +77,115 @@ pub fn to_grpc_insert_requests(
         APPROXIMATE_COLUMN_COUNT,
         APPROXIMATE_COLUMN_COUNT,
     );
+
+    let spans = parse_request_to_spans(request);
+    for span in spans {
+        let row = one_table_writer.alloc_one_row();
+        write_span_to_row(one_table_writer, row, span)?;
+    }
+
+    Ok(multi_table_writer.into_row_insert_requests())
+}
+
+fn write_span_to_row(writer: &mut TableData, mut row: Vec<Value>, span: TraceSpan) -> Result<()> {
+    {
+        // tags
+        let iter = vec![
+            ("trace_id", span.trace_id),
+            ("span_id", span.span_id),
+            ("parent_span_id", span.parent_span_id),
+        ]
+        .into_iter()
+        .map(|(col, val)| (col.to_string(), val));
+        row_writer::write_tags(writer, iter, &mut row)?;
+    }
+    {
+        // fields
+        let str_fields_iter = vec![
+            ("resource_attributes", span.resource_attributes),
+            ("scope_name", span.scope_name),
+            ("scope_version", span.scope_version),
+            ("scope_attributes", span.scope_attributes),
+            ("trace_state", span.trace_state),
+            ("span_name", span.span_name),
+            ("span_kind", span.span_kind),
+            ("span_status_code", span.span_status_code),
+            ("span_status_message", span.span_status_message),
+            ("span_attributes", span.span_attributes),
+            ("span_events", span.span_events),
+            ("span_links", span.span_links),
+        ]
+        .into_iter()
+        .map(|(col, val)| {
+            (
+                col.into(),
+                ColumnDataType::String,
+                ValueData::StringValue(val),
+            )
+        });
+
+        let time_fields_iter = vec![("start", span.start), ("end", span.end)]
+            .into_iter()
+            .map(|(col, val)| {
+                (
+                    col.into(),
+                    ColumnDataType::TimestampNanosecond,
+                    ValueData::TimestampNanosecondValue(val as i64),
+                )
+            });
+
+        row_writer::write_fields(writer, str_fields_iter, &mut row)?;
+        row_writer::write_fields(writer, time_fields_iter, &mut row)?;
+    }
+
+    row_writer::write_f64(
+        writer,
+        GREPTIME_VALUE,
+        (span.end - span.start) as f64 / 1_000_000.0, // duration in millisecond
+        &mut row,
+    )?;
+    row_writer::write_ts_precision(
+        writer,
+        GREPTIME_TIMESTAMP,
+        Some(span.ts),
+        Precision::Nanosecond,
+        &mut row,
+    )?;
+
+    writer.add_row(row);
+
+    Ok(())
+}
+
+fn parse_span(resource_attrs: &[KeyValue], scope: &InstrumentationScope, span: Span) -> TraceSpan {
+    let (code, message) = status_to_string(&span.status);
+    TraceSpan {
+        trace_id: bytes_to_hex_string(&span.trace_id),
+        span_id: bytes_to_hex_string(&span.span_id),
+        parent_span_id: bytes_to_hex_string(&span.parent_span_id),
+
+        resource_attributes: vec_kv_to_string(resource_attrs),
+        scope_name: scope.name.clone(),
+        scope_version: scope.version.clone(),
+        scope_attributes: vec_kv_to_string(&scope.attributes),
+        trace_state: span.trace_state.clone(),
+        span_name: span.name.clone(),
+        span_kind: span.kind().as_str_name().into(),
+        span_status_code: code,
+        span_status_message: message,
+        span_attributes: vec_kv_to_string(&span.attributes),
+        span_events: events_to_string(&span.events),
+        span_links: links_to_string(&span.links),
+
+        start: span.start_time_unix_nano,
+        end: span.end_time_unix_nano,
+
+        ts: span.start_time_unix_nano as i64,
+    }
+}
+
+fn parse_request_to_spans(request: ExportTraceServiceRequest) -> Vec<TraceSpan> {
+    let mut spans = vec![];
     for resource_spans in request.resource_spans {
         let resource_attrs = resource_spans
             .resource
@@ -59,42 +194,11 @@ pub fn to_grpc_insert_requests(
         for scope_spans in resource_spans.scope_spans {
             let scope = scope_spans.scope.unwrap_or_default();
             for span in scope_spans.spans {
-                let row = one_table_writer.alloc_one_row();
-                write_span(one_table_writer, row, &resource_attrs, &scope, span)?;
+                spans.push(parse_span(&resource_attrs, &scope, span));
             }
         }
     }
-
-    Ok(multi_table_writer.into_row_insert_requests())
-}
-
-fn write_span(
-    writer: &mut TableData,
-    mut row: Vec<Value>,
-    resource_attrs: &[KeyValue],
-    scope: &InstrumentationScope,
-    span: Span,
-) -> Result<()> {
-    write_span_tags(writer, &mut row, &span)?;
-    write_span_str_fields(writer, &mut row, resource_attrs, scope, &span)?;
-    write_span_time_fields(writer, &mut row, &span)?;
-    write_span_value(writer, &mut row, &span)?;
-    write_span_timestamp(writer, &mut row, &span)?;
-
-    writer.add_row(row);
-    Ok(())
-}
-
-fn write_span_tags(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) -> Result<()> {
-    let iter = vec![
-        ("trace_id", bytes_to_hex_string(&span.trace_id)),
-        ("span_id", bytes_to_hex_string(&span.span_id)),
-        ("parent_span_id", bytes_to_hex_string(&span.parent_span_id)),
-    ]
-    .into_iter()
-    .map(|(col, val)| (col.into(), val));
-
-    row_writer::write_tags(writer, iter, row)
+    spans
 }
 
 pub fn bytes_to_hex_string(bs: &[u8]) -> String {
@@ -145,9 +249,9 @@ pub fn any_value_to_string(val: AnyValue) -> Option<String> {
 
 pub fn event_to_string(event: &Event) -> String {
     json!({
-        "name": event.name,
-        "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
-        "attrs": vec_kv_to_string(&event.attributes),
+    "name": event.name,
+    "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
+    "attrs": vec_kv_to_string(&event.attributes),
     })
     .to_string()
 }
@@ -159,10 +263,10 @@ pub fn events_to_string(events: &[Event]) -> String {
 
 pub fn link_to_string(link: &Link) -> String {
     json!({
-        "trace_id": link.trace_id,
-        "span_id": link.span_id,
-        "trace_state": link.trace_state,
-        "attributes": vec_kv_to_string(&link.attributes),
+    "trace_id": link.trace_id,
+    "span_id": link.span_id,
+    "trace_state": link.trace_state,
+    "attributes": vec_kv_to_string(&link.attributes),
     })
     .to_string()
 }
@@ -177,77 +281,6 @@ pub fn status_to_string(status: &Option<Status>) -> (String, String) {
         Some(status) => (status.code().as_str_name().into(), status.message.clone()),
         None => ("".into(), "".into()),
     }
-}
-
-fn write_span_str_fields(
-    writer: &mut TableData,
-    row: &mut Vec<Value>,
-    resource_attrs: &[KeyValue],
-    scope: &InstrumentationScope,
-    span: &Span,
-) -> Result<()> {
-    let (code, message) = status_to_string(&span.status);
-    let iter = vec![
-        ("resource", vec_kv_to_string(resource_attrs)),
-        ("scope_name", scope.name.clone()),
-        ("scope_version", scope.version.clone()),
-        ("scope_attributes", vec_kv_to_string(&scope.attributes)),
-        ("trace_state", span.trace_state.clone()),
-        ("span_name", span.name.clone()),
-        ("span_kind", span.kind().as_str_name().into()),
-        ("span_status_code", code),
-        ("span_status_message", message),
-        ("span_attributes", vec_kv_to_string(&span.attributes)),
-        ("span_events", events_to_string(&span.events)),
-        ("span_links", links_to_string(&span.links)),
-    ]
-    .into_iter()
-    .map(|(col, val)| {
-        (
-            col.into(),
-            ColumnDataType::String,
-            ValueData::StringValue(val),
-        )
-    });
-
-    row_writer::write_fields(writer, iter, row)
-}
-
-fn write_span_time_fields(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) -> Result<()> {
-    let iter = vec![
-        ("start", span.start_time_unix_nano),
-        ("end", span.end_time_unix_nano),
-    ]
-    .into_iter()
-    .map(|(col, val)| {
-        (
-            col.into(),
-            ColumnDataType::TimestampNanosecond,
-            ValueData::TimestampNanosecondValue(val as i64),
-        )
-    });
-
-    row_writer::write_fields(writer, iter, row)
-}
-
-// duration in milliseconds as the value
-fn write_span_value(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) -> Result<()> {
-    row_writer::write_f64(
-        writer,
-        GREPTIME_VALUE,
-        (span.end_time_unix_nano - span.start_time_unix_nano) as f64 / 1_000_000.0,
-        row,
-    )
-}
-
-fn write_span_timestamp(writer: &mut TableData, row: &mut Vec<Value>, span: &Span) -> Result<()> {
-    row_writer::write_ts_precision(
-        writer,
-        GREPTIME_TIMESTAMP,
-        Some(span.start_time_unix_nano as i64),
-        Precision::Nanosecond,
-        row,
-    )
 }
 
 #[cfg(test)]
