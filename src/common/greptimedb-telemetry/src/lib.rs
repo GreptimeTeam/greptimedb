@@ -58,7 +58,7 @@ impl GreptimeDBTelemetryTask {
         should_report: Arc<AtomicBool>,
     ) -> Self {
         GreptimeDBTelemetryTask::Enable((
-            RepeatedTask::new(interval, task_fn).with_initial_delay(Duration::from_secs(0)),
+            RepeatedTask::new(interval, task_fn).with_initial_delay(Some(Duration::ZERO)),
             should_report,
         ))
     }

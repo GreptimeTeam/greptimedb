@@ -77,6 +77,9 @@ impl<E> Drop for RepeatedTask<E> {
 }
 
 impl<E: ErrorExt + 'static> RepeatedTask<E> {
+    /// Creates a new repeated task. The `initial_delay` is the delay before the first execution.
+    /// `initial_delay` default is None, the initial interval uses the `interval`.
+    /// You can use `with_initial_delay` to set the `initial_delay`.
     pub fn new(interval: Duration, task_fn: BoxedTaskFunction<E>) -> Self {
         Self {
             name: task_fn.name().to_string(),
@@ -91,8 +94,8 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         }
     }
 
-    pub fn with_initial_delay(mut self, initial_delay: Duration) -> Self {
-        self.initial_delay = Some(initial_delay);
+    pub fn with_initial_delay(mut self, initial_delay: Option<Duration>) -> Self {
+        self.initial_delay = initial_delay;
         self
     }
 
@@ -116,10 +119,12 @@ impl<E: ErrorExt + 'static> RepeatedTask<E> {
         let handle = runtime.spawn(async move {
             loop {
                 let sleep_time = initial_delay.take().unwrap_or(interval);
-                tokio::select! {
-                    _ = tokio::time::sleep(sleep_time) => {}
-                    _ = child.cancelled() => {
-                        return;
+                if sleep_time > Duration::ZERO {
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_time) => {}
+                        _ = child.cancelled() => {
+                            return;
+                        }
                     }
                 }
                 if let Err(e) = task_fn.call().await {
@@ -211,7 +216,7 @@ mod tests {
         let task_fn = TickTask { n: n.clone() };
 
         let task = RepeatedTask::new(Duration::from_millis(100), Box::new(task_fn))
-            .with_initial_delay(Duration::from_secs(0));
+            .with_initial_delay(Some(Duration::ZERO));
 
         task.start(crate::bg_runtime()).unwrap();
         tokio::time::sleep(Duration::from_millis(550)).await;
