@@ -43,22 +43,20 @@ struct TraceSpan {
     parent_span_id: String,
 
     // the following are fields
-    resource_attributes: String, // Map in the future
+    resource_attributes: String, // TODO(yuanbohan): Map in the future
     scope_name: String,
     scope_version: String,
-    scope_attributes: String, // Map in the future
+    scope_attributes: String, // TODO(yuanbohan): Map in the future
     trace_state: String,
     span_name: String,
     span_kind: String,
     span_status_code: String,
     span_status_message: String,
-    span_attributes: String, // Map in the future
-    span_events: String,     // List in the future
-    span_links: String,      // List in the future
-    start: u64,              // in nanosecond
-    end: u64,                // in nanosecend
-
-    ts: i64, // timestamp
+    span_attributes: String,  // TODO(yuanbohan): Map in the future
+    span_events: String,      // TODO(yuanbohan): List in the future
+    span_links: String,       // TODO(yuanbohan): List in the future
+    start_in_nanosecond: u64, // this is also the Timestamp Index
+    end_in_nanosecond: u64,
 }
 
 /// Convert OpenTelemetry traces to GreptimeDB row insert requests
@@ -124,15 +122,18 @@ fn write_span_to_row(writer: &mut TableData, mut row: Vec<Value>, span: TraceSpa
             )
         });
 
-        let time_fields_iter = vec![("start", span.start), ("end", span.end)]
-            .into_iter()
-            .map(|(col, val)| {
-                (
-                    col.into(),
-                    ColumnDataType::TimestampNanosecond,
-                    ValueData::TimestampNanosecondValue(val as i64),
-                )
-            });
+        let time_fields_iter = vec![
+            ("start", span.start_in_nanosecond),
+            ("end", span.end_in_nanosecond),
+        ]
+        .into_iter()
+        .map(|(col, val)| {
+            (
+                col.into(),
+                ColumnDataType::TimestampNanosecond,
+                ValueData::TimestampNanosecondValue(val as i64),
+            )
+        });
 
         row_writer::write_fields(writer, str_fields_iter, &mut row)?;
         row_writer::write_fields(writer, time_fields_iter, &mut row)?;
@@ -141,13 +142,13 @@ fn write_span_to_row(writer: &mut TableData, mut row: Vec<Value>, span: TraceSpa
     row_writer::write_f64(
         writer,
         GREPTIME_VALUE,
-        (span.end - span.start) as f64 / 1_000_000.0, // duration in millisecond
+        (span.end_in_nanosecond - span.start_in_nanosecond) as f64 / 1_000_000.0, // duration in millisecond
         &mut row,
     )?;
     row_writer::write_ts_precision(
         writer,
         GREPTIME_TIMESTAMP,
-        Some(span.ts),
+        Some(span.start_in_nanosecond as i64),
         Precision::Nanosecond,
         &mut row,
     )?;
@@ -177,10 +178,8 @@ fn parse_span(resource_attrs: &[KeyValue], scope: &InstrumentationScope, span: S
         span_events: events_to_string(&span.events),
         span_links: links_to_string(&span.links),
 
-        start: span.start_time_unix_nano,
-        end: span.end_time_unix_nano,
-
-        ts: span.start_time_unix_nano as i64,
+        start_in_nanosecond: span.start_time_unix_nano,
+        end_in_nanosecond: span.end_time_unix_nano,
     }
 }
 
