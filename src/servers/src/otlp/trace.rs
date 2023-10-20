@@ -143,6 +143,7 @@ pub fn write_span_to_row(
 
         row_writer::write_fields(writer, str_fields_iter, &mut row)?;
         row_writer::write_fields(writer, time_fields_iter, &mut row)?;
+        row_writer::write_fields(writer, span.uplift_fields.into_iter(), &mut row)?;
     }
 
     row_writer::write_f64(
