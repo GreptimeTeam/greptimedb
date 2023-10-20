@@ -20,10 +20,10 @@ use crate::error::Result;
 use crate::{error, ObjectStore};
 
 /// Manages multiple object stores so that users can configure a storage for each table.
-/// This struct certainly have one default object storage, and can have zero or more object stores.
+/// This struct certainly have one default object store, and can have zero or more custom object stores.
 pub struct ObjectStoreManager {
     stores: HashMap<String, ObjectStore>,
-    default_object_store: String,
+    default_object_store: ObjectStore,
 }
 
 impl ObjectStoreManager {
@@ -38,9 +38,11 @@ impl ObjectStoreManager {
             }
         );
 
+        // Safety: We've already checked in the above place whether this exists.
+        let default_object_store = stores.get(default_object_store).unwrap().clone();
         Ok(ObjectStoreManager {
             stores,
-            default_object_store: default_object_store.to_string(),
+            default_object_store,
         })
     }
 
@@ -49,11 +51,7 @@ impl ObjectStoreManager {
     }
 
     pub fn default_object_store(&self) -> ObjectStore {
-        // Safety: We've already checked in the new method whether this exists.
-        self.stores
-            .get(&self.default_object_store)
-            .cloned()
-            .unwrap()
+        self.default_object_store.clone()
     }
 }
 
