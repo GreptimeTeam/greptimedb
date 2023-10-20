@@ -37,7 +37,9 @@ impl<'a> ParserContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use sqlparser::ast::{Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions};
+    use sqlparser::ast::{
+        GroupByExpr, Query as SpQuery, Statement as SpStatement, WildcardAdditionalOptions,
+    };
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -62,12 +64,14 @@ mod tests {
                     alias: None,
                     args: None,
                     with_hints: vec![],
+                    partitions: vec![],
+                    version: None,
                 },
                 joins: vec![],
             }],
             lateral_views: vec![],
             selection: None,
-            group_by: vec![],
+            group_by: GroupByExpr::Expressions(vec![]),
             cluster_by: vec![],
             distribute_by: vec![],
             sort_by: vec![],

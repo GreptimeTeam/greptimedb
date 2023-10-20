@@ -90,7 +90,7 @@ pub(crate) fn greptime_builtins(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
             floor,
             ceil,
             round,
-            trunc,
+            // trunc,
             abs,
             signum,
             exp,
@@ -281,7 +281,8 @@ fn sqrt(py: Python<'_>, val: PyObject) -> PyResult<PyObject> {
 ```
 */
 bind_call_unary_math_function!(
-    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, trunc, abs, signum, exp, ln, log2, log10
+    sqrt, sin, cos, tan, asin, acos, atan, floor, ceil, abs, signum, exp, ln, log2,
+    log10 // trunc,
 );
 
 /// return a random vector range from 0 to 1 and length of len

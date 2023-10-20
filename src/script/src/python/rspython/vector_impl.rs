@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::compute::kernels::numeric;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
 use common_time::timestamp::Timestamp;
 use crossbeam_utils::atomic::AtomicCell;
 use datatypes::arrow::array::{Array, BooleanArray};
 use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::arithmetic;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::value::{self, OrderedFloat};
@@ -92,9 +92,9 @@ impl PyVector {
     fn add(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(numeric::add), vm)
         } else {
-            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::add_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(numeric::add), vm)
         }
     }
 
@@ -102,9 +102,9 @@ impl PyVector {
     fn sub(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(numeric::sub), vm)
         } else {
-            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::subtract_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(numeric::sub), vm)
         }
     }
 
@@ -114,12 +114,7 @@ impl PyVector {
         if rspy_is_pyobj_scalar(&other, vm) {
             zelf.rspy_scalar_arith_op(other, None, arrow_rsub, vm)
         } else {
-            zelf.rspy_vector_arith_op(
-                other,
-                None,
-                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
-                vm,
-            )
+            zelf.rspy_vector_arith_op(other, None, wrap_result(|a, b| numeric::sub(b, a)), vm)
         }
     }
 
@@ -128,9 +123,9 @@ impl PyVector {
     fn mul(zelf: PyObjectRef, other: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyVector> {
         let zelf = obj_cast_to::<PyVector>(zelf, vm)?;
         if rspy_is_pyobj_scalar(&other, vm) {
-            zelf.rspy_scalar_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
+            zelf.rspy_scalar_arith_op(other, None, wrap_result(numeric::mul), vm)
         } else {
-            zelf.rspy_vector_arith_op(other, None, wrap_result(arithmetic::multiply_dyn), vm)
+            zelf.rspy_vector_arith_op(other, None, wrap_result(numeric::mul), vm)
         }
     }
 
@@ -141,14 +136,14 @@ impl PyVector {
             zelf.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
                 vm,
             )
         } else {
             zelf.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
                 vm,
             )
         }
@@ -162,7 +157,7 @@ impl PyVector {
             self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+                wrap_result(|a, b| numeric::div(b, a)),
                 vm,
             )
         }
@@ -175,14 +170,14 @@ impl PyVector {
             zelf.rspy_scalar_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
                 vm,
             )
         } else {
             zelf.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
                 vm,
             )
         }
@@ -197,7 +192,7 @@ impl PyVector {
             self.rspy_vector_arith_op(
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+                wrap_result(|a, b| numeric::div(b, a)),
                 vm,
             )
         }

@@ -25,7 +25,7 @@ derive_builder.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 object-store = { workspace = true }
-orc-rust = "0.2"
+orc-rust = { git = "https://github.com/WenyXu/orc-rs.git", rev = "5f6399f759ba30cb46610d06027b507949a117ca" }
 paste = "1.0"
 regex = "1.7"
 serde.workspace = true

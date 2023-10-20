@@ -241,7 +241,7 @@ mod test {
         .unwrap();
 
         let flight_data = batches_to_flight_data(
-            arrow_schema,
+            &arrow_schema,
             vec![
                 batch1.clone().into_df_record_batch(),
                 batch2.clone().into_df_record_batch(),

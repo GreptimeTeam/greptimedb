@@ -219,6 +219,7 @@ impl Helper {
                 ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
             }
             ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::DurationSecond(_)
             | ScalarValue::DurationMillisecond(_)
             | ScalarValue::DurationMicrosecond(_)

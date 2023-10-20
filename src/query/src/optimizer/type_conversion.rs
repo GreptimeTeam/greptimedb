@@ -105,7 +105,8 @@ impl AnalyzerRule for TypeConversionRule {
             | LogicalPlan::DescribeTable(_)
             | LogicalPlan::Unnest(_)
             | LogicalPlan::Statement(_)
-            | LogicalPlan::Ddl(_) => Ok(Transformed::No(plan)),
+            | LogicalPlan::Ddl(_)
+            | LogicalPlan::Copy(_) => Ok(Transformed::No(plan)),
         })
     }
 

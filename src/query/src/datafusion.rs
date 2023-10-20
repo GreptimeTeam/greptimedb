@@ -103,7 +103,7 @@ impl DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            matches!(dml.op, WriteOp::Insert | WriteOp::Delete),
+            matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
                 name: format!("DML op {}", dml.op),
             }
@@ -132,7 +132,7 @@ impl DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?;
 
             let rows = match dml.op {
-                WriteOp::Insert => {
+                WriteOp::InsertInto => {
                     self.insert(&table_name, column_vectors, query_ctx.clone())
                         .await?
                 }

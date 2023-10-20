@@ -787,10 +787,11 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal128(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
-                    arrow_type: v.get_datatype(),
+                    arrow_type: v.data_type(),
                 }
                 .fail()
             }
