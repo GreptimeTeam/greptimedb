@@ -235,7 +235,7 @@ impl Env {
         args.push(format!("--http-addr=127.0.0.1:430{id}"));
         args.push(format!("--data-home={}", data_home.display()));
         args.push(format!("--node-id={id}"));
-        args.push(format!("-c"));
+        args.push("-c".to_string());
         args.push(self.generate_config_file(subcommand, db_ctx));
         args.push("--metasrv-addr=127.0.0.1:3002".to_string());
         (args, format!("127.0.0.1:410{id}"))
