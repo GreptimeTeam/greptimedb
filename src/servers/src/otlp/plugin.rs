@@ -14,15 +14,15 @@
 
 use std::sync::Arc;
 
-use api::v1::RowInsertRequests;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
-use crate::error::Result;
+use super::trace::TraceSpans;
 
 /// Transformer helps to transform ExportTraceServiceRequest based on logic, like:
 ///   - uplift some fields from Attributes (Map type) to column
 pub trait TraceParser: Send + Sync {
-    fn parse(&self, request: ExportTraceServiceRequest) -> Result<(RowInsertRequests, usize)>;
+    fn parse(&self, request: ExportTraceServiceRequest) -> TraceSpans;
+    fn table_name(&self) -> String;
 }
 
 pub type TraceParserRef = Arc<dyn TraceParser>;
