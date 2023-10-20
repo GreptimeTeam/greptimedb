@@ -57,7 +57,10 @@ impl GreptimeDBTelemetryTask {
         task_fn: BoxedTaskFunction<Error>,
         should_report: Arc<AtomicBool>,
     ) -> Self {
-        GreptimeDBTelemetryTask::Enable((RepeatedTask::new(interval, task_fn), should_report))
+        GreptimeDBTelemetryTask::Enable((
+            RepeatedTask::new(interval, task_fn).with_initial_delay(Some(Duration::ZERO)),
+            should_report,
+        ))
     }
 
     pub fn disable() -> Self {
