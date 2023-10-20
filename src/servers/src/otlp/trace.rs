@@ -32,7 +32,7 @@ use super::{GREPTIME_TIMESTAMP, GREPTIME_VALUE};
 use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
-const APPROXIMATE_COLUMN_COUNT: usize = 16;
+const APPROXIMATE_COLUMN_COUNT: usize = 24;
 pub const TRACE_TABLE_NAME: &str = "traces_preview_v01";
 
 #[derive(Debug, Clone)]
@@ -79,7 +79,7 @@ pub fn to_grpc_insert_requests(
     let one_table_writer = multi_table_writer.get_or_default_table_data(
         table_name,
         APPROXIMATE_COLUMN_COUNT,
-        APPROXIMATE_COLUMN_COUNT,
+        spans.len(),
     );
 
     for span in spans {
