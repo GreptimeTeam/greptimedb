@@ -37,6 +37,9 @@ pub struct InMemoryRowGroup<'a> {
 
 impl<'a> InMemoryRowGroup<'a> {
     /// Fetches the necessary column data into memory
+    // TODO(yingwen): Fix clippy warnings.
+    #[allow(clippy::filter_map_bool_then)]
+    #[allow(clippy::useless_conversion)]
     pub async fn fetch<T: AsyncFileReader + Send>(
         &mut self,
         input: &mut T,
