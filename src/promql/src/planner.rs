@@ -61,6 +61,8 @@ use crate::functions::{
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
+/// `histogram_quantile` function in PromQL
+const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
 
 const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
@@ -438,6 +440,10 @@ impl PromPlanner {
                             .context(DataFusionPlanningSnafu)?,
                         ),
                     }));
+                }
+
+                if func.name == SPECIAL_HISTOGRAM_QUANTILE {
+                    todo!()
                 }
 
                 let args = self.create_function_args(&args.args)?;

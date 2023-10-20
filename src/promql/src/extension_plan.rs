@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod empty_metric;
+mod histogram_fold;
 mod instant_manipulate;
 mod normalize;
 mod planner;
