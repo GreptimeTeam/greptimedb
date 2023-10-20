@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::{
 };
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::otlp;
-use servers::otlp::plugin::{TraceParser, TraceParserRef};
+use servers::otlp::plugin::TraceParserRef;
 use servers::query_handler::OpenTelemetryProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -71,11 +71,10 @@ impl OpenTelemetryProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
 
-        let (requests, rows) = self
-            .plugins
-            .get::<TraceParserRef>()
-            .as_ref()
-            .parse(request)?;
+        let (requests, rows) = match self.plugins.get::<TraceParserRef>() {
+            Some(parser) => parser.parse(request)?,
+            None => otlp::trace::to_grpc_insert_requests(request)?,
+        };
 
         let _ = self
             .handle_row_inserts(requests, ctx)

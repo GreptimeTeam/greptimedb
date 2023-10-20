@@ -249,9 +249,9 @@ pub fn any_value_to_string(val: AnyValue) -> Option<String> {
 
 pub fn event_to_string(event: &Event) -> String {
     json!({
-    "name": event.name,
-    "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
-    "attrs": vec_kv_to_string(&event.attributes),
+        "name": event.name,
+        "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
+        "attrs": vec_kv_to_string(&event.attributes),
     })
     .to_string()
 }
@@ -263,10 +263,10 @@ pub fn events_to_string(events: &[Event]) -> String {
 
 pub fn link_to_string(link: &Link) -> String {
     json!({
-    "trace_id": link.trace_id,
-    "span_id": link.span_id,
-    "trace_state": link.trace_state,
-    "attributes": vec_kv_to_string(&link.attributes),
+        "trace_id": link.trace_id,
+        "span_id": link.span_id,
+        "trace_state": link.trace_state,
+        "attributes": vec_kv_to_string(&link.attributes),
     })
     .to_string()
 }

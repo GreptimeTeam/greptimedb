@@ -26,12 +26,3 @@ pub trait TraceParser: Send + Sync {
 }
 
 pub type TraceParserRef = Arc<dyn TraceParser>;
-
-impl TraceParser for Option<&TraceParserRef> {
-    fn parse(&self, request: ExportTraceServiceRequest) -> Result<(RowInsertRequests, usize)> {
-        match self {
-            Some(this) => this.parse(request),
-            None => super::trace::to_grpc_insert_requests(request),
-        }
-    }
-}
