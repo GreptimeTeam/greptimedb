@@ -71,12 +71,15 @@ impl OpenTelemetryProtocolHandler for Instance {
             .check_permission(ctx.current_user(), PermissionReq::Otlp)
             .context(AuthSnafu)?;
 
-        let spans = match self.plugins.get::<TraceParserRef>() {
-            Some(parser) => parser.parse(request),
-            None => otlp::trace::parse(request),
+        let (table_name, spans) = match self.plugins.get::<TraceParserRef>() {
+            Some(parser) => (parser.table_name(), parser.parse(request)),
+            None => (
+                otlp::trace::TRACE_TABLE_NAME.to_string(),
+                otlp::trace::parse(request),
+            ),
         };
 
-        let (requests, rows) = otlp::trace::to_grpc_insert_requests(spans)?;
+        let (requests, rows) = otlp::trace::to_grpc_insert_requests(table_name, spans)?;
 
         let _ = self
             .handle_row_inserts(requests, ctx)

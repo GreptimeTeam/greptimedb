@@ -33,7 +33,7 @@ use crate::error::Result;
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 16;
-const TRACE_TABLE_NAME: &str = "traces_preview_v01";
+pub const TRACE_TABLE_NAME: &str = "traces_preview_v01";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -71,10 +71,13 @@ pub type TraceSpans = Vec<TraceSpan>;
 /// for data structure of OTLP metrics.
 ///
 /// Returns `InsertRequests` and total number of rows to ingest
-pub fn to_grpc_insert_requests(spans: TraceSpans) -> Result<(RowInsertRequests, usize)> {
+pub fn to_grpc_insert_requests(
+    table_name: String,
+    spans: TraceSpans,
+) -> Result<(RowInsertRequests, usize)> {
     let mut multi_table_writer = MultiTableData::default();
     let one_table_writer = multi_table_writer.get_or_default_table_data(
-        TRACE_TABLE_NAME,
+        table_name,
         APPROXIMATE_COLUMN_COUNT,
         APPROXIMATE_COLUMN_COUNT,
     );

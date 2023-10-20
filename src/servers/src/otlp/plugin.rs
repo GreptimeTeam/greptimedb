@@ -22,6 +22,7 @@ use super::trace::TraceSpans;
 ///   - uplift some fields from Attributes (Map type) to column
 pub trait TraceParser: Send + Sync {
     fn parse(&self, request: ExportTraceServiceRequest) -> TraceSpans;
+    fn table_name(&self) -> String;
 }
 
 pub type TraceParserRef = Arc<dyn TraceParser>;
