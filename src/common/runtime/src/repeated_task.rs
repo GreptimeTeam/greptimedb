@@ -50,10 +50,10 @@ struct TaskInner<E> {
 }
 
 pub trait IntervalGenerator: Send + Sync {
-    /// return the next interval.
+    /// Returns the next interval.
     fn next(&mut self) -> Duration;
 
-    /// return whether the interval is regular and the interval if it is regular.
+    /// Returns whether the interval is regular and the interval if it is regular.
     fn is_regular(&self) -> (bool, Option<Duration>);
 }
 
