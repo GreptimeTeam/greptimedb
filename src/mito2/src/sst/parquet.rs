@@ -16,7 +16,7 @@
 
 mod format;
 pub mod reader;
-mod row_group;
+pub mod row_group;
 mod stats;
 pub mod writer;
 

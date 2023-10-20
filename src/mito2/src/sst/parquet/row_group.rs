@@ -28,7 +28,7 @@ use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 
 /// An in-memory collection of column chunks
-struct InMemoryRowGroup<'a> {
+pub struct InMemoryRowGroup<'a> {
     metadata: &'a RowGroupMetaData,
     page_locations: Option<&'a [Vec<PageLocation>]>,
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
@@ -37,7 +37,7 @@ struct InMemoryRowGroup<'a> {
 
 impl<'a> InMemoryRowGroup<'a> {
     /// Fetches the necessary column data into memory
-    async fn fetch<T: AsyncFileReader + Send>(
+    pub async fn fetch<T: AsyncFileReader + Send>(
         &mut self,
         input: &mut T,
         projection: &ProjectionMask,
