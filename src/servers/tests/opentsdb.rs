@@ -37,8 +37,8 @@ struct DummyOpentsdbInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
-    async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
-        let metric = data_point.metric();
+    async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
+        let metric = data_points.first().unwrap().metric();
         if metric == "should_failed" {
             return server_error::InternalSnafu {
                 err_msg: "expected",
@@ -47,7 +47,7 @@ impl OpentsdbProtocolHandler for DummyOpentsdbInstance {
         }
         let i = metric.parse::<i32>().unwrap();
         let _ = self.tx.send(i * i).await;
-        Ok(())
+        Ok(data_points.len())
     }
 }
 

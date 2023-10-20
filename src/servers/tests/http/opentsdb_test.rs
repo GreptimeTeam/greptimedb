@@ -51,7 +51,8 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyInstance {
-    async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
+    async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
+        let data_point = data_points.first().unwrap();
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",
@@ -59,7 +60,7 @@ impl OpentsdbProtocolHandler for DummyInstance {
             .fail();
         }
         let _ = self.tx.send(data_point.metric().to_string()).await;
-        Ok(())
+        Ok(data_points.len())
     }
 }
 
@@ -172,10 +173,7 @@ async fn test_opentsdb_put() {
     while let Ok(s) = rx.try_recv() {
         metrics.push(s);
     }
-    assert_eq!(
-        metrics,
-        vec!["m1".to_string(), "m2".to_string(), "m3".to_string()]
-    );
+    assert_eq!(metrics, vec!["m1".to_string(), "m2".to_string()]);
 }
 
 #[tokio::test]

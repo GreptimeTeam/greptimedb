@@ -94,7 +94,7 @@ impl<S: AsyncWrite + AsyncRead + Unpin> Handler<S> {
             match DataPoint::try_create(&line) {
                 Ok(data_point) => {
                     let _timer = timer!(crate::metrics::METRIC_TCP_OPENTSDB_LINE_WRITE_ELAPSED);
-                    let result = self.query_handler.exec(&data_point, ctx.clone()).await;
+                    let result = self.query_handler.exec(vec![data_point], ctx.clone()).await;
                     if let Err(e) = result {
                         self.connection.write_line(e.output_msg()).await?;
                     }
@@ -128,8 +128,8 @@ mod tests {
 
     #[async_trait]
     impl OpentsdbProtocolHandler for DummyQueryHandler {
-        async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
-            let metric = data_point.metric();
+        async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
+            let metric = data_points.first().unwrap().metric();
             if metric == "should_failed" {
                 return error::InternalSnafu {
                     err_msg: "expected",
@@ -137,7 +137,7 @@ mod tests {
                 .fail();
             }
             self.tx.send(metric.to_string()).await.unwrap();
-            Ok(())
+            Ok(data_points.len())
         }
     }
 

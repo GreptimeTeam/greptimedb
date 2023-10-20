@@ -46,6 +46,8 @@ mod tests {
 
     async fn test_exec(instance: &Arc<Instance>) {
         let ctx = QueryContext::arc();
+
+        // should create new table "my_metric_1" directly
         let data_point1 = DataPoint::new(
             "my_metric_1".to_string(),
             1000,
@@ -55,9 +57,8 @@ mod tests {
                 ("tagk2".to_string(), "tagv2".to_string()),
             ],
         );
-        // should create new table "my_metric_1" directly
-        instance.exec(&data_point1, ctx.clone()).await.unwrap();
 
+        // should create new column "tagk3" directly
         let data_point2 = DataPoint::new(
             "my_metric_1".to_string(),
             2000,
@@ -67,12 +68,12 @@ mod tests {
                 ("tagk3".to_string(), "tagv3".to_string()),
             ],
         );
-        // should create new column "tagk3" directly
-        instance.exec(&data_point2, ctx.clone()).await.unwrap();
 
-        let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
         // should handle null tags properly
-        instance.exec(&data_point3, ctx.clone()).await.unwrap();
+        let data_point3 = DataPoint::new("my_metric_1".to_string(), 3000, 3.0, vec![]);
+
+        let data_points = vec![data_point1, data_point2, data_point3];
+        instance.exec(data_points, ctx.clone()).await.unwrap();
 
         let output = instance
             .do_query(
@@ -87,13 +88,13 @@ mod tests {
                 let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
                 let pretty_print = recordbatches.pretty_print().unwrap();
                 let expected = vec![
-                    "+---------------------+----------------+-------+-------+-------+",
-                    "| greptime_timestamp  | greptime_value | tagk1 | tagk2 | tagk3 |",
-                    "+---------------------+----------------+-------+-------+-------+",
-                    "| 1970-01-01T00:00:01 | 1.0            | tagv1 | tagv2 |       |",
-                    "| 1970-01-01T00:00:02 | 2.0            |       | tagv2 | tagv3 |",
-                    "| 1970-01-01T00:00:03 | 3.0            |       |       |       |",
-                    "+---------------------+----------------+-------+-------+-------+",
+                    "+-------+-------+----------------+---------------------+-------+",
+                    "| tagk1 | tagk2 | greptime_value | greptime_timestamp  | tagk3 |",
+                    "+-------+-------+----------------+---------------------+-------+",
+                    "| tagv1 | tagv2 | 1.0            | 1970-01-01T00:00:01 |       |",
+                    "|       | tagv2 | 2.0            | 1970-01-01T00:00:02 | tagv3 |",
+                    "|       |       | 3.0            | 1970-01-01T00:00:03 |       |",
+                    "+-------+-------+----------------+---------------------+-------+",
                 ]
                 .into_iter()
                 .join("\n");
