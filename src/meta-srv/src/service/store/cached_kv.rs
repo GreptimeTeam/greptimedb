@@ -162,7 +162,14 @@ impl KvBackend for LeaderCachedKvBackend {
 
         let ver = self.get_version();
 
-        let res = self.store.range(req.clone()).await?;
+        let res = self
+            .store
+            .range(RangeRequest {
+                // ignores `keys_only`
+                keys_only: false,
+                ..req.clone()
+            })
+            .await?;
         if !res.kvs.is_empty() {
             let KeyValue { key, value } = res.kvs[0].clone();
             let put_req = PutRequest {
