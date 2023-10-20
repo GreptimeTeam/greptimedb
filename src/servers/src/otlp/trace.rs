@@ -35,29 +35,34 @@ use crate::row_writer::{self, MultiTableData, TableData};
 const APPROXIMATE_COLUMN_COUNT: usize = 16;
 const TRACE_TABLE_NAME: &str = "traces_preview_v01";
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct TraceSpan {
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TraceSpan {
     // the following are tags
-    trace_id: String,
-    span_id: String,
-    parent_span_id: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: String,
 
     // the following are fields
-    resource_attributes: String, // TODO(yuanbohan): Map in the future
-    scope_name: String,
-    scope_version: String,
-    scope_attributes: String, // TODO(yuanbohan): Map in the future
-    trace_state: String,
-    span_name: String,
-    span_kind: String,
-    span_status_code: String,
-    span_status_message: String,
-    span_attributes: String,  // TODO(yuanbohan): Map in the future
-    span_events: String,      // TODO(yuanbohan): List in the future
-    span_links: String,       // TODO(yuanbohan): List in the future
-    start_in_nanosecond: u64, // this is also the Timestamp Index
-    end_in_nanosecond: u64,
+    pub resource_attributes: String, // TODO(yuanbohan): Map in the future
+    pub scope_name: String,
+    pub scope_version: String,
+    pub scope_attributes: String, // TODO(yuanbohan): Map in the future
+    pub trace_state: String,
+    pub span_name: String,
+    pub span_kind: String,
+    pub span_status_code: String,
+    pub span_status_message: String,
+    pub span_attributes: String,  // TODO(yuanbohan): Map in the future
+    pub span_events: String,      // TODO(yuanbohan): List in the future
+    pub span_links: String,       // TODO(yuanbohan): List in the future
+    pub start_in_nanosecond: u64, // this is also the Timestamp Index
+    pub end_in_nanosecond: u64,
+
+    pub uplift_fields: Vec<(String, ColumnDataType, ValueData)>,
 }
+
+pub type TraceSpans = Vec<TraceSpan>;
 
 /// Convert OpenTelemetry traces to GreptimeDB row insert requests
 ///
@@ -66,9 +71,7 @@ struct TraceSpan {
 /// for data structure of OTLP metrics.
 ///
 /// Returns `InsertRequests` and total number of rows to ingest
-pub fn to_grpc_insert_requests(
-    request: ExportTraceServiceRequest,
-) -> Result<(RowInsertRequests, usize)> {
+pub fn to_grpc_insert_requests(spans: TraceSpans) -> Result<(RowInsertRequests, usize)> {
     let mut multi_table_writer = MultiTableData::default();
     let one_table_writer = multi_table_writer.get_or_default_table_data(
         TRACE_TABLE_NAME,
@@ -76,7 +79,6 @@ pub fn to_grpc_insert_requests(
         APPROXIMATE_COLUMN_COUNT,
     );
 
-    let spans = parse_request_to_spans(request);
     for span in spans {
         let row = one_table_writer.alloc_one_row();
         write_span_to_row(one_table_writer, row, span)?;
@@ -85,7 +87,11 @@ pub fn to_grpc_insert_requests(
     Ok(multi_table_writer.into_row_insert_requests())
 }
 
-fn write_span_to_row(writer: &mut TableData, mut row: Vec<Value>, span: TraceSpan) -> Result<()> {
+pub fn write_span_to_row(
+    writer: &mut TableData,
+    mut row: Vec<Value>,
+    span: TraceSpan,
+) -> Result<()> {
     {
         // tags
         let iter = vec![
@@ -158,7 +164,11 @@ fn write_span_to_row(writer: &mut TableData, mut row: Vec<Value>, span: TraceSpa
     Ok(())
 }
 
-fn parse_span(resource_attrs: &[KeyValue], scope: &InstrumentationScope, span: Span) -> TraceSpan {
+pub fn parse_span(
+    resource_attrs: &[KeyValue],
+    scope: &InstrumentationScope,
+    span: Span,
+) -> TraceSpan {
     let (code, message) = status_to_string(&span.status);
     TraceSpan {
         trace_id: bytes_to_hex_string(&span.trace_id),
@@ -180,10 +190,12 @@ fn parse_span(resource_attrs: &[KeyValue], scope: &InstrumentationScope, span: S
 
         start_in_nanosecond: span.start_time_unix_nano,
         end_in_nanosecond: span.end_time_unix_nano,
+
+        uplift_fields: vec![],
     }
 }
 
-fn parse_request_to_spans(request: ExportTraceServiceRequest) -> Vec<TraceSpan> {
+pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
     let mut spans = vec![];
     for resource_spans in request.resource_spans {
         let resource_attrs = resource_spans
@@ -248,9 +260,9 @@ pub fn any_value_to_string(val: AnyValue) -> Option<String> {
 
 pub fn event_to_string(event: &Event) -> String {
     json!({
-        "name": event.name,
-        "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
-        "attrs": vec_kv_to_string(&event.attributes),
+    "name": event.name,
+    "time": Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
+    "attrs": vec_kv_to_string(&event.attributes),
     })
     .to_string()
 }
@@ -262,10 +274,10 @@ pub fn events_to_string(events: &[Event]) -> String {
 
 pub fn link_to_string(link: &Link) -> String {
     json!({
-        "trace_id": link.trace_id,
-        "span_id": link.span_id,
-        "trace_state": link.trace_state,
-        "attributes": vec_kv_to_string(&link.attributes),
+    "trace_id": link.trace_id,
+    "span_id": link.span_id,
+    "trace_state": link.trace_state,
+    "attributes": vec_kv_to_string(&link.attributes),
     })
     .to_string()
 }
