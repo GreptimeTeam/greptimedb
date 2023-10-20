@@ -162,23 +162,23 @@ impl HistogramFold {
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let input_schema = self.input.schema();
         // safety: those fields are checked in `check_schema()`
-        let le_column_idx = input_schema
+        let le_column_index = input_schema
             .index_of_column_by_name(None, &self.le_column)
             .unwrap()
             .unwrap();
-        let field_column_idx = input_schema
+        let field_column_index = input_schema
             .index_of_column_by_name(None, &self.field_column)
             .unwrap()
             .unwrap();
-        let ts_column_idx = input_schema
+        let ts_column_index = input_schema
             .index_of_column_by_name(None, &self.ts_column)
             .unwrap()
             .unwrap();
 
         Arc::new(HistogramFoldExec {
-            le_column: le_column_idx,
-            field_column: field_column_idx,
-            ts_column: ts_column_idx,
+            le_column_index,
+            field_column_index,
+            ts_column_index,
             input: exec_input,
             output_schema: Arc::new(self.output_schema.as_ref().into()),
             metric: ExecutionPlanMetricsSet::new(),
@@ -238,12 +238,12 @@ impl HistogramFold {
 #[derive(Debug)]
 pub struct HistogramFoldExec {
     /// Index for `le` column in the schema of input.
-    le_column: usize,
+    le_column_index: usize,
     input: Arc<dyn ExecutionPlan>,
     output_schema: SchemaRef,
     /// Index for field column in the schema of input.
-    field_column: usize,
-    ts_column: usize,
+    field_column_index: usize,
+    ts_column_index: usize,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -276,8 +276,8 @@ impl ExecutionPlan for HistogramFoldExec {
         // add le ASC
         cols.push(PhysicalSortRequirement {
             expr: Arc::new(PhyColumn::new(
-                self.output_schema.field(self.le_column).name(),
-                self.le_column,
+                self.output_schema.field(self.le_column_index).name(),
+                self.le_column_index,
             )),
             options: Some(SortOptions {
                 descending: false,  // +INF in the last
@@ -287,8 +287,8 @@ impl ExecutionPlan for HistogramFoldExec {
         // add ts
         cols.push(PhysicalSortRequirement {
             expr: Arc::new(PhyColumn::new(
-                self.output_schema.field(self.ts_column).name(),
-                self.ts_column,
+                self.output_schema.field(self.ts_column_index).name(),
+                self.ts_column_index,
             )),
             options: None,
         });
@@ -318,10 +318,10 @@ impl ExecutionPlan for HistogramFoldExec {
         Ok(Arc::new(Self {
             input: children[0].clone(),
             metric: self.metric.clone(),
-            le_column: self.le_column,
-            ts_column: self.ts_column,
+            le_column_index: self.le_column_index,
+            ts_column_index: self.ts_column_index,
             output_schema: self.output_schema.clone(),
-            field_column: self.field_column,
+            field_column_index: self.field_column_index,
         }))
     }
 
@@ -337,11 +337,11 @@ impl ExecutionPlan for HistogramFoldExec {
         let output_schema = self.output_schema.clone();
 
         let mut normal_indices = (0..output_schema.fields().len()).collect::<HashSet<_>>();
-        normal_indices.remove(&self.le_column);
-        normal_indices.remove(&self.field_column);
+        normal_indices.remove(&self.le_column_index);
+        normal_indices.remove(&self.field_column_index);
         Ok(Box::pin(HistogramFoldStream {
-            le_index: self.le_column,
-            field_index: self.field_column,
+            le_column_index: self.le_column_index,
+            field_column_index: self.field_column_index,
             normal_indices: normal_indices.into_iter().collect(),
             bucket_size: None,
             input_buffer: vec![],
@@ -380,7 +380,10 @@ impl HistogramFoldExec {
             .iter()
             .enumerate()
             .filter_map(|(idx, field)| {
-                if idx == self.le_column || idx == self.field_column || idx == self.ts_column {
+                if idx == self.le_column_index
+                    || idx == self.field_column_index
+                    || idx == self.ts_column_index
+                {
                     None
                 } else {
                     Some(Arc::new(PhyColumn::new(field.name(), idx)) as _)
@@ -397,7 +400,7 @@ impl DisplayAs for HistogramFoldExec {
                 write!(
                     f,
                     "HistogramFoldExec: le=@{}, field=@{}",
-                    self.le_column, self.field_column
+                    self.le_column_index, self.field_column_index
                 )
             }
         }
@@ -406,8 +409,8 @@ impl DisplayAs for HistogramFoldExec {
 
 pub struct HistogramFoldStream {
     // internal states
-    le_index: usize,
-    field_index: usize,
+    le_column_index: usize,
+    field_column_index: usize,
     /// Columns need not folding
     normal_indices: Vec<usize>,
     bucket_size: Option<usize>,
@@ -531,8 +534,8 @@ impl HistogramFoldStream {
                 self.output_buffer[*normal_index].push_value_ref(val.as_value_ref());
             }
             // "fold" `le` and field columns
-            let le_array = batch.column(self.le_index);
-            let field_array = batch.column(self.field_index);
+            let le_array = batch.column(self.le_column_index);
+            let field_array = batch.column(self.field_column_index);
             let mut le_item = vec![];
             let mut field_item = vec![];
             for bias in 0..bucket_num {
@@ -557,8 +560,9 @@ impl HistogramFoldStream {
                 Some(Box::new(field_item)),
                 ConcreteDataType::float64_datatype(),
             ));
-            self.output_buffer[self.le_index].push_value_ref(le_list_val.as_value_ref());
-            self.output_buffer[self.field_index].push_value_ref(field_list_val.as_value_ref());
+            self.output_buffer[self.le_column_index].push_value_ref(le_list_val.as_value_ref());
+            self.output_buffer[self.field_column_index]
+                .push_value_ref(field_list_val.as_value_ref());
 
             cursor += bucket_num;
             remaining_rows -= bucket_num;
@@ -596,13 +600,15 @@ impl HistogramFoldStream {
         }
 
         // overwrite default list datatype to change field name
-        columns[self.le_index] = compute::cast(
-            &columns[self.le_index],
-            self.output_schema.field(self.le_index).data_type(),
+        columns[self.le_column_index] = compute::cast(
+            &columns[self.le_column_index],
+            self.output_schema.field(self.le_column_index).data_type(),
         )?;
-        columns[self.field_index] = compute::cast(
-            &columns[self.field_index],
-            self.output_schema.field(self.field_index).data_type(),
+        columns[self.field_column_index] = compute::cast(
+            &columns[self.field_column_index],
+            self.output_schema
+                .field(self.field_column_index)
+                .data_type(),
         )?;
 
         self.output_buffered_rows = 0;
@@ -621,7 +627,7 @@ impl HistogramFoldStream {
         if let Some(bucket_size) = self.bucket_size {
             return Ok(bucket_size);
         }
-        let string_le_array = batch.column(self.le_index);
+        let string_le_array = batch.column(self.le_column_index);
         let float_le_array = compute::cast(&string_le_array, &DataType::Float64).map_err(|e| {
             DataFusionError::Execution(format!(
                 "cannot cast {} array to float64 array: {:?}",
@@ -731,9 +737,9 @@ mod test {
             .into(),
         );
         let fold_exec = Arc::new(HistogramFoldExec {
-            le_column: 1,
-            field_column: 2,
-            ts_column: 9999, // not exist but doesn't matter
+            le_column_index: 1,
+            field_column_index: 2,
+            ts_column_index: 9999, // not exist but doesn't matter
             input: memory_exec,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
