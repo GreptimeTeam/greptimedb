@@ -14,10 +14,10 @@
 
 use std::collections::HashMap;
 
-use snafu::ensure;
+use snafu::OptionExt;
 
-use crate::error::Result;
-use crate::{error, ObjectStore};
+use crate::error::{DefaultStorageNotFoundSnafu, Result};
+use crate::ObjectStore;
 
 /// Manages multiple object stores so that users can configure a storage for each table.
 /// This struct certainly have one default object store, and can have zero or more custom object stores.
@@ -27,31 +27,29 @@ pub struct ObjectStoreManager {
 }
 
 impl ObjectStoreManager {
+    /// Creates a new manager with specific object stores. Returns an error if `stores` doesn't contain the default object store.
     pub fn try_new(
         stores: HashMap<String, ObjectStore>,
         default_object_store: &str,
     ) -> Result<Self> {
-        ensure!(
-            stores.keys().any(|key| key == default_object_store),
-            error::DefaultStorageNotFoundSnafu {
-                default_object_store: default_object_store.to_string()
-            }
-        );
-
-        // Safety: We've already checked in the above place whether this exists.
-        let default_object_store = stores.get(default_object_store).unwrap().clone();
+        let default_object_store = stores
+            .get(default_object_store)
+            .context(DefaultStorageNotFoundSnafu {
+                default_object_store,
+            })?
+            .clone();
         Ok(ObjectStoreManager {
             stores,
             default_object_store,
         })
     }
 
-    pub fn find(&self, name: &str) -> Option<ObjectStore> {
-        self.stores.get(name).cloned()
+    pub fn find(&self, name: &str) -> Option<&ObjectStore> {
+        self.stores.get(name)
     }
 
-    pub fn default_object_store(&self) -> ObjectStore {
-        self.default_object_store.clone()
+    pub fn default_object_store(&self) -> &ObjectStore {
+        &self.default_object_store
     }
 }
 
@@ -105,8 +103,5 @@ mod tests {
         assert!(object_store_manager.find("File").is_some());
         assert!(object_store_manager.find("S3").is_some());
         assert!(object_store_manager.find("Gcs").is_none());
-
-        // Panic should not happen.
-        object_store_manager.default_object_store();
     }
 }
