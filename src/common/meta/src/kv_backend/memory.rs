@@ -17,7 +17,6 @@ use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::marker::PhantomData;
-use std::ops::Range;
 use std::sync::RwLock;
 
 use async_trait::async_trait;
@@ -85,34 +84,31 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
     }
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
+        let range = req.range();
         let RangeRequest {
-            key,
-            range_end,
-            limit,
-            keys_only,
+            limit, keys_only, ..
         } = req;
 
         let kvs = self.kvs.read().unwrap();
+        let values = kvs.range(range);
 
-        let iter: Box<dyn Iterator<Item = (&Vec<u8>, &Vec<u8>)>> = if range_end.is_empty() {
-            Box::new(kvs.get_key_value(&key).into_iter())
-        } else {
-            Box::new(kvs.range(key..range_end))
-        };
-        let mut kvs = iter
+        let mut more = false;
+        let mut iter: i64 = 0;
+
+        let kvs = values
+            .take_while(|_| {
+                let take = limit == 0 || iter != limit;
+                iter += 1;
+                more = limit > 0 && iter > limit;
+
+                take
+            })
             .map(|(k, v)| {
                 let key = k.clone();
                 let value = if keys_only { vec![] } else { v.clone() };
                 KeyValue { key, value }
             })
             .collect::<Vec<_>>();
-
-        let more = if limit > 0 && kvs.len() > limit as usize {
-            kvs.truncate(limit as usize);
-            true
-        } else {
-            false
-        };
 
         Ok(RangeResponse { kvs, more })
     }
@@ -215,36 +211,32 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
         &self,
         req: DeleteRangeRequest,
     ) -> Result<DeleteRangeResponse, Self::Error> {
-        let DeleteRangeRequest {
-            key,
-            range_end,
-            prev_kv,
-        } = req;
+        let range = req.range();
+        let DeleteRangeRequest { prev_kv, .. } = req;
 
         let mut kvs = self.kvs.write().unwrap();
 
-        let prev_kvs = if range_end.is_empty() {
-            kvs.remove(&key)
-                .into_iter()
-                .map(|value| KeyValue {
-                    key: key.clone(),
-                    value,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            let range = Range {
-                start: key,
-                end: range_end,
-            };
-            kvs.extract_if(|key, _| range.contains(key))
-                .map(Into::into)
-                .collect::<Vec<_>>()
-        };
+        let keys = kvs
+            .range(range)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
 
-        Ok(DeleteRangeResponse {
-            deleted: prev_kvs.len() as i64,
-            prev_kvs: if prev_kv { prev_kvs } else { vec![] },
-        })
+        let mut prev_kvs = if prev_kv {
+            Vec::with_capacity(keys.len())
+        } else {
+            vec![]
+        };
+        let deleted = keys.len() as i64;
+
+        for key in keys {
+            if let Some(value) = kvs.remove(&key) {
+                if prev_kv {
+                    prev_kvs.push((key.clone(), value).into())
+                }
+            }
+        }
+
+        Ok(DeleteRangeResponse { deleted, prev_kvs })
     }
 
     async fn batch_delete(
@@ -358,254 +350,63 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU8, Ordering};
     use std::sync::Arc;
 
     use super::*;
     use crate::error::Error;
+    use crate::kv_backend::test::{
+        prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
+        test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
+    };
     use crate::kv_backend::KvBackend;
-    use crate::rpc::store::{BatchGetRequest, BatchPutRequest};
-    use crate::rpc::KeyValue;
-    use crate::util;
 
     async fn mock_mem_store_with_data() -> MemoryKvBackend<Error> {
         let kv_store = MemoryKvBackend::<Error>::new();
-        let kvs = mock_kvs();
-
-        assert!(kv_store
-            .batch_put(BatchPutRequest {
-                kvs,
-                ..Default::default()
-            })
-            .await
-            .is_ok());
-
-        assert!(kv_store
-            .put(PutRequest {
-                key: b"key11".to_vec(),
-                value: b"val11".to_vec(),
-                ..Default::default()
-            })
-            .await
-            .is_ok());
+        prepare_kv(&kv_store).await;
 
         kv_store
-    }
-
-    fn mock_kvs() -> Vec<KeyValue> {
-        vec![
-            KeyValue {
-                key: b"key1".to_vec(),
-                value: b"val1".to_vec(),
-            },
-            KeyValue {
-                key: b"key2".to_vec(),
-                value: b"val2".to_vec(),
-            },
-            KeyValue {
-                key: b"key3".to_vec(),
-                value: b"val3".to_vec(),
-            },
-        ]
     }
 
     #[tokio::test]
     async fn test_put() {
         let kv_store = mock_mem_store_with_data().await;
 
-        let resp = kv_store
-            .put(PutRequest {
-                key: b"key11".to_vec(),
-                value: b"val12".to_vec(),
-                prev_kv: false,
-            })
-            .await
-            .unwrap();
-        assert!(resp.prev_kv.is_none());
-
-        let resp = kv_store
-            .put(PutRequest {
-                key: b"key11".to_vec(),
-                value: b"val13".to_vec(),
-                prev_kv: true,
-            })
-            .await
-            .unwrap();
-        let prev_kv = resp.prev_kv.unwrap();
-        assert_eq!(b"key11", prev_kv.key());
-        assert_eq!(b"val12", prev_kv.value());
+        test_kv_put(kv_store).await;
     }
 
     #[tokio::test]
     async fn test_range() {
         let kv_store = mock_mem_store_with_data().await;
 
-        let key = b"key1".to_vec();
-        let range_end = util::get_prefix_end_key(b"key1");
+        test_kv_range(kv_store).await;
+    }
 
-        let resp = kv_store
-            .range(RangeRequest {
-                key: key.clone(),
-                range_end: range_end.clone(),
-                limit: 0,
-                keys_only: false,
-            })
-            .await
-            .unwrap();
+    #[tokio::test]
+    async fn test_range_2() {
+        let kv = MemoryKvBackend::<Error>::new();
 
-        assert_eq!(2, resp.kvs.len());
-        assert_eq!(b"key1", resp.kvs[0].key());
-        assert_eq!(b"val1", resp.kvs[0].value());
-        assert_eq!(b"key11", resp.kvs[1].key());
-        assert_eq!(b"val11", resp.kvs[1].value());
-
-        let resp = kv_store
-            .range(RangeRequest {
-                key: key.clone(),
-                range_end: range_end.clone(),
-                limit: 0,
-                keys_only: true,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(2, resp.kvs.len());
-        assert_eq!(b"key1", resp.kvs[0].key());
-        assert_eq!(b"", resp.kvs[0].value());
-        assert_eq!(b"key11", resp.kvs[1].key());
-        assert_eq!(b"", resp.kvs[1].value());
-
-        let resp = kv_store
-            .range(RangeRequest {
-                key: key.clone(),
-                limit: 0,
-                keys_only: false,
-                ..Default::default()
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(1, resp.kvs.len());
-        assert_eq!(b"key1", resp.kvs[0].key());
-        assert_eq!(b"val1", resp.kvs[0].value());
-
-        let resp = kv_store
-            .range(RangeRequest {
-                key,
-                range_end,
-                limit: 1,
-                keys_only: false,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(1, resp.kvs.len());
-        assert_eq!(b"key1", resp.kvs[0].key());
-        assert_eq!(b"val1", resp.kvs[0].value());
+        test_kv_range_2(kv).await;
     }
 
     #[tokio::test]
     async fn test_batch_get() {
         let kv_store = mock_mem_store_with_data().await;
 
-        let keys = vec![];
-        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
-
-        assert!(resp.kvs.is_empty());
-
-        let keys = vec![b"key10".to_vec()];
-        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
-
-        assert!(resp.kvs.is_empty());
-
-        let keys = vec![b"key1".to_vec(), b"key3".to_vec(), b"key4".to_vec()];
-        let resp = kv_store.batch_get(BatchGetRequest { keys }).await.unwrap();
-
-        assert_eq!(2, resp.kvs.len());
-        assert_eq!(b"key1", resp.kvs[0].key());
-        assert_eq!(b"val1", resp.kvs[0].value());
-        assert_eq!(b"key3", resp.kvs[1].key());
-        assert_eq!(b"val3", resp.kvs[1].value());
+        test_kv_batch_get(kv_store).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compare_and_put() {
         let kv_store = Arc::new(MemoryKvBackend::<Error>::new());
-        let success = Arc::new(AtomicU8::new(0));
 
-        let mut joins = vec![];
-        for _ in 0..20 {
-            let kv_store_clone = kv_store.clone();
-            let success_clone = success.clone();
-            let join = tokio::spawn(async move {
-                let req = CompareAndPutRequest {
-                    key: b"key".to_vec(),
-                    expect: vec![],
-                    value: b"val_new".to_vec(),
-                };
-                let resp = kv_store_clone.compare_and_put(req).await.unwrap();
-                if resp.success {
-                    success_clone.fetch_add(1, Ordering::SeqCst);
-                }
-            });
-            joins.push(join);
-        }
-
-        for join in joins {
-            join.await.unwrap();
-        }
-
-        assert_eq!(1, success.load(Ordering::SeqCst));
+        test_kv_compare_and_put(kv_store).await;
     }
 
     #[tokio::test]
     async fn test_delete_range() {
         let kv_store = mock_mem_store_with_data().await;
 
-        let req = DeleteRangeRequest {
-            key: b"key3".to_vec(),
-            range_end: vec![],
-            prev_kv: true,
-        };
-
-        let resp = kv_store.delete_range(req).await.unwrap();
-        assert_eq!(1, resp.prev_kvs.len());
-        assert_eq!(b"key3", resp.prev_kvs[0].key());
-        assert_eq!(b"val3", resp.prev_kvs[0].value());
-
-        let resp = kv_store.get(b"key3").await.unwrap();
-        assert!(resp.is_none());
-
-        let req = DeleteRangeRequest {
-            key: b"key2".to_vec(),
-            range_end: vec![],
-            prev_kv: false,
-        };
-
-        let resp = kv_store.delete_range(req).await.unwrap();
-        assert!(resp.prev_kvs.is_empty());
-
-        let resp = kv_store.get(b"key2").await.unwrap();
-        assert!(resp.is_none());
-
-        let key = b"key1".to_vec();
-        let range_end = util::get_prefix_end_key(b"key1");
-
-        let req = DeleteRangeRequest {
-            key: key.clone(),
-            range_end: range_end.clone(),
-            prev_kv: true,
-        };
-        let resp = kv_store.delete_range(req).await.unwrap();
-        assert_eq!(2, resp.prev_kvs.len());
-
-        let req = RangeRequest {
-            key,
-            range_end,
-            ..Default::default()
-        };
-        let resp = kv_store.range(req).await.unwrap();
-        assert!(resp.kvs.is_empty());
+        test_kv_delete_range(kv_store).await;
     }
 
     #[tokio::test]
@@ -636,35 +437,6 @@ mod tests {
     async fn test_batch_delete() {
         let kv_store = mock_mem_store_with_data().await;
 
-        assert!(kv_store.get(b"key1").await.unwrap().is_some());
-        assert!(kv_store.get(b"key100").await.unwrap().is_none());
-
-        let req = BatchDeleteRequest {
-            keys: vec![b"key1".to_vec(), b"key100".to_vec()],
-            prev_kv: true,
-        };
-        let resp = kv_store.batch_delete(req).await.unwrap();
-        assert_eq!(1, resp.prev_kvs.len());
-        assert_eq!(
-            vec![KeyValue {
-                key: b"key1".to_vec(),
-                value: b"val1".to_vec()
-            }],
-            resp.prev_kvs
-        );
-        assert!(kv_store.get(b"key1").await.unwrap().is_none());
-
-        assert!(kv_store.get(b"key2").await.unwrap().is_some());
-        assert!(kv_store.get(b"key3").await.unwrap().is_some());
-
-        let req = BatchDeleteRequest {
-            keys: vec![b"key2".to_vec(), b"key3".to_vec()],
-            prev_kv: false,
-        };
-        let resp = kv_store.batch_delete(req).await.unwrap();
-        assert!(resp.prev_kvs.is_empty());
-
-        assert!(kv_store.get(b"key2").await.unwrap().is_none());
-        assert!(kv_store.get(b"key3").await.unwrap().is_none());
+        test_kv_batch_delete(kv_store).await;
     }
 }
