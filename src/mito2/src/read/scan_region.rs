@@ -173,11 +173,8 @@ impl ScanRegion {
             total_ssts
         );
 
-        let predicate = Predicate::try_new(
-            self.request.filters.clone(),
-            self.version.metadata.schema.clone(),
-        )
-        .context(BuildPredicateSnafu)?;
+        let predicate =
+            Predicate::new(self.request.filters.clone()).context(BuildPredicateSnafu)?;
         let mapper = match &self.request.projection {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,

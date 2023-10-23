@@ -188,8 +188,9 @@ impl ParquetReaderBuilder {
                 &read_format,
                 column_ids,
             );
+
             let pruned_row_groups = predicate
-                .prune_with_stats(&stats)
+                .prune_with_stats(&stats, read_format.metadata().schema.arrow_schema())
                 .into_iter()
                 .enumerate()
                 .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })

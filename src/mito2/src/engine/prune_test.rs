@@ -17,7 +17,7 @@ use common_query::logical_plan::DfExpr;
 use common_query::prelude::Expr;
 use common_recordbatch::RecordBatches;
 use datafusion_common::ScalarValue;
-use datafusion_expr::lit;
+use datafusion_expr::{col, lit};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
@@ -46,7 +46,7 @@ async fn check_prune_row_groups(expr: DfExpr, expected: &str) {
         region_id,
         Rows {
             schema: column_schemas.clone(),
-            rows: build_rows(0, 10),
+            rows: build_rows(0, 15),
         },
     )
     .await;
@@ -76,6 +76,16 @@ async fn test_read_parquet_stats() {
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 10    | 10.0    | 1970-01-01T00:00:10 |
+| 11    | 11.0    | 1970-01-01T00:00:11 |
+| 12    | 12.0    | 1970-01-01T00:00:12 |
+| 13    | 13.0    | 1970-01-01T00:00:13 |
+| 14    | 14.0    | 1970-01-01T00:00:14 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 | 6     | 6.0     | 1970-01-01T00:00:06 |
 | 7     | 7.0     | 1970-01-01T00:00:07 |
@@ -84,9 +94,45 @@ async fn test_read_parquet_stats() {
 +-------+---------+---------------------+",
     )
     .await;
+}
 
+#[tokio::test]
+async fn test_prune_tag() {
+    // prune result: only row group 1&2
     check_prune_row_groups(
         datafusion_expr::col("tag_0").gt(lit(ScalarValue::Utf8(Some("4".to_string())))),
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 10    | 10.0    | 1970-01-01T00:00:10 |
+| 11    | 11.0    | 1970-01-01T00:00:11 |
+| 12    | 12.0    | 1970-01-01T00:00:12 |
+| 13    | 13.0    | 1970-01-01T00:00:13 |
+| 14    | 14.0    | 1970-01-01T00:00:14 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
+| 7     | 7.0     | 1970-01-01T00:00:07 |
+| 8     | 8.0     | 1970-01-01T00:00:08 |
+| 9     | 9.0     | 1970-01-01T00:00:09 |
++-------+---------+---------------------+",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_prune_tag_and_field() {
+    common_telemetry::init_default_ut_logging();
+    // prune result: only row group 1
+    check_prune_row_groups(
+        col("tag_0")
+            .gt(lit(ScalarValue::Utf8(Some("4".to_string()))))
+            .and(col("field_0").lt(lit(8.0))),
         "\
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |

@@ -277,7 +277,10 @@ impl ParquetReader {
 
         let pruned_row_groups = self
             .predicate
-            .prune_row_groups(builder.metadata().row_groups())
+            .prune_row_groups(
+                builder.metadata().row_groups(),
+                store_schema.schema().clone(),
+            )
             .into_iter()
             .enumerate()
             .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
@@ -549,12 +552,11 @@ mod tests {
         let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
-        let user_schema = projected_schema.projected_user_schema().clone();
         let reader = ParquetReader::new(
             sst_file_handle,
             operator,
             projected_schema,
-            Predicate::empty(user_schema),
+            Predicate::empty(),
             TimestampRange::min_to_max(),
         );
 
@@ -636,12 +638,11 @@ mod tests {
         let operator = create_object_store(dir.path().to_str().unwrap());
 
         let projected_schema = Arc::new(ProjectedSchema::new(schema, Some(vec![1])).unwrap());
-        let user_schema = projected_schema.projected_user_schema().clone();
         let reader = ParquetReader::new(
             file_handle,
             operator,
             projected_schema,
-            Predicate::empty(user_schema),
+            Predicate::empty(),
             TimestampRange::min_to_max(),
         );
 
@@ -665,14 +666,8 @@ mod tests {
         range: TimestampRange,
         expect: Vec<i64>,
     ) {
-        let store_schema = schema.schema_to_read().clone();
-        let reader = ParquetReader::new(
-            file_handle,
-            object_store,
-            schema,
-            Predicate::empty(store_schema.schema().clone()),
-            range,
-        );
+        let reader =
+            ParquetReader::new(file_handle, object_store, schema, Predicate::empty(), range);
         let mut stream = reader.chunk_stream().await.unwrap();
         let result = stream.next_batch().await;
 
