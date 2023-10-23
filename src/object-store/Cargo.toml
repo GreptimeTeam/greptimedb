@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 async-trait = "0.1"
 bytes = "1.4"
+common-error.workspace = true
+common-macro.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 futures.workspace = true
@@ -17,6 +19,7 @@ opendal = { version = "0.40", features = [
     "layers-tracing",
     "layers-metrics",
 ] }
+snafu.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
