@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, RowInsertRequests, Value};
+use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::writer::Precision;
 use common_time::time::Time;
 use itertools::Itertools;
@@ -59,7 +59,7 @@ pub struct TraceSpan {
     pub start_in_nanosecond: u64, // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
 
-    pub uplift_fields: Vec<(String, ColumnDataType, ValueData)>,
+    pub uplifted_fields: Vec<(String, ColumnDataType, ValueData)>,
 }
 
 pub type TraceSpans = Vec<TraceSpan>;
@@ -83,18 +83,14 @@ pub fn to_grpc_insert_requests(
     );
 
     for span in spans {
-        let row = one_table_writer.alloc_one_row();
-        write_span_to_row(one_table_writer, row, span)?;
+        write_span_to_row(one_table_writer, span)?;
     }
 
     Ok(multi_table_writer.into_row_insert_requests())
 }
 
-pub fn write_span_to_row(
-    writer: &mut TableData,
-    mut row: Vec<Value>,
-    span: TraceSpan,
-) -> Result<()> {
+pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
+    let mut row = writer.alloc_one_row();
     {
         // tags
         let iter = vec![
@@ -146,7 +142,7 @@ pub fn write_span_to_row(
 
         row_writer::write_fields(writer, str_fields_iter, &mut row)?;
         row_writer::write_fields(writer, time_fields_iter, &mut row)?;
-        row_writer::write_fields(writer, span.uplift_fields.into_iter(), &mut row)?;
+        row_writer::write_fields(writer, span.uplifted_fields.into_iter(), &mut row)?;
     }
 
     row_writer::write_f64(
@@ -195,7 +191,7 @@ pub fn parse_span(
         start_in_nanosecond: span.start_time_unix_nano,
         end_in_nanosecond: span.end_time_unix_nano,
 
-        uplift_fields: vec![],
+        uplifted_fields: vec![],
     }
 }
 
