@@ -8,4 +8,13 @@ select * from demo where host='test2';
 
 select * from demo where host='test3';
 
+select * from demo where host='test2' and idc='idc1';
+
+select * from demo where host='test2' and idc='idc1' and collector='disk';
+
+select * from demo where host='test2' and idc='idc2';
+
+select * from demo where host='test3' and idc>'idc1';
+
+
 drop table demo;

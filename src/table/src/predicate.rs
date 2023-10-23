@@ -52,7 +52,7 @@ impl Predicate {
         Self { exprs }
     }
 
-    #[inline]
+    /// Builds physical exprs according to provided schema.
     pub fn to_physical_exprs(
         &self,
         schema: &arrow::datatypes::SchemaRef,
