@@ -24,12 +24,14 @@ use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{
     KvBackend, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, TxnService,
 };
+use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
+use futures::TryStreamExt;
 
 use crate::metrics;
 use crate::state::State;
@@ -94,13 +96,24 @@ impl LeaderCachedKvBackend {
         for prefix in &CACHE_KEY_PREFIXES[..] {
             let _timer = metrics::METRIC_META_LEADER_CACHED_KV_LOAD.with_label_values(&[prefix]);
 
-            let result = self
-                .store
-                .range(RangeRequest::new().with_prefix(prefix.as_bytes()))
-                .await?;
+            // TODO(weny): Refactors PaginationStream's ouput to unary output.
+            let stream = PaginationStream::new(
+                self.store.clone(),
+                RangeRequest::new().with_prefix(prefix.as_bytes()),
+                DEFAULT_PAGE_SIZE,
+                Arc::new(|kv| Ok((kv, ()))),
+            );
+
+            let kvs = stream
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .map(|(kv, _)| kv)
+                .collect();
+
             self.cache
                 .batch_put(BatchPutRequest {
-                    kvs: result.kvs,
+                    kvs,
                     prev_kv: false,
                 })
                 .await?;

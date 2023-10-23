@@ -161,7 +161,7 @@ impl MetaSrvBuilder {
 
         let state = Arc::new(RwLock::new(match election {
             None => State::leader(options.server_addr.to_string(), true),
-            Some(_) => State::new(options.server_addr.to_string()),
+            Some(_) => State::follower(options.server_addr.to_string()),
         }));
 
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(

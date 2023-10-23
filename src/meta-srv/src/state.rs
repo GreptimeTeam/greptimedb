@@ -64,7 +64,7 @@ pub struct FollowerState {
 }
 
 impl State {
-    pub fn new(server_addr: String) -> State {
+    pub fn follower(server_addr: String) -> State {
         Self::Follower(FollowerState { server_addr })
     }
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_next_state() {
-        let mut state = State::new("test".to_string());
+        let mut state = State::follower("test".to_string());
 
         state.next_state(become_leader(false));
 
