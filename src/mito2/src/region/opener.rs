@@ -119,7 +119,8 @@ impl RegionOpener {
                     &expect.column_metadatas,
                     &expect.primary_key,
                 )?;
-
+                // To keep consistence with Create behavior, set the opened Region writable.
+                region.set_writable(true);
                 return Ok(region);
             }
             Ok(None) => {

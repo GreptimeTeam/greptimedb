@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
@@ -53,6 +53,37 @@ async fn test_engine_create_existing_region() {
         .handle_request(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_engine_create_close_create_region() {
+    // This test will trigger create_or_open function.
+    let mut env = TestEnv::with_prefix("create-close-create");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let builder = CreateRequestBuilder::new();
+    // Create a region with id 1.
+    engine
+        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .await
+        .unwrap();
+    // Close the region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+    // Create the same region id again.
+    engine
+        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .await
+        .unwrap();
+
+    assert!(engine.is_region_exists(region_id));
+
+    let region = engine.get_region(region_id).unwrap();
+
+    assert!(region.is_writable());
 }
 
 #[tokio::test]
