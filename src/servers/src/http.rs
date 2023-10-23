@@ -660,6 +660,7 @@ impl HttpServer {
     fn route_otlp<S>(&self, otlp_handler: OpenTelemetryProtocolHandlerRef) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
+            .route("/v1/traces", routing::post(otlp::traces))
             .with_state(otlp_handler)
     }
 

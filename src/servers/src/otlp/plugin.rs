@@ -12,10 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod metrics;
-pub mod plugin;
-pub mod trace;
+use std::sync::Arc;
 
-const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
-const GREPTIME_VALUE: &str = "greptime_value";
-const GREPTIME_COUNT: &str = "greptime_count";
+use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+
+use super::trace::TraceSpans;
+
+/// Transformer helps to transform ExportTraceServiceRequest based on logic, like:
+///   - uplift some fields from Attributes (Map type) to column
+pub trait TraceParser: Send + Sync {
+    fn parse(&self, request: ExportTraceServiceRequest) -> TraceSpans;
+    fn table_name(&self) -> String;
+}
+
+pub type TraceParserRef = Arc<dyn TraceParser>;
