@@ -44,14 +44,14 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectExprSnafu,
-    ExpectRangeSelectorSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
-    NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
-    build_special_time_expr, EmptyMetric, InstantManipulate, Millisecond, RangeManipulate,
-    SeriesDivide, SeriesNormalize,
+    build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
+    RangeManipulate, SeriesDivide, SeriesNormalize,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
@@ -63,6 +63,8 @@ use crate::functions::{
 const SPECIAL_TIME_FUNCTION: &str = "time";
 /// `histogram_quantile` function in PromQL
 const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
+/// `le` column for conventional histogram.
+const LE_COLUMN_NAME: &str = "le";
 
 const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
@@ -109,6 +111,14 @@ impl PromPlannerContext {
         self.tag_columns = vec![];
         self.field_column_matcher = None;
         self.range = None;
+    }
+
+    /// Check if `le` is present in tag columns
+    fn has_le_tag(&self) -> bool {
+        self.tag_columns
+            .iter()
+            .find(|c| c.eq(&LE_COLUMN_NAME))
+            .is_some()
     }
 }
 
@@ -443,7 +453,54 @@ impl PromPlanner {
                 }
 
                 if func.name == SPECIAL_HISTOGRAM_QUANTILE {
-                    todo!()
+                    if args.args.len() != 2 {
+                        return FunctionInvalidArgumentSnafu {
+                            fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
+                        }
+                        .fail();
+                    }
+                    let phi = Self::try_build_float_literal(&args.args[0]).with_context(|| {
+                        FunctionInvalidArgumentSnafu {
+                            fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
+                        }
+                    })?;
+                    let input = args.args[1].as_ref().clone();
+                    let input_plan = self.prom_expr_to_plan(input).await?;
+
+                    if !self.ctx.has_le_tag() {
+                        common_telemetry::info!("[DEBUG] valid tags: {:?}", self.ctx.tag_columns);
+                        return ColumnNotFoundSnafu {
+                            col: LE_COLUMN_NAME.to_string(),
+                        }
+                        .fail();
+                    }
+                    let time_index_column =
+                        self.ctx.time_index_column.clone().with_context(|| {
+                            TimeIndexNotFoundSnafu {
+                                table: self.ctx.table_name.clone().unwrap_or_default(),
+                            }
+                        })?;
+                    // TODO(ruihang): support multi fields
+                    let field_column = self
+                        .ctx
+                        .field_columns
+                        .first()
+                        .with_context(|| FunctionInvalidArgumentSnafu {
+                            fn_name: SPECIAL_HISTOGRAM_QUANTILE.to_string(),
+                        })?
+                        .clone();
+
+                    return Ok(LogicalPlan::Extension(Extension {
+                        node: Arc::new(
+                            HistogramFold::new(
+                                LE_COLUMN_NAME.to_string(),
+                                field_column,
+                                time_index_column,
+                                input_plan,
+                            )
+                            .context(DataFusionPlanningSnafu)?,
+                        ),
+                    }));
                 }
 
                 let args = self.create_function_args(&args.args)?;
@@ -1186,6 +1243,25 @@ impl PromPlanner {
                     Some(expr)
                 }
             }
+        }
+    }
+
+    /// Try to build a [f64] from [PromExpr].
+    fn try_build_float_literal(expr: &PromExpr) -> Option<f64> {
+        match expr {
+            PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
+            PromExpr::Paren(ParenExpr { expr }) => Self::try_build_float_literal(expr),
+            PromExpr::Unary(UnaryExpr { expr, .. }) => {
+                Self::try_build_float_literal(expr).map(|f| -f)
+            }
+            PromExpr::StringLiteral(_)
+            | PromExpr::Binary(_)
+            | PromExpr::VectorSelector(_)
+            | PromExpr::MatrixSelector(_)
+            | PromExpr::Call(_)
+            | PromExpr::Extension(_)
+            | PromExpr::Aggregate(_)
+            | PromExpr::Subquery(_) => None,
         }
     }
 
