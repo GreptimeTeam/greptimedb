@@ -169,21 +169,24 @@ pub fn parse_span(
     scope: &InstrumentationScope,
     span: Span,
 ) -> TraceSpan {
-    let (code, message) = status_to_string(&span.status);
+    let (span_status_code, span_status_message) = status_to_string(&span.status);
+    let span_kind = span.kind().as_str_name().into();
     TraceSpan {
         trace_id: bytes_to_hex_string(&span.trace_id),
         span_id: bytes_to_hex_string(&span.span_id),
         parent_span_id: bytes_to_hex_string(&span.parent_span_id),
 
         resource_attributes: vec_kv_to_string(resource_attrs),
+        trace_state: span.trace_state,
+
         scope_name: scope.name.clone(),
         scope_version: scope.version.clone(),
         scope_attributes: vec_kv_to_string(&scope.attributes),
-        trace_state: span.trace_state.clone(),
-        span_name: span.name.clone(),
-        span_kind: span.kind().as_str_name().into(),
-        span_status_code: code,
-        span_status_message: message,
+
+        span_name: span.name,
+        span_kind,
+        span_status_code,
+        span_status_message,
         span_attributes: vec_kv_to_string(&span.attributes),
         span_events: events_to_string(&span.events),
         span_links: links_to_string(&span.links),
