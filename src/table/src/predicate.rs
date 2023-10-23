@@ -48,8 +48,8 @@ impl Predicate {
     /// Creates a new `Predicate` by converting logical exprs to physical exprs that can be
     /// evaluated against record batches.
     /// Returns error when failed to convert exprs.
-    pub fn new(exprs: Vec<Expr>) -> error::Result<Self> {
-        Ok(Self { exprs })
+    pub fn new(exprs: Vec<Expr>) -> Self {
+        Self { exprs }
     }
 
     #[inline]
@@ -651,7 +651,7 @@ mod tests {
         let dir = create_temp_dir("prune_parquet");
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
-        let arrow_predicate = Predicate::new(filters).unwrap();
+        let arrow_predicate = Predicate::new(filters);
         let builder = ParquetRecordBatchStreamBuilder::new(
             tokio::fs::OpenOptions::new()
                 .read(true)

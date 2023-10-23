@@ -17,13 +17,12 @@
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
-use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
-use crate::error::{BuildPredicateSnafu, Result};
+use crate::error::Result;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
@@ -173,8 +172,7 @@ impl ScanRegion {
             total_ssts
         );
 
-        let predicate =
-            Predicate::new(self.request.filters.clone()).context(BuildPredicateSnafu)?;
+        let predicate = Predicate::new(self.request.filters.clone());
         let mapper = match &self.request.projection {
             Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
