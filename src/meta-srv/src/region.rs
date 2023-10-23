@@ -12,36 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(async_closure)]
-#![feature(result_flattening)]
-#![feature(extract_if)]
+pub mod lease_keeper;
 
-pub mod bootstrap;
-mod cache_invalidator;
-pub mod cluster;
-pub mod election;
-pub mod error;
-mod failure_detector;
-pub mod handler;
-pub mod keys;
-pub mod lease;
-pub mod lock;
-pub mod metasrv;
-mod metrics;
-#[cfg(feature = "mock")]
-pub mod mocks;
-pub mod procedure;
-pub mod pubsub;
-pub mod region;
-pub mod selector;
-pub mod service;
-pub mod table_meta_alloc;
-
-pub use crate::error::Result;
-
-mod inactive_region_manager;
-
-mod greptimedb_telemetry;
-
-#[cfg(test)]
-mod test_util;
+pub use lease_keeper::RegionLeaseKeeper;

@@ -102,6 +102,8 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
+    use store_api::region_engine::RegionRole;
+
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
@@ -129,6 +131,8 @@ mod tests {
                 wcus: 0,
                 approximate_bytes: 0,
                 approximate_rows: 0,
+                engine: default_engine().to_string(),
+                role: RegionRole::Follower,
             }
         }
         acc.stat = Some(Stat {

@@ -49,6 +49,14 @@ impl Peer {
             addr: addr.into(),
         }
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn empty(id: u64) -> Self {
+        Self {
+            id,
+            addr: String::new(),
+        }
+    }
 }
 
 impl Display for Peer {

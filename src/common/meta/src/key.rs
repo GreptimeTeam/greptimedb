@@ -54,6 +54,8 @@ pub mod table_region;
 // TODO(weny): removes it.
 #[allow(deprecated)]
 pub mod table_route;
+#[cfg(any(test, feature = "testing"))]
+pub mod test_utils;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
@@ -684,12 +686,11 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
-    use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaBuilder};
     use futures::TryStreamExt;
-    use table::metadata::{RawTableInfo, TableInfo, TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{RawTableInfo, TableInfo};
 
     use super::datanode_table::DatanodeTableKey;
+    use super::test_utils;
     use crate::ddl::utils::region_storage_path;
     use crate::key::datanode_table::RegionInfo;
     use crate::key::table_info::TableInfoValue;
@@ -735,40 +736,6 @@ mod tests {
         assert_eq!(removed, to_removed_key(key));
     }
 
-    fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
-        let column_schemas = vec![
-            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            )
-            .with_time_index(true),
-            ColumnSchema::new("col2", ConcreteDataType::int32_datatype(), true),
-        ];
-        let schema = SchemaBuilder::try_from(column_schemas)
-            .unwrap()
-            .version(123)
-            .build()
-            .unwrap();
-
-        let meta = TableMetaBuilder::default()
-            .schema(Arc::new(schema))
-            .primary_key_indices(vec![0])
-            .engine("engine")
-            .next_column_id(3)
-            .region_numbers(region_numbers.collect::<Vec<_>>())
-            .build()
-            .unwrap();
-        TableInfoBuilder::default()
-            .table_id(10)
-            .table_version(5)
-            .name("mytable")
-            .meta(meta)
-            .build()
-            .unwrap()
-    }
-
     fn new_test_region_route() -> RegionRoute {
         new_region_route(1, 2)
     }
@@ -785,6 +752,10 @@ mod tests {
             follower_peers: vec![],
             leader_status: None,
         }
+    }
+
+    fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
+        test_utils::new_test_table_info(10, region_numbers)
     }
 
     #[tokio::test]
