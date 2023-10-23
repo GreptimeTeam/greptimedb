@@ -64,12 +64,7 @@ pub struct TraceSpan {
 
 pub type TraceSpans = Vec<TraceSpan>;
 
-/// Convert OpenTelemetry traces to GreptimeDB row insert requests
-///
-/// See
-/// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
-/// for data structure of OTLP metrics.
-///
+/// Convert SpanTraces to GreptimeDB row insert requests.
 /// Returns `InsertRequests` and total number of rows to ingest
 pub fn to_grpc_insert_requests(
     table_name: String,
@@ -198,6 +193,11 @@ pub fn parse_span(
     }
 }
 
+/// Convert OpenTelemetry traces to SpanTraces
+///
+/// See
+/// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/trace/v1/trace.proto>
+/// for data structure of OTLP traces.
 pub fn parse(request: ExportTraceServiceRequest) -> TraceSpans {
     let mut spans = vec![];
     for resource_spans in request.resource_spans {
