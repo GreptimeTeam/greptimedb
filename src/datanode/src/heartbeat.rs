@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::{HeartbeatRequest, Peer, RegionStat, Role};
+use api::v1::meta::{HeartbeatRequest, Peer, RegionRole, RegionStat, Role};
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
@@ -282,14 +282,15 @@ impl HeartbeatTask {
         let regions = region_server.opened_regions();
 
         let mut region_stats = Vec::new();
-        for (region_id, engine) in regions {
+        for stat in regions {
             let approximate_bytes = region_server
-                .region_disk_usage(region_id)
+                .region_disk_usage(stat.region_id)
                 .await
                 .unwrap_or(0);
             let region_stat = RegionStat {
-                region_id: region_id.as_u64(),
-                engine,
+                region_id: stat.region_id.as_u64(),
+                engine: stat.engine,
+                role: RegionRole::from(stat.role).into(),
                 approximate_bytes,
                 // TODO(ruihang): scratch more info
                 ..Default::default()

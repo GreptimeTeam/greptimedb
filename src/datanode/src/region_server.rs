@@ -47,7 +47,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionEngineRef;
+use store_api::region_engine::{RegionEngineRef, RegionRole};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -64,6 +64,12 @@ use crate::event_listener::RegionServerEventListenerRef;
 #[derive(Clone)]
 pub struct RegionServer {
     inner: Arc<RegionServerInner>,
+}
+
+pub struct RegionStat {
+    pub region_id: RegionId,
+    pub engine: String,
+    pub role: RegionRole,
 }
 
 impl RegionServer {
@@ -97,11 +103,19 @@ impl RegionServer {
         self.inner.handle_read(request).await
     }
 
-    pub fn opened_regions(&self) -> Vec<(RegionId, String)> {
+    pub fn opened_regions(&self) -> Vec<RegionStat> {
         self.inner
             .region_map
             .iter()
-            .map(|e| (*e.key(), e.value().name().to_string()))
+            .flat_map(|e| {
+                let region_id = *e.key();
+                // Filters out any regions whose role equals None.
+                e.role(region_id).map(|role| RegionStat {
+                    region_id,
+                    engine: e.value().name().to_string(),
+                    role,
+                })
+            })
             .collect()
     }
 
