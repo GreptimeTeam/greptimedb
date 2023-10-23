@@ -35,6 +35,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
+use object_store::manager::ObjectStoreManager;
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -67,26 +68,29 @@ pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
 }
 
 /// Env to test mito engine.
+#[cfg(test)]
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
     logstore: Option<Arc<RaftEngineLogStore>>,
-    object_store: Option<ObjectStore>,
+    object_store_manager: Option<Arc<ObjectStoreManager>>,
 }
 
+#[cfg(test)]
 impl Default for TestEnv {
     fn default() -> Self {
         TestEnv::new()
     }
 }
 
+#[cfg(test)]
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
         TestEnv {
             data_home: create_temp_dir(""),
             logstore: None,
-            object_store: None,
+            object_store_manager: None,
         }
     }
 
@@ -95,7 +99,7 @@ impl TestEnv {
         TestEnv {
             data_home: create_temp_dir(prefix),
             logstore: None,
-            object_store: None,
+            object_store_manager: None,
         }
     }
 
@@ -104,7 +108,7 @@ impl TestEnv {
         TestEnv {
             data_home,
             logstore: None,
-            object_store: None,
+            object_store_manager: None,
         }
     }
 
@@ -113,17 +117,21 @@ impl TestEnv {
     }
 
     pub fn get_object_store(&self) -> Option<ObjectStore> {
-        self.object_store.clone()
+        let Some(ref object_store_manager) = self.object_store_manager else {
+            unreachable!()
+        };
+        Some(object_store_manager.default_object_store().clone())
     }
 
     /// Creates a new engine with specific config under this env.
     pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
         let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
-        self.object_store = Some(object_store.clone());
-        MitoEngine::new(config, logstore, object_store)
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new(config, logstore, object_store_manager)
     }
 
     /// Creates a new engine with specific config and manager/listener under this env.
@@ -133,33 +141,40 @@ impl TestEnv {
         manager: Option<WriteBufferManagerRef>,
         listener: Option<EventListenerRef>,
     ) -> MitoEngine {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
         let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
-        self.object_store = Some(object_store.clone());
-        MitoEngine::new_for_test(config, logstore, object_store, manager, listener)
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
     }
 
     /// Reopen the engine.
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
 
+        let Some(ref object_store_manager) = self.object_store_manager else {
+            unreachable!()
+        };
+
         MitoEngine::new(
             config,
             self.logstore.clone().unwrap(),
-            self.object_store.clone().unwrap(),
+            object_store_manager.clone(),
         )
     }
 
     /// Creates a new [WorkerGroup] with specific config under this env.
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
-        let (log_store, object_store) = self.create_log_and_object_store().await;
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), object_store)
+        WorkerGroup::start(config, Arc::new(log_store), Arc::new(object_store_manager))
     }
 
-    async fn create_log_and_object_store(&self) -> (RaftEngineLogStore, ObjectStore) {
+    async fn create_log_and_object_store_manager(
+        &self,
+    ) -> (RaftEngineLogStore, ObjectStoreManager) {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
         let data_path = data_home.join("data").as_path().display().to_string();
@@ -168,8 +183,14 @@ impl TestEnv {
         let mut builder = Fs::default();
         builder.root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-
-        (log_store, object_store)
+        let object_store_manager = ObjectStoreManager::try_new(
+            vec![("default".to_string(), object_store)]
+                .into_iter()
+                .collect(),
+            "default",
+        )
+        .unwrap();
+        (log_store, object_store_manager)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`

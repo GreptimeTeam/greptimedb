@@ -44,12 +44,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Check if this region is pending drop. And clean the entire dir if so.
         if !self.dropping_regions.is_region_exists(region_id)
             && self
-                .object_store
+                .object_store_manager
+                .default_object_store()
                 .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
-            let result = remove_region_dir_once(&request.region_dir, &self.object_store).await;
+            let result = remove_region_dir_once(
+                &request.region_dir,
+                self.object_store_manager.default_object_store(),
+            )
+            .await;
             info!("Region {} is dropped, result: {:?}", region_id, result);
             return RegionNotFoundSnafu { region_id }.fail();
         }
@@ -61,7 +66,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             &request.region_dir,
             self.memtable_builder.clone(),
-            self.object_store.clone(),
+            self.object_store_manager.default_object_store().clone(),
             self.scheduler.clone(),
         )
         .options(request.options)

@@ -209,6 +209,12 @@ pub enum Error {
         source: common_runtime::error::Error,
     },
 
+    #[snafu(display("Default object store not found"))]
+    DefaultObjectStoreNotFound {
+        location: Location,
+        source: object_store::error::Error,
+    },
+
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
@@ -463,7 +469,7 @@ impl ErrorExt for Error {
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             ParseSql { source, .. } => source.status_code(),
-
+            DefaultObjectStoreNotFound { source, .. } => source.status_code(),
             DeleteExprToRequest { source, .. } | InsertData { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }
