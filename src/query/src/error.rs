@@ -316,9 +316,13 @@ impl ErrorExt for Error {
             ParseSql { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
-            DataFusion { .. } | MissingTimestampColumn { .. } | RoutePartition { .. } => {
-                StatusCode::Internal
-            }
+            DataFusion { error, .. } => match error {
+                DataFusionError::Internal(_) => StatusCode::Internal,
+                DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
+                DataFusionError::Plan(_) => StatusCode::PlanQuery,
+                _ => StatusCode::EngineExecuteQuery,
+            },
+            MissingTimestampColumn { .. } | RoutePartition { .. } => StatusCode::EngineExecuteQuery,
             Sql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),

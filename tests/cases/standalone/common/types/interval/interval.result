@@ -249,11 +249,11 @@ SELECT TIMESTAMP '1992-09-20 11:30:00.123456' - interval_value as new_value from
 -- Interval type does not support aggregation functions.
 SELECT MIN(interval_value) from intervals;
 
-Error: 1003(Internal), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
 
 SELECT MAX(interval_value) from intervals;
 
-Error: 1003(Internal), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
 
 SELECT SUM(interval_value) from intervals;
 
