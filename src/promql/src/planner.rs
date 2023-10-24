@@ -496,6 +496,7 @@ impl PromPlanner {
                                 LE_COLUMN_NAME.to_string(),
                                 field_column,
                                 time_index_column,
+                                phi,
                                 input_plan,
                             )
                             .context(DataFusionPlanningSnafu)?,

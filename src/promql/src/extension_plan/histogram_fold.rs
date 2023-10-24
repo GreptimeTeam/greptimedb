@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use common_recordbatch::RecordBatch as GtRecordBatch;
 use common_telemetry::warn;
-use datafusion::arrow::array::AsArray;
+use datafusion::arrow::array::{ArrayRef, AsArray, Float64Array, ListArray};
 use datafusion::arrow::compute::{self, concat_batches, SortOptions};
 use datafusion::arrow::datatypes::{DataType, Field, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
 use datafusion::prelude::{Column, Expr};
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::schema::Schema as GtSchema;
-use datatypes::value::{ListValue, Value};
+use datatypes::value::{ListValue, OrderedF64, Value};
 use datatypes::vectors::MutableVector;
 use futures::{ready, Stream, StreamExt};
 
@@ -56,7 +56,7 @@ use futures::{ready, Stream, StreamExt};
 /// - The value set of `le` should be same. I.e., buckets of every series should be same.
 ///
 /// [1]: https://prometheus.io/docs/concepts/metric_types/#histogram
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Hash, Eq)]
 pub struct HistogramFold {
     /// Name of the `le` column. It's a special column in prometheus
     /// for implementing conventional histogram. It's a string column
@@ -65,6 +65,7 @@ pub struct HistogramFold {
     ts_column: String,
     input: LogicalPlan,
     field_column: String,
+    quantile: OrderedF64,
     output_schema: DFSchemaRef,
 }
 
@@ -88,8 +89,8 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "HistogramFold: le={}, field={}",
-            self.le_column, self.field_column
+            "HistogramFold: le={}, field={}, quantile={}",
+            self.le_column, self.field_column, self.quantile
         )
     }
 
@@ -99,6 +100,7 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
             ts_column: self.ts_column.clone(),
             input: inputs[0].clone(),
             field_column: self.field_column.clone(),
+            quantile: self.quantile,
             // This method cannot return error. Otherwise we should re-calculate
             // the output schema
             output_schema: self.output_schema.clone(),
@@ -107,11 +109,11 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
 }
 
 impl HistogramFold {
-    #[allow(dead_code)]
     pub fn new(
         le_column: String,
         field_column: String,
         ts_column: String,
+        quantile: f64,
         input: LogicalPlan,
     ) -> DataFusionResult<Self> {
         let input_schema = input.schema();
@@ -122,6 +124,7 @@ impl HistogramFold {
             ts_column,
             input,
             field_column,
+            quantile: quantile.into(),
             output_schema,
         })
     }
@@ -158,7 +161,6 @@ impl HistogramFold {
         check_column(field_column)
     }
 
-    #[allow(dead_code)]
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let input_schema = self.input.schema();
         // safety: those fields are checked in `check_schema()`
@@ -180,6 +182,7 @@ impl HistogramFold {
             field_column_index,
             ts_column_index,
             input: exec_input,
+            quantile: self.quantile.into(),
             output_schema: Arc::new(self.output_schema.as_ref().into()),
             metric: ExecutionPlanMetricsSet::new(),
         })
@@ -244,6 +247,7 @@ pub struct HistogramFoldExec {
     /// Index for field column in the schema of input.
     field_column_index: usize,
     ts_column_index: usize,
+    quantile: f64,
     metric: ExecutionPlanMetricsSet,
 }
 
@@ -320,6 +324,7 @@ impl ExecutionPlan for HistogramFoldExec {
             metric: self.metric.clone(),
             le_column_index: self.le_column_index,
             ts_column_index: self.ts_column_index,
+            quantile: self.quantile,
             output_schema: self.output_schema.clone(),
             field_column_index: self.field_column_index,
         }))
@@ -342,6 +347,7 @@ impl ExecutionPlan for HistogramFoldExec {
         Ok(Box::pin(HistogramFoldStream {
             le_column_index: self.le_column_index,
             field_column_index: self.field_column_index,
+            quantile: self.quantile,
             normal_indices: normal_indices.into_iter().collect(),
             bucket_size: None,
             input_buffer: vec![],
@@ -399,8 +405,8 @@ impl DisplayAs for HistogramFoldExec {
             DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(
                     f,
-                    "HistogramFoldExec: le=@{}, field=@{}",
-                    self.le_column_index, self.field_column_index
+                    "HistogramFoldExec: le=@{}, field=@{}, quantile={}",
+                    self.le_column_index, self.field_column_index, self.quantile
                 )
             }
         }
@@ -411,6 +417,7 @@ pub struct HistogramFoldStream {
     // internal states
     le_column_index: usize,
     field_column_index: usize,
+    quantile: f64,
     /// Columns need not folding
     normal_indices: Vec<usize>,
     bucket_size: Option<usize>,
@@ -651,6 +658,69 @@ impl HistogramFoldStream {
 
         Ok(batch.num_rows())
     }
+
+    /// Evaluate the field column and return the result
+    fn evaluate_array(
+        quantile: f64,
+        bucket: &[f64],
+        field_array: &ArrayRef,
+    ) -> DataFusionResult<ArrayRef> {
+        let input_len = field_array.len();
+
+        // check bucket
+        if bucket.len() <= 1 {
+            return Ok(Arc::new(Float64Array::from(vec![f64::NAN; input_len])));
+        }
+        // check quantile
+        if quantile < 0.0 {
+            return Ok(Arc::new(Float64Array::from(vec![
+                f64::NEG_INFINITY;
+                input_len
+            ])));
+        } else if quantile > 1.0 {
+            return Ok(Arc::new(Float64Array::from(vec![f64::INFINITY; input_len])));
+        } else if quantile.is_nan() {
+            return Ok(Arc::new(Float64Array::from(vec![f64::NAN; input_len])));
+        }
+
+        // todo: check input value
+
+        let mut result = Vec::with_capacity(input_len);
+        let field_array = field_array.as_any().downcast_ref::<ListArray>().unwrap();
+        for index in 0..input_len {
+            let counters_dyn = field_array.value(index);
+            let counters = counters_dyn
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+
+            let total = counters.value(counters.len() - 1);
+            let expected_pos = f64::ceil(total * quantile);
+            let mut fit_bucket_pos = 0;
+            while fit_bucket_pos < bucket.len() && counters.value(fit_bucket_pos) < expected_pos {
+                fit_bucket_pos += 1;
+            }
+            if fit_bucket_pos >= bucket.len() - 1 {
+                result.push(bucket[bucket.len() - 2]);
+            } else {
+                let upper_bound = bucket[fit_bucket_pos];
+                let upper_count = counters.value(fit_bucket_pos);
+                let mut lower_bound = 0.0;
+                let mut lower_count = 0.0;
+                if fit_bucket_pos > 0 {
+                    lower_bound = bucket[fit_bucket_pos - 1];
+                    lower_count = counters.value(fit_bucket_pos - 1);
+                }
+                result.push(
+                    lower_bound
+                        + (upper_bound - lower_bound) / (upper_count - lower_count)
+                            * (expected_pos - lower_count),
+                );
+            }
+        }
+
+        return Ok(Arc::new(Float64Array::from(result)));
+    }
 }
 
 #[cfg(test)]
@@ -739,6 +809,7 @@ mod test {
         let fold_exec = Arc::new(HistogramFoldExec {
             le_column_index: 1,
             field_column_index: 2,
+            quantile: 0.0,
             ts_column_index: 9999, // not exist but doesn't matter
             input: memory_exec,
             output_schema,
@@ -794,5 +865,88 @@ mod test {
 
         let actual = HistogramFold::convert_schema(&input_schema, "le", "val").unwrap();
         assert_eq!(actual, expected_output_schema)
+    }
+
+    #[test]
+    fn evaluate_array_normal_case() {
+        let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY];
+        let counters = vec![
+            Some(vec![
+                Some(0.0),
+                Some(10.0),
+                Some(20.0),
+                Some(30.0),
+                Some(40.0),
+                Some(50.0),
+            ]),
+            Some(vec![
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(50.0),
+                Some(80.0),
+                Some(100.0),
+            ]),
+            Some(vec![
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(100.0),
+            ]),
+            Some(vec![
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+            ]),
+        ];
+        let array = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(
+            counters,
+        )) as _;
+
+        // p90
+        let result = HistogramFoldStream::evaluate_array(0.9, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![4.0, 4.0, 4.0, f64::NAN];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "p90");
+
+        // p50
+        let result = HistogramFoldStream::evaluate_array(0.5, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![2.5, 3.0, 4.0, f64::NAN];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "p50");
+
+        // p0
+        let result = HistogramFoldStream::evaluate_array(0.0, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![f64::NAN, f64::NAN, f64::NAN, f64::NAN];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "p0");
+
+        // p100
+        let result = HistogramFoldStream::evaluate_array(1.0, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![4.0, 4.0, 4.0, f64::NAN];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "p100");
+
+        // negative infinite
+        let result = HistogramFoldStream::evaluate_array(-0.01, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "neg");
+
+        // positive infinite
+        let result = HistogramFoldStream::evaluate_array(11.0, &bucket, &array).unwrap();
+        let result = result.as_primitive::<Float64Type>().values().to_vec();
+        let expected = vec![f64::INFINITY, f64::INFINITY, f64::INFINITY, f64::INFINITY];
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "pos");
     }
 }
