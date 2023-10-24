@@ -101,6 +101,10 @@ auto_flush_interval = "1h"
 global_write_buffer_size = "1GB"
 # Global write buffer size threshold to reject write requests (default 2G).
 global_write_buffer_reject_size = "2GB"
+# Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+sst_meta_cache_size = "128MB"
+# Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+vector_cache_size = "512MB"
 
 # Log options
 # [logging]
