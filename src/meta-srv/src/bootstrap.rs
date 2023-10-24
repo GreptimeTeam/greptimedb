@@ -18,7 +18,6 @@ use api::v1::meta::cluster_server::ClusterServer;
 use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
-use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use etcd_client::Client;
@@ -152,7 +151,6 @@ pub fn router(meta_srv: MetaSrv) -> Router {
     tonic::transport::Server::builder()
         .accept_http1(true) // for admin services
         .add_service(HeartbeatServer::new(meta_srv.clone()))
-        .add_service(RouterServer::new(meta_srv.clone()))
         .add_service(StoreServer::new(meta_srv.clone()))
         .add_service(ClusterServer::new(meta_srv.clone()))
         .add_service(LockServer::new(meta_srv.clone()))

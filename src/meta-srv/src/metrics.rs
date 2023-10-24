@@ -13,7 +13,6 @@
 // limitations under the License.
 
 pub(crate) const METRIC_META_KV_REQUEST: &str = "meta.kv_request";
-pub(crate) const METRIC_META_ROUTE_REQUEST: &str = "meta.route_request";
 pub(crate) const METRIC_META_HEARTBEAT_CONNECTION_NUM: &str = "meta.heartbeat_connection_num";
 pub(crate) const METRIC_META_HANDLER_EXECUTE: &str = "meta.handler_execute";
 pub const METRIC_META_INACTIVE_REGIONS: &str = "meta.inactive_regions";

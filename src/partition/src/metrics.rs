@@ -12,5 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_TABLE_ROUTE_GET_REMOTE: &str = "frontend.table_route.get.remote";
 pub(crate) const METRIC_TABLE_ROUTE_GET: &str = "frontend.table_route.get";

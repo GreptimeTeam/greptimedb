@@ -23,7 +23,6 @@ pub mod ddl;
 mod heartbeat;
 pub mod lock;
 pub mod mailbox;
-pub mod router;
 pub mod store;
 
 pub type GrpcResult<T> = std::result::Result<Response<T>, Status>;

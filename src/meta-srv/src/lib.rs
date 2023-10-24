@@ -34,7 +34,6 @@ pub mod pubsub;
 pub mod selector;
 pub mod service;
 pub mod table_meta_alloc;
-pub mod table_routes;
 
 pub use crate::error::Result;
 
