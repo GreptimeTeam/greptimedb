@@ -16,8 +16,8 @@ select * from demo where host='test2' and idc='idc2';
 
 select * from demo where host='test3' and idc>'idc1';
 
-select * from demo where idc='idc1';
+select * from demo where idc='idc1' order by ts;
 
-select * from demo where collector='disk';
+select * from demo where collector='disk' order by ts;
 
 drop table demo;
