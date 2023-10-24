@@ -28,6 +28,7 @@ const DEFAULT_MAX_BG_JOB: usize = 4;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
 pub struct MitoConfig {
     // Worker configs:
     /// Number of region workers (default 1).
