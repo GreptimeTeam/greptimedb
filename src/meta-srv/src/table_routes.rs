@@ -118,6 +118,7 @@ pub(crate) mod tests {
             leader_peer: Some(Peer {
                 id: peer,
                 addr: String::new(),
+                state: None,
             }),
             follower_peers: vec![],
         };

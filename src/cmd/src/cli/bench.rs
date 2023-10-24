@@ -155,6 +155,7 @@ fn create_region_routes() -> Vec<RegionRoute> {
             leader_peer: Some(Peer {
                 id: rng.gen_range(0..10),
                 addr: String::new(),
+                ..Default::default()
             }),
             follower_peers: vec![],
         });

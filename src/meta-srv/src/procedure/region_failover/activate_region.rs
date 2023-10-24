@@ -279,7 +279,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {} }"#
+            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "", state: None }, region_storage_path: "greptime/public", region_options: {} }"#
         );
     }
 
