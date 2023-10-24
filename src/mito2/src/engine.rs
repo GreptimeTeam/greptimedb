@@ -95,6 +95,11 @@ impl MitoEngine {
     pub(crate) fn get_region(&self, id: RegionId) -> Option<crate::region::MitoRegionRef> {
         self.inner.workers.get_region(id)
     }
+
+    /// Returns the estimated size of the region's WAL.
+    pub fn get_region_wal_size(&self, id: RegionId) -> Result<usize> {
+        self.inner.get_region_wal_size(id)
+    }
 }
 
 /// Inner struct of [MitoEngine].
@@ -171,6 +176,16 @@ impl EngineInner {
 
         region.set_writable(writable);
         Ok(())
+    }
+
+    /// Returns the estimated size of the region's WAL.
+    fn get_region_wal_size(&self, region_id: RegionId) -> Result<usize> {
+        let region = self
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        Ok(region.estimated_wal_size())
     }
 }
 

@@ -188,14 +188,17 @@ impl Memtable for TimeSeriesMemtable {
             let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
             let fields = kv.fields().collect::<Vec<_>>();
 
-            allocated += fields.len() * std::mem::size_of::<ValueRef>();
+            allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
             let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
             allocated += series_allocated;
 
             // safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
+            allocated += std::mem::size_of::<i64>();
             min_ts = min_ts.min(ts);
             max_ts = max_ts.max(ts);
+
+            allocated += std::mem::size_of::<OpType>();
 
             let mut guard = series.write().unwrap();
             guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);

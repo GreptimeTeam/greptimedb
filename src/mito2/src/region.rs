@@ -35,6 +35,10 @@ use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::OnFailure;
 use crate::sst::file_purger::FilePurgerRef;
 
+/// This is the ratio of the size of memtables to the size of wal,
+/// It is a rough estimation of the size of wal.
+const ESTIMATED_WAL_FACTOR: f32 = 0.565642;
+
 /// Metadata and runtime status of a region.
 ///
 /// Writing and reading a region follow a single-writer-multi-reader rule:
@@ -108,6 +112,14 @@ impl MitoRegion {
     /// Sets the writable flag.
     pub(crate) fn set_writable(&self, writable: bool) {
         self.writable.store(writable, Ordering::Relaxed);
+    }
+
+    /// Estimated WAL size in bytes.
+    /// Use the size of memtables to estimate the size of wal.
+    pub(crate) fn estimated_wal_size(&self) -> usize {
+        let memtables = &self.version().memtables;
+        let memtable_size = memtables.mutable_usage() + memtables.immutables_usage();
+        ((memtable_size as f32) * ESTIMATED_WAL_FACTOR) as usize
     }
 }
 
