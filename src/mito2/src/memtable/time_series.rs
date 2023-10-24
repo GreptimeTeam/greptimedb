@@ -20,6 +20,7 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_telemetry::debug;
+use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
@@ -194,15 +195,14 @@ impl Memtable for TimeSeriesMemtable {
 
             // safety: timestamp of kv must be both present and a valid timestamp value.
             let ts = kv.timestamp().as_timestamp().unwrap().unwrap().value();
-            allocated += std::mem::size_of::<i64>();
             min_ts = min_ts.min(ts);
             max_ts = max_ts.max(ts);
-
-            allocated += std::mem::size_of::<OpType>();
 
             let mut guard = series.write().unwrap();
             guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
         }
+        allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
+        allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
 
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
