@@ -638,6 +638,16 @@ impl HistogramFoldStream {
         if bucket.len() <= 1 {
             return Ok(f64::NAN);
         }
+        if *bucket.last().unwrap() != f64::INFINITY {
+            return Err(DataFusionError::Execution(
+                "last bucket should be +Inf".to_string(),
+            ));
+        }
+        if bucket.len() != counter.len() {
+            return Err(DataFusionError::Execution(
+                "bucket and counter should have the same length".to_string(),
+            ));
+        }
         // check quantile
         if quantile < 0.0 {
             return Ok(f64::NEG_INFINITY);
@@ -647,10 +657,12 @@ impl HistogramFoldStream {
             return Ok(f64::NAN);
         }
 
-        // todo: check input value
+        // check input value
+        debug_assert!(bucket.windows(2).all(|w| w[0] <= w[1]));
+        debug_assert!(counter.windows(2).all(|w| w[0] <= w[1]));
 
         let total = *counter.last().unwrap();
-        let expected_pos = f64::ceil(total * quantile);
+        let expected_pos = total * quantile;
         let mut fit_bucket_pos = 0;
         while fit_bucket_pos < bucket.len() && counter[fit_bucket_pos] < expected_pos {
             fit_bucket_pos += 1;
@@ -660,7 +672,7 @@ impl HistogramFoldStream {
         } else {
             let upper_bound = bucket[fit_bucket_pos];
             let upper_count = counter[fit_bucket_pos];
-            let mut lower_bound = 0.0;
+            let mut lower_bound = bucket[0].min(0.0);
             let mut lower_count = 0.0;
             if fit_bucket_pos > 0 {
                 lower_bound = bucket[fit_bucket_pos - 1];
@@ -774,15 +786,15 @@ mod test {
             .to_string();
 
         let expected = String::from(
-            "+--------+-------+
-| host   | val   |
-+--------+-------+
-| host_1 | 257.5 |
-| host_1 | 5.05  |
-| host_1 | 0.001 |
-| host_2 | NaN   |
-| host_2 | 10.0  |
-+--------+-------+",
+            "+--------+-------------------+
+| host   | val               |
++--------+-------------------+
+| host_1 | 257.5             |
+| host_1 | 5.05              |
+| host_1 | 0.0004            |
+| host_2 | NaN               |
+| host_2 | 6.040000000000001 |
++--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
     }
@@ -808,7 +820,7 @@ mod test {
     }
 
     #[test]
-    fn evaluate_array_normal_case() {
+    fn evaluate_row_normal_case() {
         let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY];
 
         #[derive(Debug)]
@@ -876,5 +888,29 @@ mod test {
                 case
             );
         }
+    }
+
+    #[test]
+    #[should_panic]
+    fn evaluate_out_of_order_input() {
+        let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY];
+        let counters = [5.0, 4.0, 3.0, 2.0, 1.0, 0.0];
+        HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+    }
+
+    #[test]
+    fn evaluate_wrong_bucket() {
+        let bucket = [0.0, 1.0, 2.0, 3.0, 4.0, f64::INFINITY, 5.0];
+        let counters = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evaluate_small_fraction() {
+        let bucket = [0.0, 2.0, 4.0, 6.0, f64::INFINITY];
+        let counters = [0.0, 1.0 / 300.0, 2.0 / 300.0, 0.01, 0.01];
+        let result = HistogramFoldStream::evaluate_row(0.5, &bucket, &counters).unwrap();
+        assert_eq!(3.0, result);
     }
 }
