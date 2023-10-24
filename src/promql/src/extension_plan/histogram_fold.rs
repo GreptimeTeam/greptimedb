@@ -29,7 +29,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{PhysicalSortExpr, PhysicalSortRequirement};
-use datafusion::physical_plan::expressions::Column as PhyColumn;
+use datafusion::physical_plan::expressions::{CastExpr as PhyCast, Column as PhyColumn};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PhysicalExpr,
@@ -250,9 +250,13 @@ impl ExecutionPlan for HistogramFoldExec {
             .collect::<Vec<PhysicalSortRequirement>>();
         // add le ASC
         cols.push(PhysicalSortRequirement {
-            expr: Arc::new(PhyColumn::new(
-                self.input.schema().field(self.le_column_index).name(),
-                self.le_column_index,
+            expr: Arc::new(PhyCast::new(
+                Arc::new(PhyColumn::new(
+                    self.input.schema().field(self.le_column_index).name(),
+                    self.le_column_index,
+                )),
+                DataType::Float64,
+                None,
             )),
             options: Some(SortOptions {
                 descending: false,  // +INF in the last
