@@ -14,7 +14,6 @@
 
 #![feature(async_closure)]
 #![feature(result_flattening)]
-#![feature(extract_if)]
 
 pub mod bootstrap;
 mod cache_invalidator;

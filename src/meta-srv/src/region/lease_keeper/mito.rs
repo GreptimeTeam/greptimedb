@@ -46,9 +46,7 @@ pub fn retain_active_regions(
         })
         .collect::<HashSet<_>>();
 
-    let _ = datanode_regions
-        .extract_if(|(region_id, _)| inactive_region_ids.contains(region_id))
-        .collect::<Vec<_>>();
+    datanode_regions.retain(|(region_id, _)| !inactive_region_ids.contains(region_id));
 
     inactive_region_ids
 }

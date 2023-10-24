@@ -92,28 +92,19 @@ pub fn convert_to_region_followers_map(
 
 /// Returns the HashMap<[RegionNumber], HashSet<DatanodeId>>.
 pub fn convert_to_region_peers_map(region_routes: &[RegionRoute]) -> HashMap<u32, HashSet<u64>> {
-    let mut set = region_routes
+    region_routes
         .iter()
         .map(|x| {
             (
                 x.region.id.region_number(),
                 x.follower_peers
                     .iter()
-                    .map(|peer| (peer.id))
+                    .chain(&x.leader_peer)
+                    .map(|peer| peer.id)
                     .collect::<HashSet<u64>>(),
             )
         })
-        .collect::<HashMap<_, _>>();
-
-    for route in region_routes {
-        if let Some(peer) = &route.leader_peer {
-            let entry = set.entry(route.region.id.region_number()).or_default();
-
-            entry.insert(peer.id);
-        }
-    }
-
-    set
+        .collect::<HashMap<_, _>>()
 }
 
 pub fn find_region_leader(region_routes: &[RegionRoute], region_number: u32) -> Option<&Peer> {

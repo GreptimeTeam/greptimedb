@@ -20,7 +20,6 @@ use std::collections::{HashMap, HashSet};
 
 use common_catalog::consts::{FILE_ENGINE, MITO2_ENGINE};
 use common_meta::key::TableMetadataManagerRef;
-use futures::future::try_join_all;
 use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, TableId};
@@ -82,47 +81,29 @@ impl RegionLeaseKeeper {
             table.push((*region_id, *role));
         }
 
-        let table_ids: Vec<TableId> = tables.keys().cloned().collect::<Vec<_>>();
-        let metadata = try_join_all(
-            table_ids
-                .iter()
-                .map(|table_id| table_route_manager.get(*table_id)),
-        )
-        .await
-        .context(error::TableMetadataManagerSnafu)?;
+        let table_ids = tables.keys().cloned().collect::<Vec<_>>();
 
-        // All tables' metadata.
-        let tables_metadata = table_ids
-            .into_iter()
-            .zip(metadata)
-            .collect::<HashMap<TableId, Option<_>>>();
+        // The subset of all table metadata.
+        let metadata_subset = table_route_manager
+            .batch_get(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
 
         let mut inactive_regions = HashSet::new();
 
         // Removes inactive regions.
-        for (table_id, metadata) in tables_metadata {
-            if let Some(metadata) = metadata {
-                // Safety: Value must exist.
-                let regions = tables.get_mut(&table_id).unwrap();
+        for (table_id, regions) in &mut tables {
+            if let Some(metadata) = metadata_subset.get(table_id) {
                 let region_routes = &metadata.region_routes;
 
                 inactive_regions.extend(handler(node_id, regions, region_routes));
             } else {
                 // Removes table if metadata is not found.
-                // Safety: Value must exist.
-                let regions = tables
-                    .remove(&table_id)
-                    .unwrap()
-                    .into_iter()
-                    .map(|(region_id, _)| region_id);
-
-                inactive_regions.extend(regions);
+                inactive_regions.extend(regions.drain(..).map(|(region_id, _)| region_id));
             }
         }
 
-        let _ = datanode_regions
-            .extract_if(|(region_id, _)| inactive_regions.contains(region_id))
-            .collect::<Vec<_>>();
+        datanode_regions.retain(|(region_id, _)| !inactive_regions.contains(region_id));
 
         Ok(inactive_regions)
     }
