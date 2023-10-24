@@ -652,7 +652,7 @@ impl HistogramFoldStream {
             fit_bucket_pos += 1;
         }
         if fit_bucket_pos >= bucket.len() - 1 {
-            return Ok(bucket[bucket.len() - 2]);
+            Ok(bucket[bucket.len() - 2])
         } else {
             let upper_bound = bucket[fit_bucket_pos];
             let upper_count = counter[fit_bucket_pos];
@@ -662,9 +662,9 @@ impl HistogramFoldStream {
                 lower_bound = bucket[fit_bucket_pos - 1];
                 lower_count = counter[fit_bucket_pos - 1];
             }
-            return Ok(lower_bound
+            Ok(lower_bound
                 + (upper_bound - lower_bound) / (upper_count - lower_count)
-                    * (expected_pos - lower_count));
+                    * (expected_pos - lower_count))
         }
     }
 }

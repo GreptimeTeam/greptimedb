@@ -115,10 +115,7 @@ impl PromPlannerContext {
 
     /// Check if `le` is present in tag columns
     fn has_le_tag(&self) -> bool {
-        self.tag_columns
-            .iter()
-            .find(|c| c.eq(&LE_COLUMN_NAME))
-            .is_some()
+        self.tag_columns.iter().any(|c| c.eq(&LE_COLUMN_NAME))
     }
 }
 
