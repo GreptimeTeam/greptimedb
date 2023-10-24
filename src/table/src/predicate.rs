@@ -164,7 +164,7 @@ impl Predicate {
         let physical_exprs = match self.to_physical_exprs(schema) {
             Ok(expr) => expr,
             Err(e) => {
-                warn!(e; "Failed to build physical expr from predicates: {:?}, error", &self.exprs);
+                warn!(e; "Failed to build physical expr from predicates: {:?}", &self.exprs);
                 return res;
             }
         };
