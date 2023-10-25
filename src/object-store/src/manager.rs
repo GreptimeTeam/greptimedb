@@ -54,6 +54,14 @@ impl ObjectStoreManager {
     pub fn default_object_store(&self) -> &ObjectStore {
         &self.default_object_store
     }
+
+    #[cfg(feature = "testing")]
+    pub fn from_default(name: &str, object_store: ObjectStore) -> Self {
+        ObjectStoreManager {
+            stores: [(name.to_string(), object_store.clone())].into(),
+            default_object_store: object_store,
+        }
+    }
 }
 
 #[cfg(test)]

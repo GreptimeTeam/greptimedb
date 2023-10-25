@@ -46,7 +46,7 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::timer;
-use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
+use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;

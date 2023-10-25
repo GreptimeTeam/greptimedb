@@ -33,7 +33,7 @@ use std::time::Duration;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
-use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
+use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
