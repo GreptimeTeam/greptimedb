@@ -1,0 +1,59 @@
+name: Run sqlness test
+description: Run sqlness test on GreptimeDB
+
+inputs:
+  aws-ci-test-bucket:
+    description: 'AWS S3 bucket name for testing'
+    required: true
+  aws-region:
+    description: 'AWS region for testing'
+    required: true
+  data-root:
+    description: 'Data root for testing'
+    required: true
+  aws-access-key-id:
+    description: 'AWS access key id for testing'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS secret access key for testing'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy GreptimeDB cluster by Helm
+      uses: ./.github/actions/deploy-greptimedb
+      with:
+        data-root: ${{ inputs.data-root }}
+        aws-ci-test-bucket: ${{ inputs.aws-ci-test-bucket }}
+        aws-region: ${{ inputs.aws-region }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+
+    # TODO(zyy17): The following tests will be replaced by the real sqlness test.
+    - name: Run tests on greptimedb cluster
+      shell: bash
+      run: |
+        mysql -h 127.0.0.1 -P 14002 -e "CREATE TABLE IF NOT EXISTS system_metrics (host VARCHAR(255), idc VARCHAR(255), cpu_util DOUBLE, memory_util DOUBLE, disk_util DOUBLE, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(host, idc), TIME INDEX(ts));" && \
+        mysql -h 127.0.0.1 -P 14002 -e "SHOW TABLES;"
+
+    - name: Run tests on greptimedb cluster that uses S3
+      shell: bash
+      run: |
+        mysql -h 127.0.0.1 -P 24002 -e "CREATE TABLE IF NOT EXISTS system_metrics (host VARCHAR(255), idc VARCHAR(255), cpu_util DOUBLE, memory_util DOUBLE, disk_util DOUBLE, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(host, idc), TIME INDEX(ts));" && \
+        mysql -h 127.0.0.1 -P 24002 -e "SHOW TABLES;"
+
+    - name: Run tests on standalone greptimedb
+      shell: bash
+      run: |
+        mysql -h 127.0.0.1 -P 34002 -e "CREATE TABLE IF NOT EXISTS system_metrics (host VARCHAR(255), idc VARCHAR(255), cpu_util DOUBLE, memory_util DOUBLE, disk_util DOUBLE, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(host, idc), TIME INDEX(ts));" && \
+        mysql -h 127.0.0.1 -P 34002 -e "SHOW TABLES;"
+
+    - name: Clean S3 data
+      shell: bash
+      env:
+        AWS_DEFAULT_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+      run: |
+        aws s3 rm s3://${{ inputs.aws-ci-test-bucket }}/${{ inputs.data-root }} --recursive

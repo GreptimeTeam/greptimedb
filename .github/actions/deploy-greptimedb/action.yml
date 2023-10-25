@@ -1,0 +1,31 @@
+name: Deploy GreptimeDB cluster
+description: Deploy GreptimeDB cluster on Kubernetes
+inputs:
+  aws-ci-test-bucket:
+    description: 'AWS S3 bucket name for testing'
+    required: true
+  aws-region:
+    description: 'AWS region for testing'
+    required: true
+  data-root:
+    description: 'Data root for testing'
+    required: true
+  aws-access-key-id:
+    description: 'AWS access key id for testing'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS secret access key for testing'
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Deploy GreptimeDB by Helm
+      shell: bash
+      env:
+        DATA_ROOT: ${{ inputs.data-root }}
+        AWS_CI_TEST_BUCKET: ${{ inputs.aws-ci-test-bucket }}
+        AWS_REGION: ${{ inputs.aws-region }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+      run: |
+        ./.github/scripts/deploy-greptimedb.sh
