@@ -117,10 +117,9 @@ impl TestEnv {
     }
 
     pub fn get_object_store(&self) -> Option<ObjectStore> {
-        let Some(ref object_store_manager) = self.object_store_manager else {
-            unreachable!()
-        };
-        Some(object_store_manager.default_object_store().clone())
+        self.object_store_manager
+            .as_ref()
+            .map(|manager| manager.default_object_store().clone())
     }
 
     /// Creates a new engine with specific config under this env.
