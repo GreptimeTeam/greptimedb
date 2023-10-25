@@ -22,11 +22,11 @@ SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7;
 
 SELECT COUNT(*) FROM (SELECT * FROM integers UNION ALL SELECT * FROM integers LIMIT 7) tbl;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 7               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 7        |
++----------+
 
 DROP TABLE integers;
 

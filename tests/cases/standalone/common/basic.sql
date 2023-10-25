@@ -4,7 +4,7 @@ CREATE TABLE system_metrics (
     cpu_util DOUBLE,
     memory_util DOUBLE,
     disk_util DOUBLE,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
     PRIMARY KEY(host, idc),
     TIME INDEX(ts)
 );

@@ -10,7 +10,7 @@ INSERT INTO test1 VALUES (DEFAULT, 1, DEFAULT), (default, 2, default), (DeFaUlT,
 
 SELECT * FROM test1;
 
-CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP, k STRING DEFAULT 'blabla');
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP(), k STRING DEFAULT 'blabla');
 
 INSERT INTO test2 VALUES (1,1,'a'), (default, 2, default), (3,3,'b'), (default, 4, default), (5, 5, 'c');
 

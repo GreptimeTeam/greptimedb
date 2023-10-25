@@ -80,19 +80,19 @@ SELECT f FROM floats ORDER BY f NULLS LAST LIMIT 4;
 -- count with filters
 SELECT COUNT(*) FROM floats WHERE f > 0;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 3               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 3        |
++----------+
 
 SELECT COUNT(*) FROM floats WHERE f < 0;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 2               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 2        |
++----------+
 
 DROP TABLE floats;
 
@@ -179,19 +179,19 @@ SELECT d FROM doubles ORDER BY d NULLS LAST LIMIT 4;
 -- count with filters
 SELECT COUNT(*) FROM doubles WHERE d > 0;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 3               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 3        |
++----------+
 
 SELECT COUNT(*) FROM doubles WHERE d < 0;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 2               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 2        |
++----------+
 
 DROP TABLE doubles;
 
