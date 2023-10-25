@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use api::v1::meta::HeartbeatResponse;
-use common_meta::cache_invalidator::KvCacheInvalidator;
+use common_meta::cache_invalidator::{KvCacheGuard, KvCacheInvalidator, KvCacheInvalidatorExt};
 use common_meta::heartbeat::handler::{
     HandlerGroupExecutor, HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
 };
@@ -40,6 +40,27 @@ pub struct MockKvCacheInvalidator {
 impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
         let _ = self.inner.lock().unwrap().remove(key);
+    }
+    async fn invalidate_keys(&self, keys: &[&[u8]]) {
+        let mut inner = self.inner.lock().unwrap();
+        for key in keys {
+            let _ = inner.remove(*key);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl KvCacheInvalidatorExt for MockKvCacheInvalidator {
+    type CacheType = HashMap<Vec<u8>, i32>;
+
+    async fn invalidate_with<F>(&self, f: F)
+    where
+        F: FnOnce(&mut KvCacheGuard<Self::CacheType>) + Send + 'static,
+    {
+        let inner = self.inner.lock().unwrap().clone();
+        let mut result = inner.into();
+        let mut guard = KvCacheGuard::new(&mut result);
+        f(&mut guard);
     }
 }
 
