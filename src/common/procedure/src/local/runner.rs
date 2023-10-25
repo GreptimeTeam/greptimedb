@@ -1047,6 +1047,6 @@ mod tests {
         // Run the runner and execute the procedure.
         runner.run().await;
         let err = meta.state().error().unwrap().output_msg();
-        assert!(err.contains("Internal error"), "{err}");
+        assert!(err.contains("subprocedure failed"), "{err}");
     }
 }
