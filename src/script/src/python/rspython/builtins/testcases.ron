@@ -221,27 +221,6 @@ round(values)"#,
         input: {
             "values": Var(
                 ty: Float64,
-                value: FloatVec([0.3, 0.5, 1.1])
-            )
-        },
-        script: r#"
-from greptime import *
-trunc(values)"#,
-        expect: Ok((
-            value: FloatVec(
-                [
-                    0.0,
-                    0.0,
-                    1.0,
-                ],
-            ),
-            ty: Float64
-        ))
-    ),
-    TestCase(
-        input: {
-            "values": Var(
-                ty: Float64,
                 value: FloatVec([-0.3, 0.5, -1.1])
             )
         },

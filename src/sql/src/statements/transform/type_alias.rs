@@ -324,7 +324,7 @@ CREATE TABLE data_types (
             Statement::CreateTable(c) => {
                 let expected = r#"CREATE TABLE  data_types (
   s STRING,
-  tint TINYINT,
+  tint INT8,
   sint SMALLINT,
   i INT,
   bint BIGINT,
@@ -338,7 +338,7 @@ CREATE TABLE data_types (
   ts0 TIMESTAMP(0),
   ts3 TIMESTAMP(3),
   ts6 TIMESTAMP(6),
-  ts9 TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP() NOT NULL,
+  ts9 TIMESTAMP(9) DEFAULT CURRENT_TIMESTAMP NOT NULL,
   TIME INDEX (ts9),
   PRIMARY KEY (s)
 )

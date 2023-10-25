@@ -16,7 +16,7 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayData, ArrayRef, NullArray};
+use arrow::array::{Array, ArrayRef, NullArray};
 use snafu::{ensure, OptionExt};
 
 use crate::data_type::ConcreteDataType;
@@ -44,10 +44,6 @@ impl NullVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
-    }
 }
 
 impl From<NullArray> for NullVector {
@@ -74,14 +70,11 @@ impl Vector for NullVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        // TODO(yingwen): Replaced by clone after upgrading to arrow 28.0.
-        let data = self.to_array_data();
-        Arc::new(NullArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(NullArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -93,7 +86,7 @@ impl Vector for NullVector {
     }
 
     fn null_count(&self) -> usize {
-        self.array.null_count()
+        self.array.len()
     }
 
     fn is_null(&self, _row: usize) -> bool {
@@ -225,12 +218,11 @@ mod tests {
 
         assert_eq!(v.len(), 32);
         assert_eq!(0, v.memory_size());
-        let arrow_arr = v.to_arrow_array();
-        assert_eq!(arrow_arr.null_count(), 32);
+        assert_eq!(v.null_count(), 32);
 
-        let array2 = arrow_arr.slice(8, 16);
-        assert_eq!(array2.len(), 16);
-        assert_eq!(array2.null_count(), 16);
+        let vector2 = v.slice(8, 16);
+        assert_eq!(vector2.len(), 16);
+        assert_eq!(vector2.null_count(), 16);
 
         assert_eq!("NullVector", v.vector_type_name());
         assert!(!v.is_const());

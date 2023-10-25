@@ -89,7 +89,9 @@ impl PhysicalPlan for StreamScanAdapter {
     }
 
     fn with_new_children(&self, _children: Vec<PhysicalPlanRef>) -> QueryResult<PhysicalPlanRef> {
-        unimplemented!()
+        Ok(Arc::new(Self::new(
+            self.stream.lock().unwrap().take().unwrap(),
+        )))
     }
 
     fn execute(

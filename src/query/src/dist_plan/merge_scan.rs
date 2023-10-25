@@ -32,7 +32,7 @@ use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning};
-use datafusion_common::{DataFusionError, Result, Statistics};
+use datafusion_common::{Result, Statistics};
 use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::PhysicalSortExpr;
 use datatypes::schema::{Schema, SchemaRef};
@@ -263,13 +263,13 @@ impl ExecutionPlan for MergeScanExec {
         vec![]
     }
 
+    // DataFusion will swap children unconditionally.
+    // But since this node is leaf node, it's safe to just return self.
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        Err(DataFusionError::Execution(
-            "should not call `with_new_children` on MergeScanExec".to_string(),
-        ))
+        Ok(self.clone())
     }
 
     fn execute(

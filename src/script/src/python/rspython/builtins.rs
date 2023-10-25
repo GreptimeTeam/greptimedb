@@ -553,6 +553,7 @@ pub(crate) mod greptime_builtin {
         try_into_py_obj(DFColValue::Array(result), vm)
     }
 
+    //
     // /// simple math function, the backing implement is datafusion's `trunc` math function
     // #[pyfunction]
     // fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
