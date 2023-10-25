@@ -46,7 +46,7 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::timer;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
@@ -72,7 +72,7 @@ impl MitoEngine {
     pub fn new<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> MitoEngine {
         config.sanitize();
 
@@ -108,7 +108,7 @@ impl EngineInner {
     fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
         EngineInner {
             workers: WorkerGroup::start(config, log_store, object_store_manager),
@@ -235,7 +235,7 @@ impl MitoEngine {
     pub fn new_for_test<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {

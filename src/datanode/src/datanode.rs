@@ -33,7 +33,7 @@ use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
 use mito2::engine::MitoEngine;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::Mode;
@@ -356,9 +356,7 @@ impl DatanodeBuilder {
             RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
         let object_store = store::new_object_store(opts).await?;
         let object_store_manager = ObjectStoreManager::try_new(
-            vec![("default".to_string(), object_store)]
-                .into_iter()
-                .collect(),
+            [("default".to_string(), object_store)].into(),
             "default", // TODO: use a name which is set in the configuration when #919 is done.
         )
         .context(DefaultObjectStoreNotFoundSnafu)?;
@@ -401,7 +399,7 @@ impl DatanodeBuilder {
     async fn build_store_engines<S>(
         opts: &DatanodeOptions,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> Result<Vec<RegionEngineRef>>
     where
         S: LogStore,

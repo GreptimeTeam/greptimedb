@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use snafu::OptionExt;
 
 use crate::error::{DefaultStorageNotFoundSnafu, Result};
 use crate::ObjectStore;
+
+pub type ObjectStoreManagerRef = Arc<ObjectStoreManager>;
 
 /// Manages multiple object stores so that users can configure a storage for each table.
 /// This struct certainly have one default object store, and can have zero or more custom object stores.

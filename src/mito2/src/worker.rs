@@ -33,7 +33,7 @@ use std::time::Duration;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, warn};
 use futures::future::try_join_all;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
@@ -112,7 +112,7 @@ impl WorkerGroup {
     pub(crate) fn start<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> WorkerGroup {
         assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
@@ -206,7 +206,7 @@ impl WorkerGroup {
     pub(crate) fn start_for_test<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store_manager: Arc<ObjectStoreManager>,
+        object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerGroup {
@@ -256,7 +256,7 @@ struct WorkerStarter<S> {
     id: WorkerId,
     config: Arc<MitoConfig>,
     log_store: Arc<S>,
-    object_store_manager: Arc<ObjectStoreManager>,
+    object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
     scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -427,7 +427,7 @@ struct RegionWorkerLoop<S> {
     /// WAL of the engine.
     wal: Wal<S>,
     /// Manages object stores for manifest and SSTs.
-    object_store_manager: Arc<ObjectStoreManager>,
+    object_store_manager: ObjectStoreManagerRef,
     /// Whether the worker thread is still running.
     running: Arc<AtomicBool>,
     /// Memtable builder for each region.

@@ -35,7 +35,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
-use object_store::manager::ObjectStoreManager;
+use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use object_store::ObjectStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
@@ -73,7 +73,7 @@ pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
     logstore: Option<Arc<RaftEngineLogStore>>,
-    object_store_manager: Option<Arc<ObjectStoreManager>>,
+    object_store_manager: Option<ObjectStoreManagerRef>,
 }
 
 #[cfg(test)]
@@ -153,14 +153,10 @@ impl TestEnv {
     pub async fn reopen_engine(&mut self, engine: MitoEngine, config: MitoConfig) -> MitoEngine {
         engine.stop().await.unwrap();
 
-        let Some(ref object_store_manager) = self.object_store_manager else {
-            unreachable!()
-        };
-
         MitoEngine::new(
             config,
             self.logstore.clone().unwrap(),
-            object_store_manager.clone(),
+            self.object_store_manager.clone().unwrap(),
         )
     }
 
