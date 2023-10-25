@@ -477,7 +477,7 @@ impl PromPlanner {
                                 table: self.ctx.table_name.clone().unwrap_or_default(),
                             }
                         })?;
-                    // TODO(ruihang): support multi fields
+                    // FIXME(ruihang): support multi fields
                     let field_column = self
                         .ctx
                         .field_columns
