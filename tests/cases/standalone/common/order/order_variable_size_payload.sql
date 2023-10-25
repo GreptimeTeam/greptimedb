@@ -5,13 +5,13 @@ insert into t0 values ('a', 1), (NULL,2), (NULL, 3), (NULL, 4), (NULL, 5), (NULL
 -- SQLNESS SORT_RESULT 2 2
 SELECT * FROM t0 ORDER BY t0.c0 DESC;
 
-CREATE TABLE test0 (job VARCHAR, name VARCHAR, t TIMESTAMP TIME INDEX);
+CREATE TABLE test0 (job VARCHAR, host VARCHAR, t TIMESTAMP TIME INDEX);
 
 INSERT INTO test0 VALUES ('Shipping and Receiving Supervisor', 'Ackerman', 1), ('Shipping and Receiving Clerk', 'Berndt', 2), ('Shipping and Receiving Clerk', 'Kuppa', 3), ('Production Supervisor - WC60', 'Brown', 4), ('Production Supervisor - WC60', 'Campbell', 5), ('Production Supervisor - WC40', 'Dsa', 6);
 
-SELECT * FROM test0 ORDER BY job, name;
+SELECT * FROM test0 ORDER BY job, host;
 
-SELECT * FROM test0 ORDER BY job DESC, name DESC;
+SELECT * FROM test0 ORDER BY job DESC, host DESC;
 
 CREATE TABLE test1 (s VARCHAR, t TIMESTAMP TIME INDEX);
 
@@ -85,7 +85,7 @@ select i, split_part(s, 'b', 1) from test8 order by i;
 CREATE TABLE DirectReports
 (
     EmployeeID smallint,
-    Name varchar NOT NULL,
+    "Name" varchar NOT NULL,
     Title varchar NOT NULL,
     EmployeeLevel int NOT NULL,
     "Sort" varchar NOT NULL,

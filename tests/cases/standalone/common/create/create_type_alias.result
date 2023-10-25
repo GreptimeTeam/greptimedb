@@ -14,7 +14,7 @@ CREATE TABLE data_types (
   ts0 TimestampSecond,
   ts3 Timestamp_MS,
   ts6 Timestamp_US,
-  ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP TIME INDEX,
+  ts9 TimestampNanosecond DEFAULT CURRENT_TIMESTAMP() TIME INDEX,
   PRIMARY KEY(s));
 
 Affected Rows: 0
