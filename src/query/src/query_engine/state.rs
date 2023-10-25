@@ -93,20 +93,6 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let mut physical_optimizers = {
-            let state = SessionState::with_config_rt(session_config.clone(), runtime_env.clone());
-            state.physical_optimizers().to_vec()
-        };
-        // run the sort enforcement rules first.
-        // And `EnforceSorting` is required to run after `EnforceDistribution`.
-        Self::remove_physical_optimize_rule(&mut physical_optimizers, EnforceSorting {}.name());
-        Self::remove_physical_optimize_rule(
-            &mut physical_optimizers,
-            EnforceDistribution {}.name(),
-        );
-        physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
-        physical_optimizers.insert(0, Arc::new(EnforceDistribution {}));
-
         let session_state = SessionState::with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
@@ -118,8 +104,7 @@ impl QueryEngineState {
             catalog_list.clone(),
             region_query_handler,
         )))
-        .with_optimizer_rules(optimizer.rules)
-        .with_physical_optimizer_rules(physical_optimizers);
+        .with_optimizer_rules(optimizer.rules);
 
         let df_context = SessionContext::with_state(session_state);
 
