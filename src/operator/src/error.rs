@@ -556,11 +556,12 @@ impl ErrorExt for Error {
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 
-            Error::JoinTask { .. }
-            | Error::BuildParquetRecordBatchStream { .. }
-            | Error::ReadDfRecordBatch { .. }
+            Error::JoinTask { .. } => StatusCode::Internal,
+
+            Error::BuildParquetRecordBatchStream { .. }
             | Error::BuildFileStream { .. }
             | Error::WriteStreamToFile { .. }
+            | Error::ReadDfRecordBatch { .. }
             | Error::Unexpected { .. } => StatusCode::Unexpected,
 
             Error::Catalog { source, .. } => source.status_code(),
