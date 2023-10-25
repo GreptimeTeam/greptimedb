@@ -2,7 +2,7 @@
 
 Thanks a lot for considering contributing to GreptimeDB. We believe people like you would make GreptimeDB a great product. We intend to build a community where individuals can have open talks, show respect for one another, and speak with true ❤️. Meanwhile, we are to keep transparency and make your effort count here.
 
-Read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
+Please Read the guidelines, and they can help you get started. Communicate with respect to developers maintaining and developing the project. In return, they should reciprocate that respect by addressing your issue, reviewing changes, as well as helping finalize and merge your pull requests.
 
 Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get the whole picture of the project. To learn about the design of GreptimeDB, please refer to the [design docs](https://github.com/GrepTimeTeam/docs).
 
@@ -21,7 +21,7 @@ Pull requests are great, but we accept all kinds of other help if you like. Such
 - Write tutorials or blog posts. Blog, speak about, or create tutorials about one of GreptimeDB's many features. Mention [@greptime](https://twitter.com/greptime) on Twitter and email info@greptime.com so we can give pointers and tips and help you spread the word by promoting your content on Greptime communication channels.
 - Improve the documentation. [Submit documentation](http://github.com/greptimeTeam/docs/) updates, enhancements, designs, or bug fixes, and fixing any spelling or grammar errors will be very much appreciated.
 - Present at meetups and conferences about your GreptimeDB projects. Your unique challenges and successes in building things with GreptimeDB can provide great speaking material. We'd love to review your talk abstract, so get in touch with us if you'd like some help!
-- Submit bug reports. To report a bug or a security issue, you can [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new).
+- Submitting bug reports. To report a bug or a security issue, you can [open a new GitHub issue](https://github.com/GrepTimeTeam/greptimedb/issues/new).
 - Speak up feature requests. Send feedback is a great way for us to understand your different use cases of GreptimeDB better. If you want to share your experience with GreptimeDB, or if you want to discuss any ideas, you can start a discussion on [GitHub discussions](https://github.com/GreptimeTeam/greptimedb/discussions), chat with the Greptime team on [Slack](https://greptime.com/slack), or you can tweet [@greptime](https://twitter.com/greptime) on Twitter.
 
 ## Code of Conduct
@@ -81,7 +81,7 @@ Now, `pre-commit` will run automatically on `git commit`.
 ### Title
 
 The titles of pull requests should be prefixed with category names listed in [Conventional Commits specification](https://www.conventionalcommits.org/en/v1.0.0)
-like `feat`/`fix`/`docs`, with a concise summary of code change following. DO NOT use last commit message as pull request title.
+like `feat`/`fix`/`docs`, with a concise summary of code change following. AVOID using the last commit message as pull request title.
 
 ### Description
 
@@ -100,7 +100,7 @@ of what you were trying to do and what went wrong. You can also reach for help i
 
 ## Community
 
-The core team will be thrilled if you participate in any way you like. When you are stuck, try ask for help by filing an issue, with a detailed description of what you were trying to do and what went wrong. If you have any questions or if you would like to get involved in our community, please check out:
+The core team will be thrilled if you would like to participate in any way you like. When you are stuck, try to ask for help by filing an issue, with a detailed description of what you were trying to do and what went wrong. If you have any questions or if you would like to get involved in our community, please check out:
 
 - [GreptimeDB Community Slack](https://greptime.com/slack)
 - [GreptimeDB Github Discussions](https://github.com/GreptimeTeam/greptimedb/discussions)
