@@ -202,7 +202,7 @@ async fn generate_checkpoint_with_compression_types(
         manager.update(action).await.unwrap();
     }
 
-    RegionManifestManagerInner::last_checkpoint(&manager.store().await)
+    RegionManifestManagerInner::last_checkpoint(&mut manager.store().await)
         .await
         .unwrap()
         .unwrap()

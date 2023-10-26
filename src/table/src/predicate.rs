@@ -27,6 +27,7 @@ use datafusion_expr::expr::InList;
 use datafusion_expr::{Between, BinaryExpr, ColumnarValue, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::{create_physical_expr, PhysicalExpr};
+use datatypes::arrow;
 use datatypes::arrow::array::BooleanArray;
 use datatypes::schema::SchemaRef;
 use datatypes::value::scalar_value_to_timestamp;
@@ -39,19 +40,24 @@ mod stats;
 
 #[derive(Clone)]
 pub struct Predicate {
-    /// The schema of the table that the expressions being applied.
-    schema: SchemaRef,
-    /// Physical expressions of this predicate.
-    exprs: Vec<Arc<dyn PhysicalExpr>>,
+    /// logical exprs
+    exprs: Vec<Expr>,
 }
 
 impl Predicate {
     /// Creates a new `Predicate` by converting logical exprs to physical exprs that can be
     /// evaluated against record batches.
     /// Returns error when failed to convert exprs.
-    pub fn try_new(exprs: Vec<Expr>, schema: SchemaRef) -> error::Result<Self> {
-        let arrow_schema = schema.arrow_schema();
-        let df_schema = arrow_schema
+    pub fn new(exprs: Vec<Expr>) -> Self {
+        Self { exprs }
+    }
+
+    /// Builds physical exprs according to provided schema.
+    pub fn to_physical_exprs(
+        &self,
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> error::Result<Vec<Arc<dyn PhysicalExpr>>> {
+        let df_schema = schema
             .clone()
             .to_dfschema_ref()
             .context(error::DatafusionSnafu)?;
@@ -61,47 +67,38 @@ impl Predicate {
         // registering variables.
         let execution_props = &ExecutionProps::new();
 
-        let physical_exprs = exprs
+        self.exprs
             .iter()
             .map(|expr| {
-                create_physical_expr(
-                    expr.df_expr(),
-                    df_schema.as_ref(),
-                    arrow_schema.as_ref(),
-                    execution_props,
-                )
+                create_physical_expr(expr.df_expr(), df_schema.as_ref(), schema, execution_props)
             })
             .collect::<Result<_, _>>()
-            .context(error::DatafusionSnafu)?;
-
-        Ok(Self {
-            schema,
-            exprs: physical_exprs,
-        })
-    }
-
-    #[inline]
-    pub fn exprs(&self) -> &[Arc<dyn PhysicalExpr>] {
-        &self.exprs
+            .context(error::DatafusionSnafu)
     }
 
     /// Builds an empty predicate from given schema.
-    pub fn empty(schema: SchemaRef) -> Self {
-        Self {
-            schema,
-            exprs: vec![],
-        }
+    pub fn empty() -> Self {
+        Self { exprs: vec![] }
     }
 
     /// Evaluates the predicate against row group metadata.
     /// Returns a vector of boolean values, among which `false` means the row group can be skipped.
-    pub fn prune_row_groups(&self, row_groups: &[RowGroupMetaData]) -> Vec<bool> {
+    pub fn prune_row_groups(
+        &self,
+        row_groups: &[RowGroupMetaData],
+        schema: SchemaRef,
+    ) -> Vec<bool> {
         let mut res = vec![true; row_groups.len()];
-        let arrow_schema = self.schema.arrow_schema();
-        for expr in &self.exprs {
+
+        let Ok(physical_exprs) = self.to_physical_exprs(schema.arrow_schema()) else {
+            return res;
+        };
+
+        let arrow_schema = schema.arrow_schema();
+        for expr in &physical_exprs {
             match PruningPredicate::try_new(expr.clone(), arrow_schema.clone()) {
                 Ok(p) => {
-                    let stat = RowGroupPruningStatistics::new(row_groups, &self.schema);
+                    let stat = RowGroupPruningStatistics::new(row_groups, &schema);
                     match p.prune(&stat) {
                         Ok(r) => {
                             for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
@@ -123,7 +120,9 @@ impl Predicate {
 
     /// Prunes primary keys
     pub fn prune_primary_key(&self, primary_key: &RecordBatch) -> error::Result<bool> {
-        for expr in &self.exprs {
+        let pk_schema = primary_key.schema();
+        let physical_exprs = self.to_physical_exprs(&pk_schema)?;
+        for expr in &physical_exprs {
             // evaluate every filter against primary key
             let Ok(eva) = expr.evaluate(primary_key) else {
                 continue;
@@ -156,11 +155,22 @@ impl Predicate {
 
     /// Evaluates the predicate against the `stats`.
     /// Returns a vector of boolean values, among which `false` means the row group can be skipped.
-    pub fn prune_with_stats<S: PruningStatistics>(&self, stats: &S) -> Vec<bool> {
+    pub fn prune_with_stats<S: PruningStatistics>(
+        &self,
+        stats: &S,
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> Vec<bool> {
         let mut res = vec![true; stats.num_containers()];
-        let arrow_schema = self.schema.arrow_schema();
-        for expr in &self.exprs {
-            match PruningPredicate::try_new(expr.clone(), arrow_schema.clone()) {
+        let physical_exprs = match self.to_physical_exprs(schema) {
+            Ok(expr) => expr,
+            Err(e) => {
+                warn!(e; "Failed to build physical expr from predicates: {:?}", &self.exprs);
+                return res;
+            }
+        };
+
+        for expr in &physical_exprs {
+            match PruningPredicate::try_new(expr.clone(), schema.clone()) {
                 Ok(p) => match p.prune(stats) {
                     Ok(r) => {
                         for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
@@ -643,7 +653,7 @@ mod tests {
         let dir = create_temp_dir("prune_parquet");
         let (path, schema) = gen_test_parquet_file(&dir, array_cnt).await;
         let schema = Arc::new(datatypes::schema::Schema::try_from(schema).unwrap());
-        let arrow_predicate = Predicate::try_new(filters, schema.clone()).unwrap();
+        let arrow_predicate = Predicate::new(filters);
         let builder = ParquetRecordBatchStreamBuilder::new(
             tokio::fs::OpenOptions::new()
                 .read(true)
@@ -655,7 +665,7 @@ mod tests {
         .unwrap();
         let metadata = builder.metadata().clone();
         let row_groups = metadata.row_groups();
-        let res = arrow_predicate.prune_row_groups(row_groups);
+        let res = arrow_predicate.prune_row_groups(row_groups, schema);
         assert_eq!(expect, res);
     }
 

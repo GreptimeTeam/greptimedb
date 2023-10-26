@@ -57,7 +57,10 @@ impl GreptimeDBTelemetryTask {
         task_fn: BoxedTaskFunction<Error>,
         should_report: Arc<AtomicBool>,
     ) -> Self {
-        GreptimeDBTelemetryTask::Enable((RepeatedTask::new(interval, task_fn), should_report))
+        GreptimeDBTelemetryTask::Enable((
+            RepeatedTask::new(interval, task_fn).with_initial_delay(Some(Duration::ZERO)),
+            should_report,
+        ))
     }
 
     pub fn disable() -> Self {
@@ -207,6 +210,7 @@ pub struct GreptimeDBTelemetry {
     working_home: Option<String>,
     telemetry_url: &'static str,
     should_report: Arc<AtomicBool>,
+    report_times: usize,
 }
 
 #[async_trait::async_trait]
@@ -239,6 +243,7 @@ impl GreptimeDBTelemetry {
             client: client.ok(),
             telemetry_url: TELEMETRY_URL,
             should_report,
+            report_times: 0,
         }
     }
 
@@ -256,8 +261,11 @@ impl GreptimeDBTelemetry {
                 };
 
                 if let Some(client) = self.client.as_ref() {
-                    info!("reporting greptimedb version: {:?}", data);
+                    if self.report_times == 0 {
+                        info!("reporting greptimedb version: {:?}", data);
+                    }
                     let result = client.post(self.telemetry_url).json(&data).send().await;
+                    self.report_times += 1;
                     debug!("report version result: {:?}", result);
                     result.ok()
                 } else {

@@ -99,6 +99,15 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env with specific `data_home` for test.
+    pub fn with_data_home(data_home: TempDir) -> TestEnv {
+        TestEnv {
+            data_home,
+            logstore: None,
+            object_store: None,
+        }
+    }
+
     pub fn get_logstore(&self) -> Option<Arc<RaftEngineLogStore>> {
         self.logstore.clone()
     }

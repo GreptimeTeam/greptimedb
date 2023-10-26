@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod memory;
+pub mod test;
 pub mod txn;
 
 use std::any::Any;

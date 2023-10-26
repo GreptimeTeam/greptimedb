@@ -1,0 +1,26 @@
+name: Nightly functional tests
+
+on:
+  schedule:
+    # At 00:00 on Tuesday.
+    - cron: '0 0 * * 2'
+  workflow_dispatch:
+
+jobs:
+  sqlness-test:
+    name: Run sqlness test
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Run sqlness test
+        uses: ./.github/actions/sqlness-test
+        with:
+          data-root: sqlness-test
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}

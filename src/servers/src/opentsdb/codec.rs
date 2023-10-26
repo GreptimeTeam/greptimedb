@@ -19,7 +19,7 @@ use crate::error::{self, Result};
 pub const OPENTSDB_TIMESTAMP_COLUMN_NAME: &str = "greptime_timestamp";
 pub const OPENTSDB_FIELD_COLUMN_NAME: &str = "greptime_value";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DataPoint {
     metric: String,
     ts_millis: i64,
@@ -113,6 +113,10 @@ impl DataPoint {
 
     pub fn tags(&self) -> &Vec<(String, String)> {
         &self.tags
+    }
+
+    pub fn tags_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.tags
     }
 
     pub fn ts_millis(&self) -> i64 {

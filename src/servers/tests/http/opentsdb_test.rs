@@ -51,7 +51,8 @@ impl GrpcQueryHandler for DummyInstance {
 
 #[async_trait]
 impl OpentsdbProtocolHandler for DummyInstance {
-    async fn exec(&self, data_point: &DataPoint, _ctx: QueryContextRef) -> Result<()> {
+    async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
+        let data_point = data_points.first().unwrap();
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",
@@ -59,7 +60,7 @@ impl OpentsdbProtocolHandler for DummyInstance {
             .fail();
         }
         let _ = self.tx.send(data_point.metric().to_string()).await;
-        Ok(())
+        Ok(data_points.len())
     }
 }
 
@@ -163,19 +164,13 @@ async fn test_opentsdb_put() {
         .send()
         .await;
     assert_eq!(result.status(), 500);
-    assert_eq!(
-        result.text().await,
-        "{\"error\":\"Internal error: Internal error: expected\"}"
-    );
+    assert_eq!(result.text().await, "{\"error\":\"Internal error: 1003\"}");
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {
         metrics.push(s);
     }
-    assert_eq!(
-        metrics,
-        vec!["m1".to_string(), "m2".to_string(), "m3".to_string()]
-    );
+    assert_eq!(metrics, vec!["m1".to_string(), "m2".to_string()]);
 }
 
 #[tokio::test]
@@ -208,7 +203,7 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: expected\"}]}");
+    assert_eq!(result.text().await, "{\"success\":0,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
 
     // multiple data point summary debug put
     let result = client
@@ -233,7 +228,7 @@ async fn test_opentsdb_debug_put() {
         .send()
         .await;
     assert_eq!(result.status(), 200);
-    assert_eq!(result.text().await, "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: expected\"}]}");
+    assert_eq!(result.text().await, "{\"success\":1,\"failed\":1,\"errors\":[{\"datapoint\":{\"metric\":\"should_failed\",\"timestamp\":1000,\"value\":1.0,\"tags\":{\"host\":\"web01\"}},\"error\":\"Internal error: 1003\"}]}");
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {

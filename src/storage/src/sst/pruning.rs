@@ -29,9 +29,11 @@ use datatypes::prelude::ConcreteDataType;
 use parquet::arrow::arrow_reader::{ArrowPredicate, RowFilter};
 use parquet::arrow::ProjectionMask;
 use parquet::schema::types::SchemaDescriptor;
+use snafu::ResultExt;
 use table::predicate::Predicate;
 
 use crate::error;
+use crate::error::BuildPredicateSnafu;
 use crate::schema::StoreSchema;
 
 /// Builds row filters according to predicates.
@@ -80,7 +82,11 @@ pub(crate) fn build_row_filter(
         Box::new(PlainTimestampRowFilter::new(time_range, ts_col_projection)) as _
     };
     let mut predicates = vec![time_range_row_filter];
-    if let Ok(datafusion_filters) = predicate_to_row_filter(predicate, projection_mask) {
+    if let Ok(datafusion_filters) = predicate_to_row_filter(
+        predicate,
+        projection_mask,
+        store_schema.schema().arrow_schema(),
+    ) {
         predicates.extend(datafusion_filters);
     }
     let filter = RowFilter::new(predicates);
@@ -90,9 +96,13 @@ pub(crate) fn build_row_filter(
 fn predicate_to_row_filter(
     predicate: &Predicate,
     projection_mask: ProjectionMask,
+    schema: &arrow::datatypes::SchemaRef,
 ) -> error::Result<Vec<Box<dyn ArrowPredicate>>> {
-    let mut datafusion_predicates = Vec::with_capacity(predicate.exprs().len());
-    for expr in predicate.exprs() {
+    let physical_exprs = predicate
+        .to_physical_exprs(schema)
+        .context(BuildPredicateSnafu)?;
+    let mut datafusion_predicates = Vec::with_capacity(physical_exprs.len());
+    for expr in &physical_exprs {
         datafusion_predicates.push(Box::new(DatafusionArrowPredicate {
             projection_mask: projection_mask.clone(),
             physical_expr: expr.clone(),

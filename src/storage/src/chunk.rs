@@ -245,11 +245,7 @@ impl ChunkReaderBuilder {
             reader_builder = reader_builder.push_batch_iter(iter);
         }
 
-        let predicate = Predicate::try_new(
-            self.filters.clone(),
-            self.schema.store_schema().schema().clone(),
-        )
-        .context(error::BuildPredicateSnafu)?;
+        let predicate = Predicate::new(self.filters.clone());
 
         let read_opts = ReadOptions {
             batch_size: self.iter_ctx.batch_size,

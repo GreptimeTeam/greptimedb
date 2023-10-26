@@ -109,6 +109,9 @@ pub enum Error {
 
     #[snafu(display("Expect a metric matcher, but not found"))]
     NoMetricMatcher { location: Location },
+
+    #[snafu(display("Invalid function argument for {}", fn_name))]
+    FunctionInvalidArgument { fn_name: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -124,7 +127,8 @@ impl ErrorExt for Error {
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
             | ColumnNotFound { .. }
-            | Deserialize { .. } => StatusCode::InvalidArguments,
+            | Deserialize { .. }
+            | FunctionInvalidArgument { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }

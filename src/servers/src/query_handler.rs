@@ -34,6 +34,9 @@ use common_query::Output;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
 use session::context::QueryContextRef;
 
 use crate::error::Result;
@@ -74,7 +77,7 @@ pub trait InfluxdbLineProtocolHandler {
 pub trait OpentsdbProtocolHandler {
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
-    async fn exec(&self, data_point: &DataPoint, ctx: QueryContextRef) -> Result<()>;
+    async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize>;
 }
 
 pub struct PromStoreResponse {
@@ -101,4 +104,11 @@ pub trait OpenTelemetryProtocolHandler {
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
     ) -> Result<ExportMetricsServiceResponse>;
+
+    /// Handling opentelemetry traces request
+    async fn traces(
+        &self,
+        request: ExportTraceServiceRequest,
+        ctx: QueryContextRef,
+    ) -> Result<ExportTraceServiceResponse>;
 }

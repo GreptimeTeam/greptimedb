@@ -22,3 +22,4 @@ pub(crate) const METRIC_RUN_SCRIPT_ELAPSED: &str = "frontend.run_script_elapsed"
 pub const PROM_STORE_REMOTE_WRITE_SAMPLES: &str = "frontend.prometheus.remote_write.samples";
 
 pub const OTLP_METRICS_ROWS: &str = "frontend.otlp.metrics.rows";
+pub const OTLP_TRACES_ROWS: &str = "frontend.otlp.traces.rows";
