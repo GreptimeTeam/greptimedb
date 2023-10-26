@@ -582,7 +582,9 @@ impl MergeReader {
                 // Now key range of this node is behind the hottest node's.
                 node.is_behind(hottest)
             } else {
-                false
+                // Setting this to false should not affect correctness but performance because
+                // `refille_hot()` ensures the hottest node is correct.
+                true
             };
 
             if node_is_cold {
