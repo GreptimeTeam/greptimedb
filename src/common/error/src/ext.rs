@@ -40,7 +40,7 @@ pub trait ErrorExt: StackError {
         Self: Sized,
     {
         match self.status_code() {
-            StatusCode::Unknown | StatusCode::Unexpected | StatusCode::Internal => {
+            StatusCode::Unknown | StatusCode::Internal => {
                 // masks internal error from end user
                 format!("Internal error: {}", self.status_code() as u32)
             }

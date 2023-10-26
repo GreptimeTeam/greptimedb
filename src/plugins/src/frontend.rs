@@ -18,7 +18,7 @@ use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use snafu::ResultExt;
 
-pub async fn setup_frontend_plugins(opts: &mut FrontendOptions) -> Result<Plugins> {
+pub async fn setup_frontend_plugins(opts: &FrontendOptions) -> Result<Plugins> {
     let plugins = Plugins::new();
 
     if let Some(user_provider) = opts.user_provider.as_ref() {
