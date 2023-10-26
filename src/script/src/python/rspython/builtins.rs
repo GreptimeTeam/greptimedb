@@ -49,8 +49,8 @@ fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataType) -> Stri
         .iter()
         .enumerate()
         .filter_map(|(idx, val)| {
-            if val.get_datatype() != *ty {
-                Some((idx, val.get_datatype()))
+            if val.data_type() != *ty {
+                Some((idx, val.data_type()))
             } else {
                 None
             }
@@ -124,8 +124,8 @@ pub fn try_into_columnar_value(obj: PyObjectRef, vm: &VirtualMachine) -> PyResul
             )));
         }
 
-        let ty = ret[0].get_datatype();
-        if ret.iter().any(|i| i.get_datatype() != ty) {
+        let ty = ret[0].data_type();
+        if ret.iter().any(|i| i.data_type() != ty) {
             return Err(vm.new_type_error(format!(
                 "All elements in a list should be same type to cast to Datafusion list!\nExpect {ty:?}, found {}",
                 collect_diff_types_string(&ret, &ty)
@@ -186,7 +186,7 @@ fn scalar_val_try_into_py_obj(val: ScalarValue, vm: &VirtualMachine) -> PyResult
         }
         _ => Err(vm.new_type_error(format!(
             "Can't cast a Scalar Value `{val:#?}` of type {:#?} to a Python Object",
-            val.get_datatype()
+            val.data_type()
         ))),
     }
 }
@@ -212,7 +212,7 @@ fn all_to_f64(col: DFColValue, vm: &VirtualMachine) -> PyResult<DFColValue> {
                 _ => {
                     return Err(vm.new_type_error(format!(
                         "Can't cast type {:#?} to {:#?}",
-                        val.get_datatype(),
+                        val.data_type(),
                         ArrowDataType::Float64
                     )))
                 }
@@ -287,7 +287,7 @@ pub(crate) mod greptime_builtin {
     // P.S.: not extract to file because not-inlined proc macro attribute is *unstable*
     use std::sync::Arc;
 
-    use arrow::compute::kernels::{aggregate, boolean, comparison};
+    use arrow::compute::kernels::{aggregate, boolean};
     use common_function::scalars::function::FunctionContext;
     use common_function::scalars::math::PowFunction;
     use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
@@ -553,11 +553,12 @@ pub(crate) mod greptime_builtin {
         try_into_py_obj(DFColValue::Array(result), vm)
     }
 
-    /// simple math function, the backing implement is datafusion's `trunc` math function
-    #[pyfunction]
-    fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
-        bind_call_unary_math_function!(trunc, vm, val);
-    }
+    //
+    // /// simple math function, the backing implement is datafusion's `trunc` math function
+    // #[pyfunction]
+    // fn trunc(val: PyObjectRef, vm: &VirtualMachine) -> PyResult<PyObjectRef> {
+    //     bind_call_unary_math_function!(trunc, vm, val);
+    // }
 
     /// simple math function, the backing implement is datafusion's `abs` math function
     #[pyfunction]
@@ -1000,8 +1001,12 @@ pub(crate) mod greptime_builtin {
                 .iter()
                 .zip(slices.iter().skip(1))
                 .map(|(first, second)| {
-                    let left = comparison::gt_eq_scalar(ts, *first).map_err(arrow_error)?;
-                    let right = comparison::lt_eq_scalar(ts, *second).map_err(arrow_error)?;
+                    let first = Int64Array::new_scalar(*first);
+                    let second = Int64Array::new_scalar(*second);
+                    let left =
+                        arrow::compute::kernels::cmp::gt_eq(ts, &first).map_err(arrow_error)?;
+                    let right =
+                        arrow::compute::kernels::cmp::lt_eq(ts, &second).map_err(arrow_error)?;
                     boolean::and(&left, &right).map_err(arrow_error)
                 })
                 .map(|mask| match mask {

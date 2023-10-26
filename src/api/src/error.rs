@@ -28,7 +28,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[stack_trace_debug]
 pub enum Error {
     #[snafu(display("Unknown proto column datatype: {}", datatype))]
-    UnknownColumnDataType { datatype: i32, location: Location },
+    UnknownColumnDataType {
+        datatype: i32,
+        location: Location,
+        #[snafu(source)]
+        error: prost::DecodeError,
+    },
 
     #[snafu(display("Failed to create column datatype from {:?}", from))]
     IntoColumnDataType {

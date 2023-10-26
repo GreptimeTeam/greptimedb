@@ -64,7 +64,7 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
         })?;
 
     // It's safe to unwrap here, we known that it should be SAMPLES_RESPONSE_TYPE
-    Ok(ResponseType::from_i32(*response_type).unwrap())
+    Ok(ResponseType::try_from(*response_type).unwrap())
 }
 
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {

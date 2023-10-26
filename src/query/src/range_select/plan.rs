@@ -31,7 +31,8 @@ use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::udaf::create_aggregate_expr as create_aggr_udf_expr;
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
+    SendableRecordBatchStream,
 };
 use datafusion::physical_planner::create_physical_sort_expr;
 use datafusion_common::utils::get_arrayref_at_indices;
@@ -40,7 +41,9 @@ use datafusion_expr::utils::exprlist_to_fields;
 use datafusion_expr::{Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::create_aggregate_expr as create_aggr_expr;
 use datafusion_physical_expr::hash_utils::create_hashes;
-use datafusion_physical_expr::{create_physical_expr, AggregateExpr, PhysicalExpr};
+use datafusion_physical_expr::{
+    create_physical_expr, AggregateExpr, Distribution, PhysicalExpr, PhysicalSortExpr,
+};
 use datatypes::arrow::array::{
     Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
 };
@@ -533,11 +536,15 @@ impl ExecutionPlan for RangeSelectExec {
         self.schema.clone()
     }
 
-    fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
-        self.input.output_partitioning()
+    fn output_partitioning(&self) -> Partitioning {
+        Partitioning::UnknownPartitioning(1)
     }
 
-    fn output_ordering(&self) -> Option<&[datafusion_physical_expr::PhysicalSortExpr]> {
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
+    }
+
+    fn output_ordering(&self) -> Option<&[PhysicalSortExpr]> {
         self.input.output_ordering()
     }
 
@@ -641,6 +648,7 @@ struct RangeSelectStream {
     schema_before_project: SchemaRef,
 }
 
+#[derive(Debug)]
 struct SeriesState {
     /// by values written by `RowWriter`
     row: OwnedRow,

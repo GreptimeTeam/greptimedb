@@ -16,11 +16,11 @@ Affected Rows: 1
 
 select count(*) from timestamp2 inner join timestamp1 on (timestamp1.i = timestamp2.i);
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 1               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 1        |
++----------+
 
 DROP TABLE timestamp1;
 

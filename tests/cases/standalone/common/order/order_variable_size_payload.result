@@ -21,7 +21,7 @@ SELECT * FROM t0 ORDER BY t0.c0 DESC;
 | a    | 1970-01-01T00:00:00.001 |
 +------+-------------------------+
 
-CREATE TABLE test0 (job VARCHAR, name VARCHAR, t TIMESTAMP TIME INDEX);
+CREATE TABLE test0 (job VARCHAR, host VARCHAR, t TIMESTAMP TIME INDEX);
 
 Affected Rows: 0
 
@@ -29,10 +29,10 @@ INSERT INTO test0 VALUES ('Shipping and Receiving Supervisor', 'Ackerman', 1), (
 
 Affected Rows: 6
 
-SELECT * FROM test0 ORDER BY job, name;
+SELECT * FROM test0 ORDER BY job, host;
 
 +-----------------------------------+----------+-------------------------+
-| job                               | name     | t                       |
+| job                               | host     | t                       |
 +-----------------------------------+----------+-------------------------+
 | Production Supervisor - WC40      | Dsa      | 1970-01-01T00:00:00.006 |
 | Production Supervisor - WC60      | Brown    | 1970-01-01T00:00:00.004 |
@@ -42,10 +42,10 @@ SELECT * FROM test0 ORDER BY job, name;
 | Shipping and Receiving Supervisor | Ackerman | 1970-01-01T00:00:00.001 |
 +-----------------------------------+----------+-------------------------+
 
-SELECT * FROM test0 ORDER BY job DESC, name DESC;
+SELECT * FROM test0 ORDER BY job DESC, host DESC;
 
 +-----------------------------------+----------+-------------------------+
-| job                               | name     | t                       |
+| job                               | host     | t                       |
 +-----------------------------------+----------+-------------------------+
 | Shipping and Receiving Supervisor | Ackerman | 1970-01-01T00:00:00.001 |
 | Shipping and Receiving Clerk      | Kuppa    | 1970-01-01T00:00:00.003 |
@@ -350,7 +350,7 @@ select i, split_part(s, 'b', 1) from test8 order by i;
 CREATE TABLE DirectReports
 (
     EmployeeID smallint,
-    Name varchar NOT NULL,
+    "Name" varchar NOT NULL,
     Title varchar NOT NULL,
     EmployeeLevel int NOT NULL,
     "Sort" varchar NOT NULL,

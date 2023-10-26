@@ -17,6 +17,7 @@ mod sample_testcases;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::compute::kernels::numeric;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use datafusion::arrow::array::Float64Array;
@@ -140,7 +141,8 @@ fn check_equal(v0: VectorRef, v1: VectorRef) -> bool {
         let v1 = compute::cast(&v1, &ArrowDataType::Float64).unwrap();
         let v1 = v1.as_any().downcast_ref::<Float64Array>().unwrap();
 
-        let res = compute::subtract(v0, v1).unwrap();
+        let res = numeric::sub(v0, v1).unwrap();
+        let res = res.as_any().downcast_ref::<Float64Array>().unwrap();
         res.iter().all(|v| {
             if let Some(v) = v {
                 v.abs() <= 2.0 * f32::EPSILON as f64

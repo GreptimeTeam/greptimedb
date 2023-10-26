@@ -1337,7 +1337,7 @@ async fn test_insert_with_default_value_for_type(instance: Arc<Instance>, type_n
     let create_sql = format!(
         r#"create table {table_name}(
         host string,
-        ts {type_name} DEFAULT CURRENT_TIMESTAMP,
+        ts {type_name} DEFAULT CURRENT_TIMESTAMP(),
         cpu double default 0,
         TIME INDEX (ts),
         PRIMARY KEY(host)

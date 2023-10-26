@@ -4,7 +4,7 @@ CREATE TABLE system_metrics (
     cpu_util DOUBLE,
     memory_util DOUBLE,
     disk_util DOUBLE,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
     PRIMARY KEY(host, idc),
     TIME INDEX(ts)
 );
@@ -14,7 +14,7 @@ Affected Rows: 0
 INSERT INTO system_metrics
 VALUES
     ("host1", "idc_a", 11.8, 10.3, 10.3, 1667446797450),
-    ("host2", "idc_a", 80.1, 70.3, 90.0, 1667446797450),
+    ("host2", "idc_a", 80.0, 70.3, 90.0, 1667446797450),
     ("host1", "idc_b", 50.0, 66.7, 40.6, 1667446797450);
 
 Affected Rows: 3
@@ -26,23 +26,23 @@ SELECT * FROM system_metrics;
 +-------+-------+----------+-------------+-----------+-------------------------+
 | host1 | idc_a | 11.8     | 10.3        | 10.3      | 2022-11-03T03:39:57.450 |
 | host1 | idc_b | 50.0     | 66.7        | 40.6      | 2022-11-03T03:39:57.450 |
-| host2 | idc_a | 80.1     | 70.3        | 90.0      | 2022-11-03T03:39:57.450 |
+| host2 | idc_a | 80.0     | 70.3        | 90.0      | 2022-11-03T03:39:57.450 |
 +-------+-------+----------+-------------+-----------+-------------------------+
 
 SELECT count(*) FROM system_metrics;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 3               |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 3        |
++----------+
 
 SELECT avg(cpu_util) FROM system_metrics;
 
 +------------------------------+
 | AVG(system_metrics.cpu_util) |
 +------------------------------+
-| 47.29999999999999            |
+| 47.26666666666667            |
 +------------------------------+
 
 SELECT idc, avg(memory_util) FROM system_metrics GROUP BY idc ORDER BY idc;

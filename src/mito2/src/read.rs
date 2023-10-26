@@ -26,6 +26,7 @@ use std::sync::Arc;
 use api::v1::OpType;
 use async_trait::async_trait;
 use common_time::Timestamp;
+use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::compute::SortOptions;
@@ -263,8 +264,9 @@ impl Batch {
         // Safety: op type column is not null.
         let array = self.op_types.as_arrow();
         // Find rows with non-delete op type.
+        let rhs = UInt8Array::new_scalar(OpType::Delete as u8);
         let predicate =
-            arrow::compute::neq_scalar(array, OpType::Delete as u8).context(ComputeArrowSnafu)?;
+            arrow::compute::kernels::cmp::neq(array, &rhs).context(ComputeArrowSnafu)?;
         self.filter(&BooleanVector::from(predicate))
     }
 
@@ -307,7 +309,7 @@ impl Batch {
     pub fn sort_and_dedup(&mut self) -> Result<()> {
         // If building a converter each time is costly, we may allow passing a
         // converter.
-        let mut converter = RowConverter::new(vec![
+        let converter = RowConverter::new(vec![
             SortField::new(self.timestamps.data_type().as_arrow_type()),
             SortField::new_with_options(
                 self.sequences.data_type().as_arrow_type(),

@@ -106,6 +106,7 @@ impl Categorizer {
             LogicalPlan::DescribeTable(_) => Commutativity::Unsupported,
             LogicalPlan::Dml(_) => Commutativity::Unsupported,
             LogicalPlan::Ddl(_) => Commutativity::Unsupported,
+            LogicalPlan::Copy(_) => Commutativity::Unsupported,
         }
     }
 

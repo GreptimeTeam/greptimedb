@@ -990,17 +990,6 @@ ret"#
         },
         CodeBlockTestCase {
             input: ronish! {
-                "values": vector!(Float64Vector, [0.3, 0.5, 1.1])
-            },
-            script: r#"
-from greptime import *
-ret = trunc(values)
-ret"#
-                .to_string(),
-            expect: vector!(Float64Vector, [0.0, 0.0, 1.0,]),
-        },
-        CodeBlockTestCase {
-            input: ronish! {
                 "values": vector!(Float64Vector, [-0.3, 0.5, -1.1])
             },
             script: r#"

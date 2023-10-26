@@ -55,7 +55,8 @@ Error: 3000(PlanQuery), Error during planning: Missing argument in range select 
 -- 2.3 type mismatch
 SELECT covar(ceil(val), floor(val)) RANGE '20s' FROM host ALIGN '10s';
 
-Error: 3001(EngineExecuteQuery), Internal error: Unsupported data type Int64 for function ceil. This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+Error: 3001(EngineExecuteQuery), Internal error: Unsupported data type Int64 for function ceil.
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
 
 -- 2.4 nest query
 SELECT min(max(val) RANGE '20s') RANGE '20s' FROM host ALIGN '10s';

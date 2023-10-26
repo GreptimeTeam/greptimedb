@@ -249,19 +249,25 @@ SELECT TIMESTAMP '1992-09-20 11:30:00.123456' - interval_value as new_value from
 -- Interval type does not support aggregation functions.
 SELECT MIN(interval_value) from intervals;
 
-Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano).
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
 
 SELECT MAX(interval_value) from intervals;
 
-Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano). This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
+Error: 3001(EngineExecuteQuery), Internal error: Min/Max accumulator not implemented for type Interval(MonthDayNano).
+This was likely caused by a bug in DataFusion's code and we would welcome that you file an bug report in our issue tracker
 
 SELECT SUM(interval_value) from intervals;
 
-Error: 3000(PlanQuery), Error during planning: The function Sum does not support inputs of type Interval(MonthDayNano).
+Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'SUM(Interval(MonthDayNano))'. You might need to add explicit type casts.
+	Candidate functions:
+	SUM(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT AVG(interval_value) from intervals;
 
-Error: 3000(PlanQuery), Error during planning: The function Avg does not support inputs of type Interval(MonthDayNano).
+Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'AVG(Interval(MonthDayNano))'. You might need to add explicit type casts.
+	Candidate functions:
+	AVG(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 DROP TABLE intervals;
 

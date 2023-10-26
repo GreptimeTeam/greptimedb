@@ -217,7 +217,7 @@ pub fn scalar_value_to_py_any(py: Python<'_>, val: ScalarValue) -> PyResult<PyOb
             }
             _ => Err(PyValueError::new_err(format!(
                 "Can't cast a Scalar Value `{:#?}` of type {:#?} to a Python Object",
-                $val, $val.get_datatype()
+                $val, $val.data_type()
             )))
         }
         };
@@ -281,9 +281,9 @@ pub fn try_into_columnar_value(py: Python<'_>, obj: PyObject) -> PyResult<Column
                 Arc::new(new_item_field(ArrowDataType::Null)),
             )));
         }
-        let ty = ret[0].get_datatype();
+        let ty = ret[0].data_type();
 
-        if ret.iter().any(|i| i.get_datatype() != ty) {
+        if ret.iter().any(|i| i.data_type() != ty) {
             return Err(PyValueError::new_err(format!(
                 "All elements in a list should be same type to cast to Datafusion list!\nExpect {ty:?}, found {}",
                 collect_diff_types_string(&ret, &ty)

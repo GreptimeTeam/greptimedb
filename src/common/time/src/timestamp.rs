@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
+    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -63,7 +63,7 @@ impl Timestamp {
             TimeUnit::Second => now.timestamp(),
             TimeUnit::Millisecond => now.timestamp_millis(),
             TimeUnit::Microsecond => now.timestamp_micros(),
-            TimeUnit::Nanosecond => now.timestamp_nanos(),
+            TimeUnit::Nanosecond => now.timestamp_nanos_opt().unwrap_or_default(),
         };
         Timestamp { value, unit }
     }
@@ -287,6 +287,7 @@ impl FromStr for Timestamp {
     /// - `2022-09-20 14:16:43.012345Z` (Zulu timezone, without T)
     /// - `2022-09-20 14:16:43` (local timezone, without T)
     /// - `2022-09-20 14:16:43.012345` (local timezone, without T)
+    #[allow(deprecated)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // RFC3339 timestamp (with a T)
         let s = s.trim();
@@ -298,7 +299,7 @@ impl FromStr for Timestamp {
             return Timestamp::from_chrono_datetime(ts.naive_utc())
                 .context(ParseTimestampSnafu { raw: s });
         }
-        if let Ok(ts) = Utc.datetime_from_str(s, "%Y-%m-%d %H:%M:%S%.fZ") {
+        if let Ok(ts) = chrono::Utc.datetime_from_str(s, "%Y-%m-%d %H:%M:%S%.fZ") {
             return Timestamp::from_chrono_datetime(ts.naive_utc())
                 .context(ParseTimestampSnafu { raw: s });
         }

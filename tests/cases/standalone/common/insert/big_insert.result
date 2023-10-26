@@ -8,11 +8,11 @@ Affected Rows: 1050
 
 SELECT COUNT(*) FROM integers;
 
-+-----------------+
-| COUNT(UInt8(1)) |
-+-----------------+
-| 10              |
-+-----------------+
++----------+
+| COUNT(*) |
++----------+
+| 10       |
++----------+
 
 DROP TABLE integers;
 

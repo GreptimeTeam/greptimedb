@@ -11,23 +11,46 @@ Affected Rows: 3
 
 SELECT * FROM floats JOIN (SELECT 'inf'::FLOAT) tbl(f) USING (f);
 
-Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqualified field name f which would be ambiguous
++-----+-------------------------+
+| f   | ts                      |
++-----+-------------------------+
+| inf | 1970-01-01T00:00:00.001 |
++-----+-------------------------+
 
 SELECT * FROM floats JOIN (SELECT '-inf'::FLOAT) tbl(f) USING (f);
 
-Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqualified field name f which would be ambiguous
++------+-------------------------+
+| f    | ts                      |
++------+-------------------------+
+| -inf | 1970-01-01T00:00:00.002 |
++------+-------------------------+
 
 SELECT * FROM floats JOIN (SELECT 'inf'::FLOAT) tbl(f) ON (floats.f >= tbl.f) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqualified field name f which would be ambiguous
++-----+-------------------------+-----+
+| f   | ts                      | f   |
++-----+-------------------------+-----+
+| inf | 1970-01-01T00:00:00.001 | inf |
+| NaN | 1970-01-01T00:00:00.003 | inf |
++-----+-------------------------+-----+
 
 SELECT * FROM floats JOIN (SELECT 'inf'::FLOAT) tbl(f) ON (floats.f <= tbl.f) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqualified field name f which would be ambiguous
++------+-------------------------+-----+
+| f    | ts                      | f   |
++------+-------------------------+-----+
+| -inf | 1970-01-01T00:00:00.002 | inf |
+| inf  | 1970-01-01T00:00:00.001 | inf |
++------+-------------------------+-----+
 
 SELECT * FROM floats JOIN (SELECT '-inf'::FLOAT, 'inf'::FLOAT) tbl(f,g) ON (floats.f >= tbl.f AND floats.f <= tbl.g) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name floats.f and unqualified field name f which would be ambiguous
++------+-------------------------+------+-----+
+| f    | ts                      | f    | g   |
++------+-------------------------+------+-----+
+| -inf | 1970-01-01T00:00:00.002 | -inf | inf |
+| inf  | 1970-01-01T00:00:00.001 | -inf | inf |
++------+-------------------------+------+-----+
 
 DROP TABLE floats;
 
@@ -44,23 +67,46 @@ Affected Rows: 3
 
 SELECT * FROM doubles JOIN (SELECT 'inf'::DOUBLE) tbl(d) USING (d);
 
-Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqualified field name d which would be ambiguous
++-----+-------------------------+
+| d   | ts                      |
++-----+-------------------------+
+| inf | 1970-01-01T00:00:00.001 |
++-----+-------------------------+
 
 SELECT * FROM doubles JOIN (SELECT '-inf'::DOUBLE) tbl(d) USING (d);
 
-Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqualified field name d which would be ambiguous
++------+-------------------------+
+| d    | ts                      |
++------+-------------------------+
+| -inf | 1970-01-01T00:00:00.002 |
++------+-------------------------+
 
 SELECT * FROM doubles JOIN (SELECT 'inf'::DOUBLE) tbl(d) ON (doubles.d >= tbl.d) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqualified field name d which would be ambiguous
++-----+-------------------------+-----+
+| d   | ts                      | d   |
++-----+-------------------------+-----+
+| inf | 1970-01-01T00:00:00.001 | inf |
+| NaN | 1970-01-01T00:00:00.003 | inf |
++-----+-------------------------+-----+
 
 SELECT * FROM doubles JOIN (SELECT 'inf'::DOUBLE) tbl(d) ON (doubles.d <= tbl.d) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqualified field name d which would be ambiguous
++------+-------------------------+-----+
+| d    | ts                      | d   |
++------+-------------------------+-----+
+| -inf | 1970-01-01T00:00:00.002 | inf |
+| inf  | 1970-01-01T00:00:00.001 | inf |
++------+-------------------------+-----+
 
 SELECT * FROM doubles JOIN (SELECT '-inf'::DOUBLE, 'inf'::DOUBLE) tbl(d,g) ON (doubles.d >= tbl.d AND doubles.d <= tbl.g) ORDER BY 1;
 
-Error: 3000(PlanQuery), Schema contains qualified field name doubles.d and unqualified field name d which would be ambiguous
++------+-------------------------+------+-----+
+| d    | ts                      | d    | g   |
++------+-------------------------+------+-----+
+| -inf | 1970-01-01T00:00:00.002 | -inf | inf |
+| inf  | 1970-01-01T00:00:00.001 | -inf | inf |
++------+-------------------------+------+-----+
 
 DROP TABLE doubles;
 

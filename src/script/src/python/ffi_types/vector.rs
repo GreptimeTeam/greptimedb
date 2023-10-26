@@ -17,11 +17,12 @@ mod tests;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use arrow::array::Datum;
+use arrow::compute::kernels::{cmp, numeric};
 use datatypes::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array,
 };
 use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::DataType;
@@ -62,25 +63,24 @@ fn to_type_error(vm: &'_ VirtualMachine) -> impl FnOnce(String) -> PyBaseExcepti
 }
 
 /// Performs `val - arr`.
-pub(crate) fn arrow_rsub(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
-    arithmetic::subtract_dyn(val, arr).map_err(|e| format!("rsub error: {e}"))
+pub(crate) fn arrow_rsub(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRef, String> {
+    numeric::sub(val, arr).map_err(|e| format!("rsub error: {e}"))
 }
 
 /// Performs `val / arr`
-pub(crate) fn arrow_rtruediv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
-    arithmetic::divide_dyn(val, arr).map_err(|e| format!("rtruediv error: {e}"))
+pub(crate) fn arrow_rtruediv(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRef, String> {
+    numeric::div(val, arr).map_err(|e| format!("rtruediv error: {e}"))
 }
 
 /// Performs `val / arr`, but cast to i64.
-pub(crate) fn arrow_rfloordiv(arr: &dyn Array, val: &dyn Array) -> Result<ArrayRef, String> {
-    let array =
-        arithmetic::divide_dyn(val, arr).map_err(|e| format!("rfloordiv divide error: {e}"))?;
+pub(crate) fn arrow_rfloordiv(arr: &dyn Datum, val: &dyn Datum) -> Result<ArrayRef, String> {
+    let array = numeric::div(val, arr).map_err(|e| format!("rfloordiv divide error: {e}"))?;
     compute::cast(&array, &ArrowDataType::Int64).map_err(|e| format!("rfloordiv cast error: {e}"))
 }
 
-pub(crate) fn wrap_result<F>(f: F) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
+pub(crate) fn wrap_result<F>(f: F) -> impl Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>
 where
-    F: Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef>,
+    F: Fn(&dyn Datum, &dyn Datum) -> ArrowResult<ArrayRef>,
 {
     move |left, right| f(left, right).map_err(|e| format!("arithmetic error {e}"))
 }
@@ -88,11 +88,11 @@ where
 #[cfg(feature = "pyo3_backend")]
 pub(crate) fn wrap_bool_result<F>(
     op_bool_arr: F,
-) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>
+) -> impl Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>
 where
-    F: Fn(&dyn Array, &dyn Array) -> ArrowResult<BooleanArray>,
+    F: Fn(&dyn Datum, &dyn Datum) -> ArrowResult<BooleanArray>,
 {
-    move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
+    move |a: &dyn Datum, b: &dyn Datum| -> Result<ArrayRef, String> {
         let array = op_bool_arr(a, b).map_err(|e| format!("logical op error: {e}"))?;
         Ok(Arc::new(array))
     }
@@ -209,7 +209,7 @@ impl PyVector {
         op: F,
     ) -> Result<Self, String>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>,
     {
         let right_type = right.data_type().as_arrow_type();
         // assuming they are all 64 bit type if possible
@@ -252,7 +252,7 @@ impl PyVector {
             ));
         };
 
-        let result = op(left.as_ref(), right.as_ref())?;
+        let result = op(&left, &right.as_ref())?;
 
         Ok(Helper::try_into_vector(result.clone())
             .map_err(|e| format!("Can't cast result into vector, result: {result:?}, err: {e:?}",))?
@@ -267,7 +267,7 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>,
     {
         // the right operand only support PyInt or PyFloat,
         let right = {
@@ -313,7 +313,7 @@ impl PyVector {
         op: F,
     ) -> Result<PyVector, String>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>,
     {
         let left = self.to_arrow_array();
         let right = right.to_arrow_array();
@@ -326,7 +326,7 @@ impl PyVector {
         let left = cast(left, &target_type)?;
         let right = cast(right, &target_type)?;
 
-        let result = op(left.as_ref(), right.as_ref())?;
+        let result = op(&left, &right)?;
 
         Ok(Helper::try_into_vector(result.clone())
             .map_err(|e| format!("Can't cast result into vector, result: {result:?}, err: {e:?}",))?
@@ -341,7 +341,7 @@ impl PyVector {
         vm: &VirtualMachine,
     ) -> PyResult<PyVector>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String>,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String>,
     {
         let right = other.downcast_ref::<PyVector>().ok_or_else(|| {
             vm.new_type_error(format!(
@@ -453,17 +453,17 @@ impl PyVector {
 }
 
 /// get corresponding arrow op function according to given PyComaprsionOp
-fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowResult<ArrayRef> {
+fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Datum, &dyn Datum) -> ArrowResult<ArrayRef> {
     let op_bool_arr = match op {
-        PyComparisonOp::Eq => comparison::eq_dyn,
-        PyComparisonOp::Ne => comparison::neq_dyn,
-        PyComparisonOp::Gt => comparison::gt_dyn,
-        PyComparisonOp::Lt => comparison::lt_dyn,
-        PyComparisonOp::Ge => comparison::gt_eq_dyn,
-        PyComparisonOp::Le => comparison::lt_eq_dyn,
+        PyComparisonOp::Eq => cmp::eq,
+        PyComparisonOp::Ne => cmp::neq,
+        PyComparisonOp::Gt => cmp::gt,
+        PyComparisonOp::Lt => cmp::lt,
+        PyComparisonOp::Ge => cmp::gt_eq,
+        PyComparisonOp::Le => cmp::lt_eq,
     };
 
-    move |a: &dyn Array, b: &dyn Array| -> ArrowResult<ArrayRef> {
+    move |a: &dyn Datum, b: &dyn Datum| -> ArrowResult<ArrayRef> {
         let array = op_bool_arr(a, b)?;
         Ok(Arc::new(array))
     }
@@ -472,17 +472,17 @@ fn get_arrow_op(op: PyComparisonOp) -> impl Fn(&dyn Array, &dyn Array) -> ArrowR
 /// get corresponding arrow scalar op function according to given PyComaprsionOp
 fn get_arrow_scalar_op(
     op: PyComparisonOp,
-) -> impl Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> {
+) -> impl Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String> {
     let op_bool_arr = match op {
-        PyComparisonOp::Eq => comparison::eq_dyn,
-        PyComparisonOp::Ne => comparison::neq_dyn,
-        PyComparisonOp::Gt => comparison::gt_dyn,
-        PyComparisonOp::Lt => comparison::lt_dyn,
-        PyComparisonOp::Ge => comparison::gt_eq_dyn,
-        PyComparisonOp::Le => comparison::lt_eq_dyn,
+        PyComparisonOp::Eq => cmp::eq,
+        PyComparisonOp::Ne => cmp::neq,
+        PyComparisonOp::Gt => cmp::gt,
+        PyComparisonOp::Lt => cmp::lt,
+        PyComparisonOp::Ge => cmp::gt_eq,
+        PyComparisonOp::Le => cmp::lt_eq,
     };
 
-    move |a: &dyn Array, b: &dyn Array| -> Result<ArrayRef, String> {
+    move |a: &dyn Datum, b: &dyn Datum| -> Result<ArrayRef, String> {
         let array = op_bool_arr(a, b).map_err(|e| format!("scalar op error: {e}"))?;
         Ok(Arc::new(array))
     }

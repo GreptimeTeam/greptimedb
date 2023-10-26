@@ -61,25 +61,25 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 aquamarine = "0.3"
-arrow = { version = "43.0" }
-arrow-array = "43.0"
-arrow-flight = "43.0"
-arrow-schema = { version = "43.0", features = ["serde"] }
+arrow = { version = "47.0" }
+arrow-array = "47.0"
+arrow-flight = "47.0"
+arrow-schema = { version = "47.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-datafusion = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-common = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-optimizer = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-physical-expr = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-sql = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
-datafusion-substrait = { git = "https://github.com/waynexia/arrow-datafusion.git", rev = "b6f3b28b6fe91924cc8dd3d83726b766f2a706ec" }
+datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-optimizer = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
+datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
 etcd-client = "0.11"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "1f1dd532a111e3834cc3019c5605e2993ffb9dc3" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "365922c3581ad954b3b3851af522b0ed0096970c" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -87,10 +87,14 @@ meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev =
 metrics = "0.20"
 moka = "0.12"
 once_cell = "1.18"
-opentelemetry-proto = { version = "0.2", features = ["gen-tonic", "metrics", "traces"] }
-parquet = "43.0"
+opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
+    "gen-tonic",
+    "metrics",
+    "trace",
+] }
+parquet = "47.0"
 paste = "1.0"
-prost = "0.11"
+prost = "0.12"
 raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
 rand = "0.8"
 regex = "1.8"
@@ -103,7 +107,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1"
 snafu = { version = "0.7", features = ["backtraces"] }
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6cf9d23d5b8fbecd65efc1d9afb7e80ad7a424da", features = [
+# on branch v0.38.x
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "602d7878c9949e48512251c7f18695a50936e51c", features = [
     "visitor",
 ] }
 strum = { version = "0.25", features = ["derive"] }
@@ -111,7 +116,7 @@ tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
-tonic = { version = "0.9", features = ["tls"] }
+tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 ## workspaces members
 api = { path = "src/api" }

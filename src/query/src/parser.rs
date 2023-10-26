@@ -256,12 +256,14 @@ mod test {
                 ), \
                 alias: None, \
                 args: None, \
-                with_hints: [] \
+                with_hints: [], \
+                version: None, \
+                partitions: [] \
             }, \
             joins: [] }], \
             lateral_views: [], \
             selection: None, \
-            group_by: [], \
+            group_by: Expressions([]), \
             cluster_by: [], \
             distribute_by: [], \
             sort_by: [], \

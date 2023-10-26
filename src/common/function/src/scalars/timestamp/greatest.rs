@@ -18,9 +18,9 @@ use common_query::error::{
     self, ArrowComputeSnafu, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu,
 };
 use common_query::prelude::{Signature, Volatility};
+use datafusion::arrow::compute::kernels::cmp::gt;
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::compute::kernels::comparison::gt_dyn;
 use datatypes::arrow::compute::kernels::zip;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Date32Type};
 use datatypes::prelude::ConcreteDataType;
@@ -72,7 +72,7 @@ impl Function for GreatestFunction {
                 let column2 = cast(&columns[1].to_arrow_array(), &ArrowDataType::Date32)
                     .context(ArrowComputeSnafu)?;
                 let column2 = column2.as_primitive::<Date32Type>();
-                let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
+                let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
                 Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)
@@ -82,7 +82,7 @@ impl Function for GreatestFunction {
                 let column1 = column1.as_primitive::<Date32Type>();
                 let column2 = columns[1].to_arrow_array();
                 let column2 = column2.as_primitive::<Date32Type>();
-                let boolean_array = gt_dyn(&column1, &column2).context(ArrowComputeSnafu)?;
+                let boolean_array = gt(&column1, &column2).context(ArrowComputeSnafu)?;
                 let result =
                     zip::zip(&boolean_array, &column1, &column2).context(ArrowComputeSnafu)?;
                 Ok(Helper::try_into_vector(&result).context(error::FromArrowArraySnafu)?)

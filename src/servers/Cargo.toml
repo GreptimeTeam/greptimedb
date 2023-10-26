@@ -90,7 +90,7 @@ table = { workspace = true }
 tokio-rustls = "0.24"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio.workspace = true
-tonic-reflection = "0.9"
+tonic-reflection = "0.10"
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }

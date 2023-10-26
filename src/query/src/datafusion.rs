@@ -36,6 +36,7 @@ use common_recordbatch::{
 };
 use common_telemetry::timer;
 use datafusion::common::Column;
+use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
@@ -86,12 +87,12 @@ impl DatafusionQueryEngine {
 
         // `create_physical_plan` will optimize logical plan internally
         let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
-        let physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
+        let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(physical_plan, query_ctx)
+            wrapper.wrap(optimized_physical_plan, query_ctx)
         } else {
-            physical_plan
+            optimized_physical_plan
         };
 
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
@@ -103,7 +104,7 @@ impl DatafusionQueryEngine {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            matches!(dml.op, WriteOp::Insert | WriteOp::Delete),
+            matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
                 name: format!("DML op {}", dml.op),
             }
@@ -132,7 +133,7 @@ impl DatafusionQueryEngine {
                 .context(QueryExecutionSnafu)?;
 
             let rows = match dml.op {
-                WriteOp::Insert => {
+                WriteOp::InsertInto => {
                     self.insert(&table_name, column_vectors, query_ctx.clone())
                         .await?
                 }
@@ -345,7 +346,9 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
     ) -> Result<Arc<dyn PhysicalPlan>> {
         let _timer = timer!(metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED);
 
-        let mut new_plan = plan
+        let state = ctx.state();
+        let config = state.config_options();
+        let df_plan = plan
             .as_any()
             .downcast_ref::<PhysicalPlanAdapter>()
             .context(error::PhysicalPlanDowncastSnafu)
@@ -353,14 +356,32 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
             .context(QueryExecutionSnafu)?
             .df_plan();
 
-        let state = ctx.state();
-        let config = state.config_options();
-        for optimizer in state.physical_optimizers() {
-            new_plan = optimizer
-                .optimize(new_plan, config)
-                .context(DataFusionSnafu)?;
-        }
-        Ok(Arc::new(PhysicalPlanAdapter::new(plan.schema(), new_plan)))
+        // skip optimize AnalyzeExec plan
+        let optimized_plan =
+            if let Some(analyze_plan) = df_plan.as_any().downcast_ref::<AnalyzeExec>() {
+                let mut new_plan = analyze_plan.input().clone();
+                for optimizer in state.physical_optimizers() {
+                    new_plan = optimizer
+                        .optimize(new_plan, config)
+                        .context(DataFusionSnafu)?;
+                }
+                Arc::new(analyze_plan.clone())
+                    .with_new_children(vec![new_plan])
+                    .unwrap()
+            } else {
+                let mut new_plan = df_plan;
+                for optimizer in state.physical_optimizers() {
+                    new_plan = optimizer
+                        .optimize(new_plan, config)
+                        .context(DataFusionSnafu)?;
+                }
+                new_plan
+            };
+
+        Ok(Arc::new(PhysicalPlanAdapter::new(
+            plan.schema(),
+            optimized_plan,
+        )))
     }
 }
 
@@ -634,7 +655,7 @@ mod tests {
                 true
             )
         );
-        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(numbers.number)]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
+        assert_eq!("Limit: skip=0, fetch=20\n  Aggregate: groupBy=[[]], aggr=[[SUM(CAST(numbers.number AS UInt64))]]\n    TableScan: numbers projection=[number]", format!("{}", logical_plan.display_indent()));
     }
 
     #[tokio::test]

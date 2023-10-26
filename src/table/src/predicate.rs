@@ -340,7 +340,9 @@ impl<'a> TimeRangePredicateBuilder<'a> {
             | Operator::BitwiseXor
             | Operator::BitwiseShiftRight
             | Operator::BitwiseShiftLeft
-            | Operator::StringConcat => None,
+            | Operator::StringConcat
+            | Operator::ArrowAt
+            | Operator::AtArrow => None,
         }
     }
 

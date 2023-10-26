@@ -75,27 +75,31 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: The function Sum does not support inputs of type Timestamp(Millisecond, None).
+Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+	Candidate functions:
+	SUM(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: The function Avg does not support inputs of type Timestamp(Millisecond, None).
+Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'AVG(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+	Candidate functions:
+	AVG(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT t+t FROM timestamp;
 
-Error: 3001(EngineExecuteQuery), Cast error: Cannot perform arithmetic operation between array of type Timestamp(Millisecond, None) and array of type Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) + Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) + Timestamp(Millisecond, None)
 
 SELECT t*t FROM timestamp;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) * Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) * Timestamp(Millisecond, None)
 
 SELECT t/t FROM timestamp;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) / Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) / Timestamp(Millisecond, None)
 
 SELECT t%t FROM timestamp;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: column types must match schema types, expected Interval(DayTime) but found Timestamp(Millisecond, None) at column index 0
+Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) % Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) % Timestamp(Millisecond, None)
 
 -- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
 -- SELECT t-t FROM timestamp; --

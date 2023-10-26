@@ -192,8 +192,10 @@ impl ArrowPredicate for FastTimestampRowFilter {
                         .as_any()
                         .downcast_ref::<$typ>()
                         .unwrap(); // safety: we've checked the data type of timestamp column.
-                    let left = arrow::compute::gt_eq_scalar(ts_col, self.lower_bound)?;
-                    let right = arrow::compute::lt_scalar(ts_col, self.upper_bound)?;
+                    let lower_bound = <$typ>::new_scalar(self.lower_bound);
+                    let upper_bound = <$typ>::new_scalar(self.upper_bound);
+                    let left = arrow::compute::kernels::cmp::gt_eq(ts_col, &lower_bound)?;
+                    let right = arrow::compute::kernels::cmp::lt(ts_col, &upper_bound)?;
                     arrow::compute::and(&left, &right)
                 }
             };

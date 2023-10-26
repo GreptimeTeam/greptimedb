@@ -29,7 +29,7 @@ SELECT * FROM test1;
 |   | 1970-01-01T00:00:00.004 | blabla |
 +---+-------------------------+--------+
 
-CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP, k STRING DEFAULT 'blabla');
+CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX DEFAULT CURRENT_TIMESTAMP(), k STRING DEFAULT 'blabla');
 
 Affected Rows: 0
 

@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{make_array, ArrayData};
+use arrow::array::{make_array, ArrayData, Datum};
+use arrow::compute::kernels::{cmp, numeric};
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;
-use datafusion::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};
@@ -65,7 +65,7 @@ impl PyVector {
         op: F,
     ) -> PyResult<Self>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> + Send,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String> + Send,
     {
         let right = pyo3_obj_try_to_typed_val(right.as_ref(py), None)?;
         py.allow_threads(|| {
@@ -81,7 +81,7 @@ impl PyVector {
         op: F,
     ) -> PyResult<Self>
     where
-        F: Fn(&dyn Array, &dyn Array) -> Result<ArrayRef, String> + Send,
+        F: Fn(&dyn Datum, &dyn Datum) -> Result<ArrayRef, String> + Send,
     {
         let right = right.extract::<PyVector>(py)?;
         py.allow_threads(|| {
@@ -123,12 +123,12 @@ impl PyVector {
     }
     fn __richcmp__(&self, py: Python<'_>, other: PyObject, op: CompareOp) -> PyResult<Self> {
         let op_fn = match op {
-            CompareOp::Lt => comparison::lt_dyn,
-            CompareOp::Le => comparison::lt_eq_dyn,
-            CompareOp::Eq => comparison::eq_dyn,
-            CompareOp::Ne => comparison::neq_dyn,
-            CompareOp::Gt => comparison::gt_dyn,
-            CompareOp::Ge => comparison::gt_eq_dyn,
+            CompareOp::Lt => cmp::lt,
+            CompareOp::Le => cmp::lt_eq,
+            CompareOp::Eq => cmp::eq,
+            CompareOp::Ne => cmp::neq,
+            CompareOp::Gt => cmp::gt,
+            CompareOp::Ge => cmp::gt_eq,
         };
         if pyo3_is_obj_scalar(other.as_ref(py)) {
             self.pyo3_scalar_arith_op(py, other, None, wrap_bool_result(op_fn))
@@ -139,9 +139,9 @@ impl PyVector {
 
     fn __add__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         if pyo3_is_obj_scalar(other.as_ref(py)) {
-            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::add_dyn))
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(numeric::add))
         } else {
-            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::add_dyn))
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(numeric::add))
         }
     }
     fn __radd__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
@@ -150,33 +150,23 @@ impl PyVector {
 
     fn __sub__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         if pyo3_is_obj_scalar(other.as_ref(py)) {
-            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::subtract_dyn))
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(numeric::sub))
         } else {
-            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::subtract_dyn))
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(numeric::sub))
         }
     }
     fn __rsub__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         if pyo3_is_obj_scalar(other.as_ref(py)) {
-            self.pyo3_scalar_arith_op(
-                py,
-                other,
-                None,
-                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
-            )
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(|a, b| numeric::sub(b, a)))
         } else {
-            self.pyo3_vector_arith_op(
-                py,
-                other,
-                None,
-                wrap_result(|a, b| arithmetic::subtract_dyn(b, a)),
-            )
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(|a, b| numeric::sub(b, a)))
         }
     }
     fn __mul__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
         if pyo3_is_obj_scalar(other.as_ref(py)) {
-            self.pyo3_scalar_arith_op(py, other, None, wrap_result(arithmetic::multiply_dyn))
+            self.pyo3_scalar_arith_op(py, other, None, wrap_result(numeric::mul))
         } else {
-            self.pyo3_vector_arith_op(py, other, None, wrap_result(arithmetic::multiply_dyn))
+            self.pyo3_vector_arith_op(py, other, None, wrap_result(numeric::mul))
         }
     }
     fn __rmul__(&self, py: Python<'_>, other: PyObject) -> PyResult<Self> {
@@ -188,14 +178,14 @@ impl PyVector {
                 py,
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
             )
         } else {
             self.pyo3_vector_arith_op(
                 py,
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
             )
         }
     }
@@ -208,7 +198,7 @@ impl PyVector {
                 py,
                 other,
                 Some(ArrowDataType::Float64),
-                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+                wrap_result(|a, b| numeric::div(b, a)),
             )
         }
     }
@@ -219,14 +209,14 @@ impl PyVector {
                 py,
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
             )
         } else {
             self.pyo3_vector_arith_op(
                 py,
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(arithmetic::divide_dyn),
+                wrap_result(numeric::div),
             )
         }
     }
@@ -239,7 +229,7 @@ impl PyVector {
                 py,
                 other,
                 Some(ArrowDataType::Int64),
-                wrap_result(|a, b| arithmetic::divide_dyn(b, a)),
+                wrap_result(|a, b| numeric::div(b, a)),
             )
         }
     }

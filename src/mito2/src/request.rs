@@ -161,7 +161,7 @@ impl WriteRequest {
                             "column {} expect type {:?}, given: {}({})",
                             column.column_schema.name,
                             column.column_schema.data_type,
-                            ColumnDataType::from_i32(input_col.datatype)
+                            ColumnDataType::try_from(input_col.datatype)
                                 .map(|v| v.as_str_name())
                                 .unwrap_or("Unknown"),
                             input_col.datatype,
@@ -178,7 +178,7 @@ impl WriteRequest {
                             "column {} has semantic type {:?}, given: {}({})",
                             column.column_schema.name,
                             column.semantic_type,
-                            api::v1::SemanticType::from_i32(input_col.semantic_type)
+                            api::v1::SemanticType::try_from(input_col.semantic_type)
                                 .map(|v| v.as_str_name())
                                 .unwrap_or("Unknown"),
                             input_col.semantic_type
@@ -364,7 +364,7 @@ pub(crate) fn validate_proto_value(
                     "value has type {:?}, but column {} has type {:?}({})",
                     value_type,
                     column_schema.column_name,
-                    ColumnDataType::from_i32(column_schema.datatype),
+                    ColumnDataType::try_from(column_schema.datatype),
                     column_schema.datatype,
                 ),
             }

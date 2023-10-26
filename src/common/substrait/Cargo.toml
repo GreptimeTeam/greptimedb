@@ -27,7 +27,7 @@ table = { workspace = true }
 
 [dependencies.substrait_proto]
 package = "substrait"
-version = "0.12"
+version = "0.17"
 
 [dev-dependencies]
 datatypes = { workspace = true }

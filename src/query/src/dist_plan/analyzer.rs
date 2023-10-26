@@ -19,7 +19,6 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{RewriteRecursion, Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
-use datafusion_expr::utils::from_plan;
 use datafusion_expr::{col, Expr, LogicalPlan, LogicalPlanBuilder, Subquery};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -60,7 +59,7 @@ impl DistPlannerAnalyzer {
             .collect::<DfResult<Vec<_>>>()?;
 
         let inputs = plan.inputs().into_iter().cloned().collect::<Vec<_>>();
-        Ok(Transformed::Yes(from_plan(&plan, &exprs, &inputs)?))
+        Ok(Transformed::Yes(plan.with_new_exprs(exprs, &inputs)?))
     }
 
     fn transform_subquery(expr: Expr) -> DfResult<Transformed<Expr>> {

@@ -27,10 +27,6 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_optimizer::dist_enforcement::EnforceDistribution;
-use datafusion::physical_optimizer::repartition::Repartition;
-use datafusion::physical_optimizer::sort_enforcement::EnforceSorting;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -94,23 +90,7 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let mut physical_optimizers = {
-            let state = SessionState::with_config_rt(session_config.clone(), runtime_env.clone());
-            state.physical_optimizers().to_vec()
-        };
-        // run the repartition and sort enforcement rules first.
-        // And `EnforceSorting` is required to run after `EnforceDistribution`.
-        Self::remove_physical_optimize_rule(&mut physical_optimizers, EnforceSorting {}.name());
-        Self::remove_physical_optimize_rule(
-            &mut physical_optimizers,
-            EnforceDistribution {}.name(),
-        );
-        Self::remove_physical_optimize_rule(&mut physical_optimizers, Repartition {}.name());
-        physical_optimizers.insert(0, Arc::new(EnforceSorting {}));
-        physical_optimizers.insert(0, Arc::new(EnforceDistribution {}));
-        physical_optimizers.insert(0, Arc::new(Repartition {}));
-
-        let session_state = SessionState::with_config_rt_and_catalog_list(
+        let session_state = SessionState::new_with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
@@ -121,10 +101,9 @@ impl QueryEngineState {
             catalog_list.clone(),
             region_query_handler,
         )))
-        .with_optimizer_rules(optimizer.rules)
-        .with_physical_optimizer_rules(physical_optimizers);
+        .with_optimizer_rules(optimizer.rules);
 
-        let df_context = SessionContext::with_state(session_state);
+        let df_context = SessionContext::new_with_state(session_state);
 
         Self {
             df_context,
@@ -136,13 +115,6 @@ impl QueryEngineState {
     }
 
     fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
-        rules.retain(|rule| rule.name() != name);
-    }
-
-    fn remove_physical_optimize_rule(
-        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
-        name: &str,
-    ) {
         rules.retain(|rule| rule.name() != name);
     }
 

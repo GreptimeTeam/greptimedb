@@ -50,7 +50,7 @@ pub struct ColumnDataTypeWrapper(ColumnDataType);
 
 impl ColumnDataTypeWrapper {
     pub fn try_new(datatype: i32) -> Result<Self> {
-        let datatype = ColumnDataType::from_i32(datatype)
+        let datatype = ColumnDataType::try_from(datatype)
             .context(error::UnknownColumnDataTypeSnafu { datatype })?;
         Ok(Self(datatype))
     }
@@ -705,7 +705,7 @@ pub fn is_semantic_type_eq(type_value: i32, semantic_type: SemanticType) -> bool
 
 /// Returns true if the pb type value is valid.
 pub fn is_column_type_value_eq(type_value: i32, expect_type: &ConcreteDataType) -> bool {
-    let Some(column_type) = ColumnDataType::from_i32(type_value) else {
+    let Ok(column_type) = ColumnDataType::try_from(type_value) else {
         return false;
     };
 

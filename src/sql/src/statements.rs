@@ -376,8 +376,10 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
         }
         SqlDataType::SmallInt(_) => Ok(ConcreteDataType::int16_datatype()),
         SqlDataType::UnsignedSmallInt(_) => Ok(ConcreteDataType::uint16_datatype()),
-        SqlDataType::TinyInt(_) => Ok(ConcreteDataType::int8_datatype()),
-        SqlDataType::UnsignedTinyInt(_) => Ok(ConcreteDataType::uint8_datatype()),
+        SqlDataType::TinyInt(_) | SqlDataType::Int8(_) => Ok(ConcreteDataType::int8_datatype()),
+        SqlDataType::UnsignedTinyInt(_) | SqlDataType::UnsignedInt8(_) => {
+            Ok(ConcreteDataType::uint8_datatype())
+        }
         SqlDataType::Char(_)
         | SqlDataType::Varchar(_)
         | SqlDataType::Text
