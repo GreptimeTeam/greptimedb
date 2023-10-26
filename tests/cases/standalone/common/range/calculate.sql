@@ -18,7 +18,7 @@ INSERT INTO TABLE host VALUES
 
 -- Test range expr calculate
 
-SELECT ts, host, covar(val, val) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
+SELECT ts, host, covar(val::DOUBLE, val::DOUBLE) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
 
 SELECT ts, host, 2 * min(val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 

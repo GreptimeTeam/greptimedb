@@ -21,7 +21,7 @@ INSERT INTO TABLE host VALUES
 Affected Rows: 10
 
 -- Test range expr calculate
-SELECT ts, host, covar(val, val) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
+SELECT ts, host, covar(val::DOUBLE, val::DOUBLE) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
 
 +---------------------+-------+---------------------------------------------------+
 | ts                  | host  | COVARIANCE(host.val,host.val) RANGE 20s FILL NULL |
