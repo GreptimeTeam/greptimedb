@@ -612,6 +612,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_merge_reheap_hot() {
+        let reader1 = VecBatchReader::new(&[
+            new_batch(
+                b"k1",
+                &[1, 3],
+                &[10, 10],
+                &[OpType::Put, OpType::Put],
+                &[21, 23],
+            ),
+            new_batch(b"k2", &[3], &[10], &[OpType::Put], &[23]),
+        ]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[2, 4],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[32, 34],
+        )]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_iter(Box::new(reader2))
+            .build()
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch(
+                    b"k1",
+                    &[1, 2, 3, 4],
+                    &[10, 11, 10, 11],
+                    &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+                    &[21, 32, 23, 34],
+                ),
+                new_batch(b"k2", &[3], &[10], &[OpType::Put], &[23]),
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_merge_overlapping() {
         let reader1 = VecBatchReader::new(&[
             new_batch(
