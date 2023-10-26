@@ -379,7 +379,7 @@ impl BatchMerger {
 
         // Reset number of rows.
         self.num_rows = 0;
-        if self.batches.len() == 0 {
+        if self.batches.len() == 1 {
             return Ok(self.batches.pop());
         }
         let batches = mem::take(&mut self.batches);
@@ -1008,6 +1008,17 @@ mod tests {
         assert!(merger.is_empty());
         assert!(merger.merge_batches().unwrap().is_none());
         assert!(merger.primary_key().is_none());
+    }
+
+    #[test]
+    fn test_merge_one_batch() {
+        let mut merger = BatchMerger::new();
+        let expect = new_batch(b"k1", &[1], &[10], &[OpType::Put], &[21]);
+        merger.push(expect.clone()).unwrap();
+        let batch = merger.merge_batches().unwrap().unwrap();
+        assert_eq!(1, batch.num_rows());
+        assert_eq!(expect, batch,);
+        assert!(merger.is_empty());
     }
 
     #[test]
