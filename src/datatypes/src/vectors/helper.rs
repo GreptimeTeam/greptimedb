@@ -346,7 +346,8 @@ impl Helper {
     pub fn like_utf8(names: Vec<String>, s: &str) -> Result<VectorRef> {
         let array = StringArray::from(names);
 
-        let filter = comparison::like_utf8_scalar(&array, s).context(error::ArrowComputeSnafu)?;
+        let s = StringArray::new_scalar(s);
+        let filter = comparison::like(&array, &s).context(error::ArrowComputeSnafu)?;
 
         let result = compute::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
         Helper::try_into_vector(result)
@@ -354,7 +355,8 @@ impl Helper {
 
     pub fn like_utf8_filter(names: Vec<String>, s: &str) -> Result<(VectorRef, BooleanVector)> {
         let array = StringArray::from(names);
-        let filter = comparison::like_utf8_scalar(&array, s).context(error::ArrowComputeSnafu)?;
+        let s = StringArray::new_scalar(s);
+        let filter = comparison::like(&array, &s).context(error::ArrowComputeSnafu)?;
         let result = compute::filter(&array, &filter).context(error::ArrowComputeSnafu)?;
         let vector = Helper::try_into_vector(result)?;
 
@@ -482,7 +484,8 @@ mod tests {
 
         fn assert_filter(array: Vec<String>, s: &str, expected_filter: &BooleanVector) {
             let array = StringArray::from(array);
-            let actual_filter = comparison::like_utf8_scalar(&array, s).unwrap();
+            let s = StringArray::new_scalar(s);
+            let actual_filter = comparison::like(&array, &s).unwrap();
             assert_eq!(BooleanVector::from(actual_filter), *expected_filter);
         }
 

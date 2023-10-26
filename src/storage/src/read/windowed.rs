@@ -121,7 +121,7 @@ fn sort_by_rows(
     let sort_columns = build_sorted_columns(store_schema, order_options);
     // Convert columns to rows to speed lexicographic sort
     // TODO(hl): maybe optimize to lexsort_to_index when only timestamp column is involved.
-    let mut row_converter = RowConverter::new(
+    let row_converter = RowConverter::new(
         sort_columns
             .iter()
             .map(|(idx, descending)| {

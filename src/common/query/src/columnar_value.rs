@@ -33,7 +33,7 @@ impl ColumnarValue {
         match self {
             ColumnarValue::Vector(vector) => vector.data_type(),
             ColumnarValue::Scalar(scalar_value) => {
-                ConcreteDataType::from_arrow_type(&scalar_value.get_datatype())
+                ConcreteDataType::from_arrow_type(&scalar_value.data_type())
             }
         }
     }

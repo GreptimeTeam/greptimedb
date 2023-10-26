@@ -88,12 +88,12 @@ impl<'a> Decoder for PayloadDecoder<'a> {
             let record_batch = record_batch.context(DecodeArrowSnafu)?;
             let record_batch = RecordBatch::try_from_df_record_batch(schema.clone(), record_batch)
                 .context(CreateRecordBatchSnafu)?;
-            let op_type = match MutationType::from_i32(*mutation_type) {
-                Some(MutationType::Delete) => OpType::Delete,
-                Some(MutationType::Put) => OpType::Put,
-                None => {
+            let op_type = match MutationType::try_from(*mutation_type) {
+                Ok(MutationType::Delete) => OpType::Delete,
+                Ok(MutationType::Put) => OpType::Put,
+                Err(e) => {
                     return BatchCorruptedSnafu {
-                        message: format!("Unexpceted mutation type: {mutation_type}"),
+                        message: format!("Unexpceted decode error for mutation type: {e}"),
                     }
                     .fail()
                 }

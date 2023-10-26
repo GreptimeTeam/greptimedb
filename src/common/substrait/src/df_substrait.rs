@@ -47,9 +47,9 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
         schema: &str,
     ) -> Result<Self::Plan, Self::Error> {
         let state_config = SessionConfig::new().with_default_catalog_and_schema(catalog, schema);
-        let state = SessionState::with_config_rt(state_config, Arc::new(RuntimeEnv::default()))
+        let state = SessionState::new_with_config_rt(state_config, Arc::new(RuntimeEnv::default()))
             .with_serializer_registry(Arc::new(ExtensionSerializer));
-        let mut context = SessionContext::with_state(state);
+        let mut context = SessionContext::new_with_state(state);
         context.register_catalog_list(catalog_list);
         let plan = Plan::decode(message).context(DecodeRelSnafu)?;
         let df_plan = from_substrait_plan(&mut context, &plan)
@@ -61,9 +61,9 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
     fn encode(&self, plan: &Self::Plan) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::new();
         let session_state =
-            SessionState::with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
+            SessionState::new_with_config_rt(SessionConfig::new(), Arc::new(RuntimeEnv::default()))
                 .with_serializer_registry(Arc::new(ExtensionSerializer));
-        let context = SessionContext::with_state(session_state);
+        let context = SessionContext::new_with_state(session_state);
 
         let substrait_plan = to_substrait_plan(plan, &context).context(EncodeDfPlanSnafu)?;
         substrait_plan.encode(&mut buf).context(EncodeRelSnafu)?;

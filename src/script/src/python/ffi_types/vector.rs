@@ -23,7 +23,6 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, UInt64Array,
 };
 use datatypes::arrow::compute;
-use datatypes::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::error::Result as ArrowResult;
 use datatypes::data_type::DataType;

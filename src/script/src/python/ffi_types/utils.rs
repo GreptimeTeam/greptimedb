@@ -33,8 +33,8 @@ pub(crate) fn collect_diff_types_string(values: &[ScalarValue], ty: &ArrowDataTy
         .iter()
         .enumerate()
         .filter_map(|(idx, val)| {
-            if val.get_datatype() != *ty {
-                Some((idx, val.get_datatype()))
+            if val.data_type() != *ty {
+                Some((idx, val.data_type()))
             } else {
                 None
             }
@@ -68,7 +68,7 @@ pub fn all_to_f64(col: ColumnarValue) -> Result<ColumnarValue, String> {
                 _ => {
                     return Err(format!(
                         "Can't cast type {:#?} to {:#?}",
-                        val.get_datatype(),
+                        val.data_type(),
                         ArrowDataType::Float64
                     ))
                 }

@@ -27,9 +27,6 @@ use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::context::{QueryPlanner, SessionConfig, SessionState};
 use datafusion::execution::runtime_env::RuntimeEnv;
-use datafusion::physical_optimizer::enforce_distribution::EnforceDistribution;
-use datafusion::physical_optimizer::enforce_sorting::EnforceSorting;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::LogicalPlan as DfLogicalPlan;
@@ -93,7 +90,7 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
-        let session_state = SessionState::with_config_rt_and_catalog_list(
+        let session_state = SessionState::new_with_config_rt_and_catalog_list(
             session_config,
             runtime_env,
             Arc::new(MemoryCatalogList::default()), // pass a dummy catalog list
@@ -106,7 +103,7 @@ impl QueryEngineState {
         )))
         .with_optimizer_rules(optimizer.rules);
 
-        let df_context = SessionContext::with_state(session_state);
+        let df_context = SessionContext::new_with_state(session_state);
 
         Self {
             df_context,
@@ -118,13 +115,6 @@ impl QueryEngineState {
     }
 
     fn remove_analyzer_rule(rules: &mut Vec<Arc<dyn AnalyzerRule + Send + Sync>>, name: &str) {
-        rules.retain(|rule| rule.name() != name);
-    }
-
-    fn remove_physical_optimize_rule(
-        rules: &mut Vec<Arc<dyn PhysicalOptimizerRule + Send + Sync>>,
-        name: &str,
-    ) {
         rules.retain(|rule| rule.name() != name);
     }
 

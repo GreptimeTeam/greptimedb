@@ -85,10 +85,12 @@ pub fn query_to_plan(dataframe: DataFrame, q: &Query) -> Result<LogicalPlan> {
         }
 
         let value = &m.value;
-        let m_type =
-            MatcherType::from_i32(m.r#type).context(error::InvalidPromRemoteRequestSnafu {
-                msg: format!("invalid LabelMatcher type: {}", m.r#type),
-            })?;
+        let m_type = MatcherType::try_from(m.r#type).map_err(|e| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!("invalid LabelMatcher type, decode error: {e}",),
+            }
+            .build()
+        })?;
 
         match m_type {
             MatcherType::Eq => {

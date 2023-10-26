@@ -241,7 +241,7 @@ impl HeartbeatHandlerGroup {
         let role = req
             .header
             .as_ref()
-            .and_then(|h| Role::from_i32(h.role))
+            .and_then(|h| Role::try_from(h.role).ok())
             .context(error::InvalidArgumentsSnafu {
                 err_msg: format!("invalid role: {:?}", req.header),
             })?;

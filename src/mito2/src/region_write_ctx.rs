@@ -143,10 +143,10 @@ impl RegionWriteCtx {
         self.next_sequence += num_rows as u64;
 
         // Update metrics.
-        match OpType::from_i32(op_type) {
-            Some(OpType::Delete) => self.delete_num += num_rows,
-            Some(OpType::Put) => self.put_num += num_rows,
-            None => (),
+        match OpType::try_from(op_type) {
+            Ok(OpType::Delete) => self.delete_num += num_rows,
+            Ok(OpType::Put) => self.put_num += num_rows,
+            Err(_) => (),
         }
     }
 

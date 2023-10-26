@@ -51,7 +51,7 @@ impl KeyValues {
                 helper: &self.helper,
                 sequence: self.mutation.sequence + idx as u64, // Calculate sequence for each row.
                 // Safety: This is a valid mutation.
-                op_type: OpType::from_i32(self.mutation.op_type).unwrap(),
+                op_type: OpType::try_from(self.mutation.op_type).unwrap(),
             }
         })
     }

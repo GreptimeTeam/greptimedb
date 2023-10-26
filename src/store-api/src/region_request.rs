@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self};
 
 use api::v1::add_column_location::LocationType;
 use api::v1::region::{alter_request, region_request, AlterRequest};
@@ -423,11 +423,8 @@ impl TryFrom<v1::AddColumnLocation> for AddColumnLocation {
     type Error = MetadataError;
 
     fn try_from(location: v1::AddColumnLocation) -> Result<Self> {
-        let location_type = LocationType::from_i32(location.location_type).context(
-            InvalidRawRegionRequestSnafu {
-                err: format!("unknown location type {}", location.location_type),
-            },
-        )?;
+        let location_type = LocationType::try_from(location.location_type)
+            .map_err(|e| InvalidRawRegionRequestSnafu { err: e.to_string() }.build())?;
         let add_column_location = match location_type {
             LocationType::First => AddColumnLocation::First,
             LocationType::After => AddColumnLocation::After {

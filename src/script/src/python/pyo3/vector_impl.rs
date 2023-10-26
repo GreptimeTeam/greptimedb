@@ -17,7 +17,6 @@ use arrow::compute::kernels::{cmp, numeric};
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use datafusion::arrow::array::BooleanArray;
 use datafusion::arrow::compute;
-use datafusion::arrow::compute::kernels::{arithmetic, comparison};
 use datatypes::arrow::array::{Array, ArrayRef};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::prelude::{ConcreteDataType, DataType};

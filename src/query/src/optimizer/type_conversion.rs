@@ -94,7 +94,7 @@ impl AnalyzerRule for TypeConversionRule {
                     .map(|e| e.rewrite(&mut converter))
                     .collect::<Result<Vec<_>>>()?;
 
-                datafusion_expr::utils::from_plan(&plan, &expr, &inputs).map(Transformed::Yes)
+                plan.with_new_exprs(expr, &inputs).map(Transformed::Yes)
             }
 
             LogicalPlan::Subquery { .. }

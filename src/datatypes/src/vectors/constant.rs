@@ -100,7 +100,8 @@ impl ConstantVector {
         let arr = indices.to_arrow_array();
         let indices_arr = arr.as_any().downcast_ref::<UInt32Array>().unwrap();
         if !arrow::compute::min_boolean(
-            &arrow::compute::lt_scalar(indices_arr, len as u32).unwrap(),
+            &arrow::compute::kernels::cmp::lt(indices_arr, &UInt32Array::new_scalar(len as u32))
+                .unwrap(),
         )
         .unwrap()
         {
