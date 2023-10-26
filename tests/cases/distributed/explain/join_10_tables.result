@@ -98,7 +98,7 @@ limit 1;
 |_|_MergeScan [is_placeholder=false]_|
 | physical_plan | GlobalLimitExec: skip=0, fetch=1_|
 |_|_SortPreservingMergeExec: [ts@0 DESC], fetch=1_|
-|_|_SortExec: fetch=1, expr=[ts@0 DESC]_|
+|_|_SortExec: TopK(fetch=1), expr=[ts@0 DESC]_|
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
 |_|_REDACTED
 |_|_CoalesceBatchesExec: target_batch_size=8192_|
