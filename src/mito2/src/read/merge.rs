@@ -90,7 +90,7 @@ impl MergeReader {
         for source in sources {
             let node = Node::new(source).await?;
             if !node.is_eof() {
-                // Ensure `cold` don't have eof node.
+                // Ensure `cold` don't have eof nodes.
                 cold.push(node);
             }
         }
@@ -168,7 +168,7 @@ impl MergeReader {
                 top_node.skip_rows(pos).await?;
                 // The merge window should contain this timestamp so only nodes in the hot heap
                 // have this timestamp.
-                self.skip_duplicate_timestamp_from_hot(top_node, next_min_ts)
+                self.filter_first_duplicate_timestamp_in_hot(top_node, next_min_ts)
                     .await?;
             }
             Err(pos) => {
@@ -182,9 +182,9 @@ impl MergeReader {
         Ok(())
     }
 
-    /// Skips duplicate `timestamp` from `top_node` and `hot` heap. Only keeps the timestamp
+    /// Filters the first duplicate `timestamp` in `top_node` and `hot` heap. Only keeps the timestamp
     /// with the maximum sequence.
-    async fn skip_duplicate_timestamp_from_hot(
+    async fn filter_first_duplicate_timestamp_in_hot(
         &mut self,
         top_node: Node,
         timestamp: Timestamp,
@@ -846,6 +846,57 @@ mod tests {
                 &[10, 11, 11],
                 &[OpType::Put, OpType::Put, OpType::Put],
                 &[21, 32, 33],
+            )],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_merge_large_range() {
+        let reader1 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[1, 10],
+            &[10, 10],
+            &[OpType::Put, OpType::Put],
+            &[21, 30],
+        )]);
+        let reader2 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[1, 20],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[31, 40],
+        )]);
+        // The hot heap have a node that doesn't have duplicate
+        // timestamps.
+        let reader3 = VecBatchReader::new(&[new_batch(
+            b"k1",
+            &[6, 8],
+            &[11, 11],
+            &[OpType::Put, OpType::Put],
+            &[36, 38],
+        )]);
+        let mut reader = MergeReaderBuilder::new()
+            .push_batch_reader(Box::new(reader1))
+            .push_batch_iter(Box::new(reader2))
+            .push_batch_reader(Box::new(reader3))
+            .build()
+            .await
+            .unwrap();
+        check_reader_result(
+            &mut reader,
+            &[new_batch(
+                b"k1",
+                &[1, 6, 8, 10, 20],
+                &[11, 11, 11, 10, 11],
+                &[
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                    OpType::Put,
+                ],
+                &[31, 36, 38, 30, 40],
             )],
         )
         .await;
