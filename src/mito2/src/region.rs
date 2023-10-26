@@ -115,6 +115,7 @@ impl MitoRegion {
 
     /// Estimated WAL size in bytes.
     /// Use the memtables size to estimate the size of wal.
+    #[allow(dead_code)]
     pub(crate) fn estimated_wal_size(&self) -> usize {
         let memtables = &self.version().memtables;
         let memtable_size = memtables.mutable_usage() + memtables.immutables_usage();

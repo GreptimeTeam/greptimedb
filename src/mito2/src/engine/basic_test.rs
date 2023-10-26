@@ -480,7 +480,8 @@ async fn test_estimated_wal_size() {
     put_rows(&engine, region_id, rows).await;
 
     // check wal size
-    assert_eq!(engine.get_region_wal_size(region_id).unwrap(), 124);
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(region.estimated_wal_size(), 124);
 
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -489,7 +490,7 @@ async fn test_estimated_wal_size() {
     put_rows(&engine, region_id, rows).await;
 
     // check wal size
-    assert_eq!(engine.get_region_wal_size(region_id).unwrap(), 249);
+    assert_eq!(region.estimated_wal_size(), 249);
 
     // Delete (a, 0), (a, 1), (a, 2)
     let rows = Rows {
@@ -505,5 +506,5 @@ async fn test_estimated_wal_size() {
     delete_rows(&engine, region_id, rows).await;
 
     // check wal size
-    assert_eq!(engine.get_region_wal_size(region_id).unwrap(), 292);
+    assert_eq!(region.estimated_wal_size(), 292);
 }
