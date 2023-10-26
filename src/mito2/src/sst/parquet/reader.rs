@@ -150,6 +150,8 @@ impl ParquetReaderBuilder {
             .context(ReadParquetSnafu { path: file_path })?
             .with_batch_size(DEFAULT_READ_BATCH_SIZE);
 
+        //
+
         // Decode region metadata.
         let key_value_meta = builder.metadata().file_metadata().key_value_metadata();
         let region_meta = self.get_region_metadata(file_path, key_value_meta)?;
@@ -212,7 +214,7 @@ impl ParquetReaderBuilder {
         Ok((Box::pin(stream), read_format))
     }
 
-    /// Decode region metadata from key value.
+    /// Decodes region metadata from key value.
     fn get_region_metadata(
         &self,
         file_path: &str,
@@ -238,6 +240,37 @@ impl ParquetReaderBuilder {
             })?;
 
         RegionMetadata::from_json(json).context(InvalidMetadataSnafu)
+    }
+
+    /// Reads parquet metadata for specific file.
+    async fn read_parquet_metadata(&self, file_path: &str) -> Result<Arc<ParquetMetaData>> {
+        // Tries to get from global cache.
+        if let Some(metadata) = self
+            .cache_manager
+            .as_ref()
+            .and_then(|cache| cache.get_parquet_meta_data(self.file_handle.region_id(), self.file_handle.file_id()))
+        {
+            return Ok(metadata);
+        }
+
+        // Cache miss, get from the reader.
+        // Now we create a reader to read the whole file.
+        let reader = self
+            .object_store
+            .reader(file_path)
+            .await
+            .context(OpenDalSnafu)?
+            .compat();
+        let mut reader = BufReader::new(reader);
+        let metadata = reader.get_metadata().await.context(ReadParquetSnafu {
+            path: file_path,
+        })?;
+        // Cache the metadata.
+        if let Some(cache) = &self.cache_manager {
+            cache.put_parquet_meta_data(self.file_handle.region_id(), self.file_handle.file_id(), metadata.clone());
+        }
+
+        Ok(metadata) 
     }
 }
 
@@ -346,3 +379,5 @@ impl<T: AsyncFileReader> AsyncFileReader for AsyncFileReaderCache<T> {
         .boxed()
     }
 }
+
+
