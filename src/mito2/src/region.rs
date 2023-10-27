@@ -38,7 +38,7 @@ use crate::sst::file_purger::FilePurgerRef;
 /// This is the approximate factor to estimate the size of wal.
 const ESTIMATED_WAL_FACTOR: f32 = 0.42825;
 
-/// Region status include region id, memtable size, sst size, wal size and manifest size.
+/// Region status include region id, memtable usage, sst usage, wal usage and manifest usage.
 #[derive(Debug)]
 pub struct RegionStat {
     pub region_id: RegionId,
@@ -129,8 +129,9 @@ impl MitoRegion {
         self.writable.store(writable, Ordering::Relaxed);
     }
 
-    /// Returns the region usage in bytes.
+    // TODO(QuenKar): remove this micro.
     #[allow(dead_code)]
+    /// Returns the region usage in bytes.
     pub(crate) async fn region_stat(&self) -> RegionStat {
         let region_id = self.region_id;
 

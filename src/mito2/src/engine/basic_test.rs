@@ -523,7 +523,7 @@ async fn test_region_usage() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    // region is empty now, we can check manifest size
+    // region is empty now, check manifest size
     let region = engine.get_region(region_id).unwrap();
     let region_stat = region.region_stat().await;
     assert_eq!(region_stat.manifest_usage, 686);
@@ -551,7 +551,7 @@ async fn test_region_usage() {
     assert_eq!(region_stat.memtable_usage, 351);
     assert_eq!(region_stat.wal_usage, 150);
 
-    // flush memtable
+    // flush region
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_stat().await;
