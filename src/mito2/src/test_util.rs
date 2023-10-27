@@ -175,7 +175,7 @@ impl TestEnv {
         let mut builder = Fs::default();
         builder.root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let object_store_manager = ObjectStoreManager::from_default("default", object_store);
+        let object_store_manager = ObjectStoreManager::new("default", object_store);
         (log_store, object_store_manager)
     }
 

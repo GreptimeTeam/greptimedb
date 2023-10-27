@@ -48,9 +48,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, DefaultObjectStoreNotFoundSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
-    MissingMetaClientSnafu, MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
-    RuntimeResourceSnafu, ShutdownInstanceSnafu,
+    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingMetaClientSnafu,
+    MissingMetasrvOptsSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -355,11 +355,10 @@ impl DatanodeBuilder {
         let mut region_server =
             RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
         let object_store = store::new_object_store(opts).await?;
-        let object_store_manager = ObjectStoreManager::try_new(
-            [("default".to_string(), object_store)].into(),
+        let object_store_manager = ObjectStoreManager::new(
             "default", // TODO: use a name which is set in the configuration when #919 is done.
-        )
-        .context(DefaultObjectStoreNotFoundSnafu)?;
+            object_store,
+        );
         let engines =
             Self::build_store_engines(opts, log_store, Arc::new(object_store_manager)).await?;
         for engine in engines {
