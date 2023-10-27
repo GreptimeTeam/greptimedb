@@ -25,8 +25,7 @@ use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_telemetry::{debug, timer};
@@ -150,20 +149,6 @@ impl KvBackend for CachedMetaKvBackend {
             }
             Err(e) => Err(e),
         }
-    }
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
-        let from_key = &req.from_key.clone();
-        let to_key = &req.to_key.clone();
-
-        let ret = self.kv_backend.move_value(req).await;
-
-        if ret.is_ok() {
-            self.invalidate_key(from_key).await;
-            self.invalidate_key(to_key).await;
-        }
-
-        ret
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
@@ -314,14 +299,6 @@ impl KvBackend for MetaKvBackend {
     ) -> Result<CompareAndPutResponse> {
         self.client
             .compare_and_put(request)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
-        self.client
-            .move_value(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)

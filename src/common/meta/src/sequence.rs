@@ -166,8 +166,7 @@ mod tests {
     use crate::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
         BatchPutRequest, BatchPutResponse, CompareAndPutResponse, DeleteRangeRequest,
-        DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-        RangeRequest, RangeResponse,
+        DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
     };
 
     #[tokio::test]
@@ -245,10 +244,6 @@ mod tests {
             }
 
             async fn batch_delete(&self, _: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
-                unreachable!()
-            }
-
-            async fn move_value(&self, _: MoveValueRequest) -> Result<MoveValueResponse> {
                 unreachable!()
             }
         }

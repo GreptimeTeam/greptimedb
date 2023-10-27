@@ -3635,7 +3635,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=365922c3581ad954b3b3851af522b0ed0096970c#365922c3581ad954b3b3851af522b0ed0096970c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=1d7dc6f18b310355a4c16fb453d3ca7ed09f048d#1d7dc6f18b310355a4c16fb453d3ca7ed09f048d"
 dependencies = [
  "prost 0.12.1",
  "serde",
@@ -5658,8 +5658,9 @@ checksum = "978aa494585d3ca4ad74929863093e87cac9790d81fe7aba2b3dc2890643a0fc"
 
 [[package]]
 name = "orc-rust"
-version = "0.2.42"
-source = "git+https://github.com/WenyXu/orc-rs.git?rev=5f6399f759ba30cb46610d06027b507949a117ca#5f6399f759ba30cb46610d06027b507949a117ca"
+version = "0.2.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900310981898f6e3877286f1272b75f5c4a604628594a0a7026311b93a2aa5e6"
 dependencies = [
  "arrow",
  "bytes",

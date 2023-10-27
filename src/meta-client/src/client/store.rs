@@ -19,8 +19,7 @@ use api::v1::meta::store_client::StoreClient;
 use api::v1::meta::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse, Role,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -98,11 +97,6 @@ impl Client {
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let inner = self.inner.read().await;
         inner.delete_range(req).await
-    }
-
-    pub async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
-        let inner = self.inner.read().await;
-        inner.move_value(req).await
     }
 }
 
@@ -197,14 +191,6 @@ impl Inner {
         let mut client = self.random_client()?;
         req.set_header(self.id, self.role);
         let res = client.delete_range(req).await.map_err(error::Error::from)?;
-
-        Ok(res.into_inner())
-    }
-
-    async fn move_value(&self, mut req: MoveValueRequest) -> Result<MoveValueResponse> {
-        let mut client = self.random_client()?;
-        req.set_header(self.id, self.role);
-        let res = client.move_value(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
     }

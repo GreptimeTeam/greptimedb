@@ -24,14 +24,13 @@ use api::v1::meta::{
     BatchGetResponse as PbBatchGetResponse, BatchPutRequest as PbBatchPutRequest,
     BatchPutResponse as PbBatchPutResponse, CompareAndPutRequest as PbCompareAndPutRequest,
     CompareAndPutResponse as PbCompareAndPutResponse, DeleteRangeRequest as PbDeleteRangeRequest,
-    DeleteRangeResponse as PbDeleteRangeResponse, MoveValueRequest as PbMoveValueRequest,
-    MoveValueResponse as PbMoveValueResponse, PutRequest as PbPutRequest,
+    DeleteRangeResponse as PbDeleteRangeResponse, PutRequest as PbPutRequest,
     PutResponse as PbPutResponse, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse,
     ResponseHeader,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
-    MoveValueRequest, PutRequest, RangeRequest,
+    PutRequest, RangeRequest,
 };
 use common_telemetry::timer;
 use snafu::OptionExt;
@@ -234,35 +233,6 @@ impl store_server::Store for MetaSrv {
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
     }
-
-    async fn move_value(
-        &self,
-        req: Request<PbMoveValueRequest>,
-    ) -> GrpcResult<PbMoveValueResponse> {
-        let req = req.into_inner();
-
-        let cluster_id = req
-            .header
-            .as_ref()
-            .context(MissingRequestHeaderSnafu)?
-            .cluster_id;
-
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "move_value".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
-
-        let req: MoveValueRequest = req.into();
-
-        let res = self.kv_store().move_value(req).await?;
-
-        let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
-        Ok(Response::new(res))
-    }
 }
 
 #[cfg(test)]
@@ -358,17 +328,6 @@ mod tests {
         let mut req = DeleteRangeRequest::default();
         req.set_header((1, 1), Role::Datanode);
         let res = meta_srv.delete_range(req.into_request()).await;
-
-        let _ = res.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_move_value() {
-        let meta_srv = new_meta_srv().await;
-
-        let mut req = MoveValueRequest::default();
-        req.set_header((1, 1), Role::Datanode);
-        let res = meta_srv.move_value(req.into_request()).await;
 
         let _ = res.unwrap();
     }
