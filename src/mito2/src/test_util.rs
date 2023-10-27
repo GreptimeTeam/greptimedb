@@ -68,7 +68,6 @@ pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
 }
 
 /// Env to test mito engine.
-#[cfg(test)]
 pub struct TestEnv {
     /// Path to store data.
     data_home: TempDir,
@@ -76,14 +75,12 @@ pub struct TestEnv {
     object_store_manager: Option<ObjectStoreManagerRef>,
 }
 
-#[cfg(test)]
 impl Default for TestEnv {
     fn default() -> Self {
         TestEnv::new()
     }
 }
 
-#[cfg(test)]
 impl TestEnv {
     /// Returns a new env with empty prefix for test.
     pub fn new() -> TestEnv {
