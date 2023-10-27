@@ -266,6 +266,9 @@ impl RangePlanRewriter {
                             None => y.clone(),
                         })
                         .collect();
+                    // Due to the limitations of Datafusion, for `LogicalPlan::Analyze` and `LogicalPlan::Explain`,
+                    // directly using the method `with_new_inputs` to rebuild a new `LogicalPlan` will cause an error,
+                    // so here we directly use the `LogicalPlanBuilder` to build a new plan.
                     let plan = match plan {
                         LogicalPlan::Analyze(Analyze { verbose, .. }) => {
                             ensure!(
