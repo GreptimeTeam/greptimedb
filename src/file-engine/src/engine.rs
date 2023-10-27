@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
@@ -29,7 +29,7 @@ use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
 use crate::error::{
@@ -151,7 +151,7 @@ impl EngineInner {
 
     async fn stop(&self) -> EngineResult<()> {
         let _lock = self.region_mutex.lock().await;
-        self.regions.write().await.clear();
+        self.regions.write().unwrap().clear();
         Ok(())
     }
 
@@ -161,7 +161,7 @@ impl EngineInner {
     }
 
     fn state(&self, region_id: RegionId) -> Option<RegionRole> {
-        if self.regions.blocking_read().get(&region_id).is_some() {
+        if self.regions.read().unwrap().get(&region_id).is_some() {
             Some(RegionRole::Leader)
         } else {
             None
@@ -201,7 +201,7 @@ impl EngineInner {
                 region_id, err
             );
         })?;
-        self.regions.write().await.insert(region_id, region);
+        self.regions.write().unwrap().insert(region_id, region);
 
         info!("A new region is created, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
@@ -231,7 +231,7 @@ impl EngineInner {
                 region_id, err
             );
         })?;
-        self.regions.write().await.insert(region_id, region);
+        self.regions.write().unwrap().insert(region_id, region);
 
         info!("Region opened, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
@@ -244,7 +244,7 @@ impl EngineInner {
     ) -> EngineResult<Output> {
         let _lock = self.region_mutex.lock().await;
 
-        let mut regions = self.regions.write().await;
+        let mut regions = self.regions.write().unwrap();
         if regions.remove(&region_id).is_some() {
             info!("Region closed, region_id: {}", region_id);
         }
@@ -275,17 +275,17 @@ impl EngineInner {
                 );
             })?;
         }
-        let _ = self.regions.write().await.remove(&region_id);
+        let _ = self.regions.write().unwrap().remove(&region_id);
 
         info!("Region dropped, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
     }
 
     async fn get_region(&self, region_id: RegionId) -> Option<FileRegionRef> {
-        self.regions.read().await.get(&region_id).cloned()
+        self.regions.read().unwrap().get(&region_id).cloned()
     }
 
     async fn exists(&self, region_id: RegionId) -> bool {
-        self.regions.read().await.contains_key(&region_id)
+        self.regions.read().unwrap().contains_key(&region_id)
     }
 }

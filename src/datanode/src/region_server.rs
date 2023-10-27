@@ -107,7 +107,7 @@ impl RegionServer {
         self.inner
             .region_map
             .iter()
-            .flat_map(|e| {
+            .filter_map(|e| {
                 let region_id = *e.key();
                 // Filters out any regions whose role equals None.
                 e.role(region_id).map(|role| RegionStat {
