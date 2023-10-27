@@ -30,8 +30,7 @@ use crate::metrics::METRIC_META_TXN_REQUEST;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -263,27 +262,6 @@ impl<T: ErrorExt + Send + Sync + 'static> KvBackend for MemoryKvBackend<T> {
 
         Ok(BatchDeleteResponse { prev_kvs })
     }
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
-        let MoveValueRequest { from_key, to_key } = req;
-
-        let mut kvs = self.kvs.write().unwrap();
-
-        let kv = if let Some(v) = kvs.remove(&from_key) {
-            kvs.insert(to_key, v.clone());
-            Some(KeyValue {
-                key: from_key,
-                value: v,
-            })
-        } else {
-            kvs.get(&to_key).map(|v| KeyValue {
-                key: to_key,
-                value: v.clone(),
-            })
-        };
-
-        Ok(MoveValueResponse(kv))
-    }
 }
 
 #[async_trait]
@@ -358,7 +336,6 @@ mod tests {
         prepare_kv, test_kv_batch_delete, test_kv_batch_get, test_kv_compare_and_put,
         test_kv_delete_range, test_kv_put, test_kv_range, test_kv_range_2,
     };
-    use crate::kv_backend::KvBackend;
 
     async fn mock_mem_store_with_data() -> MemoryKvBackend<Error> {
         let kv_store = MemoryKvBackend::<Error>::new();
@@ -407,30 +384,6 @@ mod tests {
         let kv_store = mock_mem_store_with_data().await;
 
         test_kv_delete_range(kv_store).await;
-    }
-
-    #[tokio::test]
-    async fn test_move_value() {
-        let kv_store = mock_mem_store_with_data().await;
-
-        let req = MoveValueRequest {
-            from_key: b"key1".to_vec(),
-            to_key: b"key111".to_vec(),
-        };
-
-        let resp = kv_store.move_value(req).await.unwrap();
-        assert_eq!(b"key1", resp.0.as_ref().unwrap().key());
-        assert_eq!(b"val1", resp.0.as_ref().unwrap().value());
-
-        let kv_store = mock_mem_store_with_data().await;
-
-        let req = MoveValueRequest {
-            from_key: b"notexistkey".to_vec(),
-            to_key: b"key222".to_vec(),
-        };
-
-        let resp = kv_store.move_value(req).await.unwrap();
-        assert!(resp.0.is_none());
     }
 
     #[tokio::test]

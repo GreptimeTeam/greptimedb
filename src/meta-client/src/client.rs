@@ -31,8 +31,7 @@ use common_meta::rpc::router::{RouteRequest, RouteResponse};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_telemetry::info;
 use ddl::Client as DdlClient;
@@ -352,15 +351,6 @@ impl MetaClient {
     pub async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         self.store_client()?
             .delete_range(req.into())
-            .await?
-            .try_into()
-            .context(ConvertMetaResponseSnafu)
-    }
-
-    /// MoveValue atomically renames the key to the given updated key.
-    pub async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
-        self.store_client()?
-            .move_value(req.into())
             .await?
             .try_into()
             .context(ConvertMetaResponseSnafu)
@@ -897,39 +887,5 @@ mod tests {
                 kv.take_value()
             );
         }
-    }
-
-    #[tokio::test]
-    async fn test_move_value() {
-        let tc = new_client("test_move_value").await;
-
-        let from_key = tc.key("from_key");
-        let to_key = tc.key("to_key");
-
-        let req = MoveValueRequest::new(from_key.as_slice(), to_key.as_slice());
-        let res = tc.client.move_value(req).await;
-        assert!(res.unwrap().take_kv().is_none());
-
-        let req = PutRequest::new()
-            .with_key(to_key.as_slice())
-            .with_value(b"value".to_vec());
-        let _ = tc.client.put(req).await;
-
-        let req = MoveValueRequest::new(from_key.as_slice(), to_key.as_slice());
-        let res = tc.client.move_value(req).await;
-        let mut kv = res.unwrap().take_kv().unwrap();
-        assert_eq!(to_key.clone(), kv.take_key());
-        assert_eq!(b"value".to_vec(), kv.take_value());
-
-        let req = PutRequest::new()
-            .with_key(from_key.as_slice())
-            .with_value(b"value2".to_vec());
-        let _ = tc.client.put(req).await;
-
-        let req = MoveValueRequest::new(from_key.as_slice(), to_key.as_slice());
-        let res = tc.client.move_value(req).await;
-        let mut kv = res.unwrap().take_kv().unwrap();
-        assert_eq!(from_key, kv.take_key());
-        assert_eq!(b"value2".to_vec(), kv.take_value());
     }
 }

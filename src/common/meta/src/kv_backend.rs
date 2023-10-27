@@ -27,8 +27,7 @@ use crate::error::Error;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
 
@@ -65,9 +64,6 @@ where
         &self,
         req: BatchDeleteRequest,
     ) -> Result<BatchDeleteResponse, Self::Error>;
-
-    /// MoveValue atomically renames the key to the given updated key.
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error>;
 
     // The following methods are implemented based on the above methods,
     // and a higher-level interface is provided for to simplify usage.

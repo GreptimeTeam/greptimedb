@@ -25,8 +25,7 @@ use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 use common_meta::util::get_next_prefix_key;
@@ -341,10 +340,6 @@ impl KvBackend for RaftEngineBackend {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
         Ok(BatchDeleteResponse { prev_kvs })
-    }
-
-    async fn move_value(&self, _req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
-        unimplemented!()
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {

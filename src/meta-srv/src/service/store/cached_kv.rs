@@ -22,8 +22,7 @@ use common_meta::kv_backend::{KvBackend, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
 
@@ -280,25 +279,6 @@ impl KvBackend for LeaderCachedKvStore {
 
         let res = self.store.batch_delete(req.clone()).await?;
         let _ = self.cache.batch_delete(req).await?;
-        Ok(res)
-    }
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse> {
-        if !self.is_leader() {
-            return self.store.move_value(req).await;
-        }
-
-        let _ = self.create_new_version();
-
-        let res = self.store.move_value(req.clone()).await?;
-        let MoveValueRequest {
-            from_key, to_key, ..
-        } = req;
-        // Delete all keys in the cache.
-        //
-        // Cache can not deal with the move operation, because it does
-        // not contain full data, so we need to delete both keys.
-        self.invalid_keys(vec![from_key, to_key]).await?;
         Ok(res)
     }
 }

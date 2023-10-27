@@ -23,8 +23,7 @@ use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, MoveValueRequest, MoveValueResponse, PutRequest, PutResponse,
-    RangeRequest, RangeResponse,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use snafu::ResultExt;
 
@@ -129,14 +128,6 @@ impl KvBackend for KvBackendAdapter {
     ) -> Result<BatchDeleteResponse, Self::Error> {
         self.0
             .batch_delete(req)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)
-    }
-
-    async fn move_value(&self, req: MoveValueRequest) -> Result<MoveValueResponse, Self::Error> {
-        self.0
-            .move_value(req)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
