@@ -388,6 +388,14 @@ pub enum Error {
         region_dir: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
+    ArrowReader {
+        path: String,
+        #[snafu(source)]
+        error: ArrowError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -458,6 +466,7 @@ impl ErrorExt for Error {
             RegionReadonly { .. } => StatusCode::RegionReadonly,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } => StatusCode::RegionNotFound,
+            ArrowReader { .. } => StatusCode::StorageUnavailable,
         }
     }
 

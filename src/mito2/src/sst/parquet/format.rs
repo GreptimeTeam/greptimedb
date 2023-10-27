@@ -138,7 +138,10 @@ impl ReadFormat {
         }
     }
 
-    /// Gets the converted arrow schema.
+    /// Gets the arrow schema of the SST file.
+    ///
+    /// This schema is computed from the region metadata but should be the same
+    /// as the arrow schema decoded from the file metadata.
     pub(crate) fn arrow_schema(&self) -> &SchemaRef {
         &self.arrow_schema
     }
