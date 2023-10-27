@@ -457,3 +457,54 @@ async fn test_absent_and_invalid_columns() {
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
 }
+
+#[tokio::test]
+async fn test_estimated_wal_size() {
+    let mut env = TestEnv::with_prefix("estimate-region-wal-size");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 10, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // check wal size
+    let region = engine.get_region(region_id).unwrap();
+    assert_eq!(region.estimated_wal_size(), 124);
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("b", 0, 10, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // check wal size
+    assert_eq!(region.estimated_wal_size(), 249);
+
+    // Delete (a, 0), (a, 1), (a, 2)
+    let rows = Rows {
+        schema: delete_schema.clone(),
+        rows: build_delete_rows_for_key("a", 0, 3),
+    };
+    delete_rows(&engine, region_id, rows).await;
+    // Delete (b, 0), (b, 1)
+    let rows = Rows {
+        schema: delete_schema,
+        rows: build_delete_rows_for_key("b", 0, 2),
+    };
+    delete_rows(&engine, region_id, rows).await;
+
+    // check wal size
+    assert_eq!(region.estimated_wal_size(), 292);
+}

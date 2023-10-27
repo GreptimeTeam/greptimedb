@@ -100,6 +100,14 @@ impl MemtableVersion {
         self.mutable.stats().estimated_bytes
     }
 
+    /// Returns the memory usage of the immutable memtables.
+    pub(crate) fn immutables_usage(&self) -> usize {
+        self.immutables
+            .iter()
+            .map(|mem| mem.stats().estimated_bytes)
+            .sum()
+    }
+
     /// Returns true if the memtable version is empty.
     ///
     /// The version is empty when mutable memtable is empty and there is no

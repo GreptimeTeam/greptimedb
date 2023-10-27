@@ -20,6 +20,7 @@ use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
 use common_telemetry::debug;
+use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
@@ -188,7 +189,7 @@ impl Memtable for TimeSeriesMemtable {
             let primary_key_encoded = self.row_codec.encode(kv.primary_keys())?;
             let fields = kv.fields().collect::<Vec<_>>();
 
-            allocated += fields.len() * std::mem::size_of::<ValueRef>();
+            allocated += fields.iter().map(|v| v.data_size()).sum::<usize>();
             let (series, series_allocated) = self.series_set.get_or_add_series(primary_key_encoded);
             allocated += series_allocated;
 
@@ -200,6 +201,8 @@ impl Memtable for TimeSeriesMemtable {
             let mut guard = series.write().unwrap();
             guard.push(kv.timestamp(), kv.sequence(), kv.op_type(), fields);
         }
+        allocated += kvs.num_rows() * std::mem::size_of::<Timestamp>();
+        allocated += kvs.num_rows() * std::mem::size_of::<OpType>();
 
         // TODO(hl): this maybe inaccurate since for-iteration may return early.
         // We may lift the primary key length check out of Memtable::write
