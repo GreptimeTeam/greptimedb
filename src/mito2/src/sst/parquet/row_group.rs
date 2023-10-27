@@ -22,7 +22,7 @@ use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::RowGroupMetaData;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
@@ -36,6 +36,24 @@ pub struct InMemoryRowGroup<'a> {
 }
 
 impl<'a> InMemoryRowGroup<'a> {
+    /// Creates a new [InMemoryRowGroup] by `row_group_idx`.
+    ///
+    /// # Panics
+    /// Panics if the `row_group_idx` is invalid.
+    pub fn create(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
+        let metadata = parquet_meta.row_group(row_group_idx);
+        let page_locations = parquet_meta
+            .offset_index()
+            .map(|x| x[row_group_idx].as_slice());
+
+        Self {
+            metadata,
+            row_count: metadata.num_rows() as usize,
+            column_chunks: vec![None; metadata.columns().len()],
+            page_locations,
+        }
+    }
+
     /// Fetches the necessary column data into memory
     // TODO(yingwen): Fix clippy warnings.
     #[allow(clippy::filter_map_bool_then)]
