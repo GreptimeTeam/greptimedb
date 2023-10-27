@@ -185,7 +185,7 @@ impl ParquetReaderBuilder {
             read_format,
             reader_builder,
             current_reader: None,
-            batches: Vec::new(),
+            batches: VecDeque::new(),
         })
     }
 
@@ -318,13 +318,13 @@ pub struct ParquetReader {
     /// Reader of current row group.
     current_reader: Option<ParquetRecordBatchReader>,
     /// Buffered batches to return.
-    batches: Vec<Batch>,
+    batches: VecDeque<Batch>,
 }
 
 #[async_trait]
 impl BatchReader for ParquetReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        if let Some(batch) = self.batches.pop() {
+        if let Some(batch) = self.batches.pop_front() {
             return Ok(Some(batch));
         }
 
@@ -333,13 +333,10 @@ impl BatchReader for ParquetReader {
             return Ok(None);
         };
 
-        // TODO(yingwen): Use a VecDeque.
         self.read_format
             .convert_record_batch(&record_batch, &mut self.batches)?;
-        // Reverse batches so we could pop it.
-        self.batches.reverse();
 
-        Ok(self.batches.pop())
+        Ok(self.batches.pop_front())
     }
 }
 

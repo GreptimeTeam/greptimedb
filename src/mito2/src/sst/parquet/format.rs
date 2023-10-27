@@ -26,7 +26,7 @@
 //!
 //! We stores fields in the same order as [RegionMetadata::field_columns()](store_api::metadata::RegionMetadata::field_columns()).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -181,7 +181,7 @@ impl ReadFormat {
     pub(crate) fn convert_record_batch(
         &self,
         record_batch: &RecordBatch,
-        batches: &mut Vec<Batch>,
+        batches: &mut VecDeque<Batch>,
     ) -> Result<()> {
         debug_assert!(batches.is_empty());
 
@@ -252,7 +252,7 @@ impl ReadFormat {
             }
 
             let batch = builder.build()?;
-            batches.push(batch);
+            batches.push_back(batch);
         }
 
         Ok(())
@@ -771,7 +771,7 @@ mod tests {
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
-        let mut batches = vec![];
+        let mut batches = VecDeque::new();
         read_format
             .convert_record_batch(&record_batch, &mut batches)
             .unwrap();
@@ -793,14 +793,14 @@ mod tests {
         ];
         let arrow_schema = build_test_arrow_schema();
         let record_batch = RecordBatch::try_new(arrow_schema, columns).unwrap();
-        let mut batches = vec![];
+        let mut batches = VecDeque::new();
         read_format
             .convert_record_batch(&record_batch, &mut batches)
             .unwrap();
 
         assert_eq!(
             vec![new_batch(b"one", 1, 1, 2), new_batch(b"two", 11, 10, 2)],
-            batches
+            batches.into_iter().collect::<Vec<_>>(),
         );
     }
 }
