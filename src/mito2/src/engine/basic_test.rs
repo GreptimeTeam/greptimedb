@@ -29,7 +29,7 @@ use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
 #[tokio::test]
@@ -481,7 +481,7 @@ async fn test_estimated_wal_size() {
 
     // check wal size
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.estimated_wal_size(), 124);
+    assert_eq!(region.region_stat().await.wal_usage, 124);
 
     let rows = Rows {
         schema: column_schemas.clone(),
@@ -490,7 +490,7 @@ async fn test_estimated_wal_size() {
     put_rows(&engine, region_id, rows).await;
 
     // check wal size
-    assert_eq!(region.estimated_wal_size(), 249);
+    assert_eq!(region.region_stat().await.wal_usage, 249);
 
     // Delete (a, 0), (a, 1), (a, 2)
     let rows = Rows {
@@ -506,5 +506,59 @@ async fn test_estimated_wal_size() {
     delete_rows(&engine, region_id, rows).await;
 
     // check wal size
-    assert_eq!(region.estimated_wal_size(), 292);
+    assert_eq!(region.region_stat().await.wal_usage, 292);
+}
+
+#[tokio::test]
+async fn test_region_usage() {
+    let mut env = TestEnv::with_prefix("region_usage");
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // region is empty now, we can check manifest size
+    let region = engine.get_region(region_id).unwrap();
+    let region_stat = region.region_stat().await;
+    assert_eq!(region_stat.manifest_usage, 686);
+    assert_eq!(region_stat.memtable_usage, 0);
+
+    // put some rows
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 10, 0),
+    };
+
+    put_rows(&engine, region_id, rows).await;
+
+    let region_stat = region.region_stat().await;
+    assert_eq!(region_stat.memtable_usage, 291);
+
+    // delete some rows
+    let rows = Rows {
+        schema: delete_schema.clone(),
+        rows: build_delete_rows_for_key("a", 0, 3),
+    };
+    delete_rows(&engine, region_id, rows).await;
+
+    let region_stat = region.region_stat().await;
+    assert_eq!(region_stat.memtable_usage, 351);
+    assert_eq!(region_stat.wal_usage, 150);
+
+    // flush memtable
+    flush_region(&engine, region_id, None).await;
+
+    let region_stat = region.region_stat().await;
+    assert_eq!(region_stat.memtable_usage, 0);
+    assert_eq!(region_stat.wal_usage, 0);
+    assert_eq!(region_stat.sst_usage, 2820);
+
+    // region total usage
+    assert_eq!(region_stat.total_usage(), 3826);
 }
