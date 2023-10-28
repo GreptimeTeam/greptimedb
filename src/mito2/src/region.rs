@@ -129,8 +129,6 @@ impl MitoRegion {
         self.writable.store(writable, Ordering::Relaxed);
     }
 
-    // TODO(QuenKar): remove this micro.
-    #[allow(dead_code)]
     /// Returns the region usage in bytes.
     pub(crate) async fn region_stat(&self) -> RegionStat {
         let region_id = self.region_id;
