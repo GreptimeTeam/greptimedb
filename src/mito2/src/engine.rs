@@ -237,11 +237,9 @@ impl RegionEngine for MitoEngine {
         let size = self
             .get_region_usage(region_id)
             .await
-            .map(|usage| usage.disk_usage());
-        match size {
-            Ok(val) => val.try_into().ok(),
-            Err(_) => None,
-        }
+            .map(|usage| usage.disk_usage())
+            .ok()?;
+        size.try_into().ok()
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
