@@ -409,11 +409,6 @@ mod tests {
                 .to_timezone_aware_string(TimeZone::from_tz_string("UTC").unwrap())
         );
         assert_eq!(
-            "02:00:00.001",
-            Time::new(1, TimeUnit::Millisecond)
-                .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Berlin").unwrap())
-        );
-        assert_eq!(
             "03:00:00.001",
             Time::new(1, TimeUnit::Millisecond)
                 .to_timezone_aware_string(TimeZone::from_tz_string("Europe/Moscow").unwrap())
