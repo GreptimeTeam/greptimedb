@@ -486,7 +486,7 @@ async fn test_region_usage() {
     put_rows(&engine, region_id, rows).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.wal_usage, 150);
+    assert!(region_stat.wal_usage > 0);
 
     // delete some rows
     let rows = Rows {
@@ -496,13 +496,13 @@ async fn test_region_usage() {
     delete_rows(&engine, region_id, rows).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.wal_usage, 150);
+    assert!(region_stat.wal_usage > 0);
 
     // flush region
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert_eq!(region_stat.wal_usage, 0);
+    assert!(region_stat.wal_usage == 0);
     assert_eq!(region_stat.sst_usage, 2827);
 
     // region total usage

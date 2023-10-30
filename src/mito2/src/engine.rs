@@ -234,10 +234,14 @@ impl RegionEngine for MitoEngine {
     }
 
     async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
-        self.get_region_usage(region_id)
+        let size = self
+            .get_region_usage(region_id)
             .await
-            .map(|usage| usage.disk_usage() as i64)
-            .ok()
+            .map(|usage| usage.disk_usage());
+        match size {
+            Ok(val) => val.try_into().ok(),
+            Err(_) => None,
+        }
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
