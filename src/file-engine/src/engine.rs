@@ -93,6 +93,10 @@ impl RegionEngine for FileRegionEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
+    async fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
+        unimplemented!("not implemented for file engine yet")
+    }
+
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         self.inner
             .set_writable(region_id, writable)

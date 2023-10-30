@@ -280,15 +280,23 @@ impl HeartbeatTask {
 
     async fn load_region_stats(region_server: &RegionServer) -> Vec<RegionStat> {
         let regions = region_server.opened_regions();
-        regions
-            .into_iter()
-            .map(|(region_id, engine)| RegionStat {
+
+        let mut region_stats = Vec::new();
+        for (region_id, engine) in regions {
+            let approximate_bytes = region_server
+                .region_disk_usage(region_id)
+                .await
+                .unwrap_or(0);
+            let region_stat = RegionStat {
                 region_id: region_id.as_u64(),
                 engine,
+                approximate_bytes,
                 // TODO(ruihang): scratch more info
                 ..Default::default()
-            })
-            .collect::<Vec<_>>()
+            };
+            region_stats.push(region_stat);
+        }
+        region_stats
     }
 
     pub async fn close(&self) -> Result<()> {

@@ -88,7 +88,7 @@ impl MitoEngine {
     }
 
     /// Returns the region disk/memory usage information.
-    pub async fn get_region_stat(&self, region_id: RegionId) -> Result<RegionUsage> {
+    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
             .inner
             .workers
@@ -231,6 +231,13 @@ impl RegionEngine for MitoEngine {
     /// automatically shutdown.)
     async fn stop(&self) -> std::result::Result<(), BoxedError> {
         self.inner.stop().await.map_err(BoxedError::new)
+    }
+
+    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+        self.get_region_usage(region_id)
+            .await
+            .map(|usage| usage.disk_usage() as i64)
+            .ok()
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
