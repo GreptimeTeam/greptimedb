@@ -18,11 +18,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_telemetry::timer;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use humantime_serde::re::humantime;
-use metrics::increment_counter;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
@@ -146,7 +144,7 @@ impl SchemaManager {
         value: Option<SchemaNameValue>,
         if_not_exists: bool,
     ) -> Result<()> {
-        let _timer = timer!(crate::metrics::METRIC_META_CREATE_SCHEMA);
+        let _timer = crate::metrics::METRIC_META_CREATE_SCHEMA.start_timer();
 
         let raw_key = schema.as_raw_key();
         let raw_value = value.unwrap_or_default().try_as_raw_value()?;
@@ -155,7 +153,7 @@ impl SchemaManager {
             .put_conditionally(raw_key, raw_value, if_not_exists)
             .await?
         {
-            increment_counter!(crate::metrics::METRIC_META_CREATE_SCHEMA);
+            crate::metrics::METRIC_META_CREATE_SCHEMA_COUNTER.inc();
         }
 
         Ok(())

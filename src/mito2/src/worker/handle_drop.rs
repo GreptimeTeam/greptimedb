@@ -20,7 +20,6 @@ use common_query::Output;
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
 use futures::TryStreamExt;
-use metrics::decrement_gauge;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
@@ -66,7 +65,7 @@ impl<S> RegionWorkerLoop<S> {
             region_id
         );
 
-        decrement_gauge!(REGION_COUNT, 1.0);
+        REGION_COUNT.dec();
 
         // detach a background task to delete the region dir
         let region_dir = region.access_layer.region_dir().to_owned();

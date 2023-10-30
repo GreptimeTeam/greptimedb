@@ -32,7 +32,6 @@ use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
     PutRequest, RangeRequest,
 };
-use common_telemetry::timer;
 use snafu::OptionExt;
 use tonic::{Request, Response};
 
@@ -51,15 +50,11 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "range".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[self.kv_store().name(), "range", cluster_id_str.as_str()])
+            .start_timer();
 
         let req: RangeRequest = req.into();
 
@@ -77,15 +72,11 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "put".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[self.kv_store().name(), "put", cluster_id_str.as_str()])
+            .start_timer();
 
         let req: PutRequest = req.into();
 
@@ -103,15 +94,11 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "batch_get".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[self.kv_store().name(), "batch_get", cluster_id_str.as_str()])
+            .start_timer();
 
         let req: BatchGetRequest = req.into();
 
@@ -129,15 +116,11 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "batch_pub".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[self.kv_store().name(), "batch_pub", cluster_id_str.as_str()])
+            .start_timer();
 
         let req: BatchPutRequest = req.into();
 
@@ -158,15 +141,15 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "batch_delete".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[
+                self.kv_store().name(),
+                "batch_delete",
+                cluster_id_str.as_str(),
+            ])
+            .start_timer();
 
         let req: BatchDeleteRequest = req.into();
 
@@ -187,15 +170,15 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "compare_and_put".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[
+                self.kv_store().name(),
+                "compare_and_put",
+                cluster_id_str.as_str(),
+            ])
+            .start_timer();
 
         let req: CompareAndPutRequest = req.into();
 
@@ -216,15 +199,15 @@ impl store_server::Store for MetaSrv {
             .as_ref()
             .context(MissingRequestHeaderSnafu)?
             .cluster_id;
+        let cluster_id_str = cluster_id.to_string();
 
-        let _timer = timer!(
-            METRIC_META_KV_REQUEST,
-            &[
-                ("target", self.kv_store().name().to_string()),
-                ("op", "delete_range".to_string()),
-                ("cluster_id", cluster_id.to_string()),
-            ]
-        );
+        let _timer = METRIC_META_KV_REQUEST
+            .with_label_values(&[
+                self.kv_store().name(),
+                "delete_range",
+                cluster_id_str.as_str(),
+            ])
+            .start_timer();
 
         let req: DeleteRangeRequest = req.into();
 

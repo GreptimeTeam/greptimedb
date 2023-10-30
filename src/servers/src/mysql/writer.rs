@@ -20,7 +20,6 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
-use metrics::increment_counter;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
 };
@@ -209,10 +208,9 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
     }
 
     async fn write_query_error(error: impl ErrorExt, w: QueryResultWriter<'a, W>) -> Result<()> {
-        increment_counter!(
-            METRIC_ERROR_COUNTER,
-            &[(METRIC_PROTOCOL_LABEL, METRIC_ERROR_COUNTER_LABEL_MYSQL)]
-        );
+        METRIC_ERROR_COUNTER
+            .with_label_values(&[METRIC_ERROR_COUNTER_LABEL_MYSQL])
+            .inc();
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
         let error = error.output_msg();

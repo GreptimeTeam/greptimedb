@@ -44,8 +44,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
+use common_telemetry::error;
 use common_telemetry::logging::info;
-use common_telemetry::{error, timer};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -422,7 +422,7 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
-        let _timer = timer!(metrics::METRIC_HANDLE_SQL_ELAPSED);
+        let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();
         let query = match query_interceptor.pre_parsing(query, query_ctx.clone()) {
@@ -482,7 +482,7 @@ impl SqlQueryHandler for Instance {
     }
 
     async fn do_exec_plan(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_EXEC_PLAN_ELAPSED);
+        let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         // plan should be prepared before exec
         // we'll do check there
         self.query_engine
@@ -551,7 +551,7 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        let _timer = timer!(metrics::METRIC_HANDLE_PROMQL_ELAPSED);
+        let _timer = metrics::METRIC_HANDLE_PROMQL_ELAPSED.start_timer();
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();

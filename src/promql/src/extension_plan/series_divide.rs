@@ -282,7 +282,7 @@ impl Stream for SeriesDivideStream {
                 let batch = match ready!(self.as_mut().fetch_next_batch(cx)) {
                     Some(Ok(batch)) => batch,
                     None => {
-                        metrics::histogram!(PROMQL_SERIES_COUNT, self.num_series as f64);
+                        PROMQL_SERIES_COUNT.observe(self.num_series as f64);
                         return Poll::Ready(None);
                     }
                     error => return Poll::Ready(error),

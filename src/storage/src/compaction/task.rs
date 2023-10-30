@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error, info, timer};
+use common_telemetry::{debug, error, info};
 use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
@@ -158,7 +158,7 @@ impl<S: LogStore> CompactionTaskImpl<S> {
 #[async_trait::async_trait]
 impl<S: LogStore> CompactionTask for CompactionTaskImpl<S> {
     async fn run(mut self) -> Result<()> {
-        let _timer = timer!(crate::metrics::COMPACT_ELAPSED);
+        let _timer = crate::metrics::COMPACT_ELAPSED.start_timer();
         self.mark_files_compacting(true);
 
         let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
@@ -256,7 +256,7 @@ impl CompactionOutput {
         let opts = WriteOptions {
             sst_write_buffer_size,
         };
-        let _timer = timer!(crate::metrics::MERGE_ELAPSED);
+        let _timer = crate::metrics::MERGE_ELAPSED.start_timer();
         let meta = sst_layer
             .write_sst(self.output_file_id, Source::Reader(reader), &opts)
             .await?

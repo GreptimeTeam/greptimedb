@@ -16,14 +16,25 @@ mod error;
 
 use common_telemetry::error;
 use error::UpdateJemallocMetricsSnafu;
-use metrics::gauge;
+use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
+use prometheus::*;
 use snafu::ResultExt;
 use tikv_jemalloc_ctl::stats::{allocated_mib, resident_mib};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
-pub(crate) const METRIC_JEMALLOC_RESIDENT: &str = "sys.jemalloc.resident";
-pub(crate) const METRIC_JEMALLOC_ALLOCATED: &str = "sys.jemalloc.allocated";
+lazy_static! {
+    pub static ref SYS_JEMALLOC_RESIDEN: IntGauge = register_int_gauge!(
+        "sys_jemalloc_resident",
+        "Total number of bytes allocated by the application."
+    )
+    .unwrap();
+    pub static ref SYS_JEMALLOC_ALLOCATED: IntGauge = register_int_gauge!(
+        "sys_jemalloc_allocated",
+        "Total number of bytes in physically resident data pages mapped by the allocator."
+    )
+    .unwrap();
+}
 
 pub(crate) static JEMALLOC_COLLECTOR: Lazy<Option<JemallocCollector>> = Lazy::new(|| {
     let collector = JemallocCollector::try_new()
@@ -62,8 +73,8 @@ impl JemallocCollector {
         let _ = self.epoch.advance().context(UpdateJemallocMetricsSnafu)?;
         let allocated = self.allocated.read().context(UpdateJemallocMetricsSnafu)?;
         let resident = self.resident.read().context(UpdateJemallocMetricsSnafu)?;
-        gauge!(METRIC_JEMALLOC_ALLOCATED, allocated as f64);
-        gauge!(METRIC_JEMALLOC_RESIDENT, resident as f64);
+        SYS_JEMALLOC_RESIDEN.set(allocated as i64);
+        SYS_JEMALLOC_ALLOCATED.set(resident as i64);
         Ok(())
     }
 }

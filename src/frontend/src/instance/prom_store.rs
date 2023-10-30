@@ -21,7 +21,6 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
-use metrics::counter;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::prom_store::{self, Metrics};
@@ -161,7 +160,7 @@ impl PromStoreProtocolHandler for Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
 
-        counter!(PROM_STORE_REMOTE_WRITE_SAMPLES, samples as u64);
+        PROM_STORE_REMOTE_WRITE_SAMPLES.inc_by(samples as u64);
         Ok(())
     }
 

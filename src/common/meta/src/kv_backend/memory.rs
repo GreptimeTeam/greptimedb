@@ -21,7 +21,6 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
-use common_telemetry::timer;
 use serde::Serializer;
 
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
@@ -269,10 +268,9 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
     type Error = T;
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
-        let _timer = timer!(
-            METRIC_META_TXN_REQUEST,
-            &[("target", "memory"), ("op", "txn")]
-        );
+        let _timer = METRIC_META_TXN_REQUEST
+            .with_label_values(&["memory", "txn"])
+            .start_timer();
 
         let TxnRequest {
             compare,

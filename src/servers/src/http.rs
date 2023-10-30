@@ -69,8 +69,7 @@ use crate::http::prometheus::{
     instant_query, label_values_query, labels_query, range_query, series_query,
 };
 use crate::metrics::{
-    METRIC_CODE_LABEL, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
-    METRIC_METHOD_LABEL, METRIC_PATH_LABEL,
+    HTTP_TRACK_METRICS, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
@@ -674,7 +673,9 @@ impl HttpServer {
 /// A middleware to record metrics for HTTP.
 // Based on https://github.com/tokio-rs/axum/blob/axum-v0.6.16/examples/prometheus-metrics/src/main.rs
 pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
-    let _timer = common_telemetry::timer!("http_track_metrics", &[("tag", "value")]);
+    let _timer = HTTP_TRACK_METRICS
+        .with_label_values(&["value"])
+        .start_timer();
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
         matched_path.as_str().to_owned()
@@ -687,15 +688,13 @@ pub(crate) async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl Int
 
     let latency = start.elapsed().as_secs_f64();
     let status = response.status().as_u16().to_string();
+    let method_str = method.to_string();
 
-    let labels = [
-        (METRIC_METHOD_LABEL, method.to_string()),
-        (METRIC_PATH_LABEL, path),
-        (METRIC_CODE_LABEL, status),
-    ];
-
-    metrics::increment_counter!(METRIC_HTTP_REQUESTS_TOTAL, &labels);
-    metrics::histogram!(METRIC_HTTP_REQUESTS_ELAPSED, latency, &labels);
+    let labels = [method_str.as_str(), path.as_str(), status.as_str()];
+    METRIC_HTTP_REQUESTS_TOTAL.with_label_values(&labels).inc();
+    METRIC_HTTP_REQUESTS_ELAPSED
+        .with_label_values(&labels)
+        .observe(latency);
 
     response
 }

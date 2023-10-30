@@ -15,7 +15,6 @@
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
-use metrics::counter;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
 };
@@ -51,7 +50,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
 
-        counter!(OTLP_METRICS_ROWS, rows as u64);
+        OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let resp = ExportMetricsServiceResponse {
             // TODO(sunng87): add support for partial_success in future patch
@@ -87,7 +86,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
 
-        counter!(OTLP_TRACES_ROWS, rows as u64);
+        OTLP_TRACES_ROWS.inc_by(rows as u64);
 
         let resp = ExportTraceServiceResponse {
             // TODO(fys): add support for partial_success in future patch

@@ -40,7 +40,7 @@ pub(crate) fn to_py_err(err: impl ToString) -> PyErr {
 
 /// init cpython interpreter with `greptime` builtins, if already inited, do nothing
 pub(crate) fn init_cpython_interpreter() -> PyResult<()> {
-    let _t = timer!(metric::METRIC_PYO3_INIT_ELAPSED);
+    let _t = metric::METRIC_PYO3_INIT_ELAPSED.start_timer();
     let mut start = START_PYO3.lock().unwrap();
     if !*start {
         pyo3::append_to_inittab!(greptime_builtins);

@@ -374,10 +374,11 @@ impl Procedure for AlterTableProcedure {
 
         let state = &self.data.state;
 
-        let _timer = common_telemetry::timer!(
-            metrics::METRIC_META_PROCEDURE_ALTER_TABLE,
-            &[("step", state.as_ref().to_string())]
-        );
+        let step = state.as_ref().to_string();
+
+        let _timer = metrics::METRIC_META_PROCEDURE_ALTER_TABLE
+            .with_label_values(&[step.as_str()])
+            .start_timer();
 
         match state {
             AlterTableState::Prepare => self.on_prepare().await,

@@ -28,16 +28,12 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
 use common_telemetry::{logging, TRACE_ID};
-use metrics::{histogram, increment_counter};
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{AuthSnafu, InvalidQuerySnafu, JoinTaskSnafu, NotFoundAuthHeaderSnafu, Result};
-use crate::metrics::{
-    METRIC_AUTH_FAILURE, METRIC_CODE_LABEL, METRIC_DB_LABEL, METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-    METRIC_TYPE_LABEL,
-};
+use crate::metrics::{METRIC_AUTH_FAILURE, METRIC_SERVER_GRPC_DB_REQUEST_TIMER};
 use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
 
 #[derive(Clone)]
@@ -136,10 +132,9 @@ pub(crate) async fn auth(
     }
     .map(Some)
     .map_err(|e| {
-        increment_counter!(
-            METRIC_AUTH_FAILURE,
-            &[(METRIC_CODE_LABEL, format!("{}", e.status_code()))]
-        );
+        METRIC_AUTH_FAILURE
+            .with_label_values(&[format!("{}", e.status_code()).as_str()])
+            .inc();
         e
     })
 }
@@ -204,14 +199,12 @@ impl RequestTimer {
 
 impl Drop for RequestTimer {
     fn drop(&mut self) {
-        histogram!(
-            METRIC_SERVER_GRPC_DB_REQUEST_TIMER,
-            self.start.elapsed(),
-            &[
-                (METRIC_DB_LABEL, std::mem::take(&mut self.db)),
-                (METRIC_TYPE_LABEL, std::mem::take(&mut self.request_type)),
-                (METRIC_CODE_LABEL, self.status_code.to_string())
-            ]
-        );
+        METRIC_SERVER_GRPC_DB_REQUEST_TIMER
+            .with_label_values(&[
+                self.db.as_str(),
+                self.request_type.as_str(),
+                self.status_code.to_string().as_str(),
+            ])
+            .observe(self.start.elapsed().as_secs_f64());
     }
 }

@@ -16,7 +16,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use common_error::ext::BoxedError;
-use common_telemetry::timer;
 use futures::{stream, Stream, TryStreamExt};
 use prost::Message;
 use snafu::{ensure, Location, ResultExt};
@@ -117,7 +116,7 @@ impl<S: LogStore> Wal<S> {
         mut header: WalHeader,
         payload: Option<&Payload>,
     ) -> Result<Id> {
-        let _timer = timer!(crate::metrics::LOG_STORE_WRITE_ELAPSED);
+        let _timer = crate::metrics::LOG_STORE_WRITE_ELAPSED.start_timer();
         if let Some(p) = payload {
             header.mutation_types = wal::gen_mutation_types(p);
         }

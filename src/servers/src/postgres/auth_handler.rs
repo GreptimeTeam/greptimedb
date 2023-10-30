@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use futures::{Sink, SinkExt};
-use metrics::increment_counter;
 use pgwire::api::auth::StartupHandler;
 use pgwire::api::{auth, ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -32,6 +31,7 @@ use snafu::IntoError;
 
 use super::PostgresServerHandler;
 use crate::error::{AuthSnafu, Result};
+use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct PgLoginVerifier {
@@ -102,13 +102,9 @@ impl PgLoginVerifier {
             .await
         {
             Err(e) => {
-                increment_counter!(
-                    crate::metrics::METRIC_AUTH_FAILURE,
-                    &[(
-                        crate::metrics::METRIC_CODE_LABEL,
-                        format!("{}", e.status_code())
-                    )]
-                );
+                METRIC_AUTH_FAILURE
+                    .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                    .inc();
                 Err(AuthSnafu.into_error(e))
             }
             Ok(user_info) => Ok(Some(user_info)),

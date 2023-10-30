@@ -13,6 +13,22 @@
 // limitations under the License.
 
 //! Runtime metrics
-pub const THREAD_NAME_LABEL: &str = "thread.name";
-pub const METRIC_RUNTIME_THREADS_ALIVE: &str = "runtime.threads.alive";
-pub const METRIC_RUNTIME_THREADS_IDLE: &str = "runtime.threads.idle";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+pub const THREAD_NAME_LABEL: &str = "thread_name";
+
+lazy_static! {
+    pub static ref METRIC_RUNTIME_THREADS_ALIVE: IntGaugeVec = register_int_gauge_vec!(
+        "runtime_threads_alive",
+        "runtime threads alive",
+        &[THREAD_NAME_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_RUNTIME_THREADS_IDLE: IntGaugeVec = register_int_gauge_vec!(
+        "runtime_threads_idle",
+        "runtime threads idle",
+        &[THREAD_NAME_LABEL]
+    )
+    .unwrap();
+}

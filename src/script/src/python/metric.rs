@@ -12,13 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Script engine metrics
-pub static METRIC_RSPY_INIT_ELAPSED: &str = "script.rspy.init_elapsed";
-pub static METRIC_RSPY_EXEC_ELAPSED: &str = "script.rspy.exec_elapsed";
-pub static METRIC_RSPY_EXEC_TOTAL_ELAPSED: &str = "script.rspy.exec_total_elapsed";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    pub static ref METRIC_RSPY_INIT_ELAPSED: Histogram =
+        register_histogram!("script_rspy_init_elapsed", "script rspy init elapsed").unwrap();
+    pub static ref METRIC_RSPY_EXEC_ELAPSED: Histogram =
+        register_histogram!("script_rspy_exec_elapsed", "script rspy exec elapsed").unwrap();
+    pub static ref METRIC_RSPY_EXEC_TOTAL_ELAPSED: Histogram = register_histogram!(
+        "script_rspy_exec_total_elapsed",
+        "script rspy exec total elapsed"
+    )
+    .unwrap();
+}
+
 #[cfg(feature = "pyo3_backend")]
-pub static METRIC_PYO3_EXEC_ELAPSED: &str = "script.pyo3.exec_elapsed";
-#[cfg(feature = "pyo3_backend")]
-pub static METRIC_PYO3_INIT_ELAPSED: &str = "script.pyo3.init_elapsed";
-#[cfg(feature = "pyo3_backend")]
-pub static METRIC_PYO3_EXEC_TOTAL_ELAPSED: &str = "script.pyo3.exec_total_elapsed";
+lazy_static! {
+    pub static ref METRIC_PYO3_EXEC_ELAPSED: Histogram =
+        register_histogram!("script_pyo3_exec_elapsed", "script pyo3 exec elapsed").unwrap();
+    pub static ref METRIC_PYO3_INIT_ELAPSED: Histogram =
+        register_histogram!("script_pyo3_init_elapsed", "script pyo3 init elapsed").unwrap();
+    pub static ref METRIC_PYO3_EXEC_TOTAL_ELAPSED: Histogram = register_histogram!(
+        "script_pyo3_exec_total_elapsed",
+        "script pyo3 exec total elapsed"
+    )
+    .unwrap();
+}

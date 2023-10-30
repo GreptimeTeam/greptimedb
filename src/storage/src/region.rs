@@ -25,7 +25,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_telemetry::{info, logging};
 use common_time::util;
-use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::manifest::{
@@ -133,7 +132,7 @@ impl<S: LogStore> Region for RegionImpl<S> {
     }
 
     async fn drop_region(&self) -> Result<()> {
-        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        crate::metrics::REGION_COUNT.dec();
         self.inner.drop_region().await
     }
 
@@ -195,7 +194,7 @@ impl<S: LogStore> RegionImpl<S> {
         // Try to persist region data to manifest, ensure the new region could be recovered from
         // the manifest.
         let manifest_version = {
-            let _timer = common_telemetry::timer!(crate::metrics::CREATE_REGION_UPDATE_MANIFEST);
+            let _timer = crate::metrics::CREATE_REGION_UPDATE_MANIFEST.start_timer();
             store_config
                 .manifest
                 .update(RegionMetaActionList::with_action(RegionMetaAction::Change(
@@ -218,7 +217,7 @@ impl<S: LogStore> RegionImpl<S> {
             store_config.file_purger.clone(),
         );
         let region = RegionImpl::new(version, store_config);
-        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        crate::metrics::REGION_COUNT.inc();
 
         Ok(region)
     }
@@ -368,7 +367,7 @@ impl<S: LogStore> RegionImpl<S> {
             manifest: store_config.manifest,
         });
 
-        increment_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        crate::metrics::REGION_COUNT.inc();
         Ok(Some(RegionImpl { inner }))
     }
 
@@ -573,7 +572,7 @@ impl<S: LogStore> RegionImpl<S> {
     }
 
     pub async fn close(&self, ctx: &CloseContext) -> Result<()> {
-        decrement_gauge!(crate::metrics::REGION_COUNT, 1.0);
+        crate::metrics::REGION_COUNT.dec();
         self.inner.close(ctx).await
     }
 }

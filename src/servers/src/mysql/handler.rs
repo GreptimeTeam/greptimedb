@@ -23,9 +23,8 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, timer, warn};
+use common_telemetry::{error, logging, warn};
 use datatypes::prelude::ConcreteDataType;
-use metrics::increment_counter;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -43,6 +42,7 @@ use sql::statements::statement::Statement;
 use tokio::io::AsyncWrite;
 
 use crate::error::{self, InvalidPrepareStatementSnafu, Result};
+use crate::metrics::METRIC_AUTH_FAILURE;
 use crate::mysql::helper::{
     self, format_placeholder, replace_placeholders, transform_placeholders,
 };
@@ -184,7 +184,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
-                    increment_counter!(crate::metrics::METRIC_AUTH_FAILURE);
+                    METRIC_AUTH_FAILURE.with_label_values(&[""]).inc();
                     warn!("Failed to auth, err: {:?}", e);
                     return false;
                 }
@@ -244,10 +244,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         });
 
         w.reply(stmt_id, &params, &[]).await?;
-        increment_counter!(
-            crate::metrics::METRIC_MYSQL_PREPARED_COUNT,
-            &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
-        );
+        crate::metrics::METRIC_MYSQL_PREPARED_COUNT
+            .with_label_values(&[query_ctx.get_db_string().as_str()])
+            .inc();
         return Ok(());
     }
 
@@ -258,16 +257,11 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         w: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let query_ctx = self.session.new_query_context();
-        let _timer = timer!(
-            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
-            &[
-                (
-                    crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_MYSQL_BINQUERY.to_string()
-                ),
-                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
-            ]
-        );
+        let db = query_ctx.get_db_string();
+        let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
+            .with_label_values(&[crate::metrics::METRIC_MYSQL_BINQUERY, db.as_str()])
+            .start_timer();
+
         let params: Vec<ParamValue> = p.into_iter().collect();
         let sql_plan = match self.plan(stmt_id) {
             None => {
@@ -326,16 +320,10 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
         let query_ctx = self.session.new_query_context();
-        let _timer = timer!(
-            crate::metrics::METRIC_MYSQL_QUERY_TIMER,
-            &[
-                (
-                    crate::metrics::METRIC_MYSQL_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_MYSQL_TEXTQUERY.to_string()
-                ),
-                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
-            ]
-        );
+        let db = query_ctx.get_db_string();
+        let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
+            .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
+            .start_timer();
         let outputs = self.do_query(query, query_ctx.clone()).await;
         writer::write_output(writer, query_ctx, outputs).await?;
         Ok(())
@@ -358,13 +346,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
 
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
-                increment_counter!(
-                    crate::metrics::METRIC_AUTH_FAILURE,
-                    &[(
-                        crate::metrics::METRIC_CODE_LABEL,
-                        format!("{}", e.status_code())
-                    )]
-                );
+                METRIC_AUTH_FAILURE
+                    .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                    .inc();
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,

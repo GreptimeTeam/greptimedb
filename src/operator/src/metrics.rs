@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub const DIST_CREATE_TABLE: &str = "table.operator.create_table";
-pub const DIST_INGEST_ROW_COUNT: &str = "table.operator.ingest_rows";
-pub const DIST_DELETE_ROW_COUNT: &str = "table.operator.delete_rows";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    pub static ref DIST_CREATE_TABLE: Histogram =
+        register_histogram!("table_operator_create_table", "table operator create table").unwrap();
+    pub static ref DIST_INGEST_ROW_COUNT: IntCounter =
+        register_int_counter!("table_operator_ingest_rows", "table operator ingest rows").unwrap();
+    pub static ref DIST_DELETE_ROW_COUNT: IntCounter =
+        register_int_counter!("table_operator_delete_rows", "table operator delete rows").unwrap();
+}

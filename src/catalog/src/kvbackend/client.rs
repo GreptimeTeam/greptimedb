@@ -28,7 +28,7 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_telemetry::{debug, timer};
+use common_telemetry::debug;
 use meta_client::client::MetaClient;
 use moka::future::{Cache, CacheBuilder};
 use snafu::{OptionExt, ResultExt};
@@ -152,10 +152,10 @@ impl KvBackend for CachedMetaKvBackend {
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
-        let _timer = timer!(METRIC_CATALOG_KV_GET);
+        let _timer = METRIC_CATALOG_KV_GET.start_timer();
 
         let init = async {
-            let _timer = timer!(METRIC_CATALOG_KV_REMOTE_GET);
+            let _timer = METRIC_CATALOG_KV_REMOTE_GET.start_timer();
             self.kv_backend.get(key).await.map(|val| {
                 val.with_context(|| CacheNotGetSnafu {
                     key: String::from_utf8_lossy(key),

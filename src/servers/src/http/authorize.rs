@@ -24,7 +24,6 @@ use common_telemetry::warn;
 use futures::future::BoxFuture;
 use headers::Header;
 use http_body::Body;
-use metrics::increment_counter;
 use secrecy::SecretString;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -89,13 +88,9 @@ where
                 Ok((username, password)) => (username, password),
                 Err(e) => {
                     warn!("extract username and password failed: {}", e);
-                    increment_counter!(
-                        crate::metrics::METRIC_AUTH_FAILURE,
-                        &[(
-                            crate::metrics::METRIC_CODE_LABEL,
-                            format!("{}", e.status_code())
-                        )]
-                    );
+                    crate::metrics::METRIC_AUTH_FAILURE
+                        .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                        .inc();
                     return Err(unauthorized_resp());
                 }
             };
@@ -116,13 +111,9 @@ where
                 }
                 Err(e) => {
                     warn!("authenticate failed: {}", e);
-                    increment_counter!(
-                        crate::metrics::METRIC_AUTH_FAILURE,
-                        &[(
-                            crate::metrics::METRIC_CODE_LABEL,
-                            format!("{}", e.status_code())
-                        )]
-                    );
+                    crate::metrics::METRIC_AUTH_FAILURE
+                        .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                        .inc();
                     Err(unauthorized_resp())
                 }
             }

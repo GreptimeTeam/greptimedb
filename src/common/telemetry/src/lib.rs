@@ -21,7 +21,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 pub use logging::{init_default_ut_logging, init_global_logging, trace_id, TRACE_ID};
-pub use metric::init_default_metrics_recorder;
+pub use metric::dump_metrics;
 use once_cell::sync::OnceCell;
 pub use panic_hook::set_panic_hook;
 use parking_lot::Mutex;

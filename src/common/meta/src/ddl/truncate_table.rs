@@ -55,10 +55,11 @@ impl Procedure for TruncateTableProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
-        let _timer = common_telemetry::timer!(
-            metrics::METRIC_META_PROCEDURE_TRUNCATE_TABLE,
-            &[("step", state.as_ref().to_string())]
-        );
+        let step = state.as_ref().to_string();
+
+        let _timer = metrics::METRIC_META_PROCEDURE_TRUNCATE_TABLE
+            .with_label_values(&[step.as_str()])
+            .start_timer();
 
         match self.data.state {
             TruncateTableState::Prepare => self.on_prepare().await,

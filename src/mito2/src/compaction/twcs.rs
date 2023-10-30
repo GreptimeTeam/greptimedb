@@ -19,11 +19,10 @@ use std::time::{Duration, Instant};
 
 use common_base::readable_size::ReadableSize;
 use common_query::Output;
-use common_telemetry::{debug, error, info, timer};
+use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;
-use metrics::increment_counter;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
@@ -35,7 +34,7 @@ use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
 use crate::error;
 use crate::error::CompactRegionSnafu;
-use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
+use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
@@ -316,10 +315,12 @@ impl TwcsCompactionTask {
 
     async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
         self.mark_files_compacting(true);
-        let merge_timer = timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "merge")]);
+        let merge_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["merge"])
+            .start_timer();
         let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
             error!(e; "Failed to compact region: {}", self.region_id);
-            merge_timer.discard();
+            merge_timer.stop_and_discard();
             e
         })?;
         compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
@@ -328,7 +329,7 @@ impl TwcsCompactionTask {
 
     /// Handles compaction failure, notifies all waiters.
     fn on_failure(&mut self, err: Arc<error::Error>) {
-        increment_counter!(COMPACTION_FAILURE_COUNT);
+        COMPACTION_FAILURE_COUNT.inc();
         for waiter in self.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,

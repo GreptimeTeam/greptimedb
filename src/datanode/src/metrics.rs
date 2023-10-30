@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! datanode metrics
+use lazy_static::lazy_static;
+use prometheus::*;
 
-/// The elapsed time of handling a request in the region_server.
-pub const HANDLE_REGION_REQUEST_ELAPSED: &str = "datanode.handle_region_request_elapsed";
 /// Region request type label.
-pub const REGION_REQUEST_TYPE: &str = "datanode.region_request_type";
+pub const REGION_REQUEST_TYPE: &str = "datanode_region_request_type";
+
+lazy_static! {
+    /// The elapsed time of handling a request in the region_server.
+    pub static ref HANDLE_REGION_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
+        "datanode_handle_region_request_elapsed",
+        "datanode handle region request elapsed",
+        &[REGION_REQUEST_TYPE]
+    )
+    .unwrap();
+}

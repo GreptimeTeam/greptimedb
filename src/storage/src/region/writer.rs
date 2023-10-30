@@ -18,7 +18,6 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging;
 use futures::TryStreamExt;
-use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::manifest::{Manifest, ManifestLogStorage, ManifestVersion, MetaAction};
@@ -39,7 +38,7 @@ use crate::manifest::action::{
 };
 use crate::memtable::{Inserter, MemtableBuilderRef, MemtableId, MemtableRef, MemtableVersion};
 use crate::metadata::RegionMetadataRef;
-use crate::metrics::{FLUSH_REASON, FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
+use crate::metrics::{FLUSH_REQUESTS_TOTAL, PREPROCESS_ELAPSED};
 use crate::proto::wal::WalHeader;
 use crate::region::{
     CompactContext, RecoveredMetadata, RecoveredMetadataMap, RegionManifest, SharedDataRef,
@@ -761,7 +760,7 @@ impl WriterInner {
         &mut self,
         writer_ctx: &WriterContext<'_, S>,
     ) -> Result<()> {
-        let _timer = common_telemetry::timer!(PREPROCESS_ELAPSED);
+        let _timer = PREPROCESS_ELAPSED.start_timer();
 
         let version_control = writer_ctx.version_control();
         // Check whether memtable is full or flush should be triggered. We need to do this first since
@@ -821,7 +820,9 @@ impl WriterInner {
         // Freeze all mutable memtables so we can flush them later.
         version_control.freeze_mutable(new_mutable);
 
-        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => reason.as_str());
+        FLUSH_REQUESTS_TOTAL
+            .with_label_values(&[reason.as_str()])
+            .inc();
 
         if let Some(flush_handle) = self.flush_handle.take() {
             // Previous flush job is incomplete, wait util it is finished.

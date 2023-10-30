@@ -40,11 +40,11 @@ futures.workspace = true
 humantime-serde = { workspace = true }
 lazy_static = "1.4"
 memcomparable = "0.2"
-metrics.workspace = true
 moka = { workspace = true, features = ["sync"] }
 object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
+prometheus.workspace = true
 prost.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }

@@ -12,49 +12,97 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use lazy_static::lazy_static;
+use prometheus::*;
+
 /// Stage label.
 pub const STAGE_LABEL: &str = "stage";
-
-/// Global write buffer size in bytes.
-pub const WRITE_BUFFER_BYTES: &str = "mito.write_buffer_bytes";
 /// Type label.
 pub const TYPE_LABEL: &str = "type";
-/// Gauge for open regions
-pub const REGION_COUNT: &str = "mito.region_count";
-/// Elapsed time to handle requests.
-pub const HANDLE_REQUEST_ELAPSED: &str = "mito.handle_request.elapsed";
-
-// ------ Flush related metrics
-/// Counter of scheduled flush requests.
-/// Note that the flush scheduler may merge some flush requests.
-pub const FLUSH_REQUESTS_TOTAL: &str = "mito.flush.requests_total";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
-/// Counter of scheduled failed flush jobs.
-pub const FLUSH_ERRORS_TOTAL: &str = "mito.flush.errors_total";
-/// Elapsed time of a flush job.
-pub const FLUSH_ELAPSED: &str = "mito.flush.elapsed";
-/// Histogram of flushed bytes.
-pub const FLUSH_BYTES_TOTAL: &str = "mito.flush.bytes_total";
-// ------ End of flush related metrics
 
-// ------ Write related metrics
-/// Counter of stalled write requests.
-pub const WRITE_STALL_TOTAL: &str = "mito.write.stall_total";
-/// Counter of rejected write requests.
-pub const WRITE_REJECT_TOTAL: &str = "mito.write.reject_total";
-/// Elapsed time of each write stage.
-pub const WRITE_STAGE_ELAPSED: &str = "mito.write.stage_elapsed";
-/// Counter of rows to write.
-pub const WRITE_ROWS_TOTAL: &str = "mito.write.rows_total";
-// ------ End of write related metrics
+lazy_static! {
+    /// Global write buffer size in bytes.
+    pub static ref WRITE_BUFFER_BYTES: IntGauge =
+        register_int_gauge!("mito_write_buffer_bytes", "mito write buffer bytes").unwrap();
+    /// Gauge for open regions
+    pub static ref REGION_COUNT: IntGauge =
+        register_int_gauge!("mito_region_count", "mito region count").unwrap();
+    /// Elapsed time to handle requests.
+    pub static ref HANDLE_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
+            "mito_handle_request_elapsed",
+            "mito handle request elapsed",
+            &[TYPE_LABEL]
+        )
+        .unwrap();
 
-// Compaction metrics
-/// Timer of different stages in compaction.
-pub const COMPACTION_STAGE_ELAPSED: &str = "mito.compaction.stage_elapsed";
-/// Timer of whole compaction task.
-pub const COMPACTION_ELAPSED_TOTAL: &str = "mito.compaction.total_elapsed";
-/// Counter of all requested compaction task.
-pub const COMPACTION_REQUEST_COUNT: &str = "mito.compaction.requests_total";
-/// Counter of failed compaction task.
-pub const COMPACTION_FAILURE_COUNT: &str = "mito.compaction.failure_total";
+
+
+    // ------ Flush related metrics
+    /// Counter of scheduled flush requests.
+    /// Note that the flush scheduler may merge some flush requests.
+    pub static ref FLUSH_REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
+            "mito_flush_requests_total",
+            "mito flush requests total",
+            &[FLUSH_REASON]
+        )
+        .unwrap();
+    /// Counter of scheduled failed flush jobs.
+    pub static ref FLUSH_ERRORS_TOTAL: IntCounter =
+        register_int_counter!("mito_flush_errors_total", "mito flush errors total").unwrap();
+    /// Elapsed time of a flush job.
+    pub static ref FLUSH_ELAPSED: HistogramVec = register_histogram_vec!(
+            "mito_flush_elapsed",
+            "mito flush elapsed",
+            &[TYPE_LABEL]
+        )
+        .unwrap();
+    /// Histogram of flushed bytes.
+    pub static ref FLUSH_BYTES_TOTAL: IntCounter =
+        register_int_counter!("mito_flush_bytes_total", "mito flush bytes total").unwrap();
+    // ------ End of flush related metrics
+
+
+    // ------ Write related metrics
+    /// Counter of stalled write requests.
+    pub static ref WRITE_STALL_TOTAL: IntCounter =
+        register_int_counter!("mito_write_stall_total", "mito write stall total").unwrap();
+    /// Counter of rejected write requests.
+    pub static ref WRITE_REJECT_TOTAL: IntCounter =
+        register_int_counter!("mito_write_reject_total", "mito write reject total").unwrap();
+    /// Elapsed time of each write stage.
+    pub static ref WRITE_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+            "mito_write_stage_elapsed",
+            "mito write stage elapsed",
+            &[STAGE_LABEL]
+        )
+        .unwrap();
+    /// Counter of rows to write.
+    pub static ref WRITE_ROWS_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "mito_write_rows_total",
+        "mito write rows total",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
+    // ------ End of write related metrics
+
+
+    // Compaction metrics
+    /// Timer of different stages in compaction.
+    pub static ref COMPACTION_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "mito_compaction_stage_elapsed",
+        "mito compaction stage elapsed",
+        &[STAGE_LABEL]
+    )
+    .unwrap();
+    /// Timer of whole compaction task.
+    pub static ref COMPACTION_ELAPSED_TOTAL: Histogram =
+        register_histogram!("mito_compaction_total_elapsed", "mito compaction total elapsed").unwrap();
+    /// Counter of all requested compaction task.
+    pub static ref COMPACTION_REQUEST_COUNT: IntCounter =
+        register_int_counter!("mito_compaction_requests_total", "mito compaction requests total").unwrap();
+    /// Counter of failed compaction task.
+    pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
+        register_int_counter!("mito_compaction_failure_total", "mito compaction failure total").unwrap();
+}

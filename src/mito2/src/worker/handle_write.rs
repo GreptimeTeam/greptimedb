@@ -17,16 +17,13 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
-use common_telemetry::timer;
-use metrics::counter;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
 use crate::error::{RejectWriteSnafu, Result};
 use crate::metrics::{
-    STAGE_LABEL, TYPE_LABEL, WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED,
-    WRITE_STALL_TOTAL,
+    WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::{SenderWriteRequest, WriteRequest};
@@ -56,7 +53,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
-            counter!(WRITE_STALL_TOTAL, write_requests.len() as u64);
+            WRITE_STALL_TOTAL.inc_by(write_requests.len() as u64);
 
             self.stalled_requests.append(&mut write_requests);
             self.listener.on_write_stall();
@@ -67,7 +64,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Write to WAL.
         {
-            let _timer = timer!(WRITE_STAGE_ELAPSED, &[(STAGE_LABEL, "write_wal")]);
+            let _timer = WRITE_STAGE_ELAPSED
+                .with_label_values(&["write_wal"])
+                .start_timer();
             let mut wal_writer = self.wal.writer();
             for region_ctx in region_ctxs.values_mut() {
                 if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
@@ -86,16 +85,21 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
         {
-            let _timer = timer!(WRITE_STAGE_ELAPSED, &[(STAGE_LABEL, "write_memtable")]);
+            let _timer = WRITE_STAGE_ELAPSED
+                .with_label_values(&["write_memtable"])
+                .start_timer();
             for mut region_ctx in region_ctxs.into_values() {
                 region_ctx.write_memtable();
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             }
         }
-
-        counter!(WRITE_ROWS_TOTAL, put_rows as u64, TYPE_LABEL => "put");
-        counter!(WRITE_ROWS_TOTAL, delete_rows as u64, TYPE_LABEL => "delete");
+        WRITE_ROWS_TOTAL
+            .with_label_values(&["put"])
+            .inc_by(put_rows as u64);
+        WRITE_ROWS_TOTAL
+            .with_label_values(&["delete"])
+            .inc_by(delete_rows as u64);
     }
 }
 
@@ -167,7 +171,7 @@ impl<S> RegionWorkerLoop<S> {
 
 /// Send rejected error to all `write_requests`.
 fn reject_write_requests(write_requests: Vec<SenderWriteRequest>) {
-    counter!(WRITE_REJECT_TOTAL, write_requests.len() as u64);
+    WRITE_REJECT_TOTAL.inc_by(write_requests.len() as u64);
 
     for req in write_requests {
         req.sender.send(

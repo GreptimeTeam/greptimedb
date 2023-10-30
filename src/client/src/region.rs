@@ -24,7 +24,7 @@ use common_meta::datanode_manager::{AffectedRows, Datanode};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
-use common_telemetry::{error, timer};
+use common_telemetry::error;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
@@ -152,11 +152,9 @@ impl RegionRequester {
             .with_context(|| MissingFieldSnafu { field: "body" })?
             .as_ref()
             .to_string();
-
-        let _timer = timer!(
-            metrics::METRIC_REGION_REQUEST_GRPC,
-            &[("request_type", request_type)]
-        );
+        let _timer = metrics::METRIC_REGION_REQUEST_GRPC
+            .with_label_values(&[request_type.as_str()])
+            .start_timer();
 
         let mut client = self.client.raw_region_client()?;
 

@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
-use metrics::{decrement_gauge, increment_gauge};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use table::predicate::Predicate;
@@ -131,7 +130,7 @@ impl AllocTracker {
     /// Tracks `bytes` memory is allocated.
     pub(crate) fn on_allocation(&self, bytes: usize) {
         self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
-        increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
+        WRITE_BUFFER_BYTES.add(bytes as i64);
         if let Some(write_buffer_manager) = &self.write_buffer_manager {
             write_buffer_manager.reserve_mem(bytes);
         }
@@ -167,7 +166,7 @@ impl Drop for AllocTracker {
         }
 
         let bytes_allocated = self.bytes_allocated.load(Ordering::Relaxed);
-        decrement_gauge!(WRITE_BUFFER_BYTES, bytes_allocated as f64);
+        WRITE_BUFFER_BYTES.sub(bytes_allocated as i64);
 
         // Memory tracked by this tracker is freed.
         if let Some(write_buffer_manager) = &self.write_buffer_manager {

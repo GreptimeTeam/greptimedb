@@ -10,9 +10,7 @@ name = "greptime"
 path = "src/bin/greptime.rs"
 
 [features]
-default = ["metrics-process"]
 tokio-console = ["common-telemetry/tokio-console"]
-metrics-process = ["servers/metrics-process"]
 
 [dependencies]
 anymap = "1.0.0-beta.2"
@@ -45,11 +43,11 @@ futures.workspace = true
 lazy_static.workspace = true
 meta-client = { workspace = true }
 meta-srv = { workspace = true }
-metrics.workspace = true
 mito2 = { workspace = true }
 nu-ansi-term = "0.46"
 partition = { workspace = true }
 plugins.workspace = true
+prometheus.workspace = true
 prost.workspace = true
 query = { workspace = true }
 rand.workspace = true

@@ -184,12 +184,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
         region.update_flush_millis();
 
+        let timer = std::mem::take(&mut request.timer);
+        let elapsed = timer.map(|x| x.stop_and_discard()).unwrap_or_default();
+
         // Delete wal.
         info!(
             "Region {} flush finished, elapsed: {:?}, tries to bump wal to {}",
-            region_id,
-            request.timer.elapsed(),
-            request.flushed_entry_id
+            region_id, elapsed, request.flushed_entry_id
         );
         if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
             error!(e; "Failed to write wal, region: {}", region_id);

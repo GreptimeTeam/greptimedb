@@ -20,7 +20,6 @@ use std::time::{Duration, SystemTime};
 use chrono::DateTime;
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
-use common_telemetry::timer;
 use promql_parser::parser::ast::{Extension as NodeExtension, ExtensionExpr};
 use promql_parser::parser::Expr::Extension;
 use promql_parser::parser::{EvalStmt, Expr, ValueType};
@@ -106,7 +105,7 @@ pub struct QueryLanguageParser {}
 
 impl QueryLanguageParser {
     pub fn parse_sql(sql: &str) -> Result<QueryStatement> {
-        let _timer = timer!(METRIC_PARSE_SQL_ELAPSED);
+        let _timer = METRIC_PARSE_SQL_ELAPSED.start_timer();
         let mut statement = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {})
             .map_err(BoxedError::new)
             .context(QueryParseSnafu {
@@ -123,7 +122,7 @@ impl QueryLanguageParser {
     }
 
     pub fn parse_promql(query: &PromQuery) -> Result<QueryStatement> {
-        let _timer = timer!(METRIC_PARSE_PROMQL_ELAPSED);
+        let _timer = METRIC_PARSE_PROMQL_ELAPSED.start_timer();
 
         let expr = promql_parser::parser::parse(&query.query)
             .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))

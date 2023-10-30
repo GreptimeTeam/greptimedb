@@ -9,9 +9,10 @@ async-trait.workspace = true
 common-error = { workspace = true }
 common-macro = { workspace = true }
 common-telemetry = { workspace = true }
-metrics.workspace = true
+lazy_static.workspace = true
 once_cell.workspace = true
 paste.workspace = true
+prometheus.workspace = true
 snafu.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true

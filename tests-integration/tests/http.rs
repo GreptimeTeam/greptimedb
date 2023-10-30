@@ -495,7 +495,6 @@ pub async fn test_prom_http_api(store_type: StorageType) {
 
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    common_telemetry::init_default_metrics_recorder();
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
     let client = TestClient::new(app);
 

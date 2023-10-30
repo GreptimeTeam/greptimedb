@@ -18,7 +18,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
-use metrics::increment_counter;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -320,7 +319,7 @@ async fn execute_flush_region<S: LogStore>(
     if let Err(e) = flush_job.run().await {
         logging::error!(e; "Failed to flush region {}", req.region_id());
 
-        increment_counter!(FLUSH_ERRORS_TOTAL);
+        FLUSH_ERRORS_TOTAL.inc();
 
         FlushRequest::Region { req, sender }.complete(Err(e));
     } else {

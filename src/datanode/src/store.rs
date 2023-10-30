@@ -26,7 +26,7 @@ use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
-use object_store::layers::{LoggingLayer, LruCacheLayer, MetricsLayer, RetryLayer, TracingLayer};
+use object_store::layers::{LoggingLayer, LruCacheLayer, RetryLayer, TracingLayer};
 use object_store::services::Fs as FsBuilder;
 use object_store::util::normalize_dir;
 use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
@@ -58,8 +58,7 @@ pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectSto
         object_store
     };
 
-    Ok(object_store
-        .layer(MetricsLayer)
+    let store = object_store
         .layer(
             LoggingLayer::default()
                 // Print the expected error only in DEBUG level.
@@ -67,7 +66,23 @@ pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectSto
                 .with_error_level(Some("debug"))
                 .expect("input error level must be valid"),
         )
-        .layer(TracingLayer))
+        .layer(TracingLayer);
+
+    // In the test environment, multiple datanodes will be started in the same process.
+    // If each datanode registers Prometheus metric when it starts, it will cause the program to crash. (Because the same metric is registered repeatedly.)
+    // So the Prometheus metric layer is disabled in the test environment.
+    #[cfg(feature = "testing")]
+    return Ok(store);
+
+    #[cfg(not(feature = "testing"))]
+    {
+        let registry = prometheus::default_registry();
+        Ok(
+            store.layer(object_store::layers::PrometheusLayer::with_registry(
+                registry.clone(),
+            )),
+        )
+    }
 }
 
 async fn create_object_store_with_cache(

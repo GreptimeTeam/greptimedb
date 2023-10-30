@@ -17,7 +17,13 @@ use std::panic;
 use std::time::Duration;
 
 use backtrace::Backtrace;
-use metrics::increment_counter;
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    pub static ref PANIC_COUNTER: IntCounter =
+        register_int_counter!("panic_counter", "panic_counter").unwrap();
+}
 
 pub fn set_panic_hook() {
     // Set a panic hook that records the panic as a `tracing` event at the
@@ -41,7 +47,7 @@ pub fn set_panic_hook() {
         } else {
             tracing::error!(message = %panic, backtrace = %backtrace);
         }
-        increment_counter!("panic_counter");
+        PANIC_COUNTER.inc();
         default_hook(panic);
     }));
 

@@ -17,10 +17,8 @@ use std::collections::HashMap;
 use axum::body::{Body, Bytes};
 use axum::extract::{Json, Query, RawBody, State};
 use axum::Form;
-use common_telemetry::metric;
 use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
-use metrics::counter;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
     JsonOutput,
@@ -154,11 +152,14 @@ async fn test_sql_form() {
     }
 }
 
+lazy_static::lazy_static! {
+  static ref TEST_METRIC: prometheus::Counter =
+  prometheus::register_counter!("test_metrics", "test_metrics")
+          .unwrap();
+}
 #[tokio::test]
 async fn test_metrics() {
-    metric::init_default_metrics_recorder();
-
-    counter!("test_metrics", 1);
+    TEST_METRIC.inc();
     let stats = MetricsHandler;
     let text = http_handler::metrics(axum::extract::State(stats), Query(HashMap::default())).await;
     assert!(text.contains("test_metrics counter"));

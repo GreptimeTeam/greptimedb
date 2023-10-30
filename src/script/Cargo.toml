@@ -47,8 +47,10 @@ datafusion-physical-expr = { workspace = true, optional = true }
 datatypes = { workspace = true }
 futures-util.workspace = true
 futures.workspace = true
+lazy_static.workspace = true
 once_cell.workspace = true
 paste = { workspace = true, optional = true }
+prometheus.workspace = true
 query = { workspace = true }
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC
 pyo3 = { version = "0.19", optional = true, features = ["abi3", "abi3-py37"] }

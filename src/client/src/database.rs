@@ -28,7 +28,7 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamAdaptor;
-use common_telemetry::{logging, timer};
+use common_telemetry::logging;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -111,12 +111,12 @@ impl Database {
     }
 
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
-        let _timer = timer!(metrics::METRIC_GRPC_INSERT);
+        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::Inserts(requests)).await
     }
 
     pub async fn row_insert(&self, requests: RowInsertRequests) -> Result<u32> {
-        let _timer = timer!(metrics::METRIC_GRPC_INSERT);
+        let _timer = metrics::METRIC_GRPC_INSERT.start_timer();
         self.handle(Request::RowInserts(requests)).await
     }
 
@@ -141,7 +141,7 @@ impl Database {
     }
 
     pub async fn delete(&self, request: DeleteRequests) -> Result<u32> {
-        let _timer = timer!(metrics::METRIC_GRPC_DELETE);
+        let _timer = metrics::METRIC_GRPC_DELETE.start_timer();
         self.handle(Request::Deletes(request)).await
     }
 
@@ -171,7 +171,7 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let _timer = timer!(metrics::METRIC_GRPC_SQL);
+        let _timer = metrics::METRIC_GRPC_SQL.start_timer();
         self.do_get(
             Request::Query(QueryRequest {
                 query: Some(Query::Sql(sql.as_ref().to_string())),
@@ -182,7 +182,7 @@ impl Database {
     }
 
     pub async fn logical_plan(&self, logical_plan: Vec<u8>, trace_id: u64) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_LOGICAL_PLAN);
+        let _timer = metrics::METRIC_GRPC_LOGICAL_PLAN.start_timer();
         self.do_get(
             Request::Query(QueryRequest {
                 query: Some(Query::LogicalPlan(logical_plan)),
@@ -199,7 +199,7 @@ impl Database {
         end: &str,
         step: &str,
     ) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_PROMQL_RANGE_QUERY);
+        let _timer = metrics::METRIC_GRPC_PROMQL_RANGE_QUERY.start_timer();
         self.do_get(
             Request::Query(QueryRequest {
                 query: Some(Query::PromRangeQuery(PromRangeQuery {
@@ -215,7 +215,7 @@ impl Database {
     }
 
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_CREATE_TABLE);
+        let _timer = metrics::METRIC_GRPC_CREATE_TABLE.start_timer();
         self.do_get(
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::CreateTable(expr)),
@@ -226,7 +226,7 @@ impl Database {
     }
 
     pub async fn alter(&self, expr: AlterExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_ALTER);
+        let _timer = metrics::METRIC_GRPC_ALTER.start_timer();
         self.do_get(
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::Alter(expr)),
@@ -237,7 +237,7 @@ impl Database {
     }
 
     pub async fn drop_table(&self, expr: DropTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_DROP_TABLE);
+        let _timer = metrics::METRIC_GRPC_DROP_TABLE.start_timer();
         self.do_get(
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::DropTable(expr)),
@@ -248,7 +248,7 @@ impl Database {
     }
 
     pub async fn truncate_table(&self, expr: TruncateTableExpr) -> Result<Output> {
-        let _timer = timer!(metrics::METRIC_GRPC_TRUNCATE_TABLE);
+        let _timer = metrics::METRIC_GRPC_TRUNCATE_TABLE.start_timer();
         self.do_get(
             Request::Ddl(DdlRequest {
                 expr: Some(DdlExpr::TruncateTable(expr)),
@@ -260,7 +260,7 @@ impl Database {
 
     async fn do_get(&self, request: Request, trace_id: u64) -> Result<Output> {
         // FIXME(paomian): should be added some labels for metrics
-        let _timer = timer!(metrics::METRIC_GRPC_DO_GET);
+        let _timer = metrics::METRIC_GRPC_DO_GET.start_timer();
         let request = self.to_rpc_request(request, trace_id);
         let request = Ticket {
             ticket: request.encode_to_vec().into(),

@@ -11,13 +11,41 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+use lazy_static::lazy_static;
+use prometheus::*;
 
-pub static METRIC_PARSE_SQL_ELAPSED: &str = "query.parse_sql_elapsed";
-pub static METRIC_PARSE_PROMQL_ELAPSED: &str = "query.parse_promql_elapsed";
-pub static METRIC_OPTIMIZE_LOGICAL_ELAPSED: &str = "query.optimize_logicalplan_elapsed";
-pub static METRIC_OPTIMIZE_PHYSICAL_ELAPSED: &str = "query.optimize_physicalplan_elapsed";
-pub static METRIC_CREATE_PHYSICAL_ELAPSED: &str = "query.create_physicalplan_elapsed";
-pub static METRIC_EXEC_PLAN_ELAPSED: &str = "query.execute_plan_elapsed";
-pub static METRIC_MERGE_SCAN_POLL_ELAPSED: &str = "query.merge_scan.poll_elapsed";
-pub static METRIC_MERGE_SCAN_REGIONS: &str = "query.merge_scan.regions";
-pub static METRIC_MERGE_SCAN_ERRORS_TOTAL: &str = "query.merge_scan.errors_total";
+lazy_static! {
+    pub static ref METRIC_PARSE_SQL_ELAPSED: Histogram =
+        register_histogram!("query_parse_sql_elapsed", "query parse sql elapsed").unwrap();
+    pub static ref METRIC_PARSE_PROMQL_ELAPSED: Histogram =
+        register_histogram!("query_parse_promql_elapsed", "query parse promql elapsed").unwrap();
+    pub static ref METRIC_OPTIMIZE_LOGICAL_ELAPSED: Histogram = register_histogram!(
+        "query_optimize_logicalplan_elapsed",
+        "query optimize logicalplan elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_OPTIMIZE_PHYSICAL_ELAPSED: Histogram = register_histogram!(
+        "query_optimize_physicalplan_elapsed",
+        "query optimize physicalplan elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_CREATE_PHYSICAL_ELAPSED: Histogram = register_histogram!(
+        "query_create_physicalplan_elapsed",
+        "query create physicalplan elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_EXEC_PLAN_ELAPSED: Histogram =
+        register_histogram!("query_execute_plan_elapsed", "query execute plan elapsed").unwrap();
+    pub static ref METRIC_MERGE_SCAN_POLL_ELAPSED: Histogram = register_histogram!(
+        "query_merge_scan_poll_elapsed",
+        "query merge scan poll elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_MERGE_SCAN_REGIONS: Histogram =
+        register_histogram!("query_merge_scan_regions", "query merge scan regions").unwrap();
+    pub static ref METRIC_MERGE_SCAN_ERRORS_TOTAL: IntCounter = register_int_counter!(
+        "query_merge_scan_errors_total",
+        "query merge scan errors total"
+    )
+    .unwrap();
+}

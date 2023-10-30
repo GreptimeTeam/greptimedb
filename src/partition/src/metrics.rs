@@ -12,4 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_TABLE_ROUTE_GET: &str = "frontend.table_route.get";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    pub static ref METRIC_TABLE_ROUTE_GET_REMOTE: Histogram = register_histogram!(
+        "frontend_table_route_get_remote",
+        "frontend table route get remote"
+    )
+    .unwrap();
+    pub static ref METRIC_TABLE_ROUTE_GET: Histogram =
+        register_histogram!("frontend_table_route_get", "frontend table route get").unwrap();
+}
