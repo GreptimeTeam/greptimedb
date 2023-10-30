@@ -40,17 +40,16 @@ const ESTIMATED_WAL_FACTOR: f32 = 0.42825;
 
 /// Region status include region id, memtable usage, sst usage, wal usage and manifest usage.
 #[derive(Debug)]
-pub struct RegionStat {
+pub struct RegionUsage {
     pub region_id: RegionId,
-    pub memtable_usage: u64,
     pub wal_usage: u64,
     pub sst_usage: u64,
     pub manifest_usage: u64,
 }
 
-impl RegionStat {
-    pub fn total_usage(&self) -> u64 {
-        self.memtable_usage + self.wal_usage + self.sst_usage + self.manifest_usage
+impl RegionUsage {
+    pub fn disk_usage(&self) -> u64 {
+        self.wal_usage + self.sst_usage + self.manifest_usage
     }
 }
 
@@ -130,7 +129,7 @@ impl MitoRegion {
     }
 
     /// Returns the region usage in bytes.
-    pub(crate) async fn region_stat(&self) -> RegionStat {
+    pub(crate) async fn region_usage(&self) -> RegionUsage {
         let region_id = self.region_id;
 
         let version = self.version();
@@ -143,9 +142,8 @@ impl MitoRegion {
 
         let manifest_usage = self.manifest_manager.manifest_usage().await;
 
-        RegionStat {
+        RegionUsage {
             region_id,
-            memtable_usage,
             wal_usage,
             sst_usage,
             manifest_usage,

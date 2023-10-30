@@ -58,7 +58,7 @@ use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::{HANDLE_REQUEST_ELAPSED, TYPE_LABEL};
 use crate::read::scan_region::{ScanRegion, Scanner};
-use crate::region::RegionStat;
+use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
@@ -88,14 +88,14 @@ impl MitoEngine {
     }
 
     /// Returns the region disk/memory usage information.
-    pub async fn get_region_stat(&self, region_id: RegionId) -> Result<RegionStat> {
+    pub async fn get_region_stat(&self, region_id: RegionId) -> Result<RegionUsage> {
         let region = self
             .inner
             .workers
             .get_region(region_id)
             .context(RegionNotFoundSnafu { region_id })?;
 
-        Ok(region.region_stat().await)
+        Ok(region.region_usage().await)
     }
 
     /// Returns a scanner to scan for `request`.
