@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use snafu::OptionExt;
-
-use crate::error::{DefaultStorageNotFoundSnafu, Result};
 use crate::ObjectStore;
+
+pub type ObjectStoreManagerRef = Arc<ObjectStoreManager>;
 
 /// Manages multiple object stores so that users can configure a storage for each table.
 /// This struct certainly have one default object store, and can have zero or more custom object stores.
@@ -27,23 +27,20 @@ pub struct ObjectStoreManager {
 }
 
 impl ObjectStoreManager {
-    /// Creates a new manager with specific object stores. Returns an error if `stores` doesn't contain the default object store.
-    pub fn try_new(
-        stores: HashMap<String, ObjectStore>,
-        default_object_store: &str,
-    ) -> Result<Self> {
-        let default_object_store = stores
-            .get(default_object_store)
-            .context(DefaultStorageNotFoundSnafu {
-                default_object_store,
-            })?
-            .clone();
-        Ok(ObjectStoreManager {
-            stores,
-            default_object_store,
-        })
+    /// Creates a new manager from the object store used as a default one.
+    pub fn new(name: &str, object_store: ObjectStore) -> Self {
+        ObjectStoreManager {
+            stores: [(name.to_string(), object_store.clone())].into(),
+            default_object_store: object_store,
+        }
     }
 
+    /// Adds an object store to the manager.
+    pub fn add(&mut self, name: &str, object_store: ObjectStore) {
+        self.stores.insert(name.to_string(), object_store);
+    }
+
+    /// Finds an object store corresponding to the name.
     pub fn find(&self, name: &str) -> Option<&ObjectStore> {
         self.stores.get(name)
     }
@@ -55,12 +52,9 @@ impl ObjectStoreManager {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
 
     use super::ObjectStoreManager;
-    use crate::error::Error;
     use crate::services::Fs as Builder;
     use crate::ObjectStore;
 
@@ -72,36 +66,18 @@ mod tests {
     }
 
     #[test]
-    fn test_new_returns_err_when_global_store_not_exist() {
-        let dir = create_temp_dir("new");
-        let object_store = new_object_store(&dir);
-        let stores: HashMap<String, ObjectStore> = vec![
-            ("File".to_string(), object_store.clone()),
-            ("S3".to_string(), object_store.clone()),
-        ]
-        .into_iter()
-        .collect();
+    fn test_manager_behavior() {
+        let dir = create_temp_dir("default");
+        let mut manager = ObjectStoreManager::new("default", new_object_store(&dir));
 
-        assert!(matches!(
-            ObjectStoreManager::try_new(stores, "Gcs"),
-            Err(Error::DefaultStorageNotFound { .. })
-        ));
-    }
+        assert!(manager.find("default").is_some());
+        assert!(manager.find("Gcs").is_none());
 
-    #[test]
-    fn test_new_returns_ok() {
-        let dir = create_temp_dir("new");
-        let object_store = new_object_store(&dir);
-        let stores: HashMap<String, ObjectStore> = vec![
-            ("File".to_string(), object_store.clone()),
-            ("S3".to_string(), object_store.clone()),
-        ]
-        .into_iter()
-        .collect();
-        let object_store_manager = ObjectStoreManager::try_new(stores, "File").unwrap();
-        assert_eq!(object_store_manager.stores.len(), 2);
-        assert!(object_store_manager.find("File").is_some());
-        assert!(object_store_manager.find("S3").is_some());
-        assert!(object_store_manager.find("Gcs").is_none());
+        let dir = create_temp_dir("default");
+        manager.add("Gcs", new_object_store(&dir));
+
+        // Should not overwrite the default object store with the new one.
+        assert!(manager.find("default").is_some());
+        assert!(manager.find("Gcs").is_some());
     }
 }

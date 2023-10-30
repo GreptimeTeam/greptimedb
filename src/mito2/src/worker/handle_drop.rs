@@ -43,7 +43,9 @@ impl<S> RegionWorkerLoop<S> {
 
         // write dropping marker
         let marker_path = join_path(region.access_layer.region_dir(), DROPPING_MARKER_FILE);
-        self.object_store
+        region
+            .access_layer
+            .object_store()
             .write(&marker_path, vec![])
             .await
             .context(OpenDalSnafu)?;
@@ -68,7 +70,7 @@ impl<S> RegionWorkerLoop<S> {
 
         // detach a background task to delete the region dir
         let region_dir = region.access_layer.region_dir().to_owned();
-        let object_store = self.object_store.clone();
+        let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
         common_runtime::spawn_bg(async move {
