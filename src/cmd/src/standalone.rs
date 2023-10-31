@@ -317,6 +317,7 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
         let mut fe_opts = opts.frontend;
+        #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
             .await
             .context(StartFrontendSnafu)?;
@@ -426,6 +427,7 @@ mod tests {
             ..Default::default()
         };
 
+        #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();

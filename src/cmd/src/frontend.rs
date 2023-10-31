@@ -188,6 +188,7 @@ impl StartCommand {
     }
 
     async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+        #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
             .context(StartFrontendSnafu)?;
@@ -312,6 +313,7 @@ mod tests {
             ..Default::default()
         };
 
+        #[allow(clippy::unnecessary_mut_passed)]
         let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
