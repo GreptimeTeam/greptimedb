@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 use common_telemetry::logging::debug;
 use futures::FutureExt;
-use metrics::{decrement_gauge, increment_counter, increment_gauge};
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
 use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
@@ -76,12 +75,12 @@ impl<C: Accessor + Clone> ReadCache<C> {
         let eviction_listener =
             move |read_key: Arc<String>, read_result: ReadResult, cause| -> ListenerFuture {
                 // Delete the file from local file cache when it's purged from mem_cache.
-                decrement_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
+                OBJECT_STORE_LRU_CACHE_ENTRIES.dec();
                 let file_cache_cloned = file_cache_cloned.clone();
 
                 async move {
                     if let ReadResult::Success(size) = read_result {
-                        decrement_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
+                        OBJECT_STORE_LRU_CACHE_BYTES.sub(size as i64);
 
                         let result = file_cache_cloned.delete(&read_key, OpDelete::new()).await;
                         debug!(
@@ -147,8 +146,8 @@ impl<C: Accessor + Clone> ReadCache<C> {
                     stat.into_metadata().content_length()
                 };
 
-                increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
-                increment_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, size as f64);
+                OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
+                OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
                 self.mem_cache
                     .insert(read_key.to_string(), ReadResult::Success(size as u32))
                     .await;
@@ -200,17 +199,21 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 // while reading, we have to fallback to remote read
                 match self.file_cache.read(&read_key, OpRead::default()).await {
                     Ok(ret) => {
-                        increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "success");
+                        OBJECT_STORE_LRU_CACHE_HIT
+                            .with_label_values(&["success"])
+                            .inc();
                         Ok(to_output_reader(ret))
                     }
                     Err(_) => {
-                        increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
+                        OBJECT_STORE_LRU_CACHE_MISS.inc();
                         inner.read(path, args).await.map(to_output_reader)
                     }
                 }
             }
             ReadResult::NotFound => {
-                increment_counter!(OBJECT_STORE_LRU_CACHE_HIT, "result" => "not_found");
+                OBJECT_STORE_LRU_CACHE_HIT
+                    .with_label_values(&["not_found"])
+                    .inc();
 
                 Err(OpendalError::new(
                     ErrorKind::NotFound,
@@ -231,7 +234,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
     where
         I: Accessor,
     {
-        increment_counter!(OBJECT_STORE_LRU_CACHE_MISS);
+        OBJECT_STORE_LRU_CACHE_MISS.inc();
 
         let inner_result = inner.read(path, args).await;
 
@@ -247,22 +250,25 @@ impl<C: Accessor + Clone> ReadCache<C> {
                 writer.close().await?;
 
                 let read_bytes = rp.metadata().content_length() as u32;
-                increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
-                increment_gauge!(OBJECT_STORE_LRU_CACHE_BYTES, read_bytes as f64);
+                OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
+                OBJECT_STORE_LRU_CACHE_BYTES.add(read_bytes as i64);
 
                 Ok(ReadResult::Success(read_bytes))
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                increment_counter!(OBJECT_STORE_READ_ERROR, "kind" => format!("{}", e.kind()));
-                increment_gauge!(OBJECT_STORE_LRU_CACHE_ENTRIES, 1.0);
+                OBJECT_STORE_READ_ERROR
+                    .with_label_values(&[e.kind().to_string().as_str()])
+                    .inc();
+                OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
 
                 Ok(ReadResult::NotFound)
             }
 
             Err(e) => {
-                increment_counter!(OBJECT_STORE_READ_ERROR, "kind" => format!("{}", e.kind()));
-
+                OBJECT_STORE_READ_ERROR
+                    .with_label_values(&[e.kind().to_string().as_str()])
+                    .inc();
                 Err(e)
             }
         }

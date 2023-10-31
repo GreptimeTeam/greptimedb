@@ -251,10 +251,9 @@ impl Procedure for CreateTableProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.creator.data.state;
 
-        let _timer = common_telemetry::timer!(
-            metrics::METRIC_META_PROCEDURE_CREATE_TABLE,
-            &[("step", state.as_ref().to_string())]
-        );
+        let _timer = metrics::METRIC_META_PROCEDURE_CREATE_TABLE
+            .with_label_values(&[state.as_ref()])
+            .start_timer();
 
         match state {
             CreateTableState::Prepare => self.on_prepare().await,

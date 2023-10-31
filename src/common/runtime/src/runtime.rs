@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use metrics::{decrement_gauge, increment_gauge};
 use snafu::ResultExt;
 use tokio::runtime::{Builder as RuntimeBuilder, Handle};
 use tokio::sync::oneshot;
@@ -172,29 +171,33 @@ impl Builder {
 
 fn on_thread_start(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
-        increment_gauge!(METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
+        METRIC_RUNTIME_THREADS_ALIVE
+            .with_label_values(&[thread_name.as_str()])
+            .inc();
     }
 }
 
 fn on_thread_stop(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
-        decrement_gauge!(METRIC_RUNTIME_THREADS_ALIVE, 1.0, &labels);
+        METRIC_RUNTIME_THREADS_ALIVE
+            .with_label_values(&[thread_name.as_str()])
+            .dec();
     }
 }
 
 fn on_thread_park(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
-        increment_gauge!(METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
+        METRIC_RUNTIME_THREADS_IDLE
+            .with_label_values(&[thread_name.as_str()])
+            .inc();
     }
 }
 
 fn on_thread_unpark(thread_name: String) -> impl Fn() + 'static {
     move || {
-        let labels = [(THREAD_NAME_LABEL, thread_name.clone())];
-        decrement_gauge!(METRIC_RUNTIME_THREADS_IDLE, 1.0, &labels);
+        METRIC_RUNTIME_THREADS_IDLE
+            .with_label_values(&[thread_name.as_str()])
+            .dec();
     }
 }
 
@@ -204,14 +207,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use common_telemetry::metric;
+    use common_telemetry::dump_metrics;
     use tokio::sync::oneshot;
     use tokio_test::assert_ok;
 
     use super::*;
 
     fn runtime() -> Arc<Runtime> {
-        common_telemetry::init_default_metrics_recorder();
         let runtime = Builder::default()
             .worker_threads(2)
             .thread_name("test_spawn_join")
@@ -221,7 +223,6 @@ mod tests {
 
     #[test]
     fn test_metric() {
-        common_telemetry::init_default_metrics_recorder();
         let runtime = Builder::default()
             .worker_threads(5)
             .thread_name("test_runtime_metric")
@@ -236,8 +237,7 @@ mod tests {
 
         thread::sleep(Duration::from_millis(10));
 
-        let handle = metric::try_handle().unwrap();
-        let metric_text = handle.render();
+        let metric_text = dump_metrics().unwrap();
 
         assert!(metric_text.contains("runtime_threads_idle{thread_name=\"test_runtime_metric\"}"));
         assert!(metric_text.contains("runtime_threads_alive{thread_name=\"test_runtime_metric\"}"));

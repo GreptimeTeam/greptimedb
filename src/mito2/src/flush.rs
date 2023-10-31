@@ -19,8 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use common_query::Output;
-use common_telemetry::{error, info, timer};
-use metrics::{counter, increment_counter};
+use common_telemetry::{error, info};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use strum::IntoStaticStr;
@@ -31,10 +30,7 @@ use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::memtable::MemtableBuilderRef;
-use crate::metrics::{
-    FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REASON, FLUSH_REQUESTS_TOTAL,
-    TYPE_LABEL,
-};
+use crate::metrics::{FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_ERRORS_TOTAL, FLUSH_REQUESTS_TOTAL};
 use crate::read::Source;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::{
@@ -244,7 +240,7 @@ impl RegionFlushTask {
 
     /// Runs the flush task.
     async fn do_flush(&mut self, version_data: VersionControlData) {
-        let timer = timer!(FLUSH_ELAPSED, &[(TYPE_LABEL, "total")]);
+        let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
         let worker_request = match self.flush_memtables(&version_data.version).await {
             Ok(file_metas) => {
@@ -264,7 +260,7 @@ impl RegionFlushTask {
                     memtables_to_remove,
                     senders: std::mem::take(&mut self.senders),
                     file_purger: self.file_purger.clone(),
-                    timer,
+                    _timer: timer,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -274,7 +270,7 @@ impl RegionFlushTask {
             Err(e) => {
                 error!(e; "Failed to flush region {}", self.region_id);
                 // Discard the timer.
-                timer.discard();
+                timer.stop_and_discard();
 
                 let err = Arc::new(e);
                 self.on_failure(err.clone());
@@ -289,7 +285,9 @@ impl RegionFlushTask {
 
     /// Flushes memtables to level 0 SSTs.
     async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
-        let timer = timer!(FLUSH_ELAPSED, &[(TYPE_LABEL, "flush_memtables")]);
+        let timer = FLUSH_ELAPSED
+            .with_label_values(&["flush_memtables"])
+            .start_timer();
 
         // TODO(yingwen): Make it configurable.
         let mut write_opts = WriteOptions::default();
@@ -328,7 +326,7 @@ impl RegionFlushTask {
         }
 
         if !file_metas.is_empty() {
-            counter!(FLUSH_BYTES_TOTAL, flushed_bytes);
+            FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
         let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
@@ -337,7 +335,7 @@ impl RegionFlushTask {
             version.metadata.region_id,
             self.reason.as_str(),
             file_ids,
-            timer.elapsed(),
+            timer.stop_and_record(),
         );
 
         Ok(file_metas)
@@ -392,7 +390,9 @@ impl FlushScheduler {
     ) -> Result<()> {
         debug_assert_eq!(region_id, task.region_id);
 
-        increment_counter!(FLUSH_REQUESTS_TOTAL, FLUSH_REASON => task.reason.as_str());
+        FLUSH_REQUESTS_TOTAL
+            .with_label_values(&[task.reason.as_str()])
+            .inc();
 
         let version = version_control.current().version;
         if version.memtables.mutable.is_empty() && version.memtables.immutables().is_empty() {
@@ -474,7 +474,7 @@ impl FlushScheduler {
     pub(crate) fn on_flush_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
 
-        increment_counter!(FLUSH_ERRORS_TOTAL);
+        FLUSH_ERRORS_TOTAL.inc();
 
         // Remove this region.
         let Some(flush_status) = self.region_status.remove(&region_id) else {

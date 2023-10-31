@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 api = { workspace = true }
 arrow-flight.workspace = true
@@ -41,12 +44,13 @@ futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
+lazy_static.workspace = true
 log-store = { workspace = true }
 meta-client = { workspace = true }
-metrics.workspace = true
 mito2 = { workspace = true }
 object-store = { workspace = true }
 pin-project = "1.0"
+prometheus.workspace = true
 prost.workspace = true
 query = { workspace = true }
 reqwest = { workspace = true }

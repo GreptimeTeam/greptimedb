@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use common_query::Output;
-use common_telemetry::timer;
 use servers::query_handler::ScriptHandler;
 use session::context::QueryContextRef;
 
@@ -31,7 +30,7 @@ impl ScriptHandler for Instance {
         name: &str,
         script: &str,
     ) -> servers::error::Result<()> {
-        let _timer = timer!(metrics::METRIC_HANDLE_SCRIPTS_ELAPSED);
+        let _timer = metrics::METRIC_HANDLE_SCRIPTS_ELAPSED.start_timer();
         self.script_executor
             .insert_script(query_ctx, name, script)
             .await
@@ -43,7 +42,7 @@ impl ScriptHandler for Instance {
         name: &str,
         params: HashMap<String, String>,
     ) -> servers::error::Result<Output> {
-        let _timer = timer!(metrics::METRIC_RUN_SCRIPT_ELAPSED);
+        let _timer = metrics::METRIC_RUN_SCRIPT_ELAPSED.start_timer();
         self.script_executor
             .execute_script(query_ctx, name, params)
             .await

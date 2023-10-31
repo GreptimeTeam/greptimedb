@@ -12,14 +12,40 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_HANDLE_SQL_ELAPSED: &str = "frontend.handle_sql_elapsed";
-pub(crate) const METRIC_HANDLE_PROMQL_ELAPSED: &str = "frontend.handle_promql_elapsed";
-pub(crate) const METRIC_EXEC_PLAN_ELAPSED: &str = "frontend.exec_plan_elapsed";
-pub(crate) const METRIC_HANDLE_SCRIPTS_ELAPSED: &str = "frontend.handle_scripts_elapsed";
-pub(crate) const METRIC_RUN_SCRIPT_ELAPSED: &str = "frontend.run_script_elapsed";
+use lazy_static::lazy_static;
+use prometheus::*;
 
-/// The samples count of Prometheus remote write.
-pub const PROM_STORE_REMOTE_WRITE_SAMPLES: &str = "frontend.prometheus.remote_write.samples";
-
-pub const OTLP_METRICS_ROWS: &str = "frontend.otlp.metrics.rows";
-pub const OTLP_TRACES_ROWS: &str = "frontend.otlp.traces.rows";
+lazy_static! {
+    pub static ref METRIC_HANDLE_SQL_ELAPSED: Histogram =
+        register_histogram!("frontend_handle_sql_elapsed", "frontend handle sql elapsed").unwrap();
+    pub static ref METRIC_HANDLE_PROMQL_ELAPSED: Histogram = register_histogram!(
+        "frontend_handle_promql_elapsed",
+        "frontend handle promql elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_EXEC_PLAN_ELAPSED: Histogram =
+        register_histogram!("frontend_exec_plan_elapsed", "frontend exec plan elapsed").unwrap();
+    pub static ref METRIC_HANDLE_SCRIPTS_ELAPSED: Histogram = register_histogram!(
+        "frontend_handle_scripts_elapsed",
+        "frontend handle scripts elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_RUN_SCRIPT_ELAPSED: Histogram =
+        register_histogram!("frontend_run_script_elapsed", "frontend run script elapsed").unwrap();
+    /// The samples count of Prometheus remote write.
+    pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
+        "frontend_prometheus_remote_write_samples",
+        "frontend prometheus remote write samples"
+    )
+    .unwrap();
+    pub static ref OTLP_METRICS_ROWS: IntCounter = register_int_counter!(
+        "frontend_otlp_metrics_rows",
+        "frontend otlp metrics rows"
+    )
+    .unwrap();
+    pub static ref OTLP_TRACES_ROWS: IntCounter = register_int_counter!(
+        "frontend_otlp_traces_rows",
+        "frontend otlp traces rows"
+    )
+    .unwrap();
+}

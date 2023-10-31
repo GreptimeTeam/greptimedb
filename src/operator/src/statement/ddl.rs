@@ -77,7 +77,7 @@ impl StatementExecutor {
         create_table: &mut CreateTableExpr,
         partitions: Option<Partitions>,
     ) -> Result<TableRef> {
-        let _timer = common_telemetry::timer!(crate::metrics::DIST_CREATE_TABLE);
+        let _timer = crate::metrics::DIST_CREATE_TABLE.start_timer();
         let schema = self
             .table_metadata_manager
             .schema_manager()

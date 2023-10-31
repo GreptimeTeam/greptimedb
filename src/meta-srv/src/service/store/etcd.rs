@@ -24,7 +24,6 @@ use common_meta::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-use common_telemetry::timer;
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
     TxnResponse,
@@ -295,10 +294,9 @@ impl TxnService for EtcdStore {
     type Error = Error;
 
     async fn txn(&self, txn: KvTxn) -> Result<KvTxnResponse> {
-        let _timer = timer!(
-            METRIC_META_TXN_REQUEST,
-            &[("target", "etcd".to_string()), ("op", "txn".to_string()),]
-        );
+        let _timer = METRIC_META_TXN_REQUEST
+            .with_label_values(&["etcd", "txn"])
+            .start_timer();
 
         let etcd_txn: Txn = txn.into();
         let txn_res = self

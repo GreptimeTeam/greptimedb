@@ -27,8 +27,10 @@ datatypes = { workspace = true }
 derive_builder.workspace = true
 enum_dispatch = "0.3"
 futures-util.workspace = true
+lazy_static.workspace = true
 moka = { workspace = true, features = ["future"] }
 parking_lot = "0.12"
+prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
 session = { workspace = true }

@@ -46,19 +46,19 @@ futures = "0.3"
 futures-util.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true
+lazy_static.workspace = true
 log-store = { workspace = true }
 meta-client = { workspace = true }
-raft-engine = { workspace = true }
-# Although it is not used, please do not delete it.
-metrics.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store = { workspace = true }
 openmetrics-parser = "0.4"
 opentelemetry-proto.workspace = true
 operator.workspace = true
 partition = { workspace = true }
+prometheus.workspace = true
 prost.workspace = true
 query = { workspace = true }
+raft-engine = { workspace = true }
 regex.workspace = true
 script = { workspace = true, features = ["python"], optional = true }
 serde.workspace = true

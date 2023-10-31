@@ -16,7 +16,6 @@ use axum::extract::{RawBody, State};
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::Extension;
-use common_telemetry::timer;
 use hyper::Body;
 use opentelemetry_proto::tonic::collector::metrics::v1::{
     ExportMetricsServiceRequest, ExportMetricsServiceResponse,
@@ -37,10 +36,10 @@ pub async fn metrics(
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<OtlpMetricsResponse> {
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
-    );
+    let db = query_ctx.get_db_string();
+    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_METRICS_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
     let request = parse_metrics_body(body).await?;
     handler
         .metrics(request, query_ctx)
@@ -75,10 +74,10 @@ pub async fn traces(
     Extension(query_ctx): Extension<QueryContextRef>,
     RawBody(body): RawBody,
 ) -> Result<OtlpTracesResponse> {
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())]
-    );
+    let db = query_ctx.get_db_string();
+    let _timer = crate::metrics::METRIC_HTTP_OPENTELEMETRY_TRACES_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
     let request = parse_traces_body(body).await?;
     handler
         .traces(request, query_ctx)

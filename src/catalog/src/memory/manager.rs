@@ -17,8 +17,8 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 
+use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
-use metrics::{decrement_gauge, increment_gauge};
 use snafu::OptionExt;
 use table::TableRef;
 
@@ -166,7 +166,7 @@ impl MemoryCatalogManager {
                 let arc_self = Arc::new(self.clone());
                 let catalog = arc_self.create_catalog_entry(name);
                 e.insert(catalog);
-                increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT, 1.0);
+                crate::metrics::METRIC_CATALOG_MANAGER_CATALOG_COUNT.inc();
                 Ok(true)
             }
             Entry::Occupied(_) => Ok(false),
@@ -187,11 +187,9 @@ impl MemoryCatalogManager {
             })?;
         let result = schema.remove(&request.table_name);
         if result.is_some() {
-            decrement_gauge!(
-                crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-                1.0,
-                &[crate::metrics::db_label(&request.catalog, &request.schema)],
-            );
+            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT
+                .with_label_values(&[build_db_string(&request.catalog, &request.schema).as_str()])
+                .dec();
         }
         Ok(())
     }
@@ -210,7 +208,7 @@ impl MemoryCatalogManager {
         match catalog.entry(request.schema) {
             Entry::Vacant(e) => {
                 e.insert(HashMap::new());
-                increment_gauge!(crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT, 1.0);
+                crate::metrics::METRIC_CATALOG_MANAGER_SCHEMA_COUNT.inc();
                 Ok(true)
             }
             Entry::Occupied(_) => Ok(false),
@@ -238,11 +236,9 @@ impl MemoryCatalogManager {
             .fail();
         }
         schema.insert(request.table_name, request.table);
-        increment_gauge!(
-            crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT,
-            1.0,
-            &[crate::metrics::db_label(&request.catalog, &request.schema)],
-        );
+        crate::metrics::METRIC_CATALOG_MANAGER_TABLE_COUNT
+            .with_label_values(&[build_db_string(&request.catalog, &request.schema).as_str()])
+            .inc();
         Ok(true)
     }
 

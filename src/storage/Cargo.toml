@@ -31,10 +31,10 @@ futures-util.workspace = true
 futures.workspace = true
 itertools.workspace = true
 lazy_static.workspace = true
-metrics.workspace = true
 object-store = { workspace = true }
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
+prometheus.workspace = true
 prost.workspace = true
 regex = "1.5"
 serde.workspace = true

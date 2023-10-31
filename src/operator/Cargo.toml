@@ -34,12 +34,13 @@ datatypes = { workspace = true }
 file-engine = { workspace = true }
 futures = "0.3"
 futures-util.workspace = true
+lazy_static.workspace = true
 meta-client = { workspace = true }
 meter-core.workspace = true
 meter-macros.workspace = true
-metrics.workspace = true
 object-store = { workspace = true }
 partition = { workspace = true }
+prometheus.workspace = true
 query = { workspace = true }
 regex.workspace = true
 serde.workspace = true

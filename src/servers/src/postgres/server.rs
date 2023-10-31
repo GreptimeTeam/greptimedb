@@ -22,7 +22,6 @@ use common_runtime::Runtime;
 use common_telemetry::logging::error;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
-use metrics::{decrement_gauge, increment_gauge};
 use pgwire::tokio::process_socket;
 use tokio_rustls::TlsAcceptor;
 
@@ -89,7 +88,7 @@ impl PostgresServer {
                         };
 
                         let _handle = io_runtime.spawn(async move {
-                            increment_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
+                            crate::metrics::METRIC_POSTGRES_CONNECTIONS.inc();
                             let pg_handler = Arc::new(handler_maker.make(addr));
                             let r = process_socket(
                                 io_stream,
@@ -99,7 +98,7 @@ impl PostgresServer {
                                 pg_handler,
                             )
                             .await;
-                            decrement_gauge!(crate::metrics::METRIC_POSTGRES_CONNECTIONS, 1.0);
+                            crate::metrics::METRIC_POSTGRES_CONNECTIONS.dec();
                             r
                         });
                     }

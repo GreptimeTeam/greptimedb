@@ -42,7 +42,7 @@ impl Inserter {
     /// Won't do schema validation if not configured. Caller (mostly the `RegionWriter` should ensure the
     /// schemas of `memtable` are consistent with `payload`'s.
     pub fn insert_memtable(&mut self, payload: &Payload, memtable: &MemtableRef) -> Result<()> {
-        let _timer = common_telemetry::timer!(MEMTABLE_WRITE_ELAPSED);
+        let _timer = MEMTABLE_WRITE_ELAPSED.start_timer();
 
         if payload.is_empty() {
             return Ok(());

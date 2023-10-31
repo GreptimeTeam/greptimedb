@@ -18,8 +18,7 @@ mod scheduler;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_telemetry::{logging, timer};
-use metrics::counter;
+use common_telemetry::logging;
 pub use picker::{FlushPicker, PickerConfig};
 pub use scheduler::{
     FlushHandle, FlushRegionRequest, FlushRequest, FlushScheduler, FlushSchedulerRef,
@@ -237,7 +236,7 @@ pub struct FlushJob<S: LogStore> {
 impl<S: LogStore> FlushJob<S> {
     /// Execute the flush job.
     async fn run(&mut self) -> Result<()> {
-        let _timer = timer!(FLUSH_ELAPSED);
+        let _timer = FLUSH_ELAPSED.start_timer();
 
         let file_metas = self.write_memtables_to_layer().await?;
         if file_metas.is_empty() {
@@ -299,7 +298,8 @@ impl<S: LogStore> FlushJob<S> {
             .collect();
 
         let flush_bytes = metas.iter().map(|f| f.file_size).sum();
-        counter!(FLUSH_BYTES_TOTAL, flush_bytes);
+
+        FLUSH_BYTES_TOTAL.inc_by(flush_bytes);
 
         let file_ids = metas.iter().map(|f| f.file_id).collect::<Vec<_>>();
         logging::info!("Successfully flush memtables, region:{region_id}, files: {file_ids:?}");

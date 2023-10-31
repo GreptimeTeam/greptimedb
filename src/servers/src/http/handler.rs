@@ -21,7 +21,6 @@ use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::status_code::StatusCode;
-use common_telemetry::timer;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,10 +49,9 @@ pub async fn sql(
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
     let db = query_ctx.get_db_string();
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_SQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db)]
-    );
+    let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
 
     let resp = if let Some(sql) = &sql {
         if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
@@ -101,10 +99,9 @@ pub async fn promql(
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_PROMQL_ELAPSED,
-        &[(crate::metrics::METRIC_DB_LABEL, db)]
-    );
+    let _timer = crate::metrics::METRIC_HTTP_PROMQL_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
 
     if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
         return Json(resp);
@@ -127,9 +124,9 @@ pub async fn metrics(
     State(state): State<MetricsHandler>,
     Query(_params): Query<HashMap<String, String>>,
 ) -> String {
-    // Collect process metrics.
-    #[cfg(feature = "metrics-process")]
-    crate::metrics::PROCESS_COLLECTOR.collect();
+    // A default ProcessCollector is registered automatically in prometheus.
+    // We do not need to explicitly collect process-related data.
+    // But ProcessCollector only support on linux.
 
     #[cfg(not(windows))]
     if let Some(c) = crate::metrics::jemalloc::JEMALLOC_COLLECTOR.as_ref() {

@@ -16,7 +16,6 @@
 
 use common_query::Output;
 use common_telemetry::info;
-use metrics::decrement_gauge;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -40,7 +39,7 @@ impl<S> RegionWorkerLoop<S> {
 
         info!("Region {} closed", region_id);
 
-        decrement_gauge!(REGION_COUNT, 1.0);
+        REGION_COUNT.dec();
 
         Ok(Output::AffectedRows(0))
     }

@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use arrow::compute;
 use common_recordbatch::RecordBatch;
-use common_telemetry::timer;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
@@ -67,7 +66,7 @@ pub(crate) fn pyo3_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
-    let _t = timer!(metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED);
+    let _t = metric::METRIC_PYO3_EXEC_TOTAL_ELAPSED.start_timer();
     // i.e params or use `vector(..)` to construct a PyVector
     let arg_names = &copr.deco_args.arg_names.clone().unwrap_or_default();
     let args: Vec<PyVector> = if let Some(rb) = rb {
@@ -80,7 +79,7 @@ pub(crate) fn pyo3_exec_parsed(
     // Just in case cpython is not inited
     init_cpython_interpreter().unwrap();
     Python::with_gil(|py| -> Result<_> {
-        let _t = timer!(metric::METRIC_PYO3_EXEC_ELAPSED);
+        let _t = metric::METRIC_PYO3_EXEC_ELAPSED.start_timer();
 
         let mut cols = (|| -> PyResult<_> {
             let dummy_decorator = "

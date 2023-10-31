@@ -12,9 +12,7 @@ deadlock_detection = ["parking_lot/deadlock_detection"]
 backtrace = "0.3"
 common-error = { workspace = true }
 console-subscriber = { version = "0.1", optional = true }
-metrics-exporter-prometheus = { version = "0.11", default-features = false }
-metrics-util = "0.14"
-metrics.workspace = true
+lazy_static.workspace = true
 once_cell.workspace = true
 opentelemetry = { version = "0.17", default-features = false, features = [
     "trace",
@@ -22,6 +20,7 @@ opentelemetry = { version = "0.17", default-features = false, features = [
 ] }
 opentelemetry-jaeger = { version = "0.16", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
+prometheus.workspace = true
 rand.workspace = true
 rs-snowflake = "0.6"
 serde.workspace = true

@@ -30,7 +30,6 @@ use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
-use metrics::counter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -175,7 +174,7 @@ impl Inserter {
         let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
 
         let affected_rows = results.into_iter().sum::<Result<u64>>()?;
-        counter!(crate::metrics::DIST_INGEST_ROW_COUNT, affected_rows);
+        crate::metrics::DIST_INGEST_ROW_COUNT.inc_by(affected_rows);
         Ok(affected_rows)
     }
 

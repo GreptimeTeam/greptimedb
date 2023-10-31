@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::{error, info, timer};
-use metrics::increment_counter;
+use common_telemetry::{error, info};
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
-use crate::metrics::{COMPACTION_REQUEST_COUNT, COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
+use crate::metrics::{COMPACTION_REQUEST_COUNT, COMPACTION_STAGE_ELAPSED};
 use crate::request::{CompactionFailed, CompactionFinished, OnFailure, OptionOutputTx};
 use crate::worker::RegionWorkerLoop;
 
@@ -32,7 +31,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
             return;
         };
-        increment_counter!(COMPACTION_REQUEST_COUNT);
+        COMPACTION_REQUEST_COUNT.inc();
         if let Err(e) = self.compaction_scheduler.schedule_compaction(
             region.region_id,
             &region.version_control,
@@ -60,8 +59,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         {
-            let manifest_timer =
-                timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "write_manifest")]);
+            let manifest_timer = COMPACTION_STAGE_ELAPSED
+                .with_label_values(&["write_manifest"])
+                .start_timer();
             // Write region edit to manifest.
             let edit = RegionEdit {
                 files_to_add: std::mem::take(&mut request.compaction_outputs),
@@ -74,7 +74,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
             if let Err(e) = region.manifest_manager.update(action_list).await {
                 error!(e; "Failed to update manifest, region: {}", region_id);
-                manifest_timer.discard();
+                manifest_timer.stop_and_discard();
                 request.on_failure(e);
                 return;
             }

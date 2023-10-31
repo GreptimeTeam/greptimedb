@@ -22,7 +22,6 @@ use common_runtime::Runtime;
 use common_telemetry::error;
 use common_telemetry::logging::{info, warn};
 use futures::StreamExt;
-use metrics::{decrement_gauge, increment_gauge};
 use opensrv_mysql::{
     plain_run_with_options, secure_run_with_options, AsyncMysqlIntermediary, IntermediaryOptions,
 };
@@ -160,13 +159,13 @@ impl MysqlServer {
     ) -> Result<()> {
         info!("MySQL connection coming from: {}", stream.peer_addr()?);
         let _handle = io_runtime.spawn(async move {
-            increment_gauge!(crate::metrics::METRIC_MYSQL_CONNECTIONS, 1.0);
+            crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
             if let Err(e)  = Self::do_handle(stream, spawn_ref, spawn_config).await {
                 // TODO(LFC): Write this error to client as well, in MySQL text protocol.
                 // Looks like we have to expose opensrv-mysql's `PacketWriter`?
                 warn!(e; "Internal error occurred during query exec, server actively close the channel to let client try next time")
             }
-            decrement_gauge!(crate::metrics::METRIC_MYSQL_CONNECTIONS, 1.0);
+            crate::metrics::METRIC_MYSQL_CONNECTIONS.dec();
         });
 
         Ok(())

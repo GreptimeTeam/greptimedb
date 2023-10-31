@@ -16,7 +16,6 @@ use std::collections::HashSet;
 
 use common_meta::rpc::store::{BatchGetRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_meta::RegionIdent;
-use metrics::{decrement_gauge, increment_gauge};
 
 use crate::error::Result;
 use crate::keys::InactiveRegionKey;
@@ -46,7 +45,7 @@ impl<'a> InactiveRegionManager<'a> {
         };
         self.store.put(req).await?;
 
-        increment_gauge!(METRIC_META_INACTIVE_REGIONS, 1.0);
+        METRIC_META_INACTIVE_REGIONS.inc();
 
         Ok(())
     }
@@ -61,7 +60,7 @@ impl<'a> InactiveRegionManager<'a> {
         .into();
         self.store.delete(&key, false).await?;
 
-        decrement_gauge!(METRIC_META_INACTIVE_REGIONS, 1.0);
+        METRIC_META_INACTIVE_REGIONS.dec();
 
         Ok(())
     }

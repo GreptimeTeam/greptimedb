@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use common_query::Output;
 use common_telemetry::info;
-use metrics::increment_gauge;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
@@ -73,7 +72,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("A new region created, region: {:?}", region.metadata());
 
-        increment_gauge!(REGION_COUNT, 1.0);
+        REGION_COUNT.inc();
 
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));

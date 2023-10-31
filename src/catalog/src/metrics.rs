@@ -12,18 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_catalog::build_db_string;
-
 pub(crate) const METRIC_DB_LABEL: &str = "db";
 
-pub(crate) const METRIC_CATALOG_MANAGER_CATALOG_COUNT: &str = "catalog.catalog_count";
-pub(crate) const METRIC_CATALOG_MANAGER_SCHEMA_COUNT: &str = "catalog.schema_count";
-pub(crate) const METRIC_CATALOG_MANAGER_TABLE_COUNT: &str = "catalog.table_count";
+use lazy_static::lazy_static;
+use prometheus::*;
 
-pub(crate) const METRIC_CATALOG_KV_REMOTE_GET: &str = "catalog.kv.get.remote";
-pub(crate) const METRIC_CATALOG_KV_GET: &str = "catalog.kv.get";
-
-#[inline]
-pub(crate) fn db_label(catalog: &str, schema: &str) -> (&'static str, String) {
-    (METRIC_DB_LABEL, build_db_string(catalog, schema))
+lazy_static! {
+    pub static ref METRIC_CATALOG_MANAGER_CATALOG_COUNT: IntGauge =
+        register_int_gauge!("catalog_catalog_count", "catalog catalog count").unwrap();
+    pub static ref METRIC_CATALOG_MANAGER_SCHEMA_COUNT: IntGauge =
+        register_int_gauge!("catalog_schema_count", "catalog schema count").unwrap();
+    pub static ref METRIC_CATALOG_MANAGER_TABLE_COUNT: IntGaugeVec = register_int_gauge_vec!(
+        "catalog_table_count",
+        "catalog table count",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
+    pub static ref METRIC_CATALOG_KV_REMOTE_GET: Histogram =
+        register_histogram!("catalog_kv_get_remote", "catalog kv get remote").unwrap();
+    pub static ref METRIC_CATALOG_KV_GET: Histogram =
+        register_histogram!("catalog_kv_get", "catalog kv get").unwrap();
 }

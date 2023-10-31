@@ -25,11 +25,10 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_query::Output;
 use common_query::Output::AffectedRows;
-use common_telemetry::metric::Timer;
 use common_telemetry::tracing::log::info;
 use common_telemetry::warn;
 use datatypes::prelude::DataType;
-use metrics::histogram;
+use prometheus::HistogramTimer;
 use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -596,7 +595,7 @@ pub(crate) struct FlushFinished {
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
     /// Flush timer.
-    pub(crate) timer: Timer,
+    pub(crate) _timer: HistogramTimer,
 }
 
 impl FlushFinished {
@@ -655,7 +654,7 @@ pub(crate) struct CompactionFinished {
 impl CompactionFinished {
     pub fn on_success(self) {
         // only update compaction time on success
-        histogram!(COMPACTION_ELAPSED_TOTAL, self.start_time.elapsed());
+        COMPACTION_ELAPSED_TOTAL.observe(self.start_time.elapsed().as_secs_f64());
 
         for sender in self.senders {
             sender.send(Ok(AffectedRows(0)));

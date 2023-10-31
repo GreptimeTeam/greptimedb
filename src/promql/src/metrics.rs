@@ -12,5 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Counter for the number of series processed per query.
-pub static PROMQL_SERIES_COUNT: &str = "promql.series_count";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    /// Counter for the number of series processed per query.
+    pub static ref PROMQL_SERIES_COUNT: Histogram =
+        register_histogram!("promql_series_count", "promql series count").unwrap();
+}

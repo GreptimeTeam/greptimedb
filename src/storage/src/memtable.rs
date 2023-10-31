@@ -26,7 +26,6 @@ use api::v1::OpType;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use datatypes::vectors::VectorRef;
-use metrics::{decrement_gauge, increment_gauge};
 use store_api::storage::{consts, SequenceNumber};
 
 use crate::error::Result;
@@ -223,7 +222,7 @@ impl AllocTracker {
     /// Tracks `bytes` memory is allocated.
     pub(crate) fn on_allocate(&self, bytes: usize) {
         let _ = self.bytes_allocated.fetch_add(bytes, Ordering::Relaxed);
-        increment_gauge!(WRITE_BUFFER_BYTES, bytes as f64);
+        WRITE_BUFFER_BYTES.add(bytes as i64);
         if let Some(flush_strategy) = &self.flush_strategy {
             flush_strategy.reserve_mem(bytes);
         }
@@ -258,7 +257,7 @@ impl Drop for AllocTracker {
         }
 
         let bytes_allocated = self.bytes_allocated.load(Ordering::Relaxed);
-        decrement_gauge!(WRITE_BUFFER_BYTES, bytes_allocated as f64);
+        WRITE_BUFFER_BYTES.sub(bytes_allocated as i64);
 
         // Memory tracked by this tracker is freed.
         if let Some(flush_strategy) = &self.flush_strategy {

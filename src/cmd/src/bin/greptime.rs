@@ -21,7 +21,11 @@ use cmd::error::Result;
 use cmd::options::{Options, TopLevelOptions};
 use cmd::{cli, datanode, frontend, metasrv, standalone};
 use common_telemetry::logging::{error, info, TracingOptions};
-use metrics::gauge;
+
+lazy_static::lazy_static! {
+    static ref APP_VERSION: prometheus::IntGaugeVec =
+        prometheus::register_int_gauge_vec!("app_version", "app version", &["short_version", "version"]).unwrap();
+}
 
 #[derive(Parser)]
 #[clap(name = "greptimedb", version = print_version())]
@@ -204,11 +208,12 @@ async fn main() -> Result<()> {
     };
 
     common_telemetry::set_panic_hook();
-    common_telemetry::init_default_metrics_recorder();
     let _guard = common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts);
 
     // Report app version as gauge.
-    gauge!("app_version", 1.0, "short_version" => short_version(), "version" => full_version());
+    APP_VERSION
+        .with_label_values(&[short_version(), full_version()])
+        .inc();
 
     // Log version and argument flags.
     info!(

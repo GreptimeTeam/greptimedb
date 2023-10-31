@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use auth::UserProviderRef;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_telemetry::timer;
 use common_time::util::current_time_rfc3339;
 use promql_parser::parser::ValueType;
 use query::parser::PromQuery;
@@ -112,10 +111,10 @@ impl PrometheusGatewayService {
         ctx: Arc<QueryContext>,
         is_range_query: bool,
     ) -> PrometheusJsonResponse {
-        let _timer = timer!(
-            crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER,
-            &[(crate::metrics::METRIC_DB_LABEL, ctx.get_db_string())]
-        );
+        let db = ctx.get_db_string();
+        let _timer = crate::metrics::METRIC_SERVER_GRPC_PROM_REQUEST_TIMER
+            .with_label_values(&[db.as_str()])
+            .start_timer();
 
         let result = self.handler.do_query(&query, ctx).await;
         let (metric_name, mut result_type) =

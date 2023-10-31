@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::result::Result as StdResult;
 
 use common_recordbatch::RecordBatch;
-use common_telemetry::{info, timer};
+use common_telemetry::info;
 use datatypes::vectors::VectorRef;
 use rustpython_vm::builtins::{PyBaseExceptionRef, PyDict, PyStr, PyTuple};
 use rustpython_vm::class::PyClassImpl;
@@ -45,7 +45,7 @@ pub(crate) fn rspy_exec_parsed(
     rb: &Option<RecordBatch>,
     params: &HashMap<String, String>,
 ) -> Result<RecordBatch> {
-    let _t = timer!(metric::METRIC_RSPY_EXEC_TOTAL_ELAPSED);
+    let _t = metric::METRIC_RSPY_EXEC_TOTAL_ELAPSED.start_timer();
     // 3. get args from `rb`, and cast them into PyVector
     let args: Vec<PyVector> = if let Some(rb) = rb {
         let arg_names = copr.deco_args.arg_names.clone().unwrap_or_default();
@@ -102,7 +102,7 @@ pub(crate) fn exec_with_cached_vm(
     vm: &Rc<Interpreter>,
 ) -> Result<RecordBatch> {
     vm.enter(|vm| -> Result<RecordBatch> {
-        let _t = timer!(metric::METRIC_RSPY_EXEC_ELAPSED);
+        let _t = metric::METRIC_RSPY_EXEC_ELAPSED.start_timer();
 
         // set arguments with given name and values
         let scope = vm.new_scope_with_builtins();
@@ -189,7 +189,7 @@ fn try_into_columns(
 
 /// init interpreter with type PyVector and Module: greptime
 pub(crate) fn init_interpreter() -> Rc<Interpreter> {
-    let _t = timer!(metric::METRIC_RSPY_INIT_ELAPSED);
+    let _t = metric::METRIC_RSPY_INIT_ELAPSED.start_timer();
     INTERPRETER.with(|i| {
         i.borrow_mut()
             .get_or_insert_with(|| {

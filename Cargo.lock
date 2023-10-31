@@ -56,15 +56,6 @@ dependencies = [
 
 [[package]]
 name = "aho-corasick"
-version = "0.7.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc936419f96fa211c1b9166887b38e5e40b19958e5b895be7c1f93adec7071ac"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "aho-corasick"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2969dcb958b36655471fc61f7e416fa76033bdd4bfed0678d8fee1e2d07a1f0"
@@ -877,26 +868,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.64.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4243e6031260db77ede97ad86c27e501d646a27ab57b59a574f725d98ab1fb4"
-dependencies = [
- "bitflags 1.3.2",
- "cexpr",
- "clang-sys",
- "lazy_static",
- "lazycell",
- "peeking_take_while",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash",
- "shlex",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.68.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "726e4313eb6ec35d2730258ad4e15b547ee75d6afaa1361a922e78e59b7d8078"
@@ -1232,11 +1203,11 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
- "metrics",
  "moka",
  "object-store",
  "parking_lot 0.12.1",
  "partition",
+ "prometheus",
  "regex",
  "serde",
  "serde_json",
@@ -1510,8 +1481,10 @@ dependencies = [
  "derive_builder 0.12.0",
  "enum_dispatch",
  "futures-util",
+ "lazy_static",
  "moka",
  "parking_lot 0.12.1",
+ "prometheus",
  "prost 0.12.1",
  "rand",
  "session",
@@ -1579,11 +1552,11 @@ dependencies = [
  "lazy_static",
  "meta-client",
  "meta-srv",
- "metrics",
  "mito2",
  "nu-ansi-term",
  "partition",
  "plugins",
+ "prometheus",
  "prost 0.12.1",
  "query",
  "rand",
@@ -1847,7 +1820,7 @@ dependencies = [
  "humantime-serde",
  "hyper",
  "lazy_static",
- "metrics",
+ "prometheus",
  "prost 0.12.1",
  "regex",
  "serde",
@@ -1939,9 +1912,10 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-telemetry",
- "metrics",
+ "lazy_static",
  "once_cell",
  "paste",
+ "prometheus",
  "snafu",
  "tokio",
  "tokio-test",
@@ -1955,13 +1929,12 @@ dependencies = [
  "backtrace",
  "common-error",
  "console-subscriber",
- "metrics",
- "metrics-exporter-prometheus",
- "metrics-util",
+ "lazy_static",
  "once_cell",
  "opentelemetry 0.17.0",
  "opentelemetry-jaeger",
  "parking_lot 0.12.1",
+ "prometheus",
  "rand",
  "rs-snowflake",
  "serde",
@@ -2701,12 +2674,13 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "hyper",
+ "lazy_static",
  "log-store",
  "meta-client",
- "metrics",
  "mito2",
  "object-store",
  "pin-project",
+ "prometheus",
  "prost 0.12.1",
  "query",
  "reqwest",
@@ -3063,33 +3037,12 @@ dependencies = [
 
 [[package]]
 name = "errno"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
-dependencies = [
- "errno-dragonfly",
- "libc",
- "winapi",
-]
-
-[[package]]
-name = "errno"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3e13f66a2f95e32a39eaa81f6b95d42878ca0e1db0c7543723dfe12557e860"
 dependencies = [
  "libc",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "errno-dragonfly"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa68f1b12764fab894d2755d2518754e71b4fd80ecfb822714a1206c2aab39bf"
-dependencies = [
- "cc",
- "libc",
 ]
 
 [[package]]
@@ -3345,16 +3298,17 @@ dependencies = [
  "futures-util",
  "humantime-serde",
  "itertools 0.10.5",
+ "lazy_static",
  "log-store",
  "meta-client",
  "meta-srv",
- "metrics",
  "moka",
  "object-store",
  "openmetrics-parser",
  "opentelemetry-proto",
  "operator",
  "partition",
+ "prometheus",
  "prost 0.12.1",
  "query",
  "raft-engine",
@@ -3591,7 +3545,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "js-sys",
  "libc",
- "wasi 0.11.0+wasi-snapshot-preview1",
+ "wasi",
  "wasm-bindgen",
 ]
 
@@ -4031,7 +3985,7 @@ dependencies = [
  "console",
  "instant",
  "number_prefix",
- "portable-atomic 1.5.0",
+ "portable-atomic",
  "unicode-width",
 ]
 
@@ -4371,17 +4325,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec2a862134d2a7d32d7983ddcdd1c4923530833c9f2ea1a44fc5fa473989058"
 
 [[package]]
-name = "libproc"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b18cbf29f8ff3542ba22bdce9ac610fcb75d74bb4e2b306b2a2762242025b4f"
-dependencies = [
- "bindgen 0.64.0",
- "errno 0.2.8",
- "libc",
-]
-
-[[package]]
 name = "libsqlite3-sys"
 version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4580,15 +4523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mach"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b823e83b2affd8f40a9ee8c29dbc56404c1e34cd2710921f2801e2cf29527afa"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "mach2"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4771,9 +4705,9 @@ dependencies = [
  "h2",
  "http-body",
  "lazy_static",
- "metrics",
  "once_cell",
  "parking_lot 0.12.1",
+ "prometheus",
  "prost 0.12.1",
  "rand",
  "regex",
@@ -4816,79 +4750,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metrics"
-version = "0.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b9b8653cec6897f73b519a43fba5ee3d50f62fe9af80b428accdcc093b4a849"
-dependencies = [
- "ahash 0.7.7",
- "metrics-macros",
- "portable-atomic 0.3.20",
-]
-
-[[package]]
-name = "metrics-exporter-prometheus"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8603921e1f54ef386189335f288441af761e0fc61bcb552168d9cedfe63ebc70"
-dependencies = [
- "indexmap 1.9.3",
- "metrics",
- "metrics-util",
- "parking_lot 0.12.1",
- "portable-atomic 0.3.20",
- "quanta 0.10.1",
- "thiserror",
-]
-
-[[package]]
-name = "metrics-macros"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "731f8ecebd9f3a4aa847dfe75455e4757a45da40a7793d2f0b1f9b6ed18b23f3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "metrics-process"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99eab79be9f7c18565e889d6eaed6f1ebdafb2b6a88aef446d2fee5e7796ed10"
-dependencies = [
- "libproc",
- "mach2",
- "metrics",
- "once_cell",
- "procfs",
- "rlimit",
- "windows 0.48.0",
-]
-
-[[package]]
-name = "metrics-util"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7d24dc2dbae22bff6f1f9326ffce828c9f07ef9cc1e8002e5279f845432a30a"
-dependencies = [
- "aho-corasick 0.7.20",
- "crossbeam-epoch",
- "crossbeam-utils",
- "hashbrown 0.12.3",
- "indexmap 1.9.3",
- "metrics",
- "num_cpus",
- "ordered-float 2.10.1",
- "parking_lot 0.12.1",
- "portable-atomic 0.3.20",
- "quanta 0.10.1",
- "radix_trie",
- "sketches-ddsketch",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4927,7 +4788,7 @@ checksum = "3dce281c5e46beae905d4de1870d8b1509a9142b62eedf18b443b011ca8343d0"
 dependencies = [
  "libc",
  "log",
- "wasi 0.11.0+wasi-snapshot-preview1",
+ "wasi",
  "windows-sys 0.48.0",
 ]
 
@@ -4968,11 +4829,11 @@ dependencies = [
  "lazy_static",
  "log-store",
  "memcomparable",
- "metrics",
  "moka",
  "object-store",
  "parquet",
  "paste",
+ "prometheus",
  "prost 0.12.1",
  "regex",
  "serde",
@@ -5002,7 +4863,7 @@ dependencies = [
  "futures-util",
  "once_cell",
  "parking_lot 0.12.1",
- "quanta 0.11.1",
+ "quanta",
  "rustc_version",
  "skeptic",
  "smallvec",
@@ -5088,7 +4949,7 @@ checksum = "57349d5a326b437989b6ee4dc8f2f34b0cc131202748414712a8e7d98952fc8c"
 dependencies = [
  "base64 0.21.5",
  "bigdecimal",
- "bindgen 0.68.1",
+ "bindgen",
  "bitflags 2.4.1",
  "bitvec",
  "byteorder",
@@ -5397,10 +5258,11 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "futures",
+ "lazy_static",
  "md5",
- "metrics",
  "moka",
  "opendal",
+ "prometheus",
  "snafu",
  "tokio",
  "uuid",
@@ -5458,11 +5320,11 @@ dependencies = [
  "hyper",
  "log",
  "md-5",
- "metrics",
  "once_cell",
  "parking_lot 0.12.1",
  "percent-encoding",
  "pin-project",
+ "prometheus",
  "quick-xml 0.29.0",
  "reqsign",
  "reqwest",
@@ -5627,12 +5489,13 @@ dependencies = [
  "file-engine",
  "futures",
  "futures-util",
+ "lazy_static",
  "meta-client",
  "meter-core",
  "meter-macros",
- "metrics",
  "object-store",
  "partition",
+ "prometheus",
  "query",
  "regex",
  "serde",
@@ -5887,8 +5750,10 @@ dependencies = [
  "datafusion-common",
  "datafusion-expr",
  "datatypes",
+ "lazy_static",
  "meta-client",
  "moka",
+ "prometheus",
  "serde",
  "serde_json",
  "snafu",
@@ -6223,15 +6088,6 @@ dependencies = [
 
 [[package]]
 name = "portable-atomic"
-version = "0.3.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e30165d31df606f5726b090ec7592c308a0eaf61721ff64c9a3018e344a8753e"
-dependencies = [
- "portable-atomic 1.5.0",
-]
-
-[[package]]
-name = "portable-atomic"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b559898e0b4931ed2d3b959ab0c2da4d99cc644c4b0b1a35b4d344027f474023"
@@ -6404,9 +6260,9 @@ dependencies = [
 
 [[package]]
 name = "procfs"
-version = "0.15.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "943ca7f9f29bab5844ecd8fdb3992c5969b6622bb9609b9502fef9b4310e3f1f"
+checksum = "b1de8dacb0873f77e6aefc6d71e044761fcc68060290f5b1089fcdf84626bb69"
 dependencies = [
  "bitflags 1.3.2",
  "byteorder",
@@ -6424,8 +6280,10 @@ dependencies = [
  "cfg-if 1.0.0",
  "fnv",
  "lazy_static",
+ "libc",
  "memchr",
  "parking_lot 0.12.1",
+ "procfs",
  "protobuf",
  "thiserror",
 ]
@@ -6459,7 +6317,8 @@ dependencies = [
  "datatypes",
  "futures",
  "greptime-proto",
- "metrics",
+ "lazy_static",
+ "prometheus",
  "promql-parser",
  "prost 0.12.1",
  "query",
@@ -6729,22 +6588,6 @@ dependencies = [
 
 [[package]]
 name = "quanta"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7e31331286705f455e56cca62e0e717158474ff02b7936c1fa596d983f4ae27"
-dependencies = [
- "crossbeam-utils",
- "libc",
- "mach",
- "once_cell",
- "raw-cpuid",
- "wasi 0.10.2+wasi-snapshot-preview1",
- "web-sys",
- "winapi",
-]
-
-[[package]]
-name = "quanta"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a17e662a7a8291a865152364c20c7abc5e60486ab2001e8ec10b24862de0b9ab"
@@ -6754,7 +6597,7 @@ dependencies = [
  "mach2",
  "once_cell",
  "raw-cpuid",
- "wasi 0.11.0+wasi-snapshot-preview1",
+ "wasi",
  "web-sys",
  "winapi",
 ]
@@ -6798,13 +6641,14 @@ dependencies = [
  "futures-util",
  "greptime-proto",
  "humantime",
- "metrics",
+ "lazy_static",
  "num",
  "num-traits",
  "object-store",
  "once_cell",
  "partition",
  "paste",
+ "prometheus",
  "promql",
  "promql-parser",
  "rand",
@@ -7032,7 +6876,7 @@ version = "1.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "380b951a9c5e80ddfd6136919eef32310721aa4aacd4889a8d39124b026ab343"
 dependencies = [
- "aho-corasick 1.1.2",
+ "aho-corasick",
  "memchr",
  "regex-automata 0.4.3",
  "regex-syntax 0.8.2",
@@ -7053,7 +6897,7 @@ version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f804c7828047e88b2d32e2d7fe5a105da8ee3264f01902f796c8e067dc2483f"
 dependencies = [
- "aho-corasick 1.1.2",
+ "aho-corasick",
  "memchr",
  "regex-syntax 0.8.2",
 ]
@@ -7298,15 +7142,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rlimit"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8a29d87a652dc4d43c586328706bb5cdff211f3f39a530f240b53f7221dab8e"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "ron"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7501,7 +7336,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6da3636faa25820d8648e0e31c5d519bbb01f72fdf57131f0f5f7da5fed36eab"
 dependencies = [
  "bitflags 1.3.2",
- "errno 0.3.5",
+ "errno",
  "io-lifetimes",
  "libc",
  "linux-raw-sys 0.1.4",
@@ -7515,7 +7350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67ce50cb2e16c2903e30d1cbccfd8387a74b9d4c938b6a4c5ec6cc7556f7a8a0"
 dependencies = [
  "bitflags 2.4.1",
- "errno 0.3.5",
+ "errno",
  "libc",
  "linux-raw-sys 0.4.10",
  "windows-sys 0.48.0",
@@ -7865,7 +7700,7 @@ dependencies = [
  "which",
  "widestring",
  "winapi",
- "windows 0.39.0",
+ "windows",
  "winreg 0.10.1",
 ]
 
@@ -8073,10 +7908,12 @@ dependencies = [
  "datatypes",
  "futures",
  "futures-util",
+ "lazy_static",
  "log-store",
  "once_cell",
  "operator",
  "paste",
+ "prometheus",
  "pyo3",
  "query",
  "rayon",
@@ -8360,8 +8197,7 @@ dependencies = [
  "hyper",
  "influxdb_line_protocol",
  "itertools 0.10.5",
- "metrics",
- "metrics-process",
+ "lazy_static",
  "mime_guess",
  "mysql_async",
  "num_cpus",
@@ -8374,6 +8210,7 @@ dependencies = [
  "pin-project",
  "postgres-types",
  "pprof",
+ "prometheus",
  "promql-parser",
  "prost 0.12.1",
  "query",
@@ -8549,12 +8386,6 @@ dependencies = [
  "tempfile",
  "walkdir",
 ]
-
-[[package]]
-name = "sketches-ddsketch"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a406c1882ed7f29cd5e248c9848a80e7cb6ae0fea82346d2746f2f941c07e1"
 
 [[package]]
 name = "slab"
@@ -8967,10 +8798,10 @@ dependencies = [
  "itertools 0.10.5",
  "lazy_static",
  "log-store",
- "metrics",
  "object-store",
  "parquet",
  "paste",
+ "prometheus",
  "prost 0.12.1",
  "rand",
  "regex",
@@ -10555,12 +10386,6 @@ dependencies = [
 
 [[package]]
 name = "wasi"
-version = "0.10.2+wasi-snapshot-preview1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd6fbd9a79829dd1ad0cc20627bf1ed606756a7f77edff7b66b7064f9cb327c6"
-
-[[package]]
-name = "wasi"
 version = "0.11.0+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c8d87e72b64a3b4db28d11ce29237c246188f4f51057d65a7eab63b7987e423"
@@ -10762,15 +10587,6 @@ dependencies = [
  "windows_i686_msvc 0.39.0",
  "windows_x86_64_gnu 0.39.0",
  "windows_x86_64_msvc 0.39.0",
-]
-
-[[package]]
-name = "windows"
-version = "0.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e686886bc078bc1b0b600cac0147aadb815089b6e4da64016cbd754b6342700f"
-dependencies = [
- "windows-targets 0.48.5",
 ]
 
 [[package]]

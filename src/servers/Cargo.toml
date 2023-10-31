@@ -50,9 +50,7 @@ humantime-serde.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", branch = "feat/line-protocol" }
 itertools.workspace = true
-metrics.workspace = true
-# metrics-process 1.0.10 depends on metrics-0.21 but opendal depends on metrics-0.20.1
-metrics-process = { version = "<1.0.10", optional = true }
+lazy_static.workspace = true
 mime_guess = "2.0"
 num_cpus = "1.13"
 once_cell.workspace = true
@@ -68,6 +66,7 @@ pprof = { version = "0.11", features = [
     "prost-codec",
     "protobuf",
 ], optional = true }
+prometheus.workspace = true
 promql-parser = "0.1.1"
 prost.workspace = true
 query = { workspace = true }

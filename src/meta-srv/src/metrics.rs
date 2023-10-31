@@ -12,7 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) const METRIC_META_KV_REQUEST: &str = "meta.kv_request";
-pub(crate) const METRIC_META_HEARTBEAT_CONNECTION_NUM: &str = "meta.heartbeat_connection_num";
-pub(crate) const METRIC_META_HANDLER_EXECUTE: &str = "meta.handler_execute";
-pub const METRIC_META_INACTIVE_REGIONS: &str = "meta.inactive_regions";
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    pub static ref METRIC_META_KV_REQUEST: HistogramVec = register_histogram_vec!(
+        "meta_kv_request",
+        "meta kv request",
+        &["target", "op", "cluster_id"]
+    )
+    .unwrap();
+    pub static ref METRIC_META_HEARTBEAT_CONNECTION_NUM: IntGauge = register_int_gauge!(
+        "meta_heartbeat_connection_num",
+        "meta heartbeat connection num"
+    )
+    .unwrap();
+    pub static ref METRIC_META_HANDLER_EXECUTE: HistogramVec =
+        register_histogram_vec!("meta_handler_execute", "meta handler execute", &["name"]).unwrap();
+    pub static ref METRIC_META_INACTIVE_REGIONS: IntGauge =
+        register_int_gauge!("meta_inactive_regions", "meta inactive regions").unwrap();
+}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::metric;
+use prometheus::{Encoder, TextEncoder};
 
 /// a server that serves metrics
 /// only start when datanode starts in distributed mode
@@ -21,10 +21,17 @@ pub struct MetricsHandler;
 
 impl MetricsHandler {
     pub fn render(&self) -> String {
-        if let Some(handle) = metric::try_handle() {
-            handle.render()
-        } else {
-            "Prometheus handle not initialized.".to_owned()
+        let mut buffer = Vec::new();
+        let encoder = TextEncoder::new();
+        // Gather the metrics.
+        let metric_families = prometheus::gather();
+        // Encode them to send.
+        match encoder.encode(&metric_families, &mut buffer) {
+            Ok(_) => match String::from_utf8(buffer) {
+                Ok(s) => s,
+                Err(e) => e.to_string(),
+            },
+            Err(e) => e.to_string(),
         }
     }
 }

@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::Result;
-use common_telemetry::{logging, metric};
+use common_telemetry::logging;
 use common_test_util::temp_dir::create_temp_dir;
 use object_store::layers::LruCacheLayer;
 use object_store::services::{Fs, S3};
@@ -290,7 +290,6 @@ async fn assert_cache_files(
 #[tokio::test]
 async fn test_object_store_cache_policy() -> Result<()> {
     common_telemetry::init_default_ut_logging();
-    common_telemetry::init_default_metrics_recorder();
     // create file storage
     let root_dir = create_temp_dir("test_object_store_cache_policy");
     let store = OperatorBuilder::new(
@@ -426,8 +425,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await;
 
-    let handle = metric::try_handle().unwrap();
-    let metric_text = handle.render();
+    let metric_text = common_telemetry::dump_metrics().unwrap();
 
     assert!(metric_text.contains("object_store_lru_cache_hit"));
     assert!(metric_text.contains("object_store_lru_cache_miss"));

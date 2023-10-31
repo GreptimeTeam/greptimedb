@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_telemetry::{debug, error, timer};
+use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -33,7 +33,7 @@ use crate::compaction::twcs::TwcsPicker;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, STAGE_LABEL};
+use crate::metrics::COMPACTION_STAGE_ELAPSED;
 use crate::region::options::CompactionOptions;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OptionOutputTx, OutputTx, WorkerRequest};
@@ -180,7 +180,9 @@ impl CompactionScheduler {
             picker, region_id
         );
 
-        let pick_timer = timer!(COMPACTION_STAGE_ELAPSED, &[(STAGE_LABEL, "pick")]);
+        let pick_timer = COMPACTION_STAGE_ELAPSED
+            .with_label_values(&["pick"])
+            .start_timer();
         let Some(mut task) = picker.pick(request) else {
             // Nothing to compact, remove it from the region status map.
             self.region_status.remove(&region_id);

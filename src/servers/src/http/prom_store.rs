@@ -18,7 +18,6 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Extension;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
-use common_telemetry::timer;
 use hyper::Body;
 use prost::Message;
 use schemars::JsonSchema;
@@ -51,14 +50,11 @@ pub async fn remote_write(
     RawBody(body): RawBody,
 ) -> Result<(StatusCode, ())> {
     let request = decode_remote_write_request(body).await?;
+    let db = params.db.clone().unwrap_or_default();
 
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED,
-        &[(
-            crate::metrics::METRIC_DB_LABEL,
-            params.db.clone().unwrap_or_default()
-        )]
-    );
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
 
     handler.write(request, query_ctx).await?;
     Ok((StatusCode::NO_CONTENT, ()))
@@ -85,14 +81,11 @@ pub async fn remote_read(
     RawBody(body): RawBody,
 ) -> Result<PromStoreResponse> {
     let request = decode_remote_read_request(body).await?;
+    let db = params.db.clone().unwrap_or_default();
 
-    let _timer = timer!(
-        crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED,
-        &[(
-            crate::metrics::METRIC_DB_LABEL,
-            params.db.clone().unwrap_or_default()
-        )]
-    );
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
+        .with_label_values(&[db.as_str()])
+        .start_timer();
     handler.read(request, query_ctx).await
 }
 

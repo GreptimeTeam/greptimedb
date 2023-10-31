@@ -166,7 +166,7 @@ impl MergeScanExec {
         let trace_id = trace_id().unwrap_or_default();
 
         let stream = Box::pin(stream!({
-            metrics::histogram!(METRIC_MERGE_SCAN_REGIONS, regions.len() as f64);
+            METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);
             let _finish_timer = metric.finish_time().timer();
             let mut ready_timer = metric.ready_time().timer();
             let mut first_consume_timer = Some(metric.first_consume_time().timer());
@@ -185,7 +185,7 @@ impl MergeScanExec {
                     .do_get(request)
                     .await
                     .map_err(|e| {
-                        metrics::increment_counter!(METRIC_MERGE_SCAN_ERRORS_TOTAL);
+                        METRIC_MERGE_SCAN_ERRORS_TOTAL.inc();
                         BoxedError::new(e)
                     })
                     .context(ExternalSnafu)?;
@@ -211,7 +211,7 @@ impl MergeScanExec {
                     // reset poll timer
                     poll_timer = Instant::now();
                 }
-                metrics::histogram!(METRIC_MERGE_SCAN_POLL_ELAPSED, poll_duration.as_secs_f64());
+                METRIC_MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
             }
         }));
 

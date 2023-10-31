@@ -45,7 +45,6 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::timer;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
@@ -56,7 +55,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
-use crate::metrics::{HANDLE_REQUEST_ELAPSED, TYPE_LABEL};
+use crate::metrics::HANDLE_REQUEST_ELAPSED;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
@@ -146,7 +145,9 @@ impl EngineInner {
 
     /// Handles [RegionRequest] and return its executed result.
     async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
-        let _timer = timer!(HANDLE_REQUEST_ELAPSED, &[(TYPE_LABEL, request.type_name())]);
+        let _timer = HANDLE_REQUEST_ELAPSED
+            .with_label_values(&[request.type_name()])
+            .start_timer();
 
         let (request, receiver) = WorkerRequest::try_from_region_request(region_id, request)?;
         self.workers.submit_to_worker(region_id, request).await?;

@@ -19,10 +19,8 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::error::Result as RecordBatchResult;
 use common_recordbatch::RecordBatch;
-use common_telemetry::timer;
 use datatypes::schema::SchemaRef;
 use futures::{future, stream, Stream, StreamExt};
-use metrics::increment_counter;
 use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
 use pgwire::api::results::{DataRowEncoder, DescribeResponse, QueryResponse, Response, Tag};
@@ -48,16 +46,10 @@ impl SimpleQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let query_ctx = self.session.new_query_context();
-        let _timer = timer!(
-            crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
-            &[
-                (
-                    crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY.to_string()
-                ),
-                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
-            ]
-        );
+        let db = query_ctx.get_db_string();
+        let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
+            .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
+            .start_timer();
         let outputs = self.query_handler.do_query(query, query_ctx).await;
 
         let mut results = Vec::with_capacity(outputs.len());
@@ -155,7 +147,7 @@ impl QueryParser for DefaultQueryParser {
     type Statement = SqlPlan;
 
     async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
-        increment_counter!(crate::metrics::METRIC_POSTGRES_PREPARED_COUNT);
+        crate::metrics::METRIC_POSTGRES_PREPARED_COUNT.inc();
         let query_ctx = self.session.new_query_context();
         let mut stmts = ParserContext::create_with_dialect(sql, &PostgreSqlDialect {})
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
@@ -216,16 +208,11 @@ impl ExtendedQueryHandler for PostgresServerHandler {
         C: ClientInfo + Unpin + Send + Sync,
     {
         let query_ctx = self.session.new_query_context();
-        let _timer = timer!(
-            crate::metrics::METRIC_POSTGRES_QUERY_TIMER,
-            &[
-                (
-                    crate::metrics::METRIC_POSTGRES_SUBPROTOCOL_LABEL,
-                    crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY.to_string()
-                ),
-                (crate::metrics::METRIC_DB_LABEL, query_ctx.get_db_string())
-            ]
-        );
+        let db = query_ctx.get_db_string();
+        let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
+            .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])
+            .start_timer();
+
         let sql_plan = portal.statement().statement();
 
         let output = if let Some(plan) = &sql_plan.plan {

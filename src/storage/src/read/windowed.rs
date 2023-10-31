@@ -16,10 +16,8 @@ use arrow::compute::SortOptions;
 use arrow::row::{RowConverter, SortField};
 use arrow_array::{Array, ArrayRef};
 use common_recordbatch::OrderOption;
-use common_telemetry::timer;
 use datatypes::data_type::DataType;
 use datatypes::vectors::Helper;
-use metrics::histogram;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
@@ -62,7 +60,7 @@ where
     R: BatchReader,
 {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        let _window_scan_elapsed = timer!(crate::metrics::WINDOW_SCAN_ELAPSED);
+        let _window_scan_elapsed = crate::metrics::WINDOW_SCAN_ELAPSED.start_timer();
         let Some(mut reader) = self.readers.pop() else {
             return Ok(None);
         };
@@ -98,7 +96,7 @@ where
                 .push(arrow::compute::concat(&columns).context(error::ConvertColumnsToRowsSnafu)?);
         }
         if let Some(v) = vectors_in_batch.get(0) {
-            histogram!(crate::metrics::WINDOW_SCAN_ROWS_PER_WINDOW, v.len() as f64);
+            crate::metrics::WINDOW_SCAN_ROWS_PER_WINDOW.observe(v.len() as f64);
         }
         let sorted = sort_by_rows(&self.schema, vectors_in_batch, &self.order_options)?;
         let vectors = sorted

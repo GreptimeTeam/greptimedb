@@ -24,10 +24,9 @@ use api::v1::meta::{
 };
 use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::sequence::Sequence;
-use common_telemetry::{debug, info, timer, warn};
+use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
 use futures::future::join_all;
-use metrics::{decrement_gauge, increment_gauge};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
@@ -215,14 +214,14 @@ impl HeartbeatHandlerGroup {
 
     pub async fn register(&self, key: impl AsRef<str>, pusher: Pusher) {
         let key = key.as_ref();
-        increment_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
+        METRIC_META_HEARTBEAT_CONNECTION_NUM.inc();
         info!("Pusher register: {}", key);
         let _ = self.pushers.insert(key.to_string(), pusher).await;
     }
 
     pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
         let key = key.as_ref();
-        decrement_gauge!(METRIC_META_HEARTBEAT_CONNECTION_NUM, 1.0);
+        METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         info!("Pusher unregister: {}", key);
         self.pushers.remove(key).await
     }
@@ -252,7 +251,9 @@ impl HeartbeatHandlerGroup {
             }
 
             if handler.is_acceptable(role) {
-                let _timer = timer!(METRIC_META_HANDLER_EXECUTE, &[("name", *name)]);
+                let _timer = METRIC_META_HANDLER_EXECUTE
+                    .with_label_values(&[*name])
+                    .start_timer();
                 handler.handle(&req, &mut ctx, &mut acc).await?;
             }
         }

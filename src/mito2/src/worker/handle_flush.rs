@@ -186,10 +186,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Delete wal.
         info!(
-            "Region {} flush finished, elapsed: {:?}, tries to bump wal to {}",
-            region_id,
-            request.timer.elapsed(),
-            request.flushed_entry_id
+            "Region {} flush finished, tries to bump wal to {}",
+            region_id, request.flushed_entry_id
         );
         if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
             error!(e; "Failed to write wal, region: {}", region_id);
