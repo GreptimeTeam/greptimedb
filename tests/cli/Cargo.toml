@@ -1,5 +1,5 @@
 [package]
-name = "sqlness-runner"
+name = "sqlness-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,6 @@ license.workspace = true
 async-trait = "0.1"
 clap = { version = "4.0", features = ["derive"] }
 client = { workspace = true }
-common-time = { workspace = true }
-serde.workspace = true
 sqlness = { version = "0.5" }
 sqlness-util = { workspace = true }
-tinytemplate = "1.2"
 tokio.workspace = true

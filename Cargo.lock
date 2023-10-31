@@ -8558,21 +8558,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlness-cli"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "clap 4.4.7",
+ "client",
+ "sqlness",
+ "sqlness-util",
+ "tokio",
+]
+
+[[package]]
 name = "sqlness-runner"
 version = "0.4.2"
 dependencies = [
  "async-trait",
  "clap 4.4.7",
  "client",
- "common-base",
- "common-error",
- "common-grpc",
- "common-query",
- "common-recordbatch",
  "common-time",
  "serde",
  "sqlness",
+ "sqlness-util",
  "tinytemplate",
+ "tokio",
+]
+
+[[package]]
+name = "sqlness-util"
+version = "0.4.2"
+dependencies = [
+ "client",
+ "common-error",
+ "common-query",
+ "common-recordbatch",
+ "sqlness",
  "tokio",
 ]
 

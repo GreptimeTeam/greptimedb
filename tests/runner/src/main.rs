@@ -19,7 +19,6 @@ use env::Env;
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
-mod util;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -52,7 +51,7 @@ async fn main() {
     let data_home = std::path::PathBuf::from("/tmp");
 
     let config = ConfigBuilder::default()
-        .case_dir(util::get_case_dir(args.case_dir))
+        .case_dir(sqlness_util::get_case_dir(args.case_dir))
         .fail_fast(args.fail_fast)
         .test_filter(args.test_filter)
         .follow_links(true)

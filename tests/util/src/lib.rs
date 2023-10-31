@@ -17,9 +17,84 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use client::error::ServerSnafu;
+use client::{Database as DB, Error as ClientError};
+use common_error::ext::ErrorExt;
+use common_query::Output;
+use common_recordbatch::RecordBatches;
+use sqlness::QueryContext;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpSocket;
+use tokio::sync::MutexGuard;
 use tokio::time;
+struct ResultDisplayer {
+    result: Result<Output, ClientError>,
+}
+
+impl Display for ResultDisplayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.result {
+            Ok(result) => match result {
+                Output::AffectedRows(rows) => {
+                    write!(f, "Affected Rows: {rows}")
+                }
+                Output::RecordBatches(recordbatches) => {
+                    let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
+                    match pretty {
+                        Ok(s) => write!(f, "{s}"),
+                        Err(e) => {
+                            write!(f, "Failed to pretty format {recordbatches:?}, error: {e}")
+                        }
+                    }
+                }
+                Output::Stream(_) => unreachable!(),
+            },
+            Err(e) => {
+                let status_code = e.status_code();
+                let root_cause = e.output_msg();
+                write!(
+                    f,
+                    "Error: {}({status_code}), {root_cause}",
+                    status_code as u32
+                )
+            }
+        }
+    }
+}
+pub async fn do_query(
+    _ctx: QueryContext,
+    mut client: MutexGuard<'_, DB>,
+    query: String,
+) -> Box<dyn Display> {
+    if query.trim().to_lowercase().starts_with("use ") {
+        let database = query
+            .split_ascii_whitespace()
+            .nth(1)
+            .expect("Illegal `USE` statement: expecting a database.")
+            .trim_end_matches(';');
+        client.set_schema(database);
+        Box::new(ResultDisplayer {
+            result: Ok(Output::AffectedRows(0)),
+        }) as _
+    } else {
+        let mut result = client.sql(&query).await;
+        if let Ok(Output::Stream(stream)) = result {
+            match RecordBatches::try_collect(stream).await {
+                Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
+                Err(e) => {
+                    let status_code = e.status_code();
+                    let msg = e.output_msg();
+                    result = ServerSnafu {
+                        code: status_code,
+                        msg,
+                    }
+                    .fail();
+                }
+            }
+        }
+        Box::new(ResultDisplayer { result }) as _
+    }
+}
 
 /// Check port every 0.1 second.
 const PORT_CHECK_INTERVAL: Duration = Duration::from_millis(100);

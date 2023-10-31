@@ -51,6 +51,8 @@ members = [
     "src/table",
     "tests-integration",
     "tests/runner",
+    "tests/cli",
+    "tests/util",
 ]
 resolver = "2"
 
@@ -165,6 +167,7 @@ script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
+sqlness-util = { path = "tests/util" }
 storage = { path = "src/storage" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }

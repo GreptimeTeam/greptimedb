@@ -3,7 +3,7 @@ linker = "aarch64-linux-gnu-gcc"
 
 [alias]
 sqlness = "run --bin sqlness-runner --"
-
+sqlness-cli = "run --bin sqlness-cli --"
 
 [build]
 rustflags = [

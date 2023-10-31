@@ -23,19 +23,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use client::error::ServerSnafu;
-use client::{
-    Client, Database as DB, Error as ClientError, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME,
-};
-use common_error::ext::ErrorExt;
-use common_query::Output;
-use common_recordbatch::RecordBatches;
+use client::{Client, Database as DB, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use serde::Serialize;
 use sqlness::{Database, EnvController, QueryContext};
 use tinytemplate::TinyTemplate;
 use tokio::sync::Mutex as TokioMutex;
-
-use crate::util;
 
 const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
@@ -188,7 +180,7 @@ impl Env {
             _ => panic!("Unexpected subcommand: {subcommand}"),
         };
 
-        if util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
+        if sqlness_util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(1)).await {
             panic!(
                 "Port {check_ip_addr} is already in use, please check and retry.",
                 check_ip_addr = check_ip_addr
@@ -201,7 +193,7 @@ impl Env {
         let program = "greptime.exe";
 
         let mut process = Command::new(program)
-            .current_dir(util::get_binary_dir("debug"))
+            .current_dir(sqlness_util::get_binary_dir("debug"))
             .env("TZ", "UTC")
             .args(args)
             .stdout(log_file)
@@ -210,7 +202,8 @@ impl Env {
                 panic!("Failed to start the DB with subcommand {subcommand},Error: {error}")
             });
 
-        if !util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await {
+        if !sqlness_util::check_port(check_ip_addr.parse().unwrap(), Duration::from_secs(10)).await
+        {
             Env::stop_server(&mut process);
             panic!("{subcommand} doesn't up in 10 seconds, quit.")
         }
@@ -315,7 +308,7 @@ impl Env {
     async fn build_db() {
         println!("Going to build the DB...");
         let output = Command::new("cargo")
-            .current_dir(util::get_workspace_root())
+            .current_dir(sqlness_util::get_workspace_root())
             .args(["build", "--bin", "greptime"])
             .output()
             .expect("Failed to start GreptimeDB");
@@ -348,35 +341,7 @@ impl Database for GreptimeDB {
             self.env.restart_server(self).await;
         }
 
-        let mut client = self.client.lock().await;
-        if query.trim().to_lowercase().starts_with("use ") {
-            let database = query
-                .split_ascii_whitespace()
-                .nth(1)
-                .expect("Illegal `USE` statement: expecting a database.")
-                .trim_end_matches(';');
-            client.set_schema(database);
-            Box::new(ResultDisplayer {
-                result: Ok(Output::AffectedRows(0)),
-            }) as _
-        } else {
-            let mut result = client.sql(&query).await;
-            if let Ok(Output::Stream(stream)) = result {
-                match RecordBatches::try_collect(stream).await {
-                    Ok(recordbatches) => result = Ok(Output::RecordBatches(recordbatches)),
-                    Err(e) => {
-                        let status_code = e.status_code();
-                        let msg = e.output_msg();
-                        result = ServerSnafu {
-                            code: status_code,
-                            msg,
-                        }
-                        .fail();
-                    }
-                }
-            }
-            Box::new(ResultDisplayer { result }) as _
-        }
+        sqlness_util::do_query(ctx, self.client.lock().await, query).await
     }
 }
 
@@ -427,40 +392,5 @@ impl GreptimeDBContext {
 
     fn reset_datanode_id(&self) {
         self.datanode_id.store(0, Ordering::Relaxed);
-    }
-}
-
-struct ResultDisplayer {
-    result: Result<Output, ClientError>,
-}
-
-impl Display for ResultDisplayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.result {
-            Ok(result) => match result {
-                Output::AffectedRows(rows) => {
-                    write!(f, "Affected Rows: {rows}")
-                }
-                Output::RecordBatches(recordbatches) => {
-                    let pretty = recordbatches.pretty_print().map_err(|e| e.to_string());
-                    match pretty {
-                        Ok(s) => write!(f, "{s}"),
-                        Err(e) => {
-                            write!(f, "Failed to pretty format {recordbatches:?}, error: {e}")
-                        }
-                    }
-                }
-                Output::Stream(_) => unreachable!(),
-            },
-            Err(e) => {
-                let status_code = e.status_code();
-                let root_cause = e.output_msg();
-                write!(
-                    f,
-                    "Error: {}({status_code}), {root_cause}",
-                    status_code as u32
-                )
-            }
-        }
     }
 }
