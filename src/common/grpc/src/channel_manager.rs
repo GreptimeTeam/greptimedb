@@ -163,7 +163,14 @@ impl ChannelManager {
     }
 
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        let mut endpoint = Endpoint::new(format!("https://{addr}")).context(CreateChannelSnafu)?;
+        let http_prefix = if self.client_tls_config.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+
+        let mut endpoint =
+            Endpoint::new(format!("{http_prefix}://{addr}")).context(CreateChannelSnafu)?;
 
         if let Some(dur) = self.config.timeout {
             endpoint = endpoint.timeout(dur);
