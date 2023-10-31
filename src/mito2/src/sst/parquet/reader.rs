@@ -123,7 +123,7 @@ impl ParquetReaderBuilder {
         let mut reader = BufReader::new(reader);
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&mut reader, &file_path).await?;
-        // Decode region metadata.
+        // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         let region_meta = Self::get_region_metadata(&file_path, key_value_meta)?;
         // Computes column ids to read.
@@ -140,7 +140,7 @@ impl ParquetReaderBuilder {
             });
         let read_format = ReadFormat::new(Arc::new(region_meta));
 
-        // Prune row groups by metadata.
+        // Prunes row groups by metadata.
         let row_groups: VecDeque<_> = if let Some(predicate) = &self.predicate {
             let stats =
                 RowGroupPruningStats::new(parquet_meta.row_groups(), &read_format, column_ids);
@@ -155,7 +155,7 @@ impl ParquetReaderBuilder {
             (0..parquet_meta.num_row_groups()).collect()
         };
 
-        // Compute the projection mask.
+        // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
         let projection_mask = if let Some(column_ids) = self.projection.as_ref() {
             let indices = read_format.projection_indices(column_ids.iter().copied());
@@ -165,7 +165,7 @@ impl ParquetReaderBuilder {
             ProjectionMask::all()
         };
 
-        // Compute the field levels.
+        // Computes the field levels.
         let hint = Some(read_format.arrow_schema().fields());
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
