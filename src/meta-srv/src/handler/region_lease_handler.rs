@@ -78,7 +78,7 @@ mod test {
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
     use crate::service::store::kv::KvBackendAdapter;
-    use crate::{table_routes, test_util};
+    use crate::test_util;
 
     #[tokio::test]
     async fn test_handle_region_lease() {
@@ -94,11 +94,7 @@ mod test {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
             kv_store.clone(),
         )));
-        table_routes::tests::prepare_table_region_and_info_value(
-            &table_metadata_manager,
-            table_name,
-        )
-        .await;
+        test_util::prepare_table_region_and_info_value(&table_metadata_manager, table_name).await;
 
         let req = HeartbeatRequest {
             duration_since_epoch: 1234,

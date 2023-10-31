@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use api::v1::meta::ddl_task_server::DdlTaskServer;
 use api::v1::meta::heartbeat_server::HeartbeatServer;
-use api::v1::meta::router_server::RouterServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -85,7 +84,6 @@ pub async fn mock(
     let _handle = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(HeartbeatServer::new(service.clone()))
-            .add_service(RouterServer::new(service.clone()))
             .add_service(StoreServer::new(service.clone()))
             .add_service(DdlTaskServer::new(service.clone()))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))

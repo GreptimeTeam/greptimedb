@@ -20,7 +20,6 @@ pub mod manager;
 pub mod metrics;
 pub mod partition;
 pub mod range;
-pub mod route;
 pub mod splitter;
 
 pub use crate::partition::{PartitionRule, PartitionRuleRef};

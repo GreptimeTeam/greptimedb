@@ -411,7 +411,7 @@ mod tests {
     use crate::service::mailbox::Channel;
     use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
     use crate::service::store::memory::MemStore;
-    use crate::table_routes;
+    use crate::test_util;
 
     struct RandomNodeSelector {
         nodes: Vec<Peer>,
@@ -497,11 +497,7 @@ mod tests {
             let table_metadata_manager = Arc::new(TableMetadataManager::new(
                 KvBackendAdapter::wrap(kv_store.clone()),
             ));
-            table_routes::tests::prepare_table_region_and_info_value(
-                &table_metadata_manager,
-                table,
-            )
-            .await;
+            test_util::prepare_table_region_and_info_value(&table_metadata_manager, table).await;
             let region_distribution = table_metadata_manager
                 .table_route_manager()
                 .get_region_distribution(1)
