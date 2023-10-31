@@ -34,6 +34,7 @@ const MIN_BATCH_SIZE: usize = 64;
 /// 1. Batch is ordered by primary key, time index, sequence desc, op type desc (we can
 /// ignore op type as sequence is already unique).
 /// 2. Batch doesn't have duplicate elements (elements with the same primary key and time index).
+/// 3. Batches from sources **must** not be empty.
 pub struct MergeReader {
     /// Holds [Node]s whose key range of current batch **is** overlapped with the merge window.
     /// Each node yields batches from a `source`.
@@ -403,7 +404,7 @@ impl Node {
     /// It tries to fetch one batch from the `source`.
     async fn new(mut source: Source) -> Result<Node> {
         // Ensures batch is not empty.
-        let current_batch = source.next_non_empty_batch().await?.map(CompareFirst);
+        let current_batch = source.next_batch().await?.map(CompareFirst);
         Ok(Node {
             source,
             current_batch,
@@ -439,7 +440,7 @@ impl Node {
     async fn fetch_batch(&mut self) -> Result<Batch> {
         let current = self.current_batch.take().unwrap();
         // Ensures batch is not empty.
-        self.current_batch = self.source.next_non_empty_batch().await?.map(CompareFirst);
+        self.current_batch = self.source.next_batch().await?.map(CompareFirst);
         Ok(current.0)
     }
 
@@ -719,71 +720,6 @@ mod tests {
                     &[21, 23, 30],
                 ),
             ],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_merge_empty() {
-        let reader1 = VecBatchReader::new(&[new_batch(b"k1", &[], &[], &[], &[])]);
-        let reader2 = VecBatchReader::new(&[new_batch(
-            b"k1",
-            &[1, 2],
-            &[11, 12],
-            &[OpType::Put, OpType::Put],
-            &[21, 22],
-        )]);
-        let mut reader = MergeReaderBuilder::new()
-            .push_batch_reader(Box::new(reader1))
-            .push_batch_iter(Box::new(reader2))
-            .build()
-            .await
-            .unwrap();
-        check_reader_result(
-            &mut reader,
-            &[new_batch(
-                b"k1",
-                &[1, 2],
-                &[11, 12],
-                &[OpType::Put, OpType::Put],
-                &[21, 22],
-            )],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_merge_empty_2() {
-        let reader1 = VecBatchReader::new(&[
-            new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21]),
-            new_batch(b"k1", &[], &[], &[], &[]),
-            new_batch(b"k1", &[2], &[11], &[OpType::Put], &[22]),
-        ]);
-        let reader2 = VecBatchReader::new(&[
-            new_batch(
-                b"k1",
-                &[1, 2],
-                &[10, 12],
-                &[OpType::Put, OpType::Put],
-                &[31, 32],
-            ),
-            new_batch(b"k1", &[], &[], &[], &[]),
-        ]);
-        let mut reader = MergeReaderBuilder::new()
-            .push_batch_reader(Box::new(reader1))
-            .push_batch_iter(Box::new(reader2))
-            .build()
-            .await
-            .unwrap();
-        check_reader_result(
-            &mut reader,
-            &[new_batch(
-                b"k1",
-                &[1, 2],
-                &[11, 12],
-                &[OpType::Put, OpType::Put],
-                &[21, 32],
-            )],
         )
         .await;
     }

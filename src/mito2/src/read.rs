@@ -647,17 +647,6 @@ impl Source {
             Source::Iter(iter) => iter.next().transpose(),
         }
     }
-
-    /// Returns next non-empty [Batch].
-    pub(crate) async fn next_non_empty_batch(&mut self) -> Result<Option<Batch>> {
-        while let Some(batch) = self.next_batch().await? {
-            if !batch.is_empty() {
-                return Ok(Some(batch));
-            }
-        }
-
-        Ok(None)
-    }
 }
 
 /// Async batch reader.
