@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use arrow::pyarrow::PyArrowException;
-use common_telemetry::{info, timer};
+use common_telemetry::info;
 use datafusion_common::ScalarValue;
 use datafusion_expr::ColumnarValue;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;

@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use arrow::compute;
 use common_recordbatch::RecordBatch;
-use common_telemetry::timer;
 use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};

@@ -21,7 +21,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{convert_to_region_map, RegionRoutes};
 use common_query::prelude::Expr;
-use common_telemetry::timer;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -68,7 +67,7 @@ impl PartitionRuleManager {
 
     /// Find table route of given table name.
     pub async fn find_table_route(&self, table_id: TableId) -> Result<RegionRoutes> {
-        let _timer = timer!(METRIC_TABLE_ROUTE_GET);
+        let _timer = METRIC_TABLE_ROUTE_GET.start_timer();
         let route = self
             .table_route_manager
             .get(table_id)

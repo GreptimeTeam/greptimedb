@@ -260,7 +260,7 @@ impl RegionFlushTask {
                     memtables_to_remove,
                     senders: std::mem::take(&mut self.senders),
                     file_purger: self.file_purger.clone(),
-                    timer,
+                    _timer: timer,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,

@@ -22,12 +22,6 @@ lazy_static! {
         &["target", "op", "cluster_id"]
     )
     .unwrap();
-    pub static ref METRIC_META_ROUTE_REQUEST: HistogramVec = register_histogram_vec!(
-        "meta_route_request",
-        "meta route request",
-        &["op", "cluster_id"]
-    )
-    .unwrap();
     pub static ref METRIC_META_HEARTBEAT_CONNECTION_NUM: IntGauge = register_int_gauge!(
         "meta_heartbeat_connection_num",
         "meta heartbeat connection num"
