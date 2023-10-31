@@ -94,7 +94,7 @@ impl RegionEngine for FileRegionEngine {
     }
 
     async fn region_disk_usage(&self, _: RegionId) -> Option<i64> {
-        unimplemented!("not implemented for file engine yet")
+        None
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
