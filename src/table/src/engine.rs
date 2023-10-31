@@ -70,6 +70,34 @@ impl<'a> From<TableReference<'a>> for DfTableReference<'a> {
     }
 }
 
+/// Represents a resolved path to a table of the form “catalog.schema”
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DatabaseReference<'a> {
+    pub database_name: &'a str,
+}
+
+
+impl<'a> DatabaseReference<'a> {
+    pub fn bare(database_name: &'a str) -> Self {
+        DatabaseReference {
+            database_name: "default",
+        }
+    }
+
+    pub fn full(database_name: &'a str) -> Self {
+        DatabaseReference {
+            database_name,
+        }
+    }
+}
+
+impl<'a> Display for DatabaseReference<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.database_name)
+    }
+}
+
+
 /// CloseTableResult
 ///
 /// Returns [`CloseTableResult::Released`] and closed region numbers if a table was removed

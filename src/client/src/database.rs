@@ -19,7 +19,7 @@ use api::v1::query_request::Query;
 use api::v1::{
     AlterExpr, AuthHeader, CreateTableExpr, DdlRequest, DeleteRequests, DropTableExpr,
     GreptimeRequest, InsertRequests, PromRangeQuery, QueryRequest, RequestHeader,
-    RowInsertRequests, TruncateTableExpr,
+    RowInsertRequests, TruncateTableExpr,CreateDatabaseExpr,
 };
 use arrow_flight::Ticket;
 use async_stream::stream;

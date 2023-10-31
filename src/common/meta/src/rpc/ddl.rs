@@ -13,20 +13,20 @@
 // limitations under the License.
 
 use std::result;
-
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
     AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
     DropTableTask as PbDropTableTask, Partition, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
+    CreateDatabaseTask as PbCreateDatabaseTask
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr,CreateDatabaseExpr};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use table::engine::TableReference;
+use table::engine::{TableReference,DatabaseReference};
 use table::metadata::{RawTableInfo, TableId};
 
 use crate::error::{self, Result};
@@ -38,6 +38,7 @@ pub enum DdlTask {
     DropTable(DropTableTask),
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
+    CreateDatabase(CreateDatabaseTask),
 }
 
 impl DdlTask {
@@ -80,6 +81,13 @@ impl DdlTask {
             table_id,
         })
     }
+
+    pub fn new_create_database(
+        database_name: String,
+    ) -> Self {
+        DdlTask::CreateDatabase(CreateDatabaseTask { database_name,})
+    }
+
 }
 
 impl TryFrom<Task> for DdlTask {
@@ -94,6 +102,7 @@ impl TryFrom<Task> for DdlTask {
             Task::TruncateTableTask(truncate_table) => {
                 Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
             }
+            Task::CreateDatabaseTask(create_database) => Ok(DdlTask::CreateDatabase(create_database.try_info()?)),
         }
     }
 }
@@ -131,7 +140,13 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     table_id: Some(api::v1::TableId { id: task.table_id }),
                 }),
             }),
-        };
+            DdlTask::CreateDatabase(task) => Task::CreateDatabaseTask(PbCreateDatabaseTask {
+                create_database:Some(CreateDatabaseExpr { 
+                    database_name: task.database_name, 
+                    create_if_not_exists: true,
+                    options: Default::default(),
+                }),
+            })};
 
         Ok(Self {
             header: None,
@@ -427,6 +442,37 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+        })
+    }
+}
+
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateDatabaseTask {
+    pub database_name: String,
+}
+
+impl CreateDatabaseTask {
+    pub fn database_ref(&self) -> DatabaseReference{
+        DatabaseReference {
+            database_name: &self.database_name
+        }
+    }
+    pub fn database_name(&self) -> &str {
+         &self.database_name
+    }
+}
+
+impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateDatabaseTask) -> Result<Self>{
+        let create_database: CreateDatabaseExpr = pb.create_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create database message",
+        })?;
+
+        Ok(Self {
+            database_name: create_database.database_name
         })
     }
 }
