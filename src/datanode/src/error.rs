@@ -463,7 +463,6 @@ impl ErrorExt for Error {
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             ParseSql { source, .. } => source.status_code(),
-
             DeleteExprToRequest { source, .. } | InsertData { source, .. } => source.status_code(),
 
             ColumnValuesNumberMismatch { .. }

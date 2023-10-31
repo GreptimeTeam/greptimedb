@@ -45,6 +45,37 @@ SELECT ts, b, min(c) RANGE '5s' FROM (SELECT ts, host AS b, val AS c FROM host W
 | 1970-01-01T00:00:20 | host1 | 2                         |
 +---------------------+-------+---------------------------+
 
+-- Test EXPLAIN and ANALYZE
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| RangeSelect: range_exprs=[MIN(host.val) RANGE 5s FILL NULL], align=5s time_index=ts_|
+|_|_MergeScan [is_placeholder=false]_|
+| physical_plan | RangeSelectExec: range_expr=[RangeFnExec{ MIN(host.val), range: 5000}], align=5000, time_index=ts, by=[host@1] |
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+EXPLAIN ANALYZE SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| Plan with Metrics | RangeSelectExec: range_expr=[RangeFnExec{ MIN(host.val), range: 5000}], align=5000, time_index=ts, by=[host@1], REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 DROP TABLE host;
 
 Affected Rows: 0

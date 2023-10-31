@@ -26,11 +26,12 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter, VisitRecursion};
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
 use datafusion_expr::expr::ScalarUDF;
 use datafusion_expr::{
-    Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder, Projection,
+    Aggregate, Analyze, Explain, Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder,
+    Projection,
 };
 use datatypes::prelude::ConcreteDataType;
 use promql_parser::util::parse_duration;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use super::plan::Fill;
@@ -265,9 +266,38 @@ impl RangePlanRewriter {
                             None => y.clone(),
                         })
                         .collect();
-                    Ok(Some(
-                        plan.with_new_inputs(&inputs).context(DataFusionSnafu)?,
-                    ))
+                    // Due to the limitations of Datafusion, for `LogicalPlan::Analyze` and `LogicalPlan::Explain`,
+                    // directly using the method `with_new_inputs` to rebuild a new `LogicalPlan` will cause an error,
+                    // so here we directly use the `LogicalPlanBuilder` to build a new plan.
+                    let plan = match plan {
+                        LogicalPlan::Analyze(Analyze { verbose, .. }) => {
+                            ensure!(
+                                inputs.len() == 1,
+                                RangeQuerySnafu {
+                                    msg: "Illegal subplan nums when rewrite Analyze logical plan",
+                                }
+                            );
+                            LogicalPlanBuilder::from(inputs[0].clone())
+                                .explain(*verbose, true)
+                                .context(DataFusionSnafu)?
+                                .build()
+                        }
+                        LogicalPlan::Explain(Explain { verbose, .. }) => {
+                            ensure!(
+                                inputs.len() == 1,
+                                RangeQuerySnafu {
+                                    msg: "Illegal subplan nums when rewrite Explain logical plan",
+                                }
+                            );
+                            LogicalPlanBuilder::from(inputs[0].clone())
+                                .explain(*verbose, false)
+                                .context(DataFusionSnafu)?
+                                .build()
+                        }
+                        _ => plan.with_new_inputs(&inputs),
+                    }
+                    .context(DataFusionSnafu)?;
+                    Ok(Some(plan))
                 } else {
                     Ok(None)
                 }

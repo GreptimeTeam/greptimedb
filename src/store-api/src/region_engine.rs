@@ -49,6 +49,9 @@ pub trait RegionEngine: Send + Sync {
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError>;
 
+    /// Retrieves region's disk usage.
+    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64>;
+
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError>;
 

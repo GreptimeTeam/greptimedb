@@ -33,6 +33,7 @@ use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
 use mito2::engine::MitoEngine;
+use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::Mode;
@@ -354,7 +355,12 @@ impl DatanodeBuilder {
         let mut region_server =
             RegionServer::new(query_engine.clone(), runtime.clone(), event_listener);
         let object_store = store::new_object_store(opts).await?;
-        let engines = Self::build_store_engines(opts, log_store, object_store).await?;
+        let object_store_manager = ObjectStoreManager::new(
+            "default", // TODO: use a name which is set in the configuration when #919 is done.
+            object_store,
+        );
+        let engines =
+            Self::build_store_engines(opts, log_store, Arc::new(object_store_manager)).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -392,7 +398,7 @@ impl DatanodeBuilder {
     async fn build_store_engines<S>(
         opts: &DatanodeOptions,
         log_store: Arc<S>,
-        object_store: object_store::ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> Result<Vec<RegionEngineRef>>
     where
         S: LogStore,
@@ -401,12 +407,18 @@ impl DatanodeBuilder {
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let engine: MitoEngine =
-                        MitoEngine::new(config.clone(), log_store.clone(), object_store.clone());
+                    let engine: MitoEngine = MitoEngine::new(
+                        config.clone(),
+                        log_store.clone(),
+                        object_store_manager.clone(),
+                    );
                     engines.push(Arc::new(engine) as _);
                 }
                 RegionEngineConfig::File(config) => {
-                    let engine = FileRegionEngine::new(config.clone(), object_store.clone());
+                    let engine = FileRegionEngine::new(
+                        config.clone(),
+                        object_store_manager.default_object_store().clone(), // TODO: implement custom storage for file engine
+                    );
                     engines.push(Arc::new(engine) as _);
                 }
             }

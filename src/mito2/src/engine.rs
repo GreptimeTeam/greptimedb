@@ -46,7 +46,7 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::timer;
-use object_store::ObjectStore;
+use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
@@ -58,6 +58,7 @@ use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::{HANDLE_REQUEST_ELAPSED, TYPE_LABEL};
 use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
@@ -72,18 +73,29 @@ impl MitoEngine {
     pub fn new<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> MitoEngine {
         config.sanitize();
 
         MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store)),
+            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager)),
         }
     }
 
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
+    }
+
+    /// Returns the region disk/memory usage information.
+    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
+        let region = self
+            .inner
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        Ok(region.region_usage().await)
     }
 
     /// Returns a scanner to scan for `request`.
@@ -108,10 +120,10 @@ impl EngineInner {
     fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store),
+            workers: WorkerGroup::start(config, log_store, object_store_manager),
         }
     }
 
@@ -221,6 +233,15 @@ impl RegionEngine for MitoEngine {
         self.inner.stop().await.map_err(BoxedError::new)
     }
 
+    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+        let size = self
+            .get_region_usage(region_id)
+            .await
+            .map(|usage| usage.disk_usage())
+            .ok()?;
+        size.try_into().ok()
+    }
+
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         self.inner
             .set_writable(region_id, writable)
@@ -235,7 +256,7 @@ impl MitoEngine {
     pub fn new_for_test<S: LogStore>(
         mut config: MitoConfig,
         log_store: Arc<S>,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {
@@ -246,7 +267,7 @@ impl MitoEngine {
                 workers: WorkerGroup::start_for_test(
                     config,
                     log_store,
-                    object_store,
+                    object_store_manager,
                     write_buffer_manager,
                     listener,
                 ),
