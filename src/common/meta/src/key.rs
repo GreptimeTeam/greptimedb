@@ -783,6 +783,7 @@ mod tests {
             },
             leader_peer: Some(Peer::new(datanode, "a2")),
             follower_peers: vec![],
+            leader_status: None,
         }
     }
 

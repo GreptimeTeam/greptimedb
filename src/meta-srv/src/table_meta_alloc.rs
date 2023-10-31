@@ -118,6 +118,7 @@ async fn handle_create_region_routes(
                 region,
                 leader_peer: Some(peer.into()),
                 follower_peers: vec![], // follower_peers is not supported at the moment
+                leader_status: None,
             }
         })
         .collect::<Vec<_>>();
