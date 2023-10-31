@@ -187,8 +187,9 @@ impl StartCommand {
         Ok(Options::Frontend(Box::new(opts)))
     }
 
-    async fn build(self, opts: FrontendOptions) -> Result<Instance> {
-        let plugins = plugins::setup_frontend_plugins(&opts)
+    async fn build(self, mut opts: FrontendOptions) -> Result<Instance> {
+        #[allow(clippy::unnecessary_mut_passed)]
+        let plugins = plugins::setup_frontend_plugins(&mut opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -303,7 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
+        let mut fe_opts = FrontendOptions {
             http: HttpOptions {
                 disable_dashboard: false,
                 ..Default::default()
@@ -312,7 +313,8 @@ mod tests {
             ..Default::default()
         };
 
-        let plugins = plugins::setup_frontend_plugins(&fe_opts).await.unwrap();
+        #[allow(clippy::unnecessary_mut_passed)]
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider

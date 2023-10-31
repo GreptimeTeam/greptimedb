@@ -316,8 +316,9 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let fe_opts = opts.frontend;
-        let fe_plugins = plugins::setup_frontend_plugins(&fe_opts)
+        let mut fe_opts = opts.frontend;
+        #[allow(clippy::unnecessary_mut_passed)]
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
@@ -421,12 +422,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
-        let fe_opts = FrontendOptions {
+        let mut fe_opts = FrontendOptions {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
-        let plugins = plugins::setup_frontend_plugins(&fe_opts).await.unwrap();
+        #[allow(clippy::unnecessary_mut_passed)]
+        let plugins = plugins::setup_frontend_plugins(&mut fe_opts).await.unwrap();
 
         let provider = plugins.get::<UserProviderRef>().unwrap();
         let result = provider
