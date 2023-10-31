@@ -163,7 +163,7 @@ impl ChannelManager {
     }
 
     fn build_endpoint(&self, addr: &str) -> Result<Endpoint> {
-        let mut endpoint = Endpoint::new(format!("http://{addr}")).context(CreateChannelSnafu)?;
+        let mut endpoint = Endpoint::new(format!("https://{addr}")).context(CreateChannelSnafu)?;
 
         if let Some(dur) = self.config.timeout {
             endpoint = endpoint.timeout(dur);
