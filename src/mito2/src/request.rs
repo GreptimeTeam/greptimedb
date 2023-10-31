@@ -595,7 +595,7 @@ pub(crate) struct FlushFinished {
     /// File purger for cleaning files on failure.
     pub(crate) file_purger: FilePurgerRef,
     /// Flush timer.
-    pub(crate) timer: Option<HistogramTimer>,
+    pub(crate) timer: HistogramTimer,
 }
 
 impl FlushFinished {

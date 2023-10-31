@@ -89,7 +89,7 @@ where
                 Err(e) => {
                     warn!("extract username and password failed: {}", e);
                     crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                        .with_label_values(&[e.status_code().as_ref()])
                         .inc();
                     return Err(unauthorized_resp());
                 }
@@ -112,7 +112,7 @@ where
                 Err(e) => {
                     warn!("authenticate failed: {}", e);
                     crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                        .with_label_values(&[e.status_code().as_ref()])
                         .inc();
                     Err(unauthorized_resp())
                 }

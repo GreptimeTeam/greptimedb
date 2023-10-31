@@ -374,10 +374,10 @@ impl Procedure for AlterTableProcedure {
 
         let state = &self.data.state;
 
-        let step = state.as_ref().to_string();
+        let step = state.as_ref();
 
         let _timer = metrics::METRIC_META_PROCEDURE_ALTER_TABLE
-            .with_label_values(&[step.as_str()])
+            .with_label_values(&[step])
             .start_timer();
 
         match state {

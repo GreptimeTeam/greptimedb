@@ -103,7 +103,7 @@ impl PgLoginVerifier {
         {
             Err(e) => {
                 METRIC_AUTH_FAILURE
-                    .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                    .with_label_values(&[e.status_code().as_ref()])
                     .inc();
                 Err(AuthSnafu.into_error(e))
             }

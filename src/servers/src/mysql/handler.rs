@@ -184,7 +184,9 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     user_info = Some(userinfo);
                 }
                 Err(e) => {
-                    METRIC_AUTH_FAILURE.with_label_values(&[""]).inc();
+                    METRIC_AUTH_FAILURE
+                        .with_label_values(&[e.status_code().as_ref()])
+                        .inc();
                     warn!("Failed to auth, err: {:?}", e);
                     return false;
                 }
@@ -347,7 +349,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         if let Some(schema_validator) = &self.user_provider {
             if let Err(e) = schema_validator.authorize(catalog, schema, user_info).await {
                 METRIC_AUTH_FAILURE
-                    .with_label_values(&[format!("{}", e.status_code()).as_str()])
+                    .with_label_values(&[e.status_code().as_ref()])
                     .inc();
                 return w
                     .error(

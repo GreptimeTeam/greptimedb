@@ -258,7 +258,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 OBJECT_STORE_READ_ERROR
-                    .with_label_values(&[format!("{}", e.kind()).as_str()])
+                    .with_label_values(&[e.kind().to_string().as_str()])
                     .inc();
                 OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
 
@@ -267,7 +267,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
 
             Err(e) => {
                 OBJECT_STORE_READ_ERROR
-                    .with_label_values(&[format!("{}", e.kind()).as_str()])
+                    .with_label_values(&[e.kind().to_string().as_str()])
                     .inc();
                 Err(e)
             }

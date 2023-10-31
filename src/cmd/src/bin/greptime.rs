@@ -24,7 +24,7 @@ use common_telemetry::logging::{error, info, TracingOptions};
 
 lazy_static::lazy_static! {
     static ref APP_VERSION: prometheus::IntGaugeVec =
-        prometheus::register_int_gauge_vec!("app_version", "app version",&["short_version","version"]).unwrap();
+        prometheus::register_int_gauge_vec!("app_version", "app version", &["short_version", "version"]).unwrap();
 }
 
 #[derive(Parser)]

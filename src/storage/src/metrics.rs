@@ -26,7 +26,7 @@ lazy_static! {
         register_histogram!("storage_create_region_update_manifest", "storage create region update manifest").unwrap();
     /// Counter of scheduled flush requests.
     pub static ref FLUSH_REQUESTS_TOTAL: IntCounterVec =
-        register_int_counter_vec!("storage_flush_requests_total", "storage flush requests total",&[FLUSH_REASON]).unwrap();
+        register_int_counter_vec!("storage_flush_requests_total", "storage flush requests total", &[FLUSH_REASON]).unwrap();
     /// Counter of scheduled failed flush jobs.
     pub static ref FLUSH_ERRORS_TOTAL: IntCounter =
         register_int_counter!("storage_flush_errors_total", "storage flush errors total").unwrap();

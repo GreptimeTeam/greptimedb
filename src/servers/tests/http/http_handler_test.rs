@@ -153,10 +153,10 @@ async fn test_sql_form() {
 }
 
 lazy_static::lazy_static! {
-  static ref TEST_METRIC: prometheus::Counter =
-  prometheus::register_counter!("test_metrics", "test_metrics")
-          .unwrap();
+    static ref TEST_METRIC: prometheus::Counter =
+      prometheus::register_counter!("test_metrics", "test metrics").unwrap();
 }
+
 #[tokio::test]
 async fn test_metrics() {
     TEST_METRIC.inc();

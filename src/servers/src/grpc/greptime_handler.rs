@@ -133,7 +133,7 @@ pub(crate) async fn auth(
     .map(Some)
     .map_err(|e| {
         METRIC_AUTH_FAILURE
-            .with_label_values(&[format!("{}", e.status_code()).as_str()])
+            .with_label_values(&[e.status_code().as_ref()])
             .inc();
         e
     })
@@ -203,7 +203,7 @@ impl Drop for RequestTimer {
             .with_label_values(&[
                 self.db.as_str(),
                 self.request_type.as_str(),
-                self.status_code.to_string().as_str(),
+                self.status_code.as_ref(),
             ])
             .observe(self.start.elapsed().as_secs_f64());
     }
