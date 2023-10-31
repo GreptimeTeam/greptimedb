@@ -59,20 +59,6 @@ pub struct RegionStat {
     pub role: RegionRole,
 }
 
-impl Default for RegionStat {
-    fn default() -> Self {
-        Self {
-            id: 0,
-            rcus: 0,
-            wcus: 0,
-            approximate_bytes: 0,
-            approximate_rows: 0,
-            engine: String::new(),
-            role: RegionRole::Follower,
-        }
-    }
-}
-
 impl Stat {
     #[inline]
     pub fn is_empty(&self) -> bool {

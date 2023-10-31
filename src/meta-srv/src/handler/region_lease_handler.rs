@@ -72,6 +72,7 @@ mod test {
 
     use common_meta::key::TableMetadataManager;
     use common_meta::{distributed_time_constants, RegionIdent};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::{RegionId, RegionNumber};
 
     use super::*;
@@ -110,7 +111,12 @@ mod test {
             let region_id = RegionId::new(table_id, region_number);
             RegionStat {
                 id: region_id.as_u64(),
-                ..Default::default()
+                rcus: 0,
+                wcus: 0,
+                approximate_bytes: 0,
+                approximate_rows: 0,
+                engine: String::new(),
+                role: RegionRole::Leader,
             }
         };
         acc.stat = Some(Stat {

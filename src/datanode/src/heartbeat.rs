@@ -293,7 +293,9 @@ impl HeartbeatTask {
                 role: RegionRole::from(stat.role).into(),
                 approximate_bytes,
                 // TODO(ruihang): scratch more info
-                ..Default::default()
+                rcus: 0,
+                wcus: 0,
+                approximate_rows: 0,
             };
             region_stats.push(region_stat);
         }
