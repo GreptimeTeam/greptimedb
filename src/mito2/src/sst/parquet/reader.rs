@@ -17,11 +17,11 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use async_compat::CompatExt;
+use async_compat::{Compat, CompatExt};
 use async_trait::async_trait;
 use common_time::range::TimestampRange;
 use datatypes::arrow::record_batch::RecordBatch;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, Reader};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
@@ -171,13 +171,13 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
-        let reader_builder = Box::new(ReaderBuilderImpl {
+        let reader_builder = RowGroupReaderBuilder {
             file_path,
             parquet_meta,
             file_reader: reader,
             projection: projection_mask,
             field_levels,
-        });
+        };
 
         Ok(ParquetReader {
             _file_handle: self.file_handle.clone(),
@@ -247,36 +247,27 @@ impl ParquetReaderBuilder {
     }
 }
 
-/// Builder to build a reader for the row group.
-#[async_trait]
-trait ReaderBuilder: Send + Sync {
-    /// Path of the file to read.
-    fn file_path(&self) -> &str;
-
-    /// Builds a [ParquetRecordBatchReader] to read the row group.
-    async fn build(&mut self, row_group_idx: usize) -> Result<ParquetRecordBatchReader>;
-}
-
-/// A reader builder that fetches data using [AsyncFileReader].
-struct ReaderBuilderImpl<T> {
+/// Builder to build a [ParquetRecordBatchReader] for a row group.
+struct RowGroupReaderBuilder {
     /// Path of the file.
     file_path: String,
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
     /// Reader to get data.
-    file_reader: T,
+    file_reader: BufReader<Compat<Reader>>,
     /// Projection mask.
     projection: ProjectionMask,
     /// Field levels to read.
     field_levels: FieldLevels,
 }
 
-#[async_trait]
-impl<T: AsyncFileReader + Send + Sync> ReaderBuilder for ReaderBuilderImpl<T> {
+impl RowGroupReaderBuilder {
+    /// Path of the file to read.
     fn file_path(&self) -> &str {
         &self.file_path
     }
 
+    /// Builds a [ParquetRecordBatchReader] to read the row group at `row_group_idx`.
     async fn build(&mut self, row_group_idx: usize) -> Result<ParquetRecordBatchReader> {
         let mut row_group = InMemoryRowGroup::create(&self.parquet_meta, row_group_idx);
         // Fetches data into memory.
@@ -313,8 +304,8 @@ pub struct ParquetReader {
     ///
     /// Not `None` if [ParquetReader::stream] is not `None`.
     read_format: ReadFormat,
-    /// Builder to build readers.
-    reader_builder: Box<dyn ReaderBuilder>,
+    /// Builder to build row group readers.
+    reader_builder: RowGroupReaderBuilder,
     /// Reader of current row group.
     current_reader: Option<ParquetRecordBatchReader>,
     /// Buffered batches to return.
