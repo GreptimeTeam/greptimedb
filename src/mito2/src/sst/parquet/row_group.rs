@@ -74,7 +74,7 @@ impl<'a> InMemoryRowGroup<'a> {
                 .filter(|&(idx, (chunk, _chunk_meta))| {
                     chunk.is_none() && projection.leaf_included(idx)
                 })
-                .map(|(idx, (_chunk, chunk_meta))| {
+                .flat_map(|(idx, (_chunk, chunk_meta))| {
                     // If the first page does not start at the beginning of the column,
                     // then we need to also fetch a dictionary page.
                     let mut ranges = vec![];
@@ -91,7 +91,6 @@ impl<'a> InMemoryRowGroup<'a> {
 
                     ranges
                 })
-                .flatten()
                 .collect();
 
             let mut chunk_data = input.get_byte_ranges(fetch_ranges).await?.into_iter();
