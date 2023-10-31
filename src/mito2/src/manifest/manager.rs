@@ -156,7 +156,7 @@ impl RegionManifestManager {
     }
 
     /// Returns total manifest size.
-    pub async fn manifest_size(&self) -> u64 {
+    pub async fn manifest_usage(&self) -> u64 {
         let inner = self.inner.read().await;
         inner.total_manifest_size()
     }
@@ -617,7 +617,7 @@ mod test {
         manager.validate_manifest(&new_metadata, 1).await;
 
         // get manifest size
-        let manifest_size = manager.manifest_size().await;
+        let manifest_size = manager.manifest_usage().await;
         assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
 
         // update 10 times nop_action to trigger checkpoint
@@ -637,7 +637,7 @@ mod test {
         }
 
         // check manifest size again
-        let manifest_size = manager.manifest_size().await;
+        let manifest_size = manager.manifest_usage().await;
         assert_eq!(manifest_size, manifest_dir_usage(&manifest_dir).await);
 
         // Reopen the manager,
@@ -651,7 +651,7 @@ mod test {
         manager.validate_manifest(&new_metadata, 11).await;
 
         // get manifest size again
-        let manifest_size = manager.manifest_size().await;
+        let manifest_size = manager.manifest_usage().await;
         assert_eq!(manifest_size, 1312);
     }
 }

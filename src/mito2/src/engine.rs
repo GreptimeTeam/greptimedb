@@ -58,6 +58,7 @@ use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::{HANDLE_REQUEST_ELAPSED, TYPE_LABEL};
 use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
@@ -84,6 +85,17 @@ impl MitoEngine {
     /// Returns true if the specific region exists.
     pub fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.inner.workers.is_region_exists(region_id)
+    }
+
+    /// Returns the region disk/memory usage information.
+    pub async fn get_region_usage(&self, region_id: RegionId) -> Result<RegionUsage> {
+        let region = self
+            .inner
+            .workers
+            .get_region(region_id)
+            .context(RegionNotFoundSnafu { region_id })?;
+
+        Ok(region.region_usage().await)
     }
 
     /// Returns a scanner to scan for `request`.
@@ -219,6 +231,15 @@ impl RegionEngine for MitoEngine {
     /// automatically shutdown.)
     async fn stop(&self) -> std::result::Result<(), BoxedError> {
         self.inner.stop().await.map_err(BoxedError::new)
+    }
+
+    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+        let size = self
+            .get_region_usage(region_id)
+            .await
+            .map(|usage| usage.disk_usage())
+            .ok()?;
+        size.try_into().ok()
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {

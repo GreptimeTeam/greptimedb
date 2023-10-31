@@ -38,6 +38,21 @@ use crate::sst::file_purger::FilePurgerRef;
 /// This is the approximate factor to estimate the size of wal.
 const ESTIMATED_WAL_FACTOR: f32 = 0.42825;
 
+/// Region status include region id, memtable usage, sst usage, wal usage and manifest usage.
+#[derive(Debug)]
+pub struct RegionUsage {
+    pub region_id: RegionId,
+    pub wal_usage: u64,
+    pub sst_usage: u64,
+    pub manifest_usage: u64,
+}
+
+impl RegionUsage {
+    pub fn disk_usage(&self) -> u64 {
+        self.wal_usage + self.sst_usage + self.manifest_usage
+    }
+}
+
 /// Metadata and runtime status of a region.
 ///
 /// Writing and reading a region follow a single-writer-multi-reader rule:
@@ -113,14 +128,32 @@ impl MitoRegion {
         self.writable.store(writable, Ordering::Relaxed);
     }
 
+    /// Returns the region usage in bytes.
+    pub(crate) async fn region_usage(&self) -> RegionUsage {
+        let region_id = self.region_id;
+
+        let version = self.version();
+        let memtables = &version.memtables;
+        let memtable_usage = (memtables.mutable_usage() + memtables.immutables_usage()) as u64;
+
+        let sst_usage = version.ssts.sst_usage();
+
+        let wal_usage = self.estimated_wal_usage(memtable_usage);
+
+        let manifest_usage = self.manifest_manager.manifest_usage().await;
+
+        RegionUsage {
+            region_id,
+            wal_usage,
+            sst_usage,
+            manifest_usage,
+        }
+    }
+
     /// Estimated WAL size in bytes.
     /// Use the memtables size to estimate the size of wal.
-    // TODO(Quenkar): after impl region size, remove #[allow(dead_code)]
-    #[allow(dead_code)]
-    pub(crate) fn estimated_wal_size(&self) -> usize {
-        let memtables = &self.version().memtables;
-        let memtable_size = memtables.mutable_usage() + memtables.immutables_usage();
-        ((memtable_size as f32) * ESTIMATED_WAL_FACTOR) as usize
+    fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
+        ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
 }
 

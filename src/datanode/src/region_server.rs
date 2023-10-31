@@ -120,6 +120,13 @@ impl RegionServer {
         self.inner.runtime.clone()
     }
 
+    pub async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+        match self.inner.region_map.get(&region_id) {
+            Some(e) => e.region_disk_usage(region_id).await,
+            None => None,
+        }
+    }
+
     /// Stop the region server.
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await

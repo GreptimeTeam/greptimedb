@@ -179,6 +179,10 @@ impl RegionEngine for MockRegionEngine {
         unimplemented!()
     }
 
+    async fn region_disk_usage(&self, _region_id: RegionId) -> Option<i64> {
+        unimplemented!()
+    }
+
     async fn stop(&self) -> Result<(), BoxedError> {
         Ok(())
     }
