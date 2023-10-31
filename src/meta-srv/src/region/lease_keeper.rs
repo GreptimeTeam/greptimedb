@@ -64,6 +64,7 @@ impl RegionLeaseKeeper {
         let table_ids = tables.keys().cloned().collect::<Vec<_>>();
 
         // The subset of all table metadata.
+        // TODO: considers storing all active regions in meta's memory.
         let metadata_subset = table_route_manager
             .batch_get(&table_ids)
             .await
