@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
@@ -24,12 +24,12 @@ use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::config::EngineConfig;
 use crate::error::{
@@ -102,6 +102,10 @@ impl RegionEngine for FileRegionEngine {
             .set_writable(region_id, writable)
             .map_err(BoxedError::new)
     }
+
+    fn role(&self, region_id: RegionId) -> Option<RegionRole> {
+        self.inner.state(region_id)
+    }
 }
 
 struct EngineInner {
@@ -147,13 +151,21 @@ impl EngineInner {
 
     async fn stop(&self) -> EngineResult<()> {
         let _lock = self.region_mutex.lock().await;
-        self.regions.write().await.clear();
+        self.regions.write().unwrap().clear();
         Ok(())
     }
 
     fn set_writable(&self, _region_id: RegionId, _writable: bool) -> EngineResult<()> {
         // TODO(zhongzc): Improve the semantics and implementation of this API.
         Ok(())
+    }
+
+    fn state(&self, region_id: RegionId) -> Option<RegionRole> {
+        if self.regions.read().unwrap().get(&region_id).is_some() {
+            Some(RegionRole::Leader)
+        } else {
+            None
+        }
     }
 }
 
@@ -189,7 +201,7 @@ impl EngineInner {
                 region_id, err
             );
         })?;
-        self.regions.write().await.insert(region_id, region);
+        self.regions.write().unwrap().insert(region_id, region);
 
         info!("A new region is created, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
@@ -219,7 +231,7 @@ impl EngineInner {
                 region_id, err
             );
         })?;
-        self.regions.write().await.insert(region_id, region);
+        self.regions.write().unwrap().insert(region_id, region);
 
         info!("Region opened, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
@@ -232,7 +244,7 @@ impl EngineInner {
     ) -> EngineResult<Output> {
         let _lock = self.region_mutex.lock().await;
 
-        let mut regions = self.regions.write().await;
+        let mut regions = self.regions.write().unwrap();
         if regions.remove(&region_id).is_some() {
             info!("Region closed, region_id: {}", region_id);
         }
@@ -263,17 +275,17 @@ impl EngineInner {
                 );
             })?;
         }
-        let _ = self.regions.write().await.remove(&region_id);
+        let _ = self.regions.write().unwrap().remove(&region_id);
 
         info!("Region dropped, region_id: {}", region_id);
         Ok(Output::AffectedRows(0))
     }
 
     async fn get_region(&self, region_id: RegionId) -> Option<FileRegionRef> {
-        self.regions.read().await.get(&region_id).cloned()
+        self.regions.read().unwrap().get(&region_id).cloned()
     }
 
     async fn exists(&self, region_id: RegionId) -> bool {
-        self.regions.read().await.contains_key(&region_id)
+        self.regions.read().unwrap().contains_key(&region_id)
     }
 }

@@ -18,7 +18,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
@@ -49,6 +49,8 @@ async fn test_engine_open_empty() {
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
     let err = engine.set_writable(region_id, true).unwrap_err();
     assert_eq!(StatusCode::RegionNotFound, err.status_code());
+    let role = engine.role(region_id);
+    assert_eq!(role, None);
 }
 
 #[tokio::test]
@@ -124,8 +126,11 @@ async fn test_engine_open_readonly() {
         .unwrap_err();
     assert_eq!(StatusCode::RegionReadonly, err.status_code());
 
+    assert_eq!(Some(RegionRole::Follower), engine.role(region_id));
     // Set writable and write.
     engine.set_writable(region_id, true).unwrap();
+    assert_eq!(Some(RegionRole::Leader), engine.role(region_id));
+
     put_rows(&engine, region_id, rows).await;
 }
 

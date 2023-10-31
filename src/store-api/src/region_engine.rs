@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use api::greptime_proto::v1::meta::RegionRole as PbRegionRole;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -24,6 +25,23 @@ use common_recordbatch::SendableRecordBatchStream;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionRole {
+    // Readonly region(mito2), Readonly region(file).
+    Follower,
+    // Writable region(mito2).
+    Leader,
+}
+
+impl From<RegionRole> for PbRegionRole {
+    fn from(value: RegionRole) -> Self {
+        match value {
+            RegionRole::Follower => PbRegionRole::Follower,
+            RegionRole::Leader => PbRegionRole::Leader,
+        }
+    }
+}
 
 #[async_trait]
 pub trait RegionEngine: Send + Sync {
@@ -61,6 +79,11 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+
+    /// Indicates region role.
+    ///
+    /// Returns the `None` if the region is not found.
+    fn role(&self, region_id: RegionId) -> Option<RegionRole>;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

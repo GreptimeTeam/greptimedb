@@ -50,7 +50,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -184,6 +184,16 @@ impl EngineInner {
         region.set_writable(writable);
         Ok(())
     }
+
+    fn role(&self, region_id: RegionId) -> Option<RegionRole> {
+        self.workers.get_region(region_id).map(|region| {
+            if region.is_writable() {
+                RegionRole::Leader
+            } else {
+                RegionRole::Follower
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -246,6 +256,10 @@ impl RegionEngine for MitoEngine {
         self.inner
             .set_writable(region_id, writable)
             .map_err(BoxedError::new)
+    }
+
+    fn role(&self, region_id: RegionId) -> Option<RegionRole> {
+        self.inner.role(region_id)
     }
 }
 
