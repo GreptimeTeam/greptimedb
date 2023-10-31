@@ -128,6 +128,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
                     region,
                     leader_peer: Some(peer),
                     follower_peers: vec![],
+                    leader_status: None,
                 }
             })
             .collect::<Vec<_>>();

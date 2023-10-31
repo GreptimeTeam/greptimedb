@@ -122,6 +122,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(3, "")),
                     follower_peers: vec![],
+                    leader_status: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -139,6 +140,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(2, "")),
                     follower_peers: vec![],
+                    leader_status: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -156,6 +158,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: Some(Peer::new(1, "")),
                     follower_peers: vec![],
+                    leader_status: None,
                 },
             ],
         )
@@ -185,6 +188,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: None,
                     follower_peers: vec![],
+                    leader_status: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -205,6 +209,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: None,
                     follower_peers: vec![],
+                    leader_status: None,
                 },
                 RegionRoute {
                     region: Region {
@@ -222,6 +227,7 @@ pub(crate) async fn create_partition_rule_manager(
                     },
                     leader_peer: None,
                     follower_peers: vec![],
+                    leader_status: None,
                 },
             ],
         )

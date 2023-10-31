@@ -148,6 +148,7 @@ impl TableRoute {
                 region,
                 leader_peer,
                 follower_peers,
+                leader_status: None,
             });
         }
 
@@ -196,6 +197,45 @@ pub struct RegionRoute {
     pub region: Region,
     pub leader_peer: Option<Peer>,
     pub follower_peers: Vec<Peer>,
+    /// `None` by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader_status: Option<RegionStatus>,
+}
+
+/// The Status of the [Region].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum RegionStatus {
+    /// The following cases in which the [Region] will be downgraded.
+    ///
+    /// - The [Region] is unavailable(e.g., Crashed, Network disconnected).
+    /// - The [Region] was planned to migrate to another [Peer].
+    Downgraded,
+}
+
+impl RegionRoute {
+    /// Returns true if the Leader [Region] is downgraded.
+    ///
+    /// The following cases in which the [Region] will be downgraded.
+    ///
+    /// - The [Region] is unavailable(e.g., Crashed, Network disconnected).
+    /// - The [Region] was planned to migrate to another [Peer].
+    ///
+    pub fn is_leader_downgraded(&self) -> bool {
+        matches!(self.leader_status, Some(RegionStatus::Downgraded))
+    }
+
+    /// Marks the Leader [Region] as downgraded.
+    ///
+    /// We should downgrade a [Region] before deactivating it:
+    ///
+    /// - During the [Region] Failover Procedure.
+    /// - Migrating a [Region].
+    ///
+    /// **Notes:** Meta Server will stop renewing the lease for the downgraded [Region].
+    ///
+    pub fn downgrade_leader(&mut self) {
+        self.leader_status = Some(RegionStatus::Downgraded)
+    }
 }
 
 pub struct RegionRoutes(pub Vec<RegionRoute>);
@@ -310,6 +350,48 @@ impl From<PbPartition> for Partition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_leader_is_downgraded() {
+        let mut region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_status: None,
+        };
+
+        assert!(!region_route.is_leader_downgraded());
+
+        region_route.downgrade_leader();
+
+        assert!(region_route.is_leader_downgraded());
+    }
+
+    #[test]
+    fn test_region_route_decode() {
+        let region_route = RegionRoute {
+            region: Region {
+                id: 2.into(),
+                name: "r2".to_string(),
+                partition: None,
+                attrs: BTreeMap::new(),
+            },
+            leader_peer: Some(Peer::new(1, "a1")),
+            follower_peers: vec![Peer::new(2, "a2"), Peer::new(3, "a3")],
+            leader_status: None,
+        };
+
+        let input = r#"{"region":{"id":2,"name":"r2","partition":null,"attrs":{}},"leader_peer":{"id":1,"addr":"a1"},"follower_peers":[{"id":2,"addr":"a2"},{"id":3,"addr":"a3"}]}"#;
+
+        let decoded: RegionRoute = serde_json::from_str(input).unwrap();
+
+        assert_eq!(decoded, region_route);
+    }
 
     #[test]
     fn test_de_serialize_partition() {
