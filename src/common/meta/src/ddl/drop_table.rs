@@ -197,10 +197,8 @@ impl Procedure for DropTableProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
-        let step = state.as_ref().to_string();
-
         let _timer = metrics::METRIC_META_PROCEDURE_DROP_TABLE
-            .with_label_values(&[step.as_str()])
+            .with_label_values(&[state.as_ref()])
             .start_timer();
 
         match self.data.state {
