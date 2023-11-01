@@ -52,7 +52,7 @@ use futures::{ready, Stream, StreamExt};
 /// Due to the folding or sampling, the output rows number will become `input_rows` / `bucket_num`.
 ///
 /// # Requirement
-/// - Input should be sorted on `<tag list>, le ASC, ts`.
+/// - Input should be sorted on `<tag list>, ts, le ASC`.
 /// - The value set of `le` should be same. I.e., buckets of every series should be same.
 ///
 /// [1]: https://prometheus.io/docs/concepts/metric_types/#histogram
@@ -248,6 +248,14 @@ impl ExecutionPlan for HistogramFoldExec {
                 options: None,
             })
             .collect::<Vec<PhysicalSortRequirement>>();
+        // add ts
+        cols.push(PhysicalSortRequirement {
+            expr: Arc::new(PhyColumn::new(
+                self.input.schema().field(self.ts_column_index).name(),
+                self.ts_column_index,
+            )),
+            options: None,
+        });
         // add le ASC
         cols.push(PhysicalSortRequirement {
             expr: Arc::new(PhyCast::new(
@@ -262,14 +270,6 @@ impl ExecutionPlan for HistogramFoldExec {
                 descending: false,  // +INF in the last
                 nulls_first: false, // not nullable
             }),
-        });
-        // add ts
-        cols.push(PhysicalSortRequirement {
-            expr: Arc::new(PhyColumn::new(
-                self.input.schema().field(self.ts_column_index).name(),
-                self.ts_column_index,
-            )),
-            options: None,
         });
 
         vec![Some(cols)]

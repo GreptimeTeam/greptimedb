@@ -132,3 +132,31 @@ tql eval (2820, 2820, '1s') histogram_quantile(0.5, rate(histogram2_bucket[15m])
 tql eval (2820, 2820, '1s') histogram_quantile(0.833, rate(histogram2_bucket[15m]));
 
 drop table histogram2_bucket;
+
+-- not from Prometheus
+-- makesure the sort expr works as expected
+create table histogram3_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+insert into histogram3_bucket values
+    (2900000, "0.1", "a", 0),
+    (2900000, "1", "a", 0),
+    (2900000, "5", "a", 0),
+    (2900000, "+Inf", "a", 0),
+    (3000000, "0.1", "a", 50),
+    (3000000, "1", "a", 70),
+    (3000000, "5", "a", 110),
+    (3000000, "+Inf", "a", 120),
+    (3005000, "0.1", "a", 10),
+    (3005000, "1", "a", 20),
+    (3005000, "5", "a", 20),
+    (3005000, "+Inf", "a", 30);
+
+tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
+
+drop table histogram3_bucket;
