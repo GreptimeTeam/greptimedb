@@ -105,9 +105,10 @@ global_write_buffer_reject_size = "2GB"
 sst_meta_cache_size = "128MB"
 # Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
 vector_cache_size = "512MB"
+# Cache size for pages of SST row groups (default 1GB). Setting it to 0 to disable the cache.
+page_cache_size = "1GB"
 # Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
-
 
 # Log options
 # [logging]
