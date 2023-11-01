@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
@@ -21,6 +23,7 @@ use crate::error::Result;
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::BatchGetRequest;
 use crate::table_name::TableName;
 
 pub struct TableInfoKey {
@@ -232,6 +235,37 @@ impl TableInfoManager {
             .await?
             .map(|x| DeserializedValueWithBytes::from_inner_slice(&x.value))
             .transpose()
+    }
+
+    pub async fn batch_get(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, TableInfoValue>> {
+        let lookup_table = table_ids
+            .iter()
+            .map(|id| (TableInfoKey::new(*id).as_raw_key(), id))
+            .collect::<HashMap<_, _>>();
+
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest {
+                keys: lookup_table.keys().cloned().collect::<Vec<_>>(),
+            })
+            .await?;
+
+        let values = resp
+            .kvs
+            .iter()
+            .map(|kv| {
+                Ok((
+                    // Safety: must exist.
+                    **lookup_table.get(kv.key()).unwrap(),
+                    TableInfoValue::try_from_raw_value(&kv.value)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        Ok(values)
     }
 }
 
