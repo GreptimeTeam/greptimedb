@@ -26,6 +26,11 @@ use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
+use store_api::storage::RegionId;
+
+use crate::cache::{CacheManagerRef, PageKey};
+use crate::sst::file::FileId;
+use crate::sst::parquet::page_reader::CachedPageReader;
 
 /// An in-memory collection of column chunks
 pub struct InMemoryRowGroup<'a> {
@@ -33,6 +38,10 @@ pub struct InMemoryRowGroup<'a> {
     page_locations: Option<&'a [Vec<PageLocation>]>,
     column_chunks: Vec<Option<Arc<ColumnChunkData>>>,
     row_count: usize,
+    region_id: RegionId,
+    file_id: FileId,
+    row_group_idx: usize,
+    cache_manager: Option<CacheManagerRef>,
 }
 
 impl<'a> InMemoryRowGroup<'a> {
@@ -40,8 +49,17 @@ impl<'a> InMemoryRowGroup<'a> {
     ///
     /// # Panics
     /// Panics if the `row_group_idx` is invalid.
-    pub fn create(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
+    pub fn create(
+        region_id: RegionId,
+        file_id: FileId,
+        parquet_meta: &'a ParquetMetaData,
+        row_group_idx: usize,
+        cache_manager: Option<CacheManagerRef>,
+    ) -> Self {
         let metadata = parquet_meta.row_group(row_group_idx);
+        // `page_locations` is always `None` if we don't set
+        // [with_page_index()](https://docs.rs/parquet/latest/parquet/arrow/arrow_reader/struct.ArrowReaderOptions.html#method.with_page_index)
+        // to `true`.
         let page_locations = parquet_meta
             .offset_index()
             .map(|x| x[row_group_idx].as_slice());
@@ -51,6 +69,10 @@ impl<'a> InMemoryRowGroup<'a> {
             row_count: metadata.num_rows() as usize,
             column_chunks: vec![None; metadata.columns().len()],
             page_locations,
+            region_id,
+            file_id,
+            row_group_idx,
+            cache_manager,
         }
     }
 
@@ -158,11 +180,22 @@ impl<'a> RowGroups for InMemoryRowGroup<'a> {
             ))),
             Some(data) => {
                 let page_locations = self.page_locations.map(|index| index[i].clone());
-                let page_reader: Box<dyn PageReader> = Box::new(SerializedPageReader::new(
+                let page_reader = SerializedPageReader::new(
                     data.clone(),
                     self.metadata.column(i),
                     self.row_count,
                     page_locations,
+                )?;
+                let page_key = PageKey {
+                    region_id: self.region_id,
+                    file_id: self.file_id,
+                    row_group_idx: self.row_group_idx,
+                    column_idx: i,
+                };
+                let page_reader: Box<dyn PageReader> = Box::new(CachedPageReader::new(
+                    page_reader,
+                    self.cache_manager.clone(),
+                    page_key,
                 )?);
 
                 Ok(Box::new(ColumnChunkIterator {
