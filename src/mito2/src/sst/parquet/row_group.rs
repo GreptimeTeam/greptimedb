@@ -22,7 +22,7 @@ use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::ProjectionMask;
 use parquet::column::page::{PageIterator, PageReader};
 use parquet::errors::{ParquetError, Result};
-use parquet::file::metadata::RowGroupMetaData;
+use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::reader::{ChunkReader, Length};
 use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
@@ -36,10 +36,25 @@ pub struct InMemoryRowGroup<'a> {
 }
 
 impl<'a> InMemoryRowGroup<'a> {
+    /// Creates a new [InMemoryRowGroup] by `row_group_idx`.
+    ///
+    /// # Panics
+    /// Panics if the `row_group_idx` is invalid.
+    pub fn create(parquet_meta: &'a ParquetMetaData, row_group_idx: usize) -> Self {
+        let metadata = parquet_meta.row_group(row_group_idx);
+        let page_locations = parquet_meta
+            .offset_index()
+            .map(|x| x[row_group_idx].as_slice());
+
+        Self {
+            metadata,
+            row_count: metadata.num_rows() as usize,
+            column_chunks: vec![None; metadata.columns().len()],
+            page_locations,
+        }
+    }
+
     /// Fetches the necessary column data into memory
-    // TODO(yingwen): Fix clippy warnings.
-    #[allow(clippy::filter_map_bool_then)]
-    #[allow(clippy::useless_conversion)]
     pub async fn fetch<T: AsyncFileReader + Send>(
         &mut self,
         input: &mut T,
@@ -56,26 +71,26 @@ impl<'a> InMemoryRowGroup<'a> {
                 .iter()
                 .zip(self.metadata.columns())
                 .enumerate()
-                .filter_map(|(idx, (chunk, chunk_meta))| {
-                    (chunk.is_none() && projection.leaf_included(idx)).then(|| {
-                        // If the first page does not start at the beginning of the column,
-                        // then we need to also fetch a dictionary page.
-                        let mut ranges = vec![];
-                        let (start, _len) = chunk_meta.byte_range();
-                        match page_locations[idx].first() {
-                            Some(first) if first.offset as u64 != start => {
-                                ranges.push(start as usize..first.offset as usize);
-                            }
-                            _ => (),
-                        }
-
-                        ranges.extend(selection.scan_ranges(&page_locations[idx]));
-                        page_start_offsets.push(ranges.iter().map(|range| range.start).collect());
-
-                        ranges
-                    })
+                .filter(|&(idx, (chunk, _chunk_meta))| {
+                    chunk.is_none() && projection.leaf_included(idx)
                 })
-                .flatten()
+                .flat_map(|(idx, (_chunk, chunk_meta))| {
+                    // If the first page does not start at the beginning of the column,
+                    // then we need to also fetch a dictionary page.
+                    let mut ranges = vec![];
+                    let (start, _len) = chunk_meta.byte_range();
+                    match page_locations[idx].first() {
+                        Some(first) if first.offset as u64 != start => {
+                            ranges.push(start as usize..first.offset as usize);
+                        }
+                        _ => (),
+                    }
+
+                    ranges.extend(selection.scan_ranges(&page_locations[idx]));
+                    page_start_offsets.push(ranges.iter().map(|range| range.start).collect());
+
+                    ranges
+                })
                 .collect();
 
             let mut chunk_data = input.get_byte_ranges(fetch_ranges).await?.into_iter();
@@ -94,7 +109,7 @@ impl<'a> InMemoryRowGroup<'a> {
 
                     *chunk = Some(Arc::new(ColumnChunkData::Sparse {
                         length: self.metadata.column(idx).byte_range().1 as usize,
-                        data: offsets.into_iter().zip(chunks.into_iter()).collect(),
+                        data: offsets.into_iter().zip(chunks).collect(),
                     }))
                 }
             }
@@ -103,12 +118,11 @@ impl<'a> InMemoryRowGroup<'a> {
                 .column_chunks
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, chunk)| {
-                    (chunk.is_none() && projection.leaf_included(idx)).then(|| {
-                        let column = self.metadata.column(idx);
-                        let (start, length) = column.byte_range();
-                        start as usize..(start + length) as usize
-                    })
+                .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
+                .map(|(idx, _chunk)| {
+                    let column = self.metadata.column(idx);
+                    let (start, length) = column.byte_range();
+                    start as usize..(start + length) as usize
                 })
                 .collect();
 
