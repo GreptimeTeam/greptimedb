@@ -20,6 +20,7 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
+use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
@@ -133,6 +134,8 @@ pub async fn bootstrap_meta_srv_with_router(
     let listener = TcpListener::bind(bind_addr)
         .await
         .context(error::TcpBindSnafu { addr: bind_addr })?;
+
+    info!("gRPC server is bound to: {bind_addr}");
 
     let incoming =
         TcpIncoming::from_listener(listener, true, None).context(error::TcpIncomingSnafu)?;

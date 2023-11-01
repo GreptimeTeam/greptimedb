@@ -27,6 +27,7 @@ use crate::error::{
     ParseNumSnafu, Result, TableMetadataManagerSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
 };
 
+#[derive(Clone)]
 pub struct RouteHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
@@ -35,9 +36,19 @@ pub struct RouteHandler {
 impl HttpHandler for RouteHandler {
     async fn handle(
         &self,
-        _path: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /table?region_id=123
+            - GET /table?table_id=456
+            - GET /table?catalog=foo&schema=bar&table=baz
+            "#,
+            );
+        }
+
         let table_id = self.extract_table_id(params).await?;
 
         let table_route_value = self

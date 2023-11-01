@@ -21,8 +21,9 @@ use tonic::codegen::http;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result};
 use crate::keys::StatValue;
-use crate::service::admin::HttpHandler;
+use crate::service::admin::{util, HttpHandler};
 
+#[derive(Clone)]
 pub struct HeartBeatHandler {
     pub meta_peer_client: MetaPeerClientRef,
 }
@@ -31,9 +32,18 @@ pub struct HeartBeatHandler {
 impl HttpHandler for HeartBeatHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /heartbeat
+            - GET /heartbeat?addr=127.0.0.1:3001
+            "#,
+            );
+        }
+
         let stat_kvs = self.meta_peer_client.get_all_dn_stat_kvs().await?;
         let mut stat_vals: Vec<StatValue> = stat_kvs.into_values().collect();
 

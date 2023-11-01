@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use snafu::{OptionExt, ResultExt};
+use tonic::codegen::http;
 
 use crate::error::{self, MissingRequiredParameterSnafu, ParseNumSnafu, Result};
 
@@ -34,4 +35,11 @@ pub fn get_value<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&
     params
         .get(key)
         .context(error::MissingRequiredParameterSnafu { param: key })
+}
+
+pub fn to_text_response(text: &str) -> Result<http::Response<String>> {
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .body(text.to_string())
+        .context(error::InvalidHttpBodySnafu)
 }

@@ -42,12 +42,12 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         },
     );
 
-    let router = router.route(
-        "/heartbeat",
-        heartbeat::HeartBeatHandler {
-            meta_peer_client: meta_srv.meta_peer_client().clone(),
-        },
-    );
+    let handler = heartbeat::HeartBeatHandler {
+        meta_peer_client: meta_srv.meta_peer_client().clone(),
+    };
+    let router = router
+        .route("/heartbeat", handler.clone())
+        .route("/heartbeat/help", handler);
 
     let router = router.route(
         "/catalogs",
@@ -56,26 +56,26 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         },
     );
 
-    let router = router.route(
-        "/schemas",
-        meta::SchemasHandler {
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
-        },
-    );
+    let handler = meta::SchemasHandler {
+        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+    };
+    let router = router
+        .route("/schemas", handler.clone())
+        .route("/schemas/help", handler);
 
-    let router = router.route(
-        "/tables",
-        meta::TablesHandler {
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
-        },
-    );
+    let handler = meta::TablesHandler {
+        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+    };
+    let router = router
+        .route("/tables", handler.clone())
+        .route("/tables/help", handler);
 
-    let router = router.route(
-        "/table",
-        meta::TableHandler {
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
-        },
-    );
+    let handler = meta::TableHandler {
+        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+    };
+    let router = router
+        .route("/table", handler.clone())
+        .route("/table/help", handler);
 
     let router = router.route(
         "/leader",
@@ -84,12 +84,12 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         },
     );
 
-    let router = router.route(
-        "/route",
-        route::RouteHandler {
-            table_metadata_manager: meta_srv.table_metadata_manager().clone(),
-        },
-    );
+    let handler = route::RouteHandler {
+        table_metadata_manager: meta_srv.table_metadata_manager().clone(),
+    };
+    let router = router
+        .route("/route", handler.clone())
+        .route("/route/help", handler);
 
     let router = router.route(
         "/inactive-regions/view",

@@ -23,21 +23,25 @@ use store_api::storage::{RegionId, TableId};
 use tonic::codegen::http;
 
 use crate::error;
-use crate::error::{InvalidHttpBodySnafu, ParseNumSnafu, Result, TableMetadataManagerSnafu};
+use crate::error::{ParseNumSnafu, Result, TableMetadataManagerSnafu};
 use crate::service::admin::{util, HttpHandler};
 
+#[derive(Clone)]
 pub struct CatalogsHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct SchemasHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct TablesHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct TableHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
@@ -65,9 +69,17 @@ impl HttpHandler for CatalogsHandler {
 impl HttpHandler for SchemasHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /schemas?catalog=foo
+            "#,
+            );
+        }
+
         let catalog = util::get_value(params, "catalog")?;
         let stream = self
             .table_metadata_manager
@@ -89,9 +101,17 @@ impl HttpHandler for SchemasHandler {
 impl HttpHandler for TablesHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /tables?catalog=foo&schema=bar
+            "#,
+            );
+        }
+
         let catalog = util::get_value(params, "catalog")?;
         let schema = util::get_value(params, "schema")?;
 
@@ -113,9 +133,19 @@ impl HttpHandler for TablesHandler {
 impl HttpHandler for TableHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /table?region_ids=1,2,3,4,5
+            - GET /table?table_ids=1,2,3,4,5
+            - GET /table?catalog=foo&schema=bar&table=baz
+            "#,
+            );
+        }
+
         let table_ids = self.extract_table_ids(params).await?;
 
         let table_info_values = self
@@ -132,7 +162,7 @@ impl HttpHandler for TableHandler {
             .status(http::StatusCode::OK)
             // Safety: HashMap<String, String> is definitely "serde-json"-able.
             .body(serde_json::to_string(&table_info_values).unwrap())
-            .context(InvalidHttpBodySnafu)
+            .context(error::InvalidHttpBodySnafu)
     }
 }
 
