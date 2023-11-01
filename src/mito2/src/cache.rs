@@ -24,6 +24,7 @@ use std::sync::Arc;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
 use moka::sync::Cache;
+use parquet::column::page::Page;
 use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
@@ -36,13 +37,19 @@ pub struct CacheManager {
     sst_meta_cache: Option<SstMetaCache>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
+    /// Cache for SST pages.
+    page_cache: Option<PageCache>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
     /// Creates a new manager with specific cache size in bytes.
-    pub fn new(sst_meta_cache_size: u64, vector_cache_size: u64) -> CacheManager {
+    pub fn new(
+        sst_meta_cache_size: u64,
+        vector_cache_size: u64,
+        page_cache_size: u64,
+    ) -> CacheManager {
         let sst_meta_cache = if sst_meta_cache_size == 0 {
             None
         } else {
@@ -67,10 +74,22 @@ impl CacheManager {
                 .build();
             Some(cache)
         };
+        let page_cache = if page_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(page_cache_size)
+                .weigher(|k: &PageKey, v: &Arc<PageValue>| {
+                    (k.estimated_size() + v.estimated_size()) as u32
+                })
+                .build();
+            Some(cache)
+        };
 
         CacheManager {
             sst_meta_cache,
             vector_cache,
+            page_cache,
         }
     }
 
@@ -117,6 +136,20 @@ impl CacheManager {
             cache.insert(key, vector);
         }
     }
+
+    /// Gets pages for the row group.
+    pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
+        self.page_cache
+            .as_ref()
+            .and_then(|page_cache| page_cache.get(page_key))
+    }
+
+    /// Puts pages of the row group into the cache.
+    pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
+        if let Some(cache) = &self.page_cache {
+            cache.insert(page_key, pages);
+        }
+    }
 }
 
 /// Cache key (region id, file id) for SST meta.
@@ -126,7 +159,46 @@ struct SstMetaKey(RegionId, FileId);
 impl SstMetaKey {
     /// Returns memory used by the key (estimated).
     fn estimated_size(&self) -> usize {
-        mem::size_of::<SstMetaKey>()
+        mem::size_of::<Self>()
+    }
+}
+
+/// Cache key for pages of a SST row group.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageKey {
+    /// Region id of the SST file to cache.
+    pub region_id: RegionId,
+    /// Id of the SST file to cache.
+    pub file_id: FileId,
+    /// Index of the row group.
+    pub row_group_idx: usize,
+    /// Index of the column in the row group.
+    pub column_idx: usize,
+}
+
+impl PageKey {
+    /// Returns memory used by the key (estimated).
+    fn estimated_size(&self) -> usize {
+        mem::size_of::<Self>()
+    }
+}
+
+/// Cached row group pages for a column.
+pub struct PageValue {
+    /// All pages of the column in the row group.
+    pages: Vec<Page>,
+}
+
+impl PageValue {
+    /// Creates a new page value.
+    pub fn new(pages: Vec<Page>) -> PageValue {
+        PageValue { pages }
+    }
+
+    /// Returns memory used by the value (estimated).
+    fn estimated_size(&self) -> usize {
+        // We only consider heap size of all pages.
+        self.pages.iter().map(|page| page.buffer().len()).sum()
     }
 }
 
@@ -136,6 +208,8 @@ type SstMetaCache = Cache<SstMetaKey, Arc<ParquetMetaData>>;
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
 type VectorCache = Cache<Value, VectorRef>;
+/// Maps (region, file, row group, column) to [PageValue].
+type PageCache = Cache<PageKey, Arc<PageValue>>;
 
 #[cfg(test)]
 mod tests {
@@ -146,8 +220,10 @@ mod tests {
 
     #[test]
     fn test_disable_cache() {
-        let cache = CacheManager::new(0, 0);
+        let cache = CacheManager::new(0, 0, 0);
         assert!(cache.sst_meta_cache.is_none());
+        assert!(cache.vector_cache.is_none());
+        assert!(cache.page_cache.is_none());
 
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
@@ -159,11 +235,21 @@ mod tests {
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         assert!(cache.get_repeated_vector(&value).is_none());
+
+        let key = PageKey {
+            region_id,
+            file_id,
+            row_group_idx: 0,
+            column_idx: 0,
+        };
+        let pages = Arc::new(PageValue::new(Vec::new()));
+        cache.put_pages(key.clone(), pages);
+        assert!(cache.get_pages(&key).is_none());
     }
 
     #[test]
     fn test_parquet_meta_cache() {
-        let cache = CacheManager::new(2000, 0);
+        let cache = CacheManager::new(2000, 0, 0);
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
@@ -176,12 +262,29 @@ mod tests {
 
     #[test]
     fn test_repeated_vector_cache() {
-        let cache = CacheManager::new(0, 4096);
+        let cache = CacheManager::new(0, 4096, 0);
         let value = Value::Int64(10);
         assert!(cache.get_repeated_vector(&value).is_none());
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
         cache.put_repeated_vector(value.clone(), vector.clone());
         let cached = cache.get_repeated_vector(&value).unwrap();
         assert_eq!(vector, cached);
+    }
+
+    #[test]
+    fn test_page_cache() {
+        let cache = CacheManager::new(0, 0, 1000);
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+        let key = PageKey {
+            region_id,
+            file_id,
+            row_group_idx: 0,
+            column_idx: 0,
+        };
+        assert!(cache.get_pages(&key).is_none());
+        let pages = Arc::new(PageValue::new(Vec::new()));
+        cache.put_pages(key.clone(), pages);
+        assert!(cache.get_pages(&key).is_some());
     }
 }
