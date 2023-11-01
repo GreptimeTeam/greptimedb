@@ -244,3 +244,44 @@ drop table histogram2_bucket;
 
 Affected Rows: 0
 
+-- not from Prometheus
+-- makesure the sort expr works as expected
+create table histogram3_bucket (
+    ts timestamp time index,
+    le string,
+    s string,
+    val double,
+    primary key (s, le),
+);
+
+Affected Rows: 0
+
+insert into histogram3_bucket values
+    (2900000, "0.1", "a", 0),
+    (2900000, "1", "a", 0),
+    (2900000, "5", "a", 0),
+    (2900000, "+Inf", "a", 0),
+    (3000000, "0.1", "a", 50),
+    (3000000, "1", "a", 70),
+    (3000000, "5", "a", 110),
+    (3000000, "+Inf", "a", 120),
+    (3005000, "0.1", "a", 10),
+    (3005000, "1", "a", 20),
+    (3005000, "5", "a", 20),
+    (3005000, "+Inf", "a", 30);
+
+Affected Rows: 12
+
+tql eval (3000, 3005, '3s') histogram_quantile(0.5, sum by(le, s) (rate(histogram3_bucket[5m])));
+
++---+---------------------+---------------------------------+
+| s | ts                  | SUM(prom_rate(ts_range,val,ts)) |
++---+---------------------+---------------------------------+
+| a | 1970-01-01T00:50:00 | 0.55                            |
+| a | 1970-01-01T00:50:03 | 0.5500000000000002              |
++---+---------------------+---------------------------------+
+
+drop table histogram3_bucket;
+
+Affected Rows: 0
+
