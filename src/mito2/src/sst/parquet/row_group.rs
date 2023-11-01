@@ -28,7 +28,7 @@ use parquet::file::serialized_reader::SerializedPageReader;
 use parquet::format::PageLocation;
 use store_api::storage::RegionId;
 
-use crate::cache::{CacheManagerRef, PageKey};
+use crate::cache::{CacheManagerRef, PageKey, PageValue};
 use crate::sst::file::FileId;
 use crate::sst::parquet::page_reader::CachedPageReader;
 
@@ -42,6 +42,10 @@ pub struct InMemoryRowGroup<'a> {
     file_id: FileId,
     row_group_idx: usize,
     cache_manager: Option<CacheManagerRef>,
+    /// Cached pages for each column.
+    ///
+    /// `column_cached_pages.len()` equals to `column_chunks.len()`.
+    column_cached_pages: Vec<Option<Arc<PageValue>>>,
 }
 
 impl<'a> InMemoryRowGroup<'a> {
@@ -73,6 +77,7 @@ impl<'a> InMemoryRowGroup<'a> {
             file_id,
             row_group_idx,
             cache_manager,
+            column_cached_pages: vec![None; metadata.columns().len()],
         }
     }
 
@@ -136,12 +141,19 @@ impl<'a> InMemoryRowGroup<'a> {
                 }
             }
         } else {
+            // Now we only use cache in dense chunk data.
+            self.fetch_pages_from_cache(projection);
+
             let fetch_ranges = self
                 .column_chunks
                 .iter()
+                .zip(&self.column_cached_pages)
                 .enumerate()
-                .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
-                .map(|(idx, _chunk)| {
+                // Don't need to fetch column data if we already cache the column's pages.
+                .filter(|&(idx, (chunk, cached_pages))| {
+                    chunk.is_none() && projection.leaf_included(idx) && cached_pages.is_none()
+                })
+                .map(|(idx, (_chunk, _cached_pages))| {
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start as usize..(start + length) as usize
@@ -150,8 +162,13 @@ impl<'a> InMemoryRowGroup<'a> {
 
             let mut chunk_data = input.get_byte_ranges(fetch_ranges).await?.into_iter();
 
-            for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-                if chunk.is_some() || !projection.leaf_included(idx) {
+            for (idx, (chunk, cached_pages)) in self
+                .column_chunks
+                .iter_mut()
+                .zip(&self.column_cached_pages)
+                .enumerate()
+            {
+                if chunk.is_some() || !projection.leaf_included(idx) || cached_pages.is_some() {
                     continue;
                 }
 
@@ -166,6 +183,69 @@ impl<'a> InMemoryRowGroup<'a> {
 
         Ok(())
     }
+
+    /// Fetches pages for columns if cache is enabled.
+    fn fetch_pages_from_cache(&mut self, projection: &ProjectionMask) {
+        self.column_chunks
+            .iter()
+            .enumerate()
+            .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
+            .for_each(|(idx, _chunk)| {
+                if let Some(cache) = &self.cache_manager {
+                    let page_key = PageKey {
+                        region_id: self.region_id,
+                        file_id: self.file_id,
+                        row_group_idx: self.row_group_idx,
+                        column_idx: idx,
+                    };
+                    self.column_cached_pages[idx] = cache.get_pages(&page_key);
+                }
+            });
+    }
+
+    /// Creates a page reader to read column at `i`.
+    fn column_page_reader(&self, i: usize) -> Result<Box<dyn PageReader>> {
+        if let Some(cached_pages) = &self.column_cached_pages[i] {
+            // Already in cache.
+            return Ok(Box::new(CachedPageReader::new(&cached_pages.pages)));
+        }
+
+        // Cache miss.
+        let page_reader = match &self.column_chunks[i] {
+            None => {
+                return Err(ParquetError::General(format!(
+                    "Invalid column index {i}, column was not fetched"
+                )))
+            }
+            Some(data) => {
+                let page_locations = self.page_locations.map(|index| index[i].clone());
+                SerializedPageReader::new(
+                    data.clone(),
+                    self.metadata.column(i),
+                    self.row_count,
+                    page_locations,
+                )?
+            }
+        };
+
+        let Some(cache) = &self.cache_manager else {
+            // Cache is disabled.
+            return Ok(Box::new(page_reader));
+        };
+
+        // We collect all pages and put them into the cache.
+        let pages = page_reader.collect::<Result<Vec<_>>>()?;
+        let page_value = Arc::new(PageValue::new(pages));
+        let page_key = PageKey {
+            region_id: self.region_id,
+            file_id: self.file_id,
+            row_group_idx: self.row_group_idx,
+            column_idx: i,
+        };
+        cache.put_pages(page_key, page_value.clone());
+
+        Ok(Box::new(CachedPageReader::new(&page_value.pages)))
+    }
 }
 
 impl<'a> RowGroups for InMemoryRowGroup<'a> {
@@ -174,35 +254,11 @@ impl<'a> RowGroups for InMemoryRowGroup<'a> {
     }
 
     fn column_chunks(&self, i: usize) -> Result<Box<dyn PageIterator>> {
-        match &self.column_chunks[i] {
-            None => Err(ParquetError::General(format!(
-                "Invalid column index {i}, column was not fetched"
-            ))),
-            Some(data) => {
-                let page_locations = self.page_locations.map(|index| index[i].clone());
-                let page_reader = SerializedPageReader::new(
-                    data.clone(),
-                    self.metadata.column(i),
-                    self.row_count,
-                    page_locations,
-                )?;
-                let page_key = PageKey {
-                    region_id: self.region_id,
-                    file_id: self.file_id,
-                    row_group_idx: self.row_group_idx,
-                    column_idx: i,
-                };
-                let page_reader: Box<dyn PageReader> = Box::new(CachedPageReader::new(
-                    page_reader,
-                    self.cache_manager.clone(),
-                    page_key,
-                )?);
+        let page_reader = self.column_page_reader(i)?;
 
-                Ok(Box::new(ColumnChunkIterator {
-                    reader: Some(Ok(page_reader)),
-                }))
-            }
-        }
+        Ok(Box::new(ColumnChunkIterator {
+            reader: Some(Ok(page_reader)),
+        }))
     }
 }
 
