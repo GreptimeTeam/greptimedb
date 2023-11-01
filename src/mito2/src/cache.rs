@@ -186,7 +186,7 @@ impl PageKey {
 /// Cached row group pages for a column.
 pub struct PageValue {
     /// All pages of the column in the row group.
-    pages: Vec<Page>,
+    pub pages: Vec<Page>,
 }
 
 impl PageValue {
