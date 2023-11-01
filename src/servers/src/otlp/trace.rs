@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_grpc::writer::Precision;
-use common_time::time::Time;
+use common_time::timestamp::Timestamp;
 use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
@@ -93,7 +93,7 @@ impl From<&Event> for SpanEvent {
     fn from(event: &Event) -> Self {
         Self {
             name: event.name.clone(),
-            time: Time::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
+            time: Timestamp::new_nanosecond(event.time_unix_nano as i64).to_iso8601_string(),
             attributes: vec_kv_to_string(&event.attributes),
         }
     }
@@ -315,7 +315,7 @@ pub fn status_to_string(status: &Option<Status>) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use common_time::time::Time;
+    use common_time::timestamp::Timestamp;
     use opentelemetry_proto::tonic::common::v1::{
         any_value, AnyValue, ArrayValue, KeyValue, KeyValueList,
     };
@@ -431,7 +431,7 @@ mod tests {
 
         let span_events = vec![SpanEvent {
             name: event_name.clone(),
-            time: Time::new_nanosecond(time_unix_nano as i64).to_iso8601_string(),
+            time: Timestamp::new_nanosecond(time_unix_nano as i64).to_iso8601_string(),
             attributes: vec_kv_to_string(&event_attributes),
         }];
         let expect_string = serde_json::to_string(&span_events).unwrap_or_default();
