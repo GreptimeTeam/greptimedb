@@ -144,7 +144,7 @@ impl<'a> InMemoryRowGroup<'a> {
             // Now we only use cache in dense chunk data.
             self.fetch_pages_from_cache(projection);
 
-            let fetch_ranges = self
+            let fetch_ranges: Vec<_> = self
                 .column_chunks
                 .iter()
                 .zip(&self.column_cached_pages)
@@ -159,6 +159,11 @@ impl<'a> InMemoryRowGroup<'a> {
                     start as usize..(start + length) as usize
                 })
                 .collect();
+
+            if fetch_ranges.is_empty() {
+                // Nothing to fetch.
+                return Ok(());
+            }
 
             let mut chunk_data = input.get_byte_ranges(fetch_ranges).await?.into_iter();
 
