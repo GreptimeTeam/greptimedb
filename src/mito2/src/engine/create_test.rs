@@ -166,3 +166,35 @@ async fn test_engine_create_with_options() {
         region.version().options.ttl.unwrap()
     );
 }
+
+#[tokio::test]
+async fn test_engine_create_with_custom_store() {
+    let mut env = TestEnv::new();
+    let engine = env
+        .create_engine_with_multiple_object_stores(MitoConfig::default(), None, None, &["Gcs"])
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("storage", "Gcs")
+        .build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert!(engine.is_region_exists(region_id));
+    let region = engine.get_region(region_id).unwrap();
+    let region_dir = region.access_layer.region_dir();
+
+    let object_store_manager = env.get_object_store_manager().unwrap();
+    assert!(object_store_manager
+        .find("Gcs")
+        .unwrap()
+        .is_exist(region_dir)
+        .await
+        .unwrap());
+    assert!(!object_store_manager
+        .default_object_store()
+        .is_exist(region_dir)
+        .await
+        .unwrap());
+}

@@ -172,3 +172,56 @@ async fn test_engine_region_open_with_options() {
         region.version().options.ttl.unwrap()
     );
 }
+
+#[tokio::test]
+async fn test_engine_region_open_with_custom_store() {
+    let mut env = TestEnv::new();
+    let engine = env
+        .create_engine_with_multiple_object_stores(MitoConfig::default(), None, None, &["Gcs"])
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("storage", "Gcs")
+        .build();
+    let region_dir = request.region_dir.clone();
+
+    // Create a custom region.
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    // Close the custom region.
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    // Open the custom region.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The region should not be opened with the default object store.
+    let region = engine.get_region(region_id).unwrap();
+    let object_store_manager = env.get_object_store_manager().unwrap();
+    assert!(!object_store_manager
+        .default_object_store()
+        .is_exist(region.access_layer.region_dir())
+        .await
+        .unwrap());
+    assert!(object_store_manager
+        .find("Gcs")
+        .unwrap()
+        .is_exist(region.access_layer.region_dir())
+        .await
+        .unwrap());
+}

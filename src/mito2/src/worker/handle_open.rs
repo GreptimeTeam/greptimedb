@@ -19,12 +19,12 @@ use std::sync::Arc;
 use common_query::Output;
 use common_telemetry::info;
 use object_store::util::join_path;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionOpenRequest;
 use store_api::storage::RegionId;
 
-use crate::error::{OpenDalSnafu, RegionNotFoundSnafu, Result};
+use crate::error::{ObjectStoreNotFoundSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::REGION_COUNT;
 use crate::region::opener::RegionOpener;
 use crate::worker::handle_drop::remove_region_dir_once;
@@ -39,21 +39,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         if self.regions.is_region_exists(region_id) {
             return Ok(Output::AffectedRows(0));
         }
-
+        let object_store = if let Some(storage_name) = request.options.get("storage") {
+            self.object_store_manager
+                .find(storage_name)
+                .context(ObjectStoreNotFoundSnafu {
+                    object_store: storage_name.to_string(),
+                })?
+        } else {
+            self.object_store_manager.default_object_store()
+        };
         // Check if this region is pending drop. And clean the entire dir if so.
         if !self.dropping_regions.is_region_exists(region_id)
-            && self
-                .object_store_manager
-                .default_object_store()
+            && object_store
                 .is_exist(&join_path(&request.region_dir, DROPPING_MARKER_FILE))
                 .await
                 .context(OpenDalSnafu)?
         {
-            let result = remove_region_dir_once(
-                &request.region_dir,
-                self.object_store_manager.default_object_store(),
-            )
-            .await;
+            let result = remove_region_dir_once(&request.region_dir, object_store).await;
             info!("Region {} is dropped, result: {:?}", region_id, result);
             return RegionNotFoundSnafu { region_id }.fail();
         }
@@ -65,7 +67,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id,
             &request.region_dir,
             self.memtable_builder.clone(),
-            self.object_store_manager.default_object_store().clone(),
+            self.object_store_manager.clone(),
             self.scheduler.clone(),
         )
         .options(request.options)

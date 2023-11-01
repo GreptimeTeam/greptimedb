@@ -55,13 +55,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         builder.primary_key(request.primary_key);
         let metadata = builder.build().context(InvalidMetadataSnafu)?;
-
         // Create a MitoRegion from the RegionMetadata.
         let region = RegionOpener::new(
             region_id,
             &request.region_dir,
             self.memtable_builder.clone(),
-            self.object_store_manager.default_object_store().clone(),
+            self.object_store_manager.clone(),
             self.scheduler.clone(),
         )
         .metadata(metadata)

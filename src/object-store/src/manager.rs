@@ -21,6 +21,7 @@ pub type ObjectStoreManagerRef = Arc<ObjectStoreManager>;
 
 /// Manages multiple object stores so that users can configure a storage for each table.
 /// This struct certainly have one default object store, and can have zero or more custom object stores.
+#[derive(Debug)]
 pub struct ObjectStoreManager {
     stores: HashMap<String, ObjectStore>,
     default_object_store: ObjectStore,
@@ -30,19 +31,19 @@ impl ObjectStoreManager {
     /// Creates a new manager from the object store used as a default one.
     pub fn new(name: &str, object_store: ObjectStore) -> Self {
         ObjectStoreManager {
-            stores: [(name.to_string(), object_store.clone())].into(),
+            stores: [(name.to_lowercase(), object_store.clone())].into(),
             default_object_store: object_store,
         }
     }
 
     /// Adds an object store to the manager.
     pub fn add(&mut self, name: &str, object_store: ObjectStore) {
-        self.stores.insert(name.to_string(), object_store);
+        self.stores.insert(name.to_lowercase(), object_store);
     }
 
     /// Finds an object store corresponding to the name.
     pub fn find(&self, name: &str) -> Option<&ObjectStore> {
-        self.stores.get(name)
+        self.stores.get(&name.to_lowercase())
     }
 
     pub fn default_object_store(&self) -> &ObjectStore {
@@ -68,10 +69,12 @@ mod tests {
     #[test]
     fn test_manager_behavior() {
         let dir = create_temp_dir("default");
-        let mut manager = ObjectStoreManager::new("default", new_object_store(&dir));
+        let mut manager = ObjectStoreManager::new("Default", new_object_store(&dir));
 
         assert!(manager.find("default").is_some());
+        assert!(manager.find("Default").is_some());
         assert!(manager.find("Gcs").is_none());
+        assert!(manager.find("gcs").is_none());
 
         let dir = create_temp_dir("default");
         manager.add("Gcs", new_object_store(&dir));
@@ -79,5 +82,6 @@ mod tests {
         // Should not overwrite the default object store with the new one.
         assert!(manager.find("default").is_some());
         assert!(manager.find("Gcs").is_some());
+        assert!(manager.find("gcs").is_some());
     }
 }

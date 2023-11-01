@@ -21,8 +21,8 @@ use std::sync::Arc;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
+use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{join_dir, normalize_dir};
-use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
@@ -31,7 +31,7 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, RegionCorruptedSnafu, Result};
+use crate::error::{EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::MemtableBuilderRef;
 use crate::region::options::RegionOptions;
@@ -48,7 +48,7 @@ pub(crate) struct RegionOpener {
     region_id: RegionId,
     metadata: Option<RegionMetadata>,
     memtable_builder: MemtableBuilderRef,
-    object_store: ObjectStore,
+    object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
@@ -61,14 +61,14 @@ impl RegionOpener {
         region_id: RegionId,
         region_dir: &str,
         memtable_builder: MemtableBuilderRef,
-        object_store: ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
         scheduler: SchedulerRef,
     ) -> RegionOpener {
         RegionOpener {
             region_id,
             metadata: None,
             memtable_builder,
-            object_store,
+            object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
             options: HashMap::new(),
@@ -105,7 +105,6 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
         let region_id = self.region_id;
-        let options = self.manifest_options(config);
 
         // Tries to open the region.
         match self.maybe_open(config, wal).await {
@@ -136,19 +135,22 @@ impl RegionOpener {
                 );
             }
         }
+        let options = RegionOptions::try_from(&self.options)?;
+        let object_store = self.object_store(&options.storage)?.clone();
 
-        let metadata = Arc::new(self.metadata.unwrap());
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let manifest_manager = RegionManifestManager::new(metadata.clone(), options).await?;
+        let region_manifest_optionss = self.manifest_options(config)?;
+        let metadata = Arc::new(self.metadata.unwrap());
+        let manifest_manager =
+            RegionManifestManager::new(metadata.clone(), region_manifest_optionss).await?;
 
         let mutable = self.memtable_builder.build(&metadata);
 
-        let options = RegionOptions::try_from(&self.options)?;
         let version = VersionBuilder::new(metadata, mutable)
             .options(options)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(self.region_dir, self.object_store.clone()));
+        let access_layer = Arc::new(AccessLayer::new(self.region_dir, object_store));
 
         Ok(MitoRegion {
             region_id,
@@ -203,7 +205,7 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        let options = self.manifest_options(config);
+        let options = self.manifest_options(config)?;
         let Some(manifest_manager) = RegionManifestManager::open(options).await? else {
             return Ok(None);
         };
@@ -212,17 +214,15 @@ impl RegionOpener {
         let metadata = manifest.metadata.clone();
 
         let region_id = self.region_id;
-        let access_layer = Arc::new(AccessLayer::new(
-            self.region_dir.clone(),
-            self.object_store.clone(),
-        ));
+        let options = RegionOptions::try_from(&self.options)?;
+        let object_store = self.object_store(&options.storage)?.clone();
+        let access_layer = Arc::new(AccessLayer::new(self.region_dir.clone(), object_store));
         let file_purger = Arc::new(LocalFilePurger::new(
             self.scheduler.clone(),
             access_layer.clone(),
             self.cache_manager.clone(),
         ));
         let mutable = self.memtable_builder.build(&metadata);
-        let options = RegionOptions::try_from(&self.options)?;
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
@@ -249,12 +249,28 @@ impl RegionOpener {
     }
 
     /// Returns a new manifest options.
-    fn manifest_options(&self, config: &MitoConfig) -> RegionManifestOptions {
-        RegionManifestOptions {
+    fn manifest_options(&self, config: &MitoConfig) -> Result<RegionManifestOptions> {
+        let options = RegionOptions::try_from(&self.options).unwrap(); // TODO: error handling
+        let object_store = self.object_store(&options.storage)?.clone();
+        Ok(RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
-            object_store: self.object_store.clone(),
+            object_store,
             compress_type: config.manifest_compress_type,
             checkpoint_distance: config.manifest_checkpoint_distance,
+        })
+    }
+
+    /// Returns a object store corresponding to the name. If the object sotre doesn't exist, this method returns the default object store.
+    fn object_store(&self, name: &Option<String>) -> Result<&object_store::ObjectStore> {
+        if let Some(name) = name {
+            Ok(self
+                .object_store_manager
+                .find(name)
+                .context(ObjectStoreNotFoundSnafu {
+                    object_store: name.to_string(),
+                })?)
+        } else {
+            Ok(self.object_store_manager.default_object_store())
         }
     }
 }
