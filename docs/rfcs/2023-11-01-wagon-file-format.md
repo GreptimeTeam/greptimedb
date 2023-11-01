@@ -38,31 +38,35 @@ Blobs in Wagon can hold varied data types as byte content. The Footer contains t
 
 The Footer maintains metadata about each Blob and consists of `FooterPayload`, `FooterPayloadSize`, and `Flags`.
 
-- `FooterPayload`: This is a JSON object that stores BlobMeta objects. Each BlobMeta object contains the following fields:
+- `FooterPayload`: This is a JSON object containing two arrays of `BlobMeta` objects and properties:
 
-    ```JSON
+    ```
     {
-      "type":string,
-      "offset":number,
-      "length":number,
-      "compression":string,
+      "blob_metas":array,
       "properties":array
     }   
    ```
-   - `type`: A string indicating the Blob data type.
-   - `offset`: A numeric value indicating the Blob starting position.
-   - `length`: A numeric value indicating the Blob length.
-   - `compression`: A string representing the compression type. It could be "none", "gzip", "lz4", "snappy", or "zstd".
-   - `properties`: An array of properties related to the Blob. Each property is represented as a key-value pair: 
+    - `blob_metas` - An array of `BlobMeta` objects, as follows: 
+        ```
+        {
+          "type":string,
+          "offset":number,
+          "length":number,
+          "compression":string,
+          "properties":array
+        }   
+        ```
+        - `type`: A string indicating the Blob data type.
+        - `offset`: A numeric value indicating the Blob starting position.
+        - `length`: A numeric value indicating the Blob length.
+        - `compression`: A string representing the compression type. It could be `"none"`, `"gzip"`, `"lz4"`, `"snappy"`, or `"zstd"`.
+        - `properties`: An array of properties related to the Blob. Each property is represented as a key-value pair, with both key and value being strings. These properties offer additional information about the Blob.
 
-    ```
-    {"key": string, "value": string}
-    ```
-    Keys and values are all strings and can hold additional information about the Blob.
+    - `properties`: An array of properties represented as key-value pairs. These properties offer additional information about the Footer.
 
 - `FooterPayloadSize`: A 4-byte unsigned integer (little-endian) indicating the `FooterPayload` size.
 
-- `Flags`: 4 bytes to store boolean flags. The first byte's four lower bits indicate the `FooterPayload` compression method ("none", "gzip", "lz4", "snappy", or "zstd"). Other bits and bytes are set to 0 during writing and reserved for future use.
+- `Flags`: 4-bytes to store boolean flags. The first byte's four lower bits indicate the `FooterPayload` compression method amongst "none", "gzip", "lz4", "snappy", or "zstd". Other bits and bytes are set to 0 during writing and are reserved for future use.
 
 ## 2. Usage
 
