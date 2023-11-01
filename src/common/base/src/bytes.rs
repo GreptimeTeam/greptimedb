@@ -167,6 +167,8 @@ impl<'de> Deserialize<'de> for StringBytes {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn check_bytes_deref(expect: &[u8], given: &[u8]) {
@@ -178,6 +180,14 @@ mod tests {
         let hello = b"hello";
         let bytes = Bytes::from(hello.to_vec());
         check_bytes_deref(hello, &bytes);
+    }
+
+    #[test]
+    fn test_bytes_borrow() {
+        let hello = b"hello";
+        let bytes = Bytes::from(hello.to_vec());
+        let set: HashSet<Bytes> = HashSet::from([bytes]);
+        assert!(set.get(hello.as_slice()).is_some());
     }
 
     #[test]
