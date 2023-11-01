@@ -39,6 +39,7 @@ pub fn get_value<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&
 
 pub fn to_text_response(text: &str) -> Result<http::Response<String>> {
     http::Response::builder()
+        .header("Content-Type", "text/plain")
         .status(http::StatusCode::OK)
         .body(text.to_string())
         .context(error::InvalidHttpBodySnafu)
