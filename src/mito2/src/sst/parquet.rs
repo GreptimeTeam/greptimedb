@@ -60,3 +60,80 @@ pub struct SstInfo {
     /// Number of rows.
     pub num_rows: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::OpType;
+    use common_time::Timestamp;
+
+    use super::*;
+    use crate::read::Batch;
+    use crate::sst::parquet::reader::ParquetReaderBuilder;
+    use crate::sst::parquet::writer::ParquetWriter;
+    use crate::test_util::sst_util::{
+        new_primary_key, new_source, sst_file_handle, sst_region_metadata,
+    };
+    use crate::test_util::{check_reader_result, new_batch_builder, TestEnv};
+
+    const FILE_DIR: &str = "/";
+
+    fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
+        assert!(end > start);
+        let pk = new_primary_key(tags);
+        let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
+        let sequences = vec![1000; end - start];
+        let op_types = vec![OpType::Put; end - start];
+        let field: Vec<_> = (start..end).map(|v| v as u64).collect();
+        new_batch_builder(&pk, &timestamps, &sequences, &op_types, 2, &field)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_write_read() {
+        let mut env = TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        // Use a small row group size for test.
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+
+        let mut writer =
+            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
+        let info = writer.write_all(&write_opts).await.unwrap().unwrap();
+        assert_eq!(200, info.num_rows);
+        assert!(info.file_size > 0);
+        assert_eq!(
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(199)
+            ),
+            info.time_range
+        );
+
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let mut reader = builder.build().await.unwrap();
+        check_reader_result(
+            &mut reader,
+            &[
+                new_batch_by_range(&["a", "d"], 0, 50),
+                new_batch_by_range(&["a", "d"], 50, 60),
+                new_batch_by_range(&["b", "f"], 0, 40),
+                new_batch_by_range(&["b", "h"], 100, 150),
+                new_batch_by_range(&["b", "h"], 150, 200),
+            ],
+        )
+        .await;
+    }
+}

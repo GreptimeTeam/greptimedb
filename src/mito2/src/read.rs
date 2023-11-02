@@ -686,7 +686,7 @@ mod tests {
         op_types: &[OpType],
         field: &[u64],
     ) -> Batch {
-        new_batch_builder(b"test", timestamps, sequences, op_types, field)
+        new_batch_builder(b"test", timestamps, sequences, op_types, 1, field)
             .build()
             .unwrap()
     }
