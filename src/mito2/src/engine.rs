@@ -28,7 +28,7 @@ mod create_test;
 mod drop_test;
 #[cfg(test)]
 mod flush_test;
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub(crate) mod listener;
 #[cfg(test)]
 mod open_test;
@@ -267,7 +267,7 @@ impl RegionEngine for MitoEngine {
 }
 
 // Tests methods.
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
     pub fn new_for_test<S: LogStore>(

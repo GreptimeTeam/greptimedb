@@ -28,7 +28,7 @@ use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
 use object_store::util::join_dir;
 use snafu::ResultExt;
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::{RegionGroup, RegionId, ScanRequest};
 
@@ -99,6 +99,11 @@ impl RegionEngine for MetricEngine {
         todo!()
     }
 
+    /// Retrieves region's disk usage.
+    async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
+        todo!()
+    }
+
     /// Stops the engine
     async fn stop(&self) -> std::result::Result<(), BoxedError> {
         todo!()
@@ -109,6 +114,10 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         writable: bool,
     ) -> std::result::Result<(), BoxedError> {
+        todo!()
+    }
+
+    fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         todo!()
     }
 }
