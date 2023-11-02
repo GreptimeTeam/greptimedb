@@ -261,10 +261,7 @@ impl MetaSrv {
                         Ok(msg) => {
                             in_memory.reset();
                             leader_cached_kv_store.reset();
-                            info!(
-                                "Leader's cache has bean cleared on leader change: {:?}",
-                                msg
-                            );
+                            info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
                                     state_handler.on_become_leader().await;

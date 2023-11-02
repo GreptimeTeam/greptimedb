@@ -14,6 +14,7 @@
 
 pub mod etcd;
 
+use std::fmt;
 use std::sync::Arc;
 
 use etcd_client::LeaderKey;
@@ -27,6 +28,27 @@ pub const ELECTION_KEY: &str = "__meta_srv_election";
 pub enum LeaderChangeMessage {
     Elected(Arc<LeaderKey>),
     StepDown(Arc<LeaderKey>),
+}
+
+impl fmt::Display for LeaderChangeMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let leader_key = match self {
+            LeaderChangeMessage::Elected(leader_key) => {
+                write!(f, "Elected(")?;
+                leader_key
+            }
+            LeaderChangeMessage::StepDown(leader_key) => {
+                write!(f, "StepDown(")?;
+                leader_key
+            }
+        };
+        write!(f, "LeaderKey {{ ")?;
+        write!(f, "name: {}", String::from_utf8_lossy(leader_key.name()))?;
+        write!(f, ", key: {}", String::from_utf8_lossy(leader_key.key()))?;
+        write!(f, ", rev: {}", leader_key.rev())?;
+        write!(f, ", lease: {}", leader_key.lease())?;
+        write!(f, " }})")
+    }
 }
 
 #[async_trait::async_trait]

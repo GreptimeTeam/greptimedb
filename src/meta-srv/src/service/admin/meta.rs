@@ -18,25 +18,30 @@ use common_error::ext::BoxedError;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::key::TableMetadataManagerRef;
 use futures::TryStreamExt;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
+use store_api::storage::{RegionId, TableId};
 use tonic::codegen::http;
 
 use crate::error;
-use crate::error::{Result, TableMetadataManagerSnafu};
-use crate::service::admin::HttpHandler;
+use crate::error::{ParseNumSnafu, Result, TableMetadataManagerSnafu};
+use crate::service::admin::{util, HttpHandler};
 
+#[derive(Clone)]
 pub struct CatalogsHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct SchemasHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct TablesHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
+#[derive(Clone)]
 pub struct TableHandler {
     pub table_metadata_manager: TableMetadataManagerRef,
 }
@@ -64,14 +69,18 @@ impl HttpHandler for CatalogsHandler {
 impl HttpHandler for SchemasHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let catalog = params
-            .get("catalog_name")
-            .context(error::MissingRequiredParameterSnafu {
-                param: "catalog_name",
-            })?;
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /schemas?catalog=foo
+            "#,
+            );
+        }
+
+        let catalog = util::get_value(params, "catalog")?;
         let stream = self
             .table_metadata_manager
             .schema_manager()
@@ -92,20 +101,19 @@ impl HttpHandler for SchemasHandler {
 impl HttpHandler for TablesHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let catalog = params
-            .get("catalog_name")
-            .context(error::MissingRequiredParameterSnafu {
-                param: "catalog_name",
-            })?;
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /tables?catalog=foo&schema=bar
+            "#,
+            );
+        }
 
-        let schema = params
-            .get("schema_name")
-            .context(error::MissingRequiredParameterSnafu {
-                param: "schema_name",
-            })?;
+        let catalog = util::get_value(params, "catalog")?;
+        let schema = util::get_value(params, "schema")?;
 
         let tables = self
             .table_metadata_manager
@@ -125,22 +133,74 @@ impl HttpHandler for TablesHandler {
 impl HttpHandler for TableHandler {
     async fn handle(
         &self,
-        _: &str,
+        path: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let catalog = params
-            .get("catalog")
-            .context(error::MissingRequiredParameterSnafu { param: "catalog" })?;
-        let schema = params
-            .get("schema")
-            .context(error::MissingRequiredParameterSnafu { param: "schema" })?;
-        let table = params
-            .get("table")
-            .context(error::MissingRequiredParameterSnafu { param: "table" })?;
+        if path.ends_with("/help") {
+            return util::to_text_response(
+                r#"
+            - GET /table?region_ids=1,2,3,4,5
+            - GET /table?table_ids=1,2,3,4,5
+            - GET /table?catalog=foo&schema=bar&table=baz
+            "#,
+            );
+        }
+
+        let table_ids = self.extract_table_ids(params).await?;
+
+        let table_info_values = self
+            .table_metadata_manager
+            .table_info_manager()
+            .batch_get(&table_ids)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .into_iter()
+            .map(|(k, v)| (format!("{k}"), format!("{v:?}")))
+            .collect::<HashMap<_, _>>();
+
+        http::Response::builder()
+            .status(http::StatusCode::OK)
+            // Safety: HashMap<String, String> is definitely "serde-json"-able.
+            .body(serde_json::to_string(&table_info_values).unwrap())
+            .context(error::InvalidHttpBodySnafu)
+    }
+}
+
+impl TableHandler {
+    async fn extract_table_ids(&self, params: &HashMap<String, String>) -> Result<Vec<TableId>> {
+        if let Some(ids) = params.get("region_ids") {
+            let table_ids = ids
+                .split(',')
+                .map(|x| {
+                    x.parse::<u64>()
+                        .map(|y| RegionId::from_u64(y).table_id())
+                        .context(ParseNumSnafu {
+                            err_msg: format!("invalid region id: {x}"),
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            return Ok(table_ids);
+        }
+
+        if let Some(ids) = params.get("table_ids") {
+            let table_ids = ids
+                .split(',')
+                .map(|x| {
+                    x.parse::<u32>().context(ParseNumSnafu {
+                        err_msg: format!("invalid table id: {x}"),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            return Ok(table_ids);
+        }
+
+        let catalog = util::get_value(params, "catalog")?;
+        let schema = util::get_value(params, "schema")?;
+        let table = util::get_value(params, "table")?;
 
         let key = TableNameKey::new(catalog, schema, table);
-
-        let mut result = HashMap::with_capacity(2);
 
         let table_id = self
             .table_metadata_manager
@@ -151,34 +211,10 @@ impl HttpHandler for TableHandler {
             .map(|x| x.table_id());
 
         if let Some(table_id) = table_id {
-            let table_info_value = self
-                .table_metadata_manager
-                .table_info_manager()
-                .get(table_id)
-                .await
-                .context(TableMetadataManagerSnafu)?
-                .map(|x| format!("{x:?}"))
-                .unwrap_or_else(|| "Not Found".to_string());
-            result.insert("table_info_value", table_info_value);
+            Ok(vec![table_id])
+        } else {
+            Ok(vec![])
         }
-
-        if let Some(table_id) = table_id {
-            let table_region_value = self
-                .table_metadata_manager
-                .table_route_manager()
-                .get(table_id)
-                .await
-                .context(TableMetadataManagerSnafu)?
-                .map(|x| format!("{x:?}"))
-                .unwrap_or_else(|| "Not Found".to_string());
-            result.insert("table_route_value", table_region_value);
-        }
-
-        http::Response::builder()
-            .status(http::StatusCode::OK)
-            // Safety: HashMap<String, String> is definitely "serde-json"-able.
-            .body(serde_json::to_string(&result).unwrap())
-            .context(error::InvalidHttpBodySnafu)
     }
 }
 

@@ -15,17 +15,32 @@
 use std::collections::HashMap;
 
 use snafu::{OptionExt, ResultExt};
+use tonic::codegen::http;
 
-use crate::error::{self, Result};
+use crate::error::{self, MissingRequiredParameterSnafu, ParseNumSnafu, Result};
 
 pub fn extract_cluster_id(params: &HashMap<String, String>) -> Result<u64> {
     params
         .get("cluster_id")
         .map(|id| id.parse::<u64>())
-        .context(error::MissingRequiredParameterSnafu {
+        .context(MissingRequiredParameterSnafu {
             param: "cluster_id",
         })?
-        .context(error::ParseNumSnafu {
+        .context(ParseNumSnafu {
             err_msg: "`cluster_id` is not a valid number",
         })
+}
+
+pub fn get_value<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&'a String> {
+    params
+        .get(key)
+        .context(error::MissingRequiredParameterSnafu { param: key })
+}
+
+pub fn to_text_response(text: &str) -> Result<http::Response<String>> {
+    http::Response::builder()
+        .header("Content-Type", "text/plain")
+        .status(http::StatusCode::OK)
+        .body(text.to_string())
+        .context(error::InvalidHttpBodySnafu)
 }
