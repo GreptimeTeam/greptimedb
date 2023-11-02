@@ -462,8 +462,8 @@ mod tests {
             .register(format!("{}-{}", Role::Datanode as i32, datanode_id), pusher)
             .await;
 
-        let kv_store = Arc::new(MemoryKvBackend::new());
-        let seq = Sequence::new("test_seq", 0, 10, kv_store);
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let seq = Sequence::new("test_seq", 0, 10, kv_backend);
         let mailbox = HeartbeatMailbox::create(handler_group.pushers(), seq);
 
         let msg = MailboxMessage {

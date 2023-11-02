@@ -230,10 +230,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_range_empty() {
-        let kv_store = Arc::new(MemoryKvBackend::<Error>::new());
+        let kv_backend = Arc::new(MemoryKvBackend::<Error>::new());
 
         let stream = PaginationStream::new(
-            kv_store.clone(),
+            kv_backend.clone(),
             RangeRequest {
                 key: b"a".to_vec(),
                 ..Default::default()
@@ -248,14 +248,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_range() {
-        let kv_store = Arc::new(MemoryKvBackend::<Error>::new());
+        let kv_backend = Arc::new(MemoryKvBackend::<Error>::new());
         let total = 26;
 
         let mut expected = BTreeMap::<Vec<u8>, ()>::new();
         for i in 0..total {
             let key = vec![97 + i];
 
-            assert!(kv_store
+            assert!(kv_backend
                 .put(PutRequest {
                     key: key.clone(),
                     value: key.clone(),
@@ -271,7 +271,7 @@ mod tests {
         let range_end = b"f".to_vec();
 
         let stream = PaginationStream::new(
-            kv_store.clone(),
+            kv_backend.clone(),
             RangeRequest {
                 key,
                 range_end,

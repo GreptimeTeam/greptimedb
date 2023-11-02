@@ -49,13 +49,13 @@ impl store_server::Store for MetaSrv {
         let cluster_id_str = cluster_id.to_string();
 
         let _timer = METRIC_META_KV_REQUEST
-            .with_label_values(&[self.kv_store().name(), "range", cluster_id_str.as_str()])
+            .with_label_values(&[self.kv_backend().name(), "range", cluster_id_str.as_str()])
             .start_timer();
 
         let req: RangeRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .range(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -75,13 +75,13 @@ impl store_server::Store for MetaSrv {
         let cluster_id_str = cluster_id.to_string();
 
         let _timer = METRIC_META_KV_REQUEST
-            .with_label_values(&[self.kv_store().name(), "put", cluster_id_str.as_str()])
+            .with_label_values(&[self.kv_backend().name(), "put", cluster_id_str.as_str()])
             .start_timer();
 
         let req: PutRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -101,13 +101,17 @@ impl store_server::Store for MetaSrv {
         let cluster_id_str = cluster_id.to_string();
 
         let _timer = METRIC_META_KV_REQUEST
-            .with_label_values(&[self.kv_store().name(), "batch_get", cluster_id_str.as_str()])
+            .with_label_values(&[
+                self.kv_backend().name(),
+                "batch_get",
+                cluster_id_str.as_str(),
+            ])
             .start_timer();
 
         let req: BatchGetRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .batch_get(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -127,13 +131,17 @@ impl store_server::Store for MetaSrv {
         let cluster_id_str = cluster_id.to_string();
 
         let _timer = METRIC_META_KV_REQUEST
-            .with_label_values(&[self.kv_store().name(), "batch_pub", cluster_id_str.as_str()])
+            .with_label_values(&[
+                self.kv_backend().name(),
+                "batch_pub",
+                cluster_id_str.as_str(),
+            ])
             .start_timer();
 
         let req: BatchPutRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .batch_put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -157,7 +165,7 @@ impl store_server::Store for MetaSrv {
 
         let _timer = METRIC_META_KV_REQUEST
             .with_label_values(&[
-                self.kv_store().name(),
+                self.kv_backend().name(),
                 "batch_delete",
                 cluster_id_str.as_str(),
             ])
@@ -166,7 +174,7 @@ impl store_server::Store for MetaSrv {
         let req: BatchDeleteRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .batch_delete(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -190,7 +198,7 @@ impl store_server::Store for MetaSrv {
 
         let _timer = METRIC_META_KV_REQUEST
             .with_label_values(&[
-                self.kv_store().name(),
+                self.kv_backend().name(),
                 "compare_and_put",
                 cluster_id_str.as_str(),
             ])
@@ -199,7 +207,7 @@ impl store_server::Store for MetaSrv {
         let req: CompareAndPutRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .compare_and_put(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -223,7 +231,7 @@ impl store_server::Store for MetaSrv {
 
         let _timer = METRIC_META_KV_REQUEST
             .with_label_values(&[
-                self.kv_store().name(),
+                self.kv_backend().name(),
                 "delete_range",
                 cluster_id_str.as_str(),
             ])
@@ -232,7 +240,7 @@ impl store_server::Store for MetaSrv {
         let req: DeleteRangeRequest = req.into();
 
         let res = self
-            .kv_store()
+            .kv_backend()
             .delete_range(req)
             .await
             .context(error::KvBackendSnafu)?;
@@ -256,7 +264,7 @@ mod tests {
 
     async fn new_meta_srv() -> MetaSrv {
         MetaSrvBuilder::new()
-            .kv_store(Arc::new(MemoryKvBackend::new()))
+            .kv_backend(Arc::new(MemoryKvBackend::new()))
             .build()
             .await
             .unwrap()

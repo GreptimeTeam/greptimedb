@@ -343,24 +343,24 @@ mod tests {
     };
 
     async fn mock_mem_store_with_data() -> MemoryKvBackend<Error> {
-        let kv_store = MemoryKvBackend::<Error>::new();
-        prepare_kv(&kv_store).await;
+        let kv_backend = MemoryKvBackend::<Error>::new();
+        prepare_kv(&kv_backend).await;
 
-        kv_store
+        kv_backend
     }
 
     #[tokio::test]
     async fn test_put() {
-        let kv_store = mock_mem_store_with_data().await;
+        let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_put(kv_store).await;
+        test_kv_put(kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_range() {
-        let kv_store = mock_mem_store_with_data().await;
+        let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_range(kv_store).await;
+        test_kv_range(kv_backend).await;
     }
 
     #[tokio::test]
@@ -372,29 +372,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_get() {
-        let kv_store = mock_mem_store_with_data().await;
+        let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_get(kv_store).await;
+        test_kv_batch_get(kv_backend).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_compare_and_put() {
-        let kv_store = Arc::new(MemoryKvBackend::<Error>::new());
+        let kv_backend = Arc::new(MemoryKvBackend::<Error>::new());
 
-        test_kv_compare_and_put(kv_store).await;
+        test_kv_compare_and_put(kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_delete_range() {
-        let kv_store = mock_mem_store_with_data().await;
+        let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_delete_range(kv_store).await;
+        test_kv_delete_range(kv_backend).await;
     }
 
     #[tokio::test]
     async fn test_batch_delete() {
-        let kv_store = mock_mem_store_with_data().await;
+        let kv_backend = mock_mem_store_with_data().await;
 
-        test_kv_batch_delete(kv_store).await;
+        test_kv_batch_delete(kv_backend).await;
     }
 }

@@ -260,7 +260,7 @@ impl Instance {
         kv_store_config: KvStoreConfig,
         procedure_config: ProcedureConfig,
     ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
-        let kv_store = Arc::new(
+        let kv_backend = Arc::new(
             RaftEngineBackend::try_open_with_cfg(Config {
                 dir,
                 purge_threshold: ReadableSize(kv_store_config.purge_threshold.0),
@@ -273,7 +273,7 @@ impl Instance {
             .context(error::OpenRaftEngineBackendSnafu)?,
         );
 
-        let state_store = Arc::new(KvStateStore::new(kv_store.clone()));
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
 
         let manager_config = ManagerConfig {
             max_retry_times: procedure_config.max_retry_times,
@@ -282,7 +282,7 @@ impl Instance {
         };
         let procedure_manager = Arc::new(LocalManager::new(manager_config, state_store));
 
-        Ok((kv_store, procedure_manager))
+        Ok((kv_backend, procedure_manager))
     }
 
     pub async fn try_new_standalone(

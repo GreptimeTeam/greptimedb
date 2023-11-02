@@ -336,7 +336,7 @@ impl StartCommand {
         })?;
 
         let metadata_dir = metadata_store_dir(&opts.data_home);
-        let (kv_store, procedure_manager) = FeInstance::try_build_standalone_components(
+        let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
             opts.metadata_store,
             opts.procedure,
@@ -344,15 +344,18 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode =
-            DatanodeBuilder::new(dn_opts.clone(), Some(kv_store.clone()), Default::default())
-                .build()
-                .await
-                .context(StartDatanodeSnafu)?;
+        let datanode = DatanodeBuilder::new(
+            dn_opts.clone(),
+            Some(kv_backend.clone()),
+            Default::default(),
+        )
+        .build()
+        .await
+        .context(StartDatanodeSnafu)?;
         let region_server = datanode.region_server();
 
         let catalog_manager = KvBackendCatalogManager::new(
-            kv_store.clone(),
+            kv_backend.clone(),
             Arc::new(DummyKvCacheInvalidator),
             Arc::new(StandaloneDatanodeManager(region_server.clone())),
         );
@@ -366,7 +369,7 @@ impl StartCommand {
         // TODO: build frontend instance like in distributed mode
         let mut frontend = build_frontend(
             fe_plugins,
-            kv_store,
+            kv_backend,
             procedure_manager.clone(),
             catalog_manager,
             region_server,
@@ -389,13 +392,13 @@ impl StartCommand {
 /// Build frontend instance in standalone mode
 async fn build_frontend(
     plugins: Plugins,
-    kv_store: KvBackendRef,
+    kv_backend: KvBackendRef,
     procedure_manager: ProcedureManagerRef,
     catalog_manager: CatalogManagerRef,
     region_server: RegionServer,
 ) -> Result<FeInstance> {
     let frontend_instance = FeInstance::try_new_standalone(
-        kv_store,
+        kv_backend,
         procedure_manager,
         catalog_manager,
         plugins,

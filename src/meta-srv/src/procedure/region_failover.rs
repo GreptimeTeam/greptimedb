@@ -482,7 +482,7 @@ mod tests {
 
         pub async fn build(self) -> TestingEnv {
             let in_memory = Arc::new(MemoryKvBackend::new());
-            let kv_store = Arc::new(MemoryKvBackend::new());
+            let kv_backend = Arc::new(MemoryKvBackend::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
                 .in_memory(Arc::new(MemoryKvBackend::new()))
@@ -493,7 +493,7 @@ mod tests {
 
             let table_id = 1;
             let table = "my_table";
-            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_store.clone()));
+            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
             test_util::prepare_table_region_and_info_value(&table_metadata_manager, table).await;
             let region_distribution = table_metadata_manager
                 .table_route_manager()
@@ -515,7 +515,7 @@ mod tests {
             }
 
             let mailbox_sequence =
-                Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
+                Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {
@@ -530,7 +530,7 @@ mod tests {
             let selector_ctx = SelectorContext {
                 datanode_lease_secs: 10,
                 server_addr: "127.0.0.1:3002".to_string(),
-                kv_store: kv_store.clone(),
+                kv_backend: kv_backend.clone(),
                 meta_peer_client,
                 table_id: Some(table_id),
             };

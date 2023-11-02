@@ -171,9 +171,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence() {
-        let kv_store = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(MemoryKvBackend::default());
         let initial = 1024;
-        let seq = Sequence::new("test_seq", initial, 10, kv_store);
+        let seq = Sequence::new("test_seq", initial, 10, kv_backend);
 
         for i in initial..initial + 100 {
             assert_eq!(i, seq.next().await.unwrap());
@@ -182,9 +182,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_out_of_rage() {
-        let kv_store = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(MemoryKvBackend::default());
         let initial = u64::MAX - 10;
-        let seq = Sequence::new("test_seq", initial, 10, kv_store);
+        let seq = Sequence::new("test_seq", initial, 10, kv_backend);
 
         for _ in 0..10 {
             let _ = seq.next().await.unwrap();
@@ -248,8 +248,8 @@ mod tests {
             }
         }
 
-        let kv_store = Arc::new(Noop {});
-        let seq = Sequence::new("test_seq", 0, 10, kv_store);
+        let kv_backend = Arc::new(Noop {});
+        let seq = Sequence::new("test_seq", 0, 10, kv_backend);
 
         let next = seq.next().await;
         assert!(next.is_err());

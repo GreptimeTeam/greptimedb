@@ -162,7 +162,7 @@ pub fn router(meta_srv: MetaSrv) -> Router {
 }
 
 pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<MetaSrv> {
-    let (kv_store, election, lock) = if opts.use_memory_store {
+    let (kv_backend, election, lock) = if opts.use_memory_store {
         (
             Arc::new(MemoryKvBackend::new()) as _,
             None,
@@ -194,7 +194,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
 
     MetaSrvBuilder::new()
         .options(opts.clone())
-        .kv_store(kv_store)
+        .kv_backend(kv_backend)
         .in_memory(in_memory)
         .selector(selector)
         .election(election)

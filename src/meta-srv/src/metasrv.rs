@@ -130,7 +130,7 @@ impl Default for DatanodeClientOptions {
 pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
-    pub kv_store: KvBackendRef,
+    pub kv_backend: KvBackendRef,
     pub leader_cached_kv_store: ResettableKvStoreRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
@@ -164,7 +164,7 @@ pub struct LeaderValue(pub String);
 pub struct SelectorContext {
     pub server_addr: String,
     pub datanode_lease_secs: u64,
-    pub kv_store: KvBackendRef,
+    pub kv_backend: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub table_id: Option<TableId>,
 }
@@ -210,7 +210,7 @@ pub struct MetaSrv {
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
     in_memory: ResettableKvStoreRef,
-    kv_store: KvBackendRef,
+    kv_backend: KvBackendRef,
     leader_cached_kv_store: ResettableKvStoreRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
@@ -333,8 +333,8 @@ impl MetaSrv {
         &self.in_memory
     }
 
-    pub fn kv_store(&self) -> &KvBackendRef {
-        &self.kv_store
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
     }
 
     pub fn leader_cached_kv_store(&self) -> &ResettableKvStoreRef {
@@ -397,7 +397,7 @@ impl MetaSrv {
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory.clone();
-        let kv_store = self.kv_store.clone();
+        let kv_backend = self.kv_backend.clone();
         let leader_cached_kv_store = self.leader_cached_kv_store.clone();
         let meta_peer_client = self.meta_peer_client.clone();
         let mailbox = self.mailbox.clone();
@@ -408,7 +408,7 @@ impl MetaSrv {
         Context {
             server_addr,
             in_memory,
-            kv_store,
+            kv_backend,
             leader_cached_kv_store,
             meta_peer_client,
             mailbox,

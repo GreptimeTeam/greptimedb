@@ -50,14 +50,14 @@ pub struct GreptimeDbCluster {
     pub _dir_guards: Vec<FileDirGuard>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
-    pub kv_store: KvBackendRef,
+    pub kv_backend: KvBackendRef,
     pub meta_srv: MetaSrv,
     pub frontend: Arc<FeInstance>,
 }
 
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
-    kv_store: KvBackendRef,
+    kv_backend: KvBackendRef,
     store_config: Option<ObjectStoreConfig>,
     datanodes: Option<u32>,
 }
@@ -66,7 +66,7 @@ impl GreptimeDbClusterBuilder {
     pub fn new(cluster_name: &str) -> Self {
         Self {
             cluster_name: cluster_name.to_string(),
-            kv_store: Arc::new(MemoryKvBackend::new()),
+            kv_backend: Arc::new(MemoryKvBackend::new()),
             store_config: None,
             datanodes: None,
         }
@@ -110,7 +110,7 @@ impl GreptimeDbClusterBuilder {
             storage_guards,
             _dir_guards: dir_guards,
             datanode_instances,
-            kv_store: self.kv_store.clone(),
+            kv_backend: self.kv_backend.clone(),
             meta_srv: meta_srv.meta_srv,
             frontend,
         }
@@ -127,7 +127,7 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await
+        meta_srv::mocks::mock(opt, self.kv_backend.clone(), None, Some(datanode_clients)).await
     }
 
     async fn build_datanodes(

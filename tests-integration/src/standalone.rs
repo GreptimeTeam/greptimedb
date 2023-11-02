@@ -66,7 +66,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, &self.instance_name);
 
-        let (kv_store, procedure_manager) = Instance::try_build_standalone_components(
+        let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
             format!("{}/kv", &opts.storage.data_home),
             KvStoreConfig::default(),
             ProcedureConfig::default(),
@@ -76,13 +76,14 @@ impl GreptimeDbStandaloneBuilder {
 
         let plugins = self.plugin.unwrap_or_default();
 
-        let datanode = DatanodeBuilder::new(opts.clone(), Some(kv_store.clone()), plugins.clone())
-            .build()
-            .await
-            .unwrap();
+        let datanode =
+            DatanodeBuilder::new(opts.clone(), Some(kv_backend.clone()), plugins.clone())
+                .build()
+                .await
+                .unwrap();
 
         let catalog_manager = KvBackendCatalogManager::new(
-            kv_store.clone(),
+            kv_backend.clone(),
             Arc::new(DummyKvCacheInvalidator),
             Arc::new(StandaloneDatanodeManager(datanode.region_server())),
         );
@@ -94,7 +95,7 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap();
         procedure_manager.start().await.unwrap();
         let instance = Instance::try_new_standalone(
-            kv_store,
+            kv_backend,
             procedure_manager,
             catalog_manager,
             plugins,

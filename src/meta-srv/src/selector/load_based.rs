@@ -65,7 +65,7 @@ impl Selector for LoadBasedSelector {
         let stat_kvs = ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
         let leader_peer_ids = if let Some(table_id) = ctx.table_id {
-            let table_metadata_manager = TableMetadataManager::new(ctx.kv_store.clone());
+            let table_metadata_manager = TableMetadataManager::new(ctx.kv_backend.clone());
 
             get_leader_peer_ids(&table_metadata_manager, table_id).await?
         } else {

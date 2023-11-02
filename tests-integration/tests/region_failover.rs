@@ -347,7 +347,7 @@ async fn run_region_failover_procedure(
             selector_ctx: SelectorContext {
                 datanode_lease_secs: distributed_time_constants::REGION_LEASE_SECS,
                 server_addr: meta_srv.options().server_addr.clone(),
-                kv_store: meta_srv.kv_store().clone(),
+                kv_backend: meta_srv.kv_backend().clone(),
                 meta_peer_client: meta_srv.meta_peer_client().clone(),
                 table_id: None,
             },

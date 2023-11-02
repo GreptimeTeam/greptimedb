@@ -62,10 +62,10 @@ mod tests {
     #[tokio::test]
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemoryKvBackend::new());
-        let kv_store = Arc::new(MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
         let leader_cached_kv_store =
-            Arc::new(LeaderCachedKvStore::with_always_leader(kv_store.clone()));
-        let seq = Sequence::new("test_seq", 0, 10, kv_store.clone());
+            Arc::new(LeaderCachedKvStore::with_always_leader(kv_backend.clone()));
+        let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
             .election(None)
@@ -77,14 +77,14 @@ mod tests {
         let mut ctx = Context {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
-            kv_store: kv_store.clone(),
+            kv_backend: kv_backend.clone(),
             leader_cached_kv_store,
             meta_peer_client,
             mailbox,
             election: None,
             skip_all: Arc::new(AtomicBool::new(false)),
             is_infancy: false,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_store.clone())),
+            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
         };
 
         let req = HeartbeatRequest {

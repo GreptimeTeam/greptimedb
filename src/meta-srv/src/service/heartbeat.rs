@@ -175,10 +175,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let kv_store = Arc::new(MemoryKvBackend::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let meta_srv = MetaSrvBuilder::new()
-            .kv_store(kv_store)
+            .kv_backend(kv_backend)
             .build()
             .await
             .unwrap();
