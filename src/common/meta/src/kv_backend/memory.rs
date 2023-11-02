@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use serde::Serializer;
 
-use super::ResettableKvStore;
+use super::ResettableKvBackend;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
 use crate::metrics::METRIC_META_TXN_REQUEST;
@@ -325,7 +325,7 @@ impl<T: ErrorExt + Send + Sync> TxnService for MemoryKvBackend<T> {
     }
 }
 
-impl<T: ErrorExt + Send + Sync + 'static> ResettableKvStore for MemoryKvBackend<T> {
+impl<T: ErrorExt + Send + Sync + 'static> ResettableKvBackend for MemoryKvBackend<T> {
     fn reset(&self) {
         self.clear();
     }

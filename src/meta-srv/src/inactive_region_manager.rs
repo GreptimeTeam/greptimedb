@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use common_meta::kv_backend::ResettableKvStoreRef;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::rpc::store::{BatchGetRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_meta::RegionIdent;
 use snafu::ResultExt;
@@ -24,11 +24,11 @@ use crate::keys::InactiveRegionKey;
 use crate::metrics::METRIC_META_INACTIVE_REGIONS;
 
 pub struct InactiveRegionManager<'a> {
-    store: &'a ResettableKvStoreRef,
+    store: &'a ResettableKvBackendRef,
 }
 
 impl<'a> InactiveRegionManager<'a> {
-    pub fn new(store: &'a ResettableKvStoreRef) -> Self {
+    pub fn new(store: &'a ResettableKvBackendRef) -> Self {
         Self { store }
     }
 

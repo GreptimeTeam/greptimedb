@@ -24,7 +24,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvStoreRef};
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -129,9 +129,9 @@ impl Default for DatanodeClientOptions {
 #[derive(Clone)]
 pub struct Context {
     pub server_addr: String,
-    pub in_memory: ResettableKvStoreRef,
+    pub in_memory: ResettableKvBackendRef,
     pub kv_backend: KvBackendRef,
-    pub leader_cached_kv_store: ResettableKvStoreRef,
+    pub leader_cached_kv_store: ResettableKvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
@@ -209,9 +209,9 @@ pub struct MetaSrv {
     options: MetaSrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
-    in_memory: ResettableKvStoreRef,
+    in_memory: ResettableKvBackendRef,
     kv_backend: KvBackendRef,
-    leader_cached_kv_store: ResettableKvStoreRef,
+    leader_cached_kv_store: ResettableKvBackendRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
@@ -329,7 +329,7 @@ impl MetaSrv {
         &self.options
     }
 
-    pub fn in_memory(&self) -> &ResettableKvStoreRef {
+    pub fn in_memory(&self) -> &ResettableKvBackendRef {
         &self.in_memory
     }
 
@@ -337,7 +337,7 @@ impl MetaSrv {
         &self.kv_backend
     }
 
-    pub fn leader_cached_kv_store(&self) -> &ResettableKvStoreRef {
+    pub fn leader_cached_kv_store(&self) -> &ResettableKvBackendRef {
         &self.leader_cached_kv_store
     }
 

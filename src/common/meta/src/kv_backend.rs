@@ -129,11 +129,11 @@ where
     }
 }
 
-pub trait ResettableKvStore: KvBackend
+pub trait ResettableKvBackend: KvBackend
 where
     Self::Error: ErrorExt,
 {
     fn reset(&self);
 }
 
-pub type ResettableKvStoreRef = Arc<dyn ResettableKvStore<Error = Error> + Send + Sync>;
+pub type ResettableKvBackendRef = Arc<dyn ResettableKvBackend<Error = Error> + Send + Sync>;

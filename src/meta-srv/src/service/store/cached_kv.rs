@@ -21,7 +21,7 @@ use common_meta::error::{Error, Result};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{
-    KvBackend, KvBackendRef, ResettableKvStore, ResettableKvStoreRef, TxnService,
+    KvBackend, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, TxnService,
 };
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -53,15 +53,15 @@ impl CheckLeader for AlwaysLeader {
 ///   3. Only the leader node can update this metadata, as the cache cannot detect
 ///     modifications made to the data on the follower node.
 ///   4. Only the leader node can delete this metadata for the same reason mentioned above.
-pub struct LeaderCachedKvStore {
+pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,
     store: KvBackendRef,
-    cache: ResettableKvStoreRef,
+    cache: ResettableKvBackendRef,
     version: AtomicUsize,
     name: String,
 }
 
-impl LeaderCachedKvStore {
+impl LeaderCachedKvBackend {
     pub fn new(check_leader: CheckLeaderRef, store: KvBackendRef) -> Self {
         let name = format!("LeaderCached({})", store.name());
         Self {
@@ -114,7 +114,7 @@ impl LeaderCachedKvStore {
 }
 
 #[async_trait::async_trait]
-impl KvBackend for LeaderCachedKvStore {
+impl KvBackend for LeaderCachedKvBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -284,7 +284,7 @@ impl KvBackend for LeaderCachedKvStore {
 }
 
 #[async_trait::async_trait]
-impl TxnService for LeaderCachedKvStore {
+impl TxnService for LeaderCachedKvBackend {
     type Error = Error;
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
@@ -322,7 +322,7 @@ impl TxnService for LeaderCachedKvStore {
     }
 }
 
-impl ResettableKvStore for LeaderCachedKvStore {
+impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
         self.cache.reset()
     }
@@ -334,9 +334,9 @@ mod tests {
 
     use super::*;
 
-    fn create_leader_cached_kv_store() -> LeaderCachedKvStore {
+    fn create_leader_cached_kv_store() -> LeaderCachedKvBackend {
         let store = Arc::new(MemoryKvBackend::new());
-        LeaderCachedKvStore::with_always_leader(store)
+        LeaderCachedKvBackend::with_always_leader(store)
     }
 
     #[tokio::test]

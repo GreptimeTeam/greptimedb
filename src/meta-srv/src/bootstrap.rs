@@ -22,7 +22,7 @@ use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::ResettableKvStoreRef;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
@@ -185,7 +185,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
         )
     };
 
-    let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvStoreRef;
+    let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,

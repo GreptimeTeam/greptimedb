@@ -27,7 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::ResettableKvStoreRef;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -70,7 +70,7 @@ impl From<RegionIdent> for RegionFailoverKey {
 
 pub(crate) struct RegionFailoverManager {
     region_lease_secs: u64,
-    in_memory: ResettableKvStoreRef,
+    in_memory: ResettableKvBackendRef,
     mailbox: MailboxRef,
     procedure_manager: ProcedureManagerRef,
     selector: SelectorRef,
@@ -94,7 +94,7 @@ impl Drop for FailoverProcedureGuard {
 impl RegionFailoverManager {
     pub(crate) fn new(
         region_lease_secs: u64,
-        in_memory: ResettableKvStoreRef,
+        in_memory: ResettableKvBackendRef,
         mailbox: MailboxRef,
         procedure_manager: ProcedureManagerRef,
         (selector, selector_ctx): (SelectorRef, SelectorContext),
@@ -249,7 +249,7 @@ struct Node {
 #[derive(Clone)]
 pub struct RegionFailoverContext {
     pub region_lease_secs: u64,
-    pub in_memory: ResettableKvStoreRef,
+    pub in_memory: ResettableKvBackendRef,
     pub mailbox: MailboxRef,
     pub selector: SelectorRef,
     pub selector_ctx: SelectorContext,

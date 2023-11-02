@@ -154,14 +154,15 @@ mod tests {
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::keys::StatKey;
-    use crate::service::store::cached_kv::LeaderCachedKvStore;
+    use crate::service::store::cached_kv::LeaderCachedKvBackend;
 
     #[tokio::test]
     async fn test_handle_datanode_stats() {
         let in_memory = Arc::new(MemoryKvBackend::new());
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let leader_cached_kv_store =
-            Arc::new(LeaderCachedKvStore::with_always_leader(kv_backend.clone()));
+        let leader_cached_kv_store = Arc::new(LeaderCachedKvBackend::with_always_leader(
+            kv_backend.clone(),
+        ));
         let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()

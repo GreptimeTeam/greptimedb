@@ -22,7 +22,7 @@ use api::v1::meta::{
     RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::kv_backend::ResettableKvStoreRef;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::rpc::store::{BatchGetRequest, RangeRequest};
 use common_meta::rpc::KeyValue;
 use common_meta::util;
@@ -40,7 +40,7 @@ pub type MetaPeerClientRef = Arc<MetaPeerClient>;
 #[derive(Builder)]
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
-    in_memory: ResettableKvStoreRef,
+    in_memory: ResettableKvBackendRef,
     #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
     #[builder(default = "3")]

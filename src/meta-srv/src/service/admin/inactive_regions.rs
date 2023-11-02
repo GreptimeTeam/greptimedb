@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use common_meta::kv_backend::ResettableKvStoreRef;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tonic::codegen::http;
@@ -25,7 +25,7 @@ use crate::keys::InactiveRegionKey;
 use crate::service::admin::{util, HttpHandler};
 
 pub struct ViewInactiveRegionsHandler {
-    pub store: ResettableKvStoreRef,
+    pub store: ResettableKvBackendRef,
 }
 
 #[async_trait::async_trait]
@@ -51,7 +51,7 @@ impl HttpHandler for ViewInactiveRegionsHandler {
 }
 
 pub struct ClearInactiveRegionsHandler {
-    pub store: ResettableKvStoreRef,
+    pub store: ResettableKvBackendRef,
 }
 
 #[async_trait::async_trait]

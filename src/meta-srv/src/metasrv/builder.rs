@@ -23,7 +23,7 @@ use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvStoreRef};
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::sequence::{Sequence, SequenceRef};
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -54,14 +54,14 @@ use crate::procedure::region_failover::RegionFailoverManager;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
+use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
 use crate::table_meta_alloc::MetaSrvTableMetadataAllocator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
     options: Option<MetaSrvOptions>,
     kv_backend: Option<KvBackendRef>,
-    in_memory: Option<ResettableKvStoreRef>,
+    in_memory: Option<ResettableKvBackendRef>,
     selector: Option<SelectorRef>,
     handler_group: Option<HeartbeatHandlerGroup>,
     election: Option<ElectionRef>,
@@ -97,7 +97,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn in_memory(mut self, in_memory: ResettableKvStoreRef) -> Self {
+    pub fn in_memory(mut self, in_memory: ResettableKvBackendRef) -> Self {
         self.in_memory = Some(in_memory);
         self
     }
@@ -270,8 +270,8 @@ impl MetaSrvBuilder {
 fn build_leader_cached_kv_store(
     election: &Option<ElectionRef>,
     kv_backend: &KvBackendRef,
-) -> Arc<LeaderCachedKvStore> {
-    Arc::new(LeaderCachedKvStore::new(
+) -> Arc<LeaderCachedKvBackend> {
+    Arc::new(LeaderCachedKvBackend::new(
         Arc::new(CheckLeaderByElection(election.clone())),
         kv_backend.clone(),
     ))
@@ -279,7 +279,7 @@ fn build_leader_cached_kv_store(
 
 fn build_default_meta_peer_client(
     election: &Option<ElectionRef>,
-    in_memory: &ResettableKvStoreRef,
+    in_memory: &ResettableKvBackendRef,
 ) -> MetaPeerClientRef {
     MetaPeerClientBuilder::default()
         .election(election.clone())
