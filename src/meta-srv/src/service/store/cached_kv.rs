@@ -96,7 +96,7 @@ impl LeaderCachedKvBackend {
         for prefix in &CACHE_KEY_PREFIXES[..] {
             let _timer = metrics::METRIC_META_LEADER_CACHED_KV_LOAD.with_label_values(&[prefix]);
 
-            // TODO(weny): Refactors PaginationStream's ouput to unary output.
+            // TODO(weny): Refactors PaginationStream's output to unary output.
             let stream = PaginationStream::new(
                 self.store.clone(),
                 RangeRequest::new().with_prefix(prefix.as_bytes()),
