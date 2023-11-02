@@ -21,12 +21,13 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
+use serde::{Deserialize, Serialize};
 
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {
     // Readonly region(mito2), Readonly region(file).
     Follower,
@@ -39,6 +40,15 @@ impl From<RegionRole> for PbRegionRole {
         match value {
             RegionRole::Follower => PbRegionRole::Follower,
             RegionRole::Leader => PbRegionRole::Leader,
+        }
+    }
+}
+
+impl From<PbRegionRole> for RegionRole {
+    fn from(value: PbRegionRole) -> Self {
+        match value {
+            PbRegionRole::Leader => RegionRole::Leader,
+            PbRegionRole::Follower => RegionRole::Follower,
         }
     }
 }

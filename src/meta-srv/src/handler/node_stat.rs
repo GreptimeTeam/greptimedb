@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
+use store_api::region_engine::RegionRole;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
@@ -25,7 +26,9 @@ use crate::keys::StatKey;
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
+    // The datanode Id.
     pub id: u64,
+    // The datanode address.
     pub addr: String,
     /// The read capacity units during this period
     pub rcus: i64,
@@ -38,8 +41,9 @@ pub struct Stat {
     pub node_epoch: u64,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RegionStat {
+    /// The region_id.
     pub id: u64,
     /// The read capacity units during this period
     pub rcus: i64,
@@ -49,6 +53,10 @@ pub struct RegionStat {
     pub approximate_bytes: i64,
     /// Approximate number of rows in this region
     pub approximate_rows: i64,
+    /// The engine name.
+    pub engine: String,
+    /// The region role.
+    pub role: RegionRole,
 }
 
 impl Stat {
@@ -132,6 +140,8 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
             approximate_rows: value.approximate_rows,
+            engine: value.engine.to_string(),
+            role: RegionRole::from(value.role()),
         })
     }
 }

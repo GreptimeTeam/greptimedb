@@ -58,7 +58,10 @@ pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
         .collect()
 }
 
-pub fn convert_to_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Peer> {
+/// Returns the HashMap<[RegionNumber], &[Peer]>;
+///
+/// If the region doesn't have a leader peer, the [Region] will be omitted.
+pub fn convert_to_region_leader_map(region_routes: &[RegionRoute]) -> HashMap<RegionNumber, &Peer> {
     region_routes
         .iter()
         .filter_map(|x| {
@@ -69,7 +72,10 @@ pub fn convert_to_region_map(region_routes: &[RegionRoute]) -> HashMap<u32, &Pee
         .collect::<HashMap<_, _>>()
 }
 
-pub fn find_region_leader(region_routes: &[RegionRoute], region_number: u32) -> Option<&Peer> {
+pub fn find_region_leader(
+    region_routes: &[RegionRoute],
+    region_number: RegionNumber,
+) -> Option<&Peer> {
     region_routes
         .iter()
         .find(|x| x.region.id.region_number() == region_number)
@@ -241,12 +247,12 @@ impl RegionRoute {
 pub struct RegionRoutes(pub Vec<RegionRoute>);
 
 impl RegionRoutes {
-    pub fn region_map(&self) -> HashMap<u32, &Peer> {
-        convert_to_region_map(&self.0)
+    pub fn region_leader_map(&self) -> HashMap<RegionNumber, &Peer> {
+        convert_to_region_leader_map(&self.0)
     }
 
-    pub fn find_region_leader(&self, region_number: u32) -> Option<&Peer> {
-        self.region_map().get(&region_number).copied()
+    pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
+        self.region_leader_map().get(&region_number).copied()
     }
 }
 
@@ -256,6 +262,16 @@ pub struct Region {
     pub name: String,
     pub partition: Option<Partition>,
     pub attrs: BTreeMap<String, String>,
+}
+
+impl Region {
+    #[cfg(any(test, feature = "testing"))]
+    pub fn new_test(id: RegionId) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
 }
 
 impl From<PbRegion> for Region {

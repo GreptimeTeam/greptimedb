@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_P
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute};
+use crate::rpc::store::BatchGetRequest;
 
 pub struct TableRouteKey {
     pub table_id: TableId,
@@ -195,6 +197,38 @@ impl TableRouteManager {
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
+    }
+
+    /// It may return a subset of the `table_ids`.
+    pub async fn batch_get(
+        &self,
+        table_ids: &[TableId],
+    ) -> Result<HashMap<TableId, TableRouteValue>> {
+        let lookup_table = table_ids
+            .iter()
+            .map(|id| (TableRouteKey::new(*id).as_raw_key(), id))
+            .collect::<HashMap<_, _>>();
+
+        let resp = self
+            .kv_backend
+            .batch_get(BatchGetRequest {
+                keys: lookup_table.keys().cloned().collect::<Vec<_>>(),
+            })
+            .await?;
+
+        let values = resp
+            .kvs
+            .iter()
+            .map(|kv| {
+                Ok((
+                    // Safety: must exist.
+                    **lookup_table.get(kv.key()).unwrap(),
+                    TableRouteValue::try_from_raw_value(&kv.value)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        Ok(values)
     }
 
     #[cfg(test)]

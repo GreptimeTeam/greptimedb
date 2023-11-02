@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_meta::key::table_route::TableRouteManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{convert_to_region_map, RegionRoutes};
+use common_meta::rpc::router::{convert_to_region_leader_map, RegionRoutes};
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
@@ -93,7 +93,7 @@ impl PartitionRuleManager {
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
         let mut datanodes = HashMap::with_capacity(regions.len());
-        let region_map = convert_to_region_map(&route.region_routes);
+        let region_map = convert_to_region_leader_map(&route.region_routes);
         for region in regions.iter() {
             let datanode = *region_map.get(region).context(error::FindDatanodeSnafu {
                 table_id,
