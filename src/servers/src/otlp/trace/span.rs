@@ -44,7 +44,7 @@ pub struct TraceSpan {
     pub span_status_message: String,
     pub span_attributes: Attributes, // TODO(yuanbohan): Map in the future
     pub span_events: SpanEvents,     // TODO(yuanbohan): List in the future
-    pub span_links: TraceLinks,      // TODO(yuanbohan): List in the future
+    pub span_links: SpanLinks,       // TODO(yuanbohan): List in the future
     pub start_in_nanosecond: u64,    // this is also the Timestamp Index
     pub end_in_nanosecond: u64,
 
@@ -54,14 +54,14 @@ pub struct TraceSpan {
 pub type TraceSpans = Vec<TraceSpan>;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TraceLink {
+pub struct SpanLink {
     pub trace_id: String,
     pub span_id: String,
     pub trace_state: String,
     pub attributes: Attributes, // TODO(yuanbohan): Map in the future
 }
 
-impl From<Link> for TraceLink {
+impl From<Link> for SpanLink {
     fn from(link: Link) -> Self {
         Self {
             trace_id: bytes_to_hex_string(&link.trace_id),
@@ -73,27 +73,27 @@ impl From<Link> for TraceLink {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct TraceLinks(Vec<TraceLink>);
+pub struct SpanLinks(Vec<SpanLink>);
 
-impl From<Vec<Link>> for TraceLinks {
+impl From<Vec<Link>> for SpanLinks {
     fn from(value: Vec<Link>) -> Self {
-        let links = value.into_iter().map(TraceLink::from).collect_vec();
+        let links = value.into_iter().map(SpanLink::from).collect_vec();
         Self(links)
     }
 }
 
-impl Display for TraceLinks {
+impl Display for SpanLinks {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", serde_json::to_string(self).unwrap_or_default())
     }
 }
 
-impl TraceLinks {
-    pub fn get_ref(&self) -> &Vec<TraceLink> {
+impl SpanLinks {
+    pub fn get_ref(&self) -> &Vec<SpanLink> {
         &self.0
     }
 
-    pub fn get_mut(&mut self) -> &mut Vec<TraceLink> {
+    pub fn get_mut(&mut self) -> &mut Vec<SpanLink> {
         &mut self.0
     }
 }
@@ -166,7 +166,7 @@ pub fn parse_span(
         span_status_message,
         span_attributes: Attributes::from(span.attributes),
         span_events: SpanEvents::from(span.events),
-        span_links: TraceLinks::from(span.links),
+        span_links: SpanLinks::from(span.links),
 
         start_in_nanosecond: span.start_time_unix_nano,
         end_in_nanosecond: span.end_time_unix_nano,
