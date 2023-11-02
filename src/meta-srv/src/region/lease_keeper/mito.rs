@@ -79,6 +79,7 @@ mod tests {
             region: Region::new_test(region_id),
             leader_peer: Some(another_peer.clone()),
             follower_peers: vec![peer.clone()],
+            leader_status: None,
         }];
 
         let retained_active_regions = datanode_regions.clone();

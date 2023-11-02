@@ -204,6 +204,7 @@ mod tests {
                 region: Region::new_test(another_region_id),
                 leader_peer: None,
                 follower_peers: vec![another_peer.clone()],
+                leader_status: None,
             },
         ];
 
