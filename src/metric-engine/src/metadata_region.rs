@@ -93,17 +93,13 @@ impl MetadataRegion {
     }
 
     pub fn parse_table_key(key: &str) -> Option<&str> {
-        if key.starts_with("__table_") {
-            Some(&key[8..])
-        } else {
-            None
-        }
+        key.strip_prefix("__table_")
     }
 
     /// Parse column key to (table_name, column_name)
     pub fn parse_column_key(key: &str) -> Result<Option<(String, String)>> {
-        if key.starts_with("__column_") {
-            let mut iter = key[9..].split('_');
+        if let Some(stripped) = key.strip_prefix("__column_") {
+            let mut iter = stripped.split('_');
             let encoded_table_name = iter.next().unwrap();
             let encoded_column_name = iter.next().unwrap();
 
@@ -136,6 +132,7 @@ impl MetadataRegion {
 // simulate to `KvBackend`
 //
 // methods in this block assume the given region id is transformed.
+#[allow(unused_variables)]
 impl MetadataRegion {
     /// Put if not exist, return if this put operation is successful (error other
     /// than "key already exist" will be wrapped in [Err]).

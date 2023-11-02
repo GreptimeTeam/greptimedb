@@ -19,6 +19,7 @@
 #![feature(let_chains)]
 
 #[cfg(any(test, feature = "test"))]
+#[cfg_attr(feature = "test", allow(unused))]
 pub mod test_util;
 
 mod access_layer;
