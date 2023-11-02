@@ -258,7 +258,7 @@ impl Memtable for TimeSeriesMemtable {
         let min_timestamp = ts_type.create_timestamp(self.min_timestamp.load(Ordering::Relaxed));
         MemtableStats {
             estimated_bytes,
-            time_range: Some((max_timestamp, min_timestamp)),
+            time_range: Some((min_timestamp, max_timestamp)),
         }
     }
 }
@@ -1047,6 +1047,16 @@ mod tests {
             .map(|v| v.unwrap().0.value())
             .collect::<HashSet<_>>();
         assert_eq!(expected_ts, read);
+
+        let stats = memtable.stats();
+        assert!(stats.bytes_allocated() > 0);
+        assert_eq!(
+            Some((
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(99)
+            )),
+            stats.time_range()
+        );
     }
 
     #[test]
