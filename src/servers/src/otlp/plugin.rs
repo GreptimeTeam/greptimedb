@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 
-use super::trace::TraceSpans;
+use super::trace::span::TraceSpans;
 
 /// Transformer helps to transform ExportTraceServiceRequest based on logic, like:
 ///   - uplift some fields from Attributes (Map type) to column
