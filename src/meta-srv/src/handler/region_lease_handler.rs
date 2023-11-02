@@ -78,7 +78,6 @@ mod test {
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::service::store::kv::KvBackendAdapter;
     use crate::test_util;
 
     #[tokio::test]
@@ -92,9 +91,7 @@ mod test {
 
         let table_id = 1;
         let table_name = "my_table";
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-            kv_store.clone(),
-        )));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_store.clone()));
         test_util::prepare_table_region_and_info_value(&table_metadata_manager, table_name).await;
 
         let req = HeartbeatRequest {

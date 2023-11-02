@@ -107,6 +107,7 @@ pub mod test_data {
     use common_meta::datanode_manager::DatanodeManagerRef;
     use common_meta::ddl::DdlContext;
     use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::Sequence;
@@ -118,8 +119,6 @@ pub mod test_data {
     use crate::cache_invalidator::MetasrvCacheInvalidator;
     use crate::handler::{HeartbeatMailbox, Pushers};
     use crate::metasrv::MetasrvInfo;
-    use crate::service::store::kv::KvBackendAdapter;
-    use crate::service::store::memory::MemStore;
     use crate::test_util::new_region_route;
 
     pub fn new_region_routes() -> Vec<RegionRoute> {
@@ -186,17 +185,11 @@ pub mod test_data {
     }
 
     pub(crate) fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
-        let kv_store = Arc::new(MemStore::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
-        let mailbox_sequence = Sequence::new(
-            "test_heartbeat_mailbox",
-            0,
-            100,
-            KvBackendAdapter::wrap(kv_store.clone()),
-        );
+        let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
-        let kv_backend = KvBackendAdapter::wrap(kv_store);
         DdlContext {
             datanode_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(

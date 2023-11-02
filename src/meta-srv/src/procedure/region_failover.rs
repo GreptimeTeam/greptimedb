@@ -27,6 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use common_meta::key::datanode_table::DatanodeTableKey;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::kv_backend::ResettableKvStoreRef;
 use common_meta::{ClusterId, RegionIdent};
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -46,7 +47,6 @@ use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataMan
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::kv::ResettableKvStoreRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -396,6 +396,7 @@ mod tests {
     use common_meta::ddl::utils::region_storage_path;
     use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
     use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::Sequence;
     use common_meta::DatanodeId;
     use common_procedure::{BoxedProcedure, ProcedureId};
@@ -409,8 +410,6 @@ mod tests {
     use crate::lock::memory::MemLock;
     use crate::selector::{Namespace, Selector};
     use crate::service::mailbox::Channel;
-    use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
-    use crate::service::store::memory::MemStore;
     use crate::test_util;
 
     struct RandomNodeSelector {
@@ -482,11 +481,11 @@ mod tests {
         }
 
         pub async fn build(self) -> TestingEnv {
-            let in_memory = Arc::new(MemStore::new());
-            let kv_store: KvStoreRef = Arc::new(MemStore::new());
+            let in_memory = Arc::new(MemoryKvBackend::new());
+            let kv_store = Arc::new(MemoryKvBackend::new());
             let meta_peer_client = MetaPeerClientBuilder::default()
                 .election(None)
-                .in_memory(Arc::new(MemStore::new()))
+                .in_memory(Arc::new(MemoryKvBackend::new()))
                 .build()
                 .map(Arc::new)
                 // Safety: all required fields set at initialization
@@ -494,9 +493,7 @@ mod tests {
 
             let table_id = 1;
             let table = "my_table";
-            let table_metadata_manager = Arc::new(TableMetadataManager::new(
-                KvBackendAdapter::wrap(kv_store.clone()),
-            ));
+            let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_store.clone()));
             test_util::prepare_table_region_and_info_value(&table_metadata_manager, table).await;
             let region_distribution = table_metadata_manager
                 .table_route_manager()
@@ -517,12 +514,8 @@ mod tests {
                 let _ = heartbeat_receivers.insert(datanode_id, rx);
             }
 
-            let mailbox_sequence = Sequence::new(
-                "test_heartbeat_mailbox",
-                0,
-                100,
-                KvBackendAdapter::wrap(kv_store.clone()),
-            );
+            let mailbox_sequence =
+                Sequence::new("test_heartbeat_mailbox", 0, 100, kv_store.clone());
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {

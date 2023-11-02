@@ -17,8 +17,10 @@ use api::v1::meta::{
     Error, RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_telemetry::warn;
+use snafu::ResultExt;
 use tonic::{Request, Response};
 
+use crate::error;
 use crate::metasrv::MetaSrv;
 use crate::service::GrpcResult;
 
@@ -37,7 +39,11 @@ impl cluster_server::Cluster for MetaSrv {
         }
 
         let req = req.into_inner().into();
-        let resp = self.in_memory().batch_get(req).await?;
+        let resp = self
+            .in_memory()
+            .batch_get(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let resp = resp.to_proto_resp(ResponseHeader::success(0));
         Ok(Response::new(resp))
@@ -56,7 +62,11 @@ impl cluster_server::Cluster for MetaSrv {
         }
 
         let req = req.into_inner().into();
-        let res = self.in_memory().range(req).await?;
+        let res = self
+            .in_memory()
+            .range(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let resp = res.to_proto_resp(ResponseHeader::success(0));
         Ok(Response::new(resp))

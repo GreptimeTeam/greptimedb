@@ -24,7 +24,6 @@ use crate::keys::{LeaseKey, LeaseValue, StatKey};
 use crate::lease;
 use crate::metasrv::SelectorContext;
 use crate::selector::{Namespace, Selector};
-use crate::service::store::kv::KvBackendAdapter;
 
 const MAX_REGION_NUMBER: u64 = u64::MAX;
 
@@ -66,8 +65,7 @@ impl Selector for LoadBasedSelector {
         let stat_kvs = ctx.meta_peer_client.get_dn_stat_kvs(stat_keys).await?;
 
         let leader_peer_ids = if let Some(table_id) = ctx.table_id {
-            let table_metadata_manager =
-                TableMetadataManager::new(KvBackendAdapter::wrap(ctx.kv_store.clone()));
+            let table_metadata_manager = TableMetadataManager::new(ctx.kv_store.clone());
 
             get_leader_peer_ids(&table_metadata_manager, table_id).await?
         } else {

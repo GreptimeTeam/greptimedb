@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod etcd;
 pub mod memory;
 pub mod test;
 pub mod txn;
@@ -127,3 +128,12 @@ where
         }
     }
 }
+
+pub trait ResettableKvStore: KvBackend
+where
+    Self::Error: ErrorExt,
+{
+    fn reset(&self);
+}
+
+pub type ResettableKvStoreRef = Arc<dyn ResettableKvStore<Error = Error> + Send + Sync>;

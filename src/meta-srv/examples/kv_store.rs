@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
-use meta_srv::service::store::etcd::EtcdStore;
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 

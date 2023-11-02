@@ -14,13 +14,14 @@
 
 use std::collections::HashSet;
 
+use common_meta::kv_backend::ResettableKvStoreRef;
 use common_meta::rpc::store::{BatchGetRequest, DeleteRangeRequest, PutRequest, RangeRequest};
 use common_meta::RegionIdent;
+use snafu::ResultExt;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::keys::InactiveRegionKey;
 use crate::metrics::METRIC_META_INACTIVE_REGIONS;
-use crate::service::store::kv::ResettableKvStoreRef;
 
 pub struct InactiveRegionManager<'a> {
     store: &'a ResettableKvStoreRef,
@@ -43,7 +44,7 @@ impl<'a> InactiveRegionManager<'a> {
             value: vec![],
             prev_kv: false,
         };
-        self.store.put(req).await?;
+        self.store.put(req).await.context(error::KvBackendSnafu)?;
 
         METRIC_META_INACTIVE_REGIONS.inc();
 
@@ -58,7 +59,10 @@ impl<'a> InactiveRegionManager<'a> {
             region_id,
         }
         .into();
-        self.store.delete(&key, false).await?;
+        self.store
+            .delete(&key, false)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         METRIC_META_INACTIVE_REGIONS.dec();
 
@@ -89,7 +93,11 @@ impl<'a> InactiveRegionManager<'a> {
             })
             .collect::<Vec<(Vec<u8>, _)>>();
         let keys = key_region_ids.iter().map(|(key, _)| key.clone()).collect();
-        let resp = self.store.batch_get(BatchGetRequest { keys }).await?;
+        let resp = self
+            .store
+            .batch_get(BatchGetRequest { keys })
+            .await
+            .context(error::KvBackendSnafu)?;
         let kvs = resp.kvs;
         if kvs.is_empty() {
             return Ok(HashSet::new());
@@ -124,7 +132,11 @@ impl<'a> InactiveRegionManager<'a> {
     ) -> Result<Vec<InactiveRegionKey>> {
         let prefix = InactiveRegionKey::get_prefix_by_cluster(cluster_id);
         let request = RangeRequest::new().with_prefix(prefix);
-        let resp = self.store.range(request).await?;
+        let resp = self
+            .store
+            .range(request)
+            .await
+            .context(error::KvBackendSnafu)?;
         let kvs = resp.kvs;
         kvs.into_iter()
             .map(|kv| InactiveRegionKey::try_from(kv.key))
@@ -134,7 +146,11 @@ impl<'a> InactiveRegionManager<'a> {
     pub async fn clear_all_inactive_regions(&self, cluster_id: u64) -> Result<()> {
         let prefix = InactiveRegionKey::get_prefix_by_cluster(cluster_id);
         let request = DeleteRangeRequest::new().with_prefix(prefix);
-        let _ = self.store.delete_range(request).await?;
+        let _ = self
+            .store
+            .delete_range(request)
+            .await
+            .context(error::KvBackendSnafu)?;
         Ok(())
     }
 }

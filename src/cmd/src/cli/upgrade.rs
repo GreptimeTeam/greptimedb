@@ -27,6 +27,8 @@ use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
 use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::router::TableRoute;
 use common_meta::rpc::store::{BatchDeleteRequest, BatchPutRequest, PutRequest, RangeRequest};
@@ -35,8 +37,6 @@ use common_meta::util::get_prefix_end_key;
 use common_telemetry::info;
 use etcd_client::Client;
 use futures::TryStreamExt;
-use meta_srv::service::store::etcd::EtcdStore;
-use meta_srv::service::store::kv::{KvBackendAdapter, KvStoreRef};
 use prost::Message;
 use snafu::ResultExt;
 use v1_helper::{CatalogKey as v1CatalogKey, SchemaKey as v1SchemaKey, TableGlobalValue};
@@ -81,7 +81,7 @@ impl UpgradeCommand {
 }
 
 struct MigrateTableMetadata {
-    etcd_store: KvStoreRef,
+    etcd_store: KvBackendRef,
     dryrun: bool,
 
     skip_table_global_keys: bool,
@@ -123,7 +123,7 @@ impl MigrateTableMetadata {
         info!("Start scanning key from: {}", String::from_utf8_lossy(&key));
 
         let mut stream = PaginationStream::new(
-            KvBackendAdapter::wrap(self.etcd_store.clone()),
+            self.etcd_store.clone(),
             RangeRequest::new().with_range(key, range_end),
             PAGE_SIZE,
             Arc::new(|kv: KeyValue| {
@@ -182,7 +182,7 @@ impl MigrateTableMetadata {
         let mut keys = Vec::new();
         info!("Start scanning key from: {}", String::from_utf8_lossy(&key));
         let mut stream = PaginationStream::new(
-            KvBackendAdapter::wrap(self.etcd_store.clone()),
+            self.etcd_store.clone(),
             RangeRequest::new().with_range(key, range_end),
             PAGE_SIZE,
             Arc::new(|kv: KeyValue| {
@@ -234,7 +234,7 @@ impl MigrateTableMetadata {
         let mut keys = Vec::new();
         info!("Start scanning key from: {}", String::from_utf8_lossy(&key));
         let mut stream = PaginationStream::new(
-            KvBackendAdapter::wrap(self.etcd_store.clone()),
+            self.etcd_store.clone(),
             RangeRequest::new().with_range(key, range_end),
             PAGE_SIZE,
             Arc::new(|kv: KeyValue| {
@@ -284,7 +284,7 @@ impl MigrateTableMetadata {
 
         info!("Start scanning key from: {}", String::from_utf8_lossy(&key));
         let mut stream = PaginationStream::new(
-            KvBackendAdapter::wrap(self.etcd_store.clone()),
+            self.etcd_store.clone(),
             RangeRequest::new().with_range(key, range_end.clone()),
             PAGE_SIZE,
             Arc::new(|kv: KeyValue| {

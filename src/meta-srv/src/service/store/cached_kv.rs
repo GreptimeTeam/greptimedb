@@ -17,18 +17,18 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_meta::error::{Error, Result};
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
-use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::kv_backend::{
+    KvBackend, KvBackendRef, ResettableKvStore, ResettableKvStoreRef, TxnService,
+};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-
-use crate::error::{Error, Result};
-use crate::service::store::kv::{KvStoreRef, ResettableKvStore, ResettableKvStoreRef};
-use crate::service::store::memory::MemStore;
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
 
@@ -55,19 +55,19 @@ impl CheckLeader for AlwaysLeader {
 ///   4. Only the leader node can delete this metadata for the same reason mentioned above.
 pub struct LeaderCachedKvStore {
     check_leader: CheckLeaderRef,
-    store: KvStoreRef,
+    store: KvBackendRef,
     cache: ResettableKvStoreRef,
     version: AtomicUsize,
     name: String,
 }
 
 impl LeaderCachedKvStore {
-    pub fn new(check_leader: CheckLeaderRef, store: KvStoreRef) -> Self {
+    pub fn new(check_leader: CheckLeaderRef, store: KvBackendRef) -> Self {
         let name = format!("LeaderCached({})", store.name());
         Self {
             check_leader,
             store,
-            cache: Arc::new(MemStore::new()),
+            cache: Arc::new(MemoryKvBackend::new()),
             version: AtomicUsize::new(0),
             name,
         }
@@ -75,7 +75,7 @@ impl LeaderCachedKvStore {
 
     /// With a leader checker which always returns true when checking,
     /// mainly used in test scenarios.
-    pub fn with_always_leader(store: KvStoreRef) -> Self {
+    pub fn with_always_leader(store: KvBackendRef) -> Self {
         Self::new(Arc::new(AlwaysLeader), store)
     }
 
@@ -333,10 +333,9 @@ mod tests {
     use common_meta::rpc::KeyValue;
 
     use super::*;
-    use crate::service::store::memory::MemStore;
 
     fn create_leader_cached_kv_store() -> LeaderCachedKvStore {
-        let store = Arc::new(MemStore::new());
+        let store = Arc::new(MemoryKvBackend::new());
         LeaderCachedKvStore::with_always_leader(store)
     }
 

@@ -22,6 +22,8 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvStoreRef};
 use common_meta::sequence::{Sequence, SequenceRef};
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -53,14 +55,12 @@ use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvStore};
-use crate::service::store::kv::{KvBackendAdapter, KvStoreRef, ResettableKvStoreRef};
-use crate::service::store::memory::MemStore;
 use crate::table_meta_alloc::MetaSrvTableMetadataAllocator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
     options: Option<MetaSrvOptions>,
-    kv_store: Option<KvStoreRef>,
+    kv_store: Option<KvBackendRef>,
     in_memory: Option<ResettableKvStoreRef>,
     selector: Option<SelectorRef>,
     handler_group: Option<HeartbeatHandlerGroup>,
@@ -92,7 +92,7 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn kv_store(mut self, kv_store: KvStoreRef) -> Self {
+    pub fn kv_store(mut self, kv_store: KvBackendRef) -> Self {
         self.kv_store = Some(kv_store);
         self
     }
@@ -155,23 +155,22 @@ impl MetaSrvBuilder {
 
         let options = options.unwrap_or_default();
 
-        let kv_store = kv_store.unwrap_or_else(|| Arc::new(MemStore::default()));
-        let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemStore::default()));
-        let leader_cached_kv_store = build_leader_cached_kv_store(&election, &kv_store);
+        let kv_backend = kv_store.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
+        let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
+        let leader_cached_kv_store = build_leader_cached_kv_store(&election, &kv_backend);
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
         let pushers = Pushers::default();
-        let mailbox = build_mailbox(&kv_store, &pushers);
-        let procedure_manager = build_procedure_manager(&options, &kv_store);
-        let kv_backend = KvBackendAdapter::wrap(kv_store.clone());
+        let mailbox = build_mailbox(&kv_backend, &pushers);
+        let procedure_manager = build_procedure_manager(&options, &kv_backend);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
             datanode_lease_secs: distributed_time_constants::DATANODE_LEASE_SECS,
-            kv_store: kv_store.clone(),
+            kv_store: kv_backend.clone(),
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
         };
@@ -245,7 +244,7 @@ impl MetaSrvBuilder {
             started,
             options,
             in_memory,
-            kv_store,
+            kv_store: kv_backend,
             leader_cached_kv_store,
             meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
@@ -270,7 +269,7 @@ impl MetaSrvBuilder {
 
 fn build_leader_cached_kv_store(
     election: &Option<ElectionRef>,
-    kv_store: &KvStoreRef,
+    kv_store: &KvBackendRef,
 ) -> Arc<LeaderCachedKvStore> {
     Arc::new(LeaderCachedKvStore::new(
         Arc::new(CheckLeaderByElection(election.clone())),
@@ -291,23 +290,21 @@ fn build_default_meta_peer_client(
         .unwrap()
 }
 
-fn build_mailbox(kv_store: &KvStoreRef, pushers: &Pushers) -> MailboxRef {
-    let mailbox_sequence = Sequence::new(
-        "heartbeat_mailbox",
-        1,
-        100,
-        KvBackendAdapter::wrap(kv_store.clone()),
-    );
+fn build_mailbox(kv_store: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
+    let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_store.clone());
     HeartbeatMailbox::create(pushers.clone(), mailbox_sequence)
 }
 
-fn build_procedure_manager(options: &MetaSrvOptions, kv_store: &KvStoreRef) -> ProcedureManagerRef {
+fn build_procedure_manager(
+    options: &MetaSrvOptions,
+    kv_store: &KvBackendRef,
+) -> ProcedureManagerRef {
     let manager_config = ManagerConfig {
         max_retry_times: options.procedure.max_retry_times,
         retry_delay: options.procedure.retry_delay,
         ..Default::default()
     };
-    let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
+    let state_store = Arc::new(KvStateStore::new(kv_store.clone()));
     Arc::new(LocalManager::new(manager_config, state_store))
 }
 

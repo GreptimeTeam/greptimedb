@@ -13,10 +13,6 @@
 // limitations under the License.
 
 pub mod cached_kv;
-pub mod etcd;
-pub(crate) mod etcd_util;
-pub mod kv;
-pub mod memory;
 
 use api::v1::meta::{
     store_server, BatchDeleteRequest as PbBatchDeleteRequest,
@@ -32,10 +28,10 @@ use common_meta::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, CompareAndPutRequest, DeleteRangeRequest,
     PutRequest, RangeRequest,
 };
-use snafu::OptionExt;
+use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
-use crate::error::MissingRequestHeaderSnafu;
+use crate::error::{self, MissingRequestHeaderSnafu};
 use crate::metasrv::MetaSrv;
 use crate::metrics::METRIC_META_KV_REQUEST;
 use crate::service::GrpcResult;
@@ -58,7 +54,11 @@ impl store_server::Store for MetaSrv {
 
         let req: RangeRequest = req.into();
 
-        let res = self.kv_store().range(req).await?;
+        let res = self
+            .kv_store()
+            .range(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -80,7 +80,11 @@ impl store_server::Store for MetaSrv {
 
         let req: PutRequest = req.into();
 
-        let res = self.kv_store().put(req).await?;
+        let res = self
+            .kv_store()
+            .put(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -102,7 +106,11 @@ impl store_server::Store for MetaSrv {
 
         let req: BatchGetRequest = req.into();
 
-        let res = self.kv_store().batch_get(req).await?;
+        let res = self
+            .kv_store()
+            .batch_get(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -124,7 +132,11 @@ impl store_server::Store for MetaSrv {
 
         let req: BatchPutRequest = req.into();
 
-        let res = self.kv_store().batch_put(req).await?;
+        let res = self
+            .kv_store()
+            .batch_put(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -153,7 +165,11 @@ impl store_server::Store for MetaSrv {
 
         let req: BatchDeleteRequest = req.into();
 
-        let res = self.kv_store().batch_delete(req).await?;
+        let res = self
+            .kv_store()
+            .batch_delete(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -182,7 +198,11 @@ impl store_server::Store for MetaSrv {
 
         let req: CompareAndPutRequest = req.into();
 
-        let res = self.kv_store().compare_and_put(req).await?;
+        let res = self
+            .kv_store()
+            .compare_and_put(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -211,7 +231,11 @@ impl store_server::Store for MetaSrv {
 
         let req: DeleteRangeRequest = req.into();
 
-        let res = self.kv_store().delete_range(req).await?;
+        let res = self
+            .kv_store()
+            .delete_range(req)
+            .await
+            .context(error::KvBackendSnafu)?;
 
         let res = res.to_proto_resp(ResponseHeader::success(cluster_id));
         Ok(Response::new(res))
@@ -224,15 +248,15 @@ mod tests {
 
     use api::v1::meta::store_server::Store;
     use api::v1::meta::*;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use tonic::IntoRequest;
 
     use crate::metasrv::builder::MetaSrvBuilder;
     use crate::metasrv::MetaSrv;
-    use crate::service::store::memory::MemStore;
 
     async fn new_meta_srv() -> MetaSrv {
         MetaSrvBuilder::new()
-            .kv_store(Arc::new(MemStore::new()))
+            .kv_store(Arc::new(MemoryKvBackend::new()))
             .build()
             .await
             .unwrap()

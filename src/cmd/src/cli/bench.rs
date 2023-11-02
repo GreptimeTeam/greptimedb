@@ -20,14 +20,13 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
-use meta_srv::service::store::etcd::EtcdStore;
-use meta_srv::service::store::kv::KvBackendAdapter;
 use rand::Rng;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
@@ -64,9 +63,7 @@ impl BenchTableMetadataCommand {
     pub async fn build(&self) -> Result<Instance> {
         let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr]).await.unwrap();
 
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-            etcd_store,
-        )));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
 
         let tool = BenchTableMetadata {
             table_metadata_manager,

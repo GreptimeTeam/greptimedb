@@ -24,6 +24,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvStoreRef};
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -46,7 +47,6 @@ use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
@@ -130,7 +130,7 @@ impl Default for DatanodeClientOptions {
 pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvStoreRef,
-    pub kv_store: KvStoreRef,
+    pub kv_store: KvBackendRef,
     pub leader_cached_kv_store: ResettableKvStoreRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
@@ -164,7 +164,7 @@ pub struct LeaderValue(pub String);
 pub struct SelectorContext {
     pub server_addr: String,
     pub datanode_lease_secs: u64,
-    pub kv_store: KvStoreRef,
+    pub kv_store: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub table_id: Option<TableId>,
 }
@@ -210,7 +210,7 @@ pub struct MetaSrv {
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
     in_memory: ResettableKvStoreRef,
-    kv_store: KvStoreRef,
+    kv_store: KvBackendRef,
     leader_cached_kv_store: ResettableKvStoreRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
@@ -333,7 +333,7 @@ impl MetaSrv {
         &self.in_memory
     }
 
-    pub fn kv_store(&self) -> &KvStoreRef {
+    pub fn kv_store(&self) -> &KvBackendRef {
         &self.kv_store
     }
 
