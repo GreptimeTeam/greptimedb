@@ -4760,6 +4760,8 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-recordbatch",
+ "common-telemetry",
+ "common-test-util",
  "common-time",
  "datatypes",
  "mito2",
@@ -4767,6 +4769,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "store-api",
+ "tokio",
 ]
 
 [[package]]

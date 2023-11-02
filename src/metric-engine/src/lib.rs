@@ -17,4 +17,6 @@ pub mod engine;
 pub mod error;
 #[allow(unused)]
 mod metadata_region;
+#[cfg(test)]
+mod test_util;
 mod utils;

@@ -48,6 +48,8 @@ const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
 const METADATA_REGION_SUBDIR: &str = "metadata";
 const DATA_REGION_SUBDIR: &str = "data";
 
+pub const METRIC_ENGINE_NAME: &str = "metric";
+
 pub struct MetricEngine {
     inner: Arc<MetricEngineInner>,
 }
@@ -56,7 +58,7 @@ pub struct MetricEngine {
 impl RegionEngine for MetricEngine {
     /// Name of this engine
     fn name(&self) -> &str {
-        "metric"
+        METRIC_ENGINE_NAME
     }
 
     /// Handles request to the region.
@@ -67,10 +69,14 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> std::result::Result<Output, BoxedError> {
-        match request {
+        let result = match request {
             RegionRequest::Put(_) => todo!(),
             RegionRequest::Delete(_) => todo!(),
-            RegionRequest::Create(create) => todo!(),
+            RegionRequest::Create(create) => self
+                .inner
+                .create_region(region_id, create)
+                .await
+                .map(|_| Output::AffectedRows(0)),
             RegionRequest::Drop(_) => todo!(),
             RegionRequest::Open(_) => todo!(),
             RegionRequest::Close(_) => todo!(),
@@ -78,8 +84,9 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),
-        }
-        todo!()
+        };
+
+        result.map_err(BoxedError::new)
     }
 
     /// Handles substrait query and return a stream of record batches
@@ -139,15 +146,15 @@ impl MetricEngineInner {
         let create_metadata_region_request =
             self.create_request_for_metadata_region(&request.region_dir);
 
-        self.mito
-            .handle_request(
-                data_region_id,
-                RegionRequest::Create(create_data_region_request),
-            )
-            .await
-            .with_context(|_| CreateMitoRegionSnafu {
-                region_type: DATA_REGION_SUBDIR,
-            })?;
+        // self.mito
+        //     .handle_request(
+        //         data_region_id,
+        //         RegionRequest::Create(create_data_region_request),
+        //     )
+        //     .await
+        //     .with_context(|_| CreateMitoRegionSnafu {
+        //         region_type: DATA_REGION_SUBDIR,
+        //     })?;
         self.mito
             .handle_request(
                 metadata_region_id,
@@ -194,7 +201,7 @@ impl MetricEngineInner {
             semantic_type: SemanticType::Timestamp,
             column_schema: ColumnSchema::new(
                 METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-                ConcreteDataType::time_millisecond_datatype(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             )
             .with_default_constraint(Some(datatypes::schema::ColumnDefaultConstraint::Value(
@@ -253,5 +260,58 @@ impl MetricEngineInner {
         // todo: add internal column
 
         data_region_request
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use common_telemetry::info;
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn create_metadata_region() {
+        common_telemetry::init_default_ut_logging();
+
+        let env = TestEnv::new().await;
+        let mito = env.mito();
+        let engine = MetricEngine {
+            inner: Arc::new(MetricEngineInner { mito }),
+        };
+        let engine_dir = env.data_home();
+        info!("[DEBUG] {engine_dir}");
+        let region_dir = join_dir(&engine_dir, "test_metric_region");
+
+        let region_id = RegionId::new(1, 2);
+        let region_create_request = RegionCreateRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            column_metadatas: vec![],
+            primary_key: vec![],
+            options: HashMap::new(),
+            region_dir: "test_metric_region".to_string(),
+        };
+
+        // create the region
+        engine
+            .handle_request(region_id, RegionRequest::Create(region_create_request))
+            .await
+            .unwrap();
+
+        let mut ls_result = tokio::fs::read_dir(&engine_dir).await.unwrap();
+        while let Some(dir) = ls_result.next_entry().await.unwrap() {
+            info!("[DEBUG] {dir:?}");
+        }
+
+        // assert metadata region's dir
+        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
+        let exist = tokio::fs::try_exists(region_dir).await.unwrap();
+        assert!(exist);
+
+        // check mito engine
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        let result = env.mito().get_metadata(metadata_region_id).await.unwrap();
     }
 }

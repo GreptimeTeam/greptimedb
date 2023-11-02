@@ -20,6 +20,7 @@ pub mod scheduler_util;
 pub mod version_util;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -117,6 +118,10 @@ impl TestEnv {
         self.object_store_manager
             .as_ref()
             .map(|manager| manager.default_object_store().clone())
+    }
+
+    pub fn data_home(&self) -> &Path {
+        self.data_home.path()
     }
 
     /// Creates a new engine with specific config under this env.
