@@ -136,3 +136,80 @@ async fn test_prune_tag_and_field() {
     )
     .await;
 }
+
+/// Creates a time range `[start_sec, end_sec)`
+fn time_range_expr(start_sec: i64, end_sec: i64) -> Expr {
+    Expr::from(
+        col("ts")
+            .gt_eq(lit(ScalarValue::TimestampMillisecond(
+                Some(start_sec * 1000),
+                None,
+            )))
+            .and(col("ts").lt(lit(ScalarValue::TimestampMillisecond(
+                Some(end_sec * 1000),
+                None,
+            )))),
+    )
+}
+
+#[tokio::test]
+async fn test_prune_memtable() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // 5 ~ 10 in SST
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(5, 10),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, Some(5)).await;
+
+    // 20 ~ 30 in memtable
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(20, 30),
+        },
+    )
+    .await;
+
+    let stream = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                filters: vec![time_range_expr(0, 20)],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 5     | 5.0     | 1970-01-01T00:00:05 |
+| 6     | 6.0     | 1970-01-01T00:00:06 |
+| 7     | 7.0     | 1970-01-01T00:00:07 |
+| 8     | 8.0     | 1970-01-01T00:00:08 |
+| 9     | 9.0     | 1970-01-01T00:00:09 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
