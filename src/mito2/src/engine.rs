@@ -61,6 +61,8 @@ use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
 
+pub const MITO_ENGINE_NAME: &str = "mito";
+
 /// Region engine implementation for timeseries data.
 #[derive(Clone)]
 pub struct MitoEngine {
@@ -200,7 +202,7 @@ impl EngineInner {
 #[async_trait]
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
-        "mito"
+        MITO_ENGINE_NAME
     }
 
     async fn handle_request(

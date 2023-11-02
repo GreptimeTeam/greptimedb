@@ -4750,6 +4750,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "metric-engine"
+version = "0.4.2"
+dependencies = [
+ "api",
+ "async-trait",
+ "base64 0.21.5",
+ "common-error",
+ "common-macro",
+ "common-query",
+ "common-recordbatch",
+ "common-time",
+ "datatypes",
+ "mito2",
+ "object-store",
+ "serde_json",
+ "snafu",
+ "store-api",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
