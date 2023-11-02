@@ -155,10 +155,10 @@ impl HttpHandler for TableHandler {
             .await
             .context(TableMetadataManagerSnafu)?
             .into_iter()
-            .map(|(k, v)| (format!("{k}"), format!("{v:?}")))
             .collect::<HashMap<_, _>>();
 
         http::Response::builder()
+            .header("Content-Type", "application/json")
             .status(http::StatusCode::OK)
             // Safety: HashMap<String, String> is definitely "serde-json"-able.
             .body(serde_json::to_string(&table_info_values).unwrap())
