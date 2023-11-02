@@ -72,25 +72,6 @@ pub fn convert_to_region_leader_map(region_routes: &[RegionRoute]) -> HashMap<Re
         .collect::<HashMap<_, _>>()
 }
 
-/// Returns the HashMap<[RegionNumber], HashSet<DatanodeId>>.
-pub fn convert_to_region_peers_map(
-    region_routes: &[RegionRoute],
-) -> HashMap<RegionNumber, HashSet<u64>> {
-    region_routes
-        .iter()
-        .map(|x| {
-            (
-                x.region.id.region_number(),
-                x.follower_peers
-                    .iter()
-                    .chain(&x.leader_peer)
-                    .map(|peer| peer.id)
-                    .collect::<HashSet<u64>>(),
-            )
-        })
-        .collect::<HashMap<_, _>>()
-}
-
 pub fn find_region_leader(
     region_routes: &[RegionRoute],
     region_number: RegionNumber,

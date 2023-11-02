@@ -17,29 +17,24 @@ use std::collections::HashSet;
 use common_meta::rpc::router::{convert_to_region_leader_map, RegionRoute};
 use store_api::storage::RegionId;
 
-use crate::region::lease_keeper::utils::inactive_leader_regions;
+use crate::region::lease_keeper::utils::staled_leader_regions;
 
-/// Retains active [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions(`datanode_regions`), returns inactive regions.
+/// Returns staled regions.
 ///
-/// It removes a leader region if the `datanode_id` isn't the corresponding leader peer in `region_routes`.
+/// It returns a region if the `datanode_id` isn't the corresponding leader peer in `region_routes`.
 ///   - Expected as [RegionRole::Follower](store_api::region_engine::RegionRole::Follower) regions.
 ///   - Unexpected [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
-pub fn retain_active_regions(
+pub fn find_staled_leader_regions(
     datanode_id: u64,
-    datanode_regions: &mut Vec<RegionId>,
+    datanode_regions: &[RegionId],
     region_routes: &[RegionRoute],
 ) -> HashSet<RegionId> {
     let region_leader_map = convert_to_region_leader_map(region_routes);
 
-    let inactive_region_ids = datanode_regions
-        .clone()
-        .into_iter()
-        .filter_map(|region_id| inactive_leader_regions(datanode_id, region_id, &region_leader_map))
-        .collect::<HashSet<_>>();
-
-    datanode_regions.retain(|region_id| !inactive_region_ids.contains(region_id));
-
-    inactive_region_ids
+    datanode_regions
+        .iter()
+        .filter_map(|region_id| staled_leader_regions(datanode_id, *region_id, &region_leader_map))
+        .collect::<HashSet<_>>()
 }
 
 #[cfg(test)]
@@ -49,10 +44,10 @@ mod tests {
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
 
-    use crate::region::lease_keeper::mito::retain_active_regions;
+    use crate::region::lease_keeper::mito::find_staled_leader_regions;
 
     #[test]
-    fn test_retain_active_regions() {
+    fn test_find_staled_regions() {
         let datanode_id = 1u64;
         let region_number = 1u32;
         let region_id = RegionId::from_u64(region_number as u64);
@@ -67,22 +62,18 @@ mod tests {
         }];
 
         // Grants lease.
-        // `inactive_regions` should be empty, `region_id` is a active leader region of the `peer`
-        let inactive_regions =
-            retain_active_regions(datanode_id, &mut datanode_regions.clone(), &region_routes);
+        // `staled_regions` should be empty, `region_id` is a active leader region of the `peer`
+        let staled_regions =
+            find_staled_leader_regions(datanode_id, &datanode_regions, &region_routes);
 
-        assert!(inactive_regions.is_empty());
-
-        let mut retained_active_regions = datanode_regions.clone();
+        assert!(staled_regions.is_empty());
 
         // Unexpected Leader region.
-        // `inactive_regions` should be vec![`region_id`];
-        let inactive_regions =
-            retain_active_regions(datanode_id, &mut retained_active_regions, &[]);
+        // `staled_regions` should be vec![`region_id`];
+        let staled_regions = find_staled_leader_regions(datanode_id, &datanode_regions, &[]);
 
-        assert_eq!(inactive_regions.len(), 1);
-        assert!(inactive_regions.contains(&region_id));
-        assert!(retained_active_regions.is_empty());
+        assert_eq!(staled_regions.len(), 1);
+        assert!(staled_regions.contains(&region_id));
 
         let region_routes = vec![RegionRoute {
             region: Region::new_test(region_id),
@@ -90,15 +81,14 @@ mod tests {
             follower_peers: vec![peer.clone()],
         }];
 
-        let mut retained_active_regions = datanode_regions.clone();
+        let retained_active_regions = datanode_regions.clone();
 
         // Expected as Follower region.
-        // `inactive_regions` should be vec![`region_id`], `region_id` is RegionRole::Leader.
-        let inactive_regions =
-            retain_active_regions(datanode_id, &mut retained_active_regions, &region_routes);
+        // `staled_regions` should be vec![`region_id`], `region_id` is RegionRole::Leader.
+        let staled_regions =
+            find_staled_leader_regions(datanode_id, &retained_active_regions, &region_routes);
 
-        assert_eq!(inactive_regions.len(), 1);
-        assert!(inactive_regions.contains(&region_id));
-        assert!(retained_active_regions.is_empty());
+        assert_eq!(staled_regions.len(), 1);
+        assert!(staled_regions.contains(&region_id));
     }
 }

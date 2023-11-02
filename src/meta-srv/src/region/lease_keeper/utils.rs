@@ -20,7 +20,7 @@ use store_api::storage::RegionId;
 /// Returns Some(region_id) if it's a inactive leader region.
 ///
 /// It removes a leader region if the `node_id` isn't the corresponding leader peer in `region_routes`.
-pub fn inactive_leader_regions(
+pub fn staled_leader_regions(
     node_id: u64,
     region_id: RegionId,
     region_leader_map: &HashMap<u32, &Peer>,
@@ -57,13 +57,13 @@ mod tests {
         // Should be None, `region_id` is a active region of `peer`.
         assert_eq!(
             None,
-            inactive_leader_regions(datanode_id, region_id, &region_leader_map)
+            staled_leader_regions(datanode_id, region_id, &region_leader_map)
         );
 
         // Should be Some(`region_id`), the inactive_leader_regions is empty.
         assert_eq!(
             Some(region_id),
-            inactive_leader_regions(datanode_id, region_id, &Default::default())
+            staled_leader_regions(datanode_id, region_id, &Default::default())
         );
 
         let another_peer = Peer::empty(datanode_id + 1);
@@ -72,7 +72,7 @@ mod tests {
         // Should be Some(`region_id`), `region_id` is active region of `another_peer`.
         assert_eq!(
             Some(region_id),
-            inactive_leader_regions(datanode_id, region_id, &region_leader_map)
+            staled_leader_regions(datanode_id, region_id, &region_leader_map)
         );
     }
 }

@@ -21,10 +21,9 @@ use common_meta::key::TableMetadataManagerRef;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 
-use self::mito::retain_active_regions;
+use self::mito::find_staled_leader_regions;
 use crate::error::{self, Result};
 
-/// Region Lease Keeper removes any inactive [RegionRole::Leader] regions.
 pub struct RegionLeaseKeeper {
     table_metadata_manager: TableMetadataManagerRef,
 }
@@ -38,18 +37,17 @@ impl RegionLeaseKeeper {
 }
 
 impl RegionLeaseKeeper {
-    /// Retains active [RegionRole::Leader] regions, returns inactive regions.
+    /// Returns staled [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
     ///
-    /// - It grants new lease if the `datanode_id` is the corresponding leader peer in `region_routes`.
-    /// - It removes a leader region if the `datanode_id` isn't the corresponding leader peer in `region_routes`.
-    ///     - Expected as [RegionRole::Follower] regions.
-    ///     - Unexpected [RegionRole::Leader] regions.
-    /// - It removes a region if the region's table metadata is not found.
-    pub async fn retain_active_regions(
+    /// - It returns a region if the `datanode_id` isn't the corresponding leader peer in `region_routes`.
+    ///     - Expected as [RegionRole::Follower](store_api::region_engine::RegionRole::Follower) regions.
+    ///     - Unexpected [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
+    /// - It returns a region if the region's table metadata is not found.
+    pub async fn find_staled_leader_regions(
         &self,
         _cluster_id: u64,
         datanode_id: u64,
-        datanode_regions: &mut Vec<RegionId>,
+        datanode_regions: &[RegionId],
     ) -> Result<HashSet<RegionId>> {
         let table_route_manager = self.table_metadata_manager.table_route_manager();
 
@@ -70,23 +68,24 @@ impl RegionLeaseKeeper {
             .await
             .context(error::TableMetadataManagerSnafu)?;
 
-        let mut inactive_regions = HashSet::new();
+        let mut staled_regions = HashSet::new();
 
-        // Removes inactive regions.
         for (table_id, regions) in &mut tables {
             if let Some(metadata) = metadata_subset.get(table_id) {
                 let region_routes = &metadata.region_routes;
 
-                inactive_regions.extend(retain_active_regions(datanode_id, regions, region_routes));
+                staled_regions.extend(find_staled_leader_regions(
+                    datanode_id,
+                    regions,
+                    region_routes,
+                ));
             } else {
-                // Removes table if metadata is not found.
-                inactive_regions.extend(regions.drain(..));
+                // If table metadata is not found.
+                staled_regions.extend(regions.drain(..));
             }
         }
 
-        datanode_regions.retain(|region_id| !inactive_regions.contains(region_id));
-
-        Ok(inactive_regions)
+        Ok(staled_regions)
     }
 
     #[cfg(test)]
@@ -125,20 +124,19 @@ mod tests {
 
         let keeper = new_test_keeper();
 
-        let mut datanode_regions = vec![region_id];
+        let datanode_regions = vec![region_id];
 
-        let removed = keeper
-            .retain_active_regions(0, datanode_id, &mut datanode_regions)
+        let staled_regions = keeper
+            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(datanode_regions.is_empty());
-        assert_eq!(removed.len(), 1);
-        assert!(removed.contains(&region_id));
+        assert_eq!(staled_regions.len(), 1);
+        assert!(staled_regions.contains(&region_id));
     }
 
     #[tokio::test]
-    async fn test_retain_active_regions_simple() {
+    async fn test_find_staled_regions_simple() {
         let datanode_id = 1;
         let region_number = 1u32;
         let table_id = 10;
@@ -160,30 +158,29 @@ mod tests {
             .await
             .unwrap();
 
-        // `inactive_regions` should be empty.
-        let mut datanode_regions = vec![region_id];
+        // `staled_regions` should be empty.
+        let datanode_regions = vec![region_id];
 
-        let inactive_regions = keeper
-            .retain_active_regions(0, datanode_id, &mut datanode_regions)
+        let staled_regions = keeper
+            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(inactive_regions.is_empty());
-        assert_eq!(datanode_regions.len(), 1);
+        assert!(staled_regions.is_empty());
 
-        // `inactive_regions` should be empty.
-        let mut datanode_regions = vec![];
+        // `staled_regions` should be empty.
+        let datanode_regions = vec![];
 
-        let inactive_regions = keeper
-            .retain_active_regions(0, datanode_id, &mut datanode_regions)
+        let staled_regions = keeper
+            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(inactive_regions.is_empty());
+        assert!(staled_regions.is_empty());
     }
 
     #[tokio::test]
-    async fn test_retain_active_regions_2() {
+    async fn test_find_staled_regions_2() {
         let datanode_id = 1;
         let region_number = 1u32;
         let table_id = 10;
@@ -219,29 +216,27 @@ mod tests {
             .unwrap();
 
         // Unexpected Leader region.
-        // `inactive_regions` should be vec![unknown_region_id].
-        let mut datanode_regions = vec![region_id, unknown_region_id];
+        // `staled_regions` should be vec![unknown_region_id].
+        let datanode_regions = vec![region_id, unknown_region_id];
 
-        let inactive_regions = keeper
-            .retain_active_regions(0, datanode_id, &mut datanode_regions)
+        let staled_regions = keeper
+            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(inactive_regions.len(), 1);
-        assert!(inactive_regions.contains(&unknown_region_id));
-        assert_eq!(datanode_regions.len(), 1);
+        assert_eq!(staled_regions.len(), 1);
+        assert!(staled_regions.contains(&unknown_region_id));
 
         // Expected as Follower region.
-        // `inactive_regions` should be vec![another_region_id], because the `another_region_id` is a active region of `another_peer`.
-        let mut datanode_regions = vec![another_region_id];
+        // `staled_regions` should be vec![another_region_id], because the `another_region_id` is a active region of `another_peer`.
+        let datanode_regions = vec![another_region_id];
 
-        let inactive_regions = keeper
-            .retain_active_regions(0, datanode_id, &mut datanode_regions)
+        let staled_regions = keeper
+            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(inactive_regions.len(), 1);
-        assert!(inactive_regions.contains(&another_region_id));
-        assert!(datanode_regions.is_empty());
+        assert_eq!(staled_regions.len(), 1);
+        assert!(staled_regions.contains(&another_region_id));
     }
 }
