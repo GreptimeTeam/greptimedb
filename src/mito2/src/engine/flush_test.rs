@@ -72,7 +72,7 @@ async fn test_manual_flush() {
 async fn test_flush_engine() {
     let mut env = TestEnv::new();
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(FlushListener::new());
+    let listener = Arc::new(FlushListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
@@ -131,7 +131,7 @@ async fn test_flush_engine() {
 async fn test_write_stall() {
     let mut env = TestEnv::new();
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(StallListener::new());
+    let listener = Arc::new(StallListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),
