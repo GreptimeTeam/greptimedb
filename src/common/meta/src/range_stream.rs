@@ -151,7 +151,7 @@ impl PaginationStreamFactory {
                 .adaptive_range(RangeRequest {
                     key: self.key.clone(),
                     range_end: self.range_end.clone(),
-                    limit: self.page_size as i64,
+                    limit: self.adaptive_page_size.unwrap_or(self.page_size) as i64,
                     keys_only: self.keys_only,
                 })
                 .await?;
@@ -172,7 +172,7 @@ impl PaginationStreamFactory {
                     page_size: self.page_size,
                     keys_only: self.keys_only,
                     more: resp.more,
-                    adaptive_page_size: None,
+                    adaptive_page_size: self.adaptive_page_size,
                 },
                 Some(resp),
             ))
