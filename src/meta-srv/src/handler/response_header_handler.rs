@@ -63,7 +63,7 @@ mod tests {
     async fn test_handle_heartbeat_resp_header() {
         let in_memory = Arc::new(MemoryKvBackend::new());
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let leader_cached_kv_store = Arc::new(LeaderCachedKvBackend::with_always_leader(
+        let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
             kv_backend.clone(),
         ));
         let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
@@ -79,7 +79,7 @@ mod tests {
             server_addr: "127.0.0.1:0000".to_string(),
             in_memory,
             kv_backend: kv_backend.clone(),
-            leader_cached_kv_store,
+            leader_cached_kv_backend,
             meta_peer_client,
             mailbox,
             election: None,

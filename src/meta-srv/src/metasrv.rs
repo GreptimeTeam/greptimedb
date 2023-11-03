@@ -131,7 +131,7 @@ pub struct Context {
     pub server_addr: String,
     pub in_memory: ResettableKvBackendRef,
     pub kv_backend: KvBackendRef,
-    pub leader_cached_kv_store: ResettableKvBackendRef,
+    pub leader_cached_kv_backend: ResettableKvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
@@ -153,8 +153,8 @@ impl Context {
         self.in_memory.reset();
     }
 
-    pub fn reset_leader_cached_kv_store(&self) {
-        self.leader_cached_kv_store.reset();
+    pub fn reset_leader_cached_kv_backend(&self) {
+        self.leader_cached_kv_backend.reset();
     }
 }
 
@@ -211,7 +211,7 @@ pub struct MetaSrv {
     // store some data that will not be persisted.
     in_memory: ResettableKvBackendRef,
     kv_backend: KvBackendRef,
-    leader_cached_kv_store: ResettableKvBackendRef,
+    leader_cached_kv_backend: ResettableKvBackendRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
@@ -243,7 +243,7 @@ impl MetaSrv {
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
-            let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+            let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
             let subscribe_manager = self.subscribe_manager();
             let mut rx = election.subscribe_leader_change();
             let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
@@ -260,7 +260,7 @@ impl MetaSrv {
                     match rx.recv().await {
                         Ok(msg) => {
                             in_memory.reset();
-                            leader_cached_kv_store.reset();
+                            leader_cached_kv_backend.reset();
                             info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
@@ -337,8 +337,8 @@ impl MetaSrv {
         &self.kv_backend
     }
 
-    pub fn leader_cached_kv_store(&self) -> &ResettableKvBackendRef {
-        &self.leader_cached_kv_store
+    pub fn leader_cached_kv_backend(&self) -> &ResettableKvBackendRef {
+        &self.leader_cached_kv_backend
     }
 
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
@@ -398,7 +398,7 @@ impl MetaSrv {
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory.clone();
         let kv_backend = self.kv_backend.clone();
-        let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+        let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
         let meta_peer_client = self.meta_peer_client.clone();
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
@@ -409,7 +409,7 @@ impl MetaSrv {
             server_addr,
             in_memory,
             kv_backend,
-            leader_cached_kv_store,
+            leader_cached_kv_backend,
             meta_peer_client,
             mailbox,
             election,

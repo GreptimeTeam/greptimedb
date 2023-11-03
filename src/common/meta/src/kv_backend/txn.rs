@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_one_compare_op() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
 
         let _ = kv_backend
             .put(PutRequest {
@@ -296,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_multi_compare_op() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
 
         for i in 1..3 {
             let _ = kv_backend
@@ -329,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_equal() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![101u8];
         kv_backend.delete(&key, false).await.unwrap();
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_greater() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![102u8];
         kv_backend.delete(&key, false).await.unwrap();
 
@@ -402,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_less() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![103u8];
         kv_backend.delete(&[3], false).await.unwrap();
 
@@ -444,7 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_not_equal() {
-        let kv_backend = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![104u8];
         kv_backend.delete(&key, false).await.unwrap();
 
@@ -484,7 +484,7 @@ mod tests {
         );
     }
 
-    async fn create_kv_store() -> KvBackendRef {
+    async fn create_kv_backend() -> KvBackendRef {
         Arc::new(MemoryKvBackend::<Error>::new())
         // TODO(jiachun): Add a feature to test against etcd in github CI
         //

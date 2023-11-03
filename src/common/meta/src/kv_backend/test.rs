@@ -255,7 +255,7 @@ pub async fn test_kv_compare_and_put(kv_backend: Arc<dyn KvBackend<Error = Error
 
     let mut joins = vec![];
     for _ in 0..20 {
-        let kv_store_clone = kv_backend.clone();
+        let kv_backend_clone = kv_backend.clone();
         let success_clone = success.clone();
         let join = tokio::spawn(async move {
             let req = CompareAndPutRequest {
@@ -263,7 +263,7 @@ pub async fn test_kv_compare_and_put(kv_backend: Arc<dyn KvBackend<Error = Error
                 expect: vec![],
                 value: b"val_new".to_vec(),
             };
-            let resp = kv_store_clone.compare_and_put(req).await.unwrap();
+            let resp = kv_backend_clone.compare_and_put(req).await.unwrap();
             if resp.success {
                 success_clone.fetch_add(1, Ordering::SeqCst);
             }

@@ -257,16 +257,16 @@ impl Instance {
 
     pub async fn try_build_standalone_components(
         dir: String,
-        kv_store_config: KvStoreConfig,
+        kv_backend_config: KvStoreConfig,
         procedure_config: ProcedureConfig,
     ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
         let kv_backend = Arc::new(
             RaftEngineBackend::try_open_with_cfg(Config {
                 dir,
-                purge_threshold: ReadableSize(kv_store_config.purge_threshold.0),
+                purge_threshold: ReadableSize(kv_backend_config.purge_threshold.0),
                 recovery_mode: RecoveryMode::TolerateTailCorruption,
                 batch_compression_threshold: ReadableSize::kb(8),
-                target_file_size: ReadableSize(kv_store_config.file_size.0),
+                target_file_size: ReadableSize(kv_backend_config.file_size.0),
                 ..Default::default()
             })
             .map_err(BoxedError::new)

@@ -334,14 +334,14 @@ mod tests {
 
     use super::*;
 
-    fn create_leader_cached_kv_store() -> LeaderCachedKvBackend {
+    fn create_leader_cached_kv_backend() -> LeaderCachedKvBackend {
         let store = Arc::new(MemoryKvBackend::new());
         LeaderCachedKvBackend::with_always_leader(store)
     }
 
     #[tokio::test]
     async fn test_get_put_delete() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_store = cached_store.store.clone();
         let inner_cache = cached_store.cache.clone();
 
@@ -373,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_get_put_delete() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_store = cached_store.store.clone();
         let inner_cache = cached_store.cache.clone();
 
@@ -415,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_cache = cached_store.cache.clone();
 
         let kvs = (1..5)

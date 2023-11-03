@@ -157,7 +157,7 @@ impl MetaSrvBuilder {
 
         let kv_backend = kv_backend.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
-        let leader_cached_kv_store = build_leader_cached_kv_store(&election, &kv_backend);
+        let leader_cached_kv_backend = build_leader_cached_kv_backend(&election, &kv_backend);
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
@@ -245,7 +245,7 @@ impl MetaSrvBuilder {
             options,
             in_memory,
             kv_backend,
-            leader_cached_kv_store,
+            leader_cached_kv_backend,
             meta_peer_client: meta_peer_client.clone(),
             table_id_sequence,
             selector,
@@ -267,7 +267,7 @@ impl MetaSrvBuilder {
     }
 }
 
-fn build_leader_cached_kv_store(
+fn build_leader_cached_kv_backend(
     election: &Option<ElectionRef>,
     kv_backend: &KvBackendRef,
 ) -> Arc<LeaderCachedKvBackend> {
