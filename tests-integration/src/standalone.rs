@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
-use common_config::KvStoreConfig;
+use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_procedure::options::ProcedureConfig;
 use datanode::config::DatanodeOptions;
@@ -68,7 +68,7 @@ impl GreptimeDbStandaloneBuilder {
 
         let (kv_backend, procedure_manager) = Instance::try_build_standalone_components(
             format!("{}/kv", &opts.storage.data_home),
-            KvStoreConfig::default(),
+            KvBackendConfig::default(),
             ProcedureConfig::default(),
         )
         .await

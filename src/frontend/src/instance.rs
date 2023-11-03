@@ -30,7 +30,7 @@ use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
-use common_config::KvStoreConfig;
+use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
@@ -257,7 +257,7 @@ impl Instance {
 
     pub async fn try_build_standalone_components(
         dir: String,
-        kv_backend_config: KvStoreConfig,
+        kv_backend_config: KvBackendConfig,
         procedure_config: ProcedureConfig,
     ) -> Result<(KvBackendRef, ProcedureManagerRef)> {
         let kv_backend = Arc::new(

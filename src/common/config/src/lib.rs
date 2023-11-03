@@ -54,14 +54,14 @@ pub fn metadata_store_dir(store_dir: &str) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct KvStoreConfig {
+pub struct KvBackendConfig {
     // Kv file size in bytes
     pub file_size: ReadableSize,
     // Kv purge threshold in bytes
     pub purge_threshold: ReadableSize,
 }
 
-impl Default for KvStoreConfig {
+impl Default for KvBackendConfig {
     fn default() -> Self {
         Self {
             // log file size 256MB

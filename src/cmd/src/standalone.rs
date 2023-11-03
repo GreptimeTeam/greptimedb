@@ -19,7 +19,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
-use common_config::{metadata_store_dir, KvStoreConfig, WalConfig};
+use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
@@ -97,7 +97,7 @@ pub struct StandaloneOptions {
     pub prom_store: PromStoreOptions,
     pub wal: WalConfig,
     pub storage: StorageConfig,
-    pub metadata_store: KvStoreConfig,
+    pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
     pub logging: LoggingOptions,
     pub user_provider: Option<String>,
@@ -119,7 +119,7 @@ impl Default for StandaloneOptions {
             prom_store: PromStoreOptions::default(),
             wal: WalConfig::default(),
             storage: StorageConfig::default(),
-            metadata_store: KvStoreConfig::default(),
+            metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
             user_provider: None,
