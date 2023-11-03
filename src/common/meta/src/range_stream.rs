@@ -109,6 +109,11 @@ impl PaginationStreamFactory {
                 }
             );
             self.adaptive_page_size = Some(new_adaptive_page_size);
+        } else if self.page_size == 1 {
+            return error::UnexpectedSnafu {
+                err_msg: "Value is larger than response size limit",
+            }
+            .fail();
         } else {
             self.adaptive_page_size = Some(if self.page_size == 0 {
                 DEFAULT_ADAPTIVE_PAGE_SIZE
@@ -321,6 +326,14 @@ mod tests {
         assert_eq!(
             factory.adaptive_page_size.unwrap(),
             DEFAULT_ADAPTIVE_PAGE_SIZE
+        );
+
+        let mut factory =
+            PaginationStreamFactory::new(&kv_backend, vec![], vec![], 1, false, false);
+
+        assert_matches!(
+            factory.try_reduce_adaptive_page_size().unwrap_err(),
+            error::Error::Unexpected { .. }
         );
     }
 
