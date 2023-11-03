@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use futures::future::BoxFuture;
 use futures::{ready, FutureExt, Stream};
 use snafu::ensure;
@@ -65,12 +66,12 @@ struct PaginationStreamFactory {
     pub range_end: Vec<u8>,
 
     /// page_size is the pagination page size.
-    pub page_size: usize,
+    page_size: usize,
     /// keys_only when set returns only the keys and not the values.
     pub keys_only: bool,
 
     /// It reduces the page size if the response size exceeds the limit.
-    pub adaptive_page_size: Option<usize>,
+    pub adaptive_page_size: usize,
 
     pub more: bool,
 }
@@ -91,7 +92,11 @@ impl PaginationStreamFactory {
             page_size,
             keys_only,
             more,
-            adaptive_page_size: None,
+            adaptive_page_size: if page_size == 0 {
+                DEFAULT_ADAPTIVE_PAGE_SIZE
+            } else {
+                page_size
+            },
         }
     }
 }
@@ -100,32 +105,19 @@ const DEFAULT_ADAPTIVE_PAGE_SIZE: usize = 1024;
 
 impl PaginationStreamFactory {
     fn try_reduce_adaptive_page_size(&mut self) -> Result<()> {
-        if let Some(adaptive_page_size) = self.adaptive_page_size {
-            let new_adaptive_page_size = adaptive_page_size / 2;
-            ensure!(
-                new_adaptive_page_size != 0,
-                error::UnexpectedSnafu {
-                    err_msg: "Exceeded maximum number of adaptive range retries"
-                }
-            );
-            self.adaptive_page_size = Some(new_adaptive_page_size);
-        } else if self.page_size == 1 {
-            return error::UnexpectedSnafu {
-                err_msg: "Value is larger than response size limit",
+        self.adaptive_page_size /= 2;
+
+        ensure!(
+            self.adaptive_page_size != 0,
+            error::UnexpectedSnafu {
+                err_msg: "Exceeded maximum number of adaptive range retries"
             }
-            .fail();
-        } else {
-            self.adaptive_page_size = Some(if self.page_size == 0 {
-                DEFAULT_ADAPTIVE_PAGE_SIZE
-            } else {
-                self.page_size / 2
-            });
-        }
+        );
 
         Ok(())
     }
 
-    /// Decrease the `page size` if the response message size exceeds the limitation.
+    /// Decreases the `page size` if the response message size exceeds the limitation.
     /// TODO(weny): Considers to add an E2e test.
     #[async_recursion::async_recursion]
     async fn adaptive_range(&mut self, req: RangeRequest) -> Result<RangeResponse> {
@@ -134,10 +126,10 @@ impl PaginationStreamFactory {
             Err(err) => {
                 if err.is_exceeded_size_limit() {
                     self.try_reduce_adaptive_page_size()?;
-                    // Safety: must exist.
-                    let limit = self.adaptive_page_size.unwrap() as i64;
+                    debug!("Reset page_size to {}", self.adaptive_page_size);
 
-                    self.adaptive_range(req.clone().with_limit(limit)).await
+                    self.adaptive_range(req.with_limit(self.adaptive_page_size as i64))
+                        .await
                 } else {
                     Err(err)
                 }
@@ -151,7 +143,7 @@ impl PaginationStreamFactory {
                 .adaptive_range(RangeRequest {
                     key: self.key.clone(),
                     range_end: self.range_end.clone(),
-                    limit: self.adaptive_page_size.unwrap_or(self.page_size) as i64,
+                    limit: self.adaptive_page_size as i64,
                     keys_only: self.keys_only,
                 })
                 .await?;
@@ -312,29 +304,18 @@ mod tests {
 
         factory.try_reduce_adaptive_page_size().unwrap();
 
-        assert_eq!(factory.adaptive_page_size.unwrap(), 512);
+        assert_eq!(factory.adaptive_page_size, 512);
 
         factory.try_reduce_adaptive_page_size().unwrap();
 
-        assert_eq!(factory.adaptive_page_size.unwrap(), 256);
+        assert_eq!(factory.adaptive_page_size, 256);
 
         let mut factory =
             PaginationStreamFactory::new(&kv_backend, vec![], vec![], 0, false, false);
 
         factory.try_reduce_adaptive_page_size().unwrap();
 
-        assert_eq!(
-            factory.adaptive_page_size.unwrap(),
-            DEFAULT_ADAPTIVE_PAGE_SIZE
-        );
-
-        let mut factory =
-            PaginationStreamFactory::new(&kv_backend, vec![], vec![], 1, false, false);
-
-        assert_matches!(
-            factory.try_reduce_adaptive_page_size().unwrap_err(),
-            error::Error::Unexpected { .. }
-        );
+        assert_eq!(factory.adaptive_page_size, DEFAULT_ADAPTIVE_PAGE_SIZE / 2);
     }
 
     #[tokio::test]
