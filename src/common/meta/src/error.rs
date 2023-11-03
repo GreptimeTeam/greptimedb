@@ -343,4 +343,16 @@ impl Error {
     pub fn is_retry_later(&self) -> bool {
         matches!(self, Error::RetryLater { .. })
     }
+
+    /// Returns true if the response exceeds the size limit.
+    pub fn is_exceeded_size_limit(&self) -> bool {
+        if let Error::EtcdFailed {
+            error: etcd_client::Error::GRpcStatus(status),
+            ..
+        } = self
+        {
+            return status.code() == tonic::Code::OutOfRange;
+        }
+        false
+    }
 }
