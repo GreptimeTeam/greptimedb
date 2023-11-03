@@ -26,13 +26,13 @@ use datatypes::schema::ColumnSchema;
 use datatypes::value::Value;
 use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
 use object_store::util::join_dir;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::{RegionGroup, RegionId, ScanRequest};
 
-use crate::error::{CreateMitoRegionSnafu, Result};
+use crate::error::{CreateMitoRegionSnafu, InternalColumnOccupiedSnafu, Result};
 use crate::utils;
 
 /// region group value for data region inside a metric region
@@ -48,6 +48,9 @@ pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
 pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX: usize = 0;
 pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
 pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
+
+/// Column name of internal column `__metric_name` that stores the original metric name
+pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric_name";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
 pub const DATA_REGION_SUBDIR: &str = "data";
@@ -151,7 +154,7 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionCreateRequest,
     ) -> Result<()> {
-        self.verify_region_create_request(&request)?;
+        Self::verify_region_create_request(&request)?;
 
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
         let create_data_region_request = self.create_request_for_data_region(&request);
@@ -181,14 +184,22 @@ impl MetricEngineInner {
     }
 
     /// Check if
-    /// - internal columns are present
-    fn verify_region_create_request(&self, request: &RegionCreateRequest) -> Result<()> {
+    /// - internal columns are not occupied
+    fn verify_region_create_request(request: &RegionCreateRequest) -> Result<()> {
         let name_to_index = request
             .column_metadatas
             .iter()
             .enumerate()
             .map(|(idx, metadata)| (metadata.column_schema.name.clone(), idx))
             .collect::<HashMap<String, usize>>();
+
+        // check if internal columns are not occupied
+        ensure!(
+            !name_to_index.contains_key(DATA_SCHEMA_METRIC_NAME_COLUMN_NAME),
+            InternalColumnOccupiedSnafu {
+                column: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
+            }
+        );
 
         Ok(())
     }
@@ -272,5 +283,77 @@ impl MetricEngineInner {
         // todo: add internal column
 
         data_region_request
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_region_create_request() {
+        // internal column is occupied
+        let request = RegionCreateRequest {
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                },
+            ],
+            region_dir: "test_dir".to_string(),
+            engine: METRIC_ENGINE_NAME.to_string(),
+            primary_key: vec![],
+            options: HashMap::new(),
+        };
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Internal column __metric_name is reserved".to_string()
+        );
+
+        // valid request
+        let request = RegionCreateRequest {
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        "column1".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                },
+            ],
+            region_dir: "test_dir".to_string(),
+            engine: METRIC_ENGINE_NAME.to_string(),
+            primary_key: vec![],
+            options: HashMap::new(),
+        };
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_ok());
     }
 }
