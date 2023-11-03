@@ -17,18 +17,18 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_meta::error::{Error, Result};
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
-use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::kv_backend::{
+    KvBackend, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, TxnService,
+};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
-
-use crate::error::{Error, Result};
-use crate::service::store::kv::{KvStoreRef, ResettableKvStore, ResettableKvStoreRef};
-use crate::service::store::memory::MemStore;
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
 
@@ -53,21 +53,21 @@ impl CheckLeader for AlwaysLeader {
 ///   3. Only the leader node can update this metadata, as the cache cannot detect
 ///     modifications made to the data on the follower node.
 ///   4. Only the leader node can delete this metadata for the same reason mentioned above.
-pub struct LeaderCachedKvStore {
+pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,
-    store: KvStoreRef,
-    cache: ResettableKvStoreRef,
+    store: KvBackendRef,
+    cache: ResettableKvBackendRef,
     version: AtomicUsize,
     name: String,
 }
 
-impl LeaderCachedKvStore {
-    pub fn new(check_leader: CheckLeaderRef, store: KvStoreRef) -> Self {
+impl LeaderCachedKvBackend {
+    pub fn new(check_leader: CheckLeaderRef, store: KvBackendRef) -> Self {
         let name = format!("LeaderCached({})", store.name());
         Self {
             check_leader,
             store,
-            cache: Arc::new(MemStore::new()),
+            cache: Arc::new(MemoryKvBackend::new()),
             version: AtomicUsize::new(0),
             name,
         }
@@ -75,7 +75,7 @@ impl LeaderCachedKvStore {
 
     /// With a leader checker which always returns true when checking,
     /// mainly used in test scenarios.
-    pub fn with_always_leader(store: KvStoreRef) -> Self {
+    pub fn with_always_leader(store: KvBackendRef) -> Self {
         Self::new(Arc::new(AlwaysLeader), store)
     }
 
@@ -114,7 +114,7 @@ impl LeaderCachedKvStore {
 }
 
 #[async_trait::async_trait]
-impl KvBackend for LeaderCachedKvStore {
+impl KvBackend for LeaderCachedKvBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -284,7 +284,7 @@ impl KvBackend for LeaderCachedKvStore {
 }
 
 #[async_trait::async_trait]
-impl TxnService for LeaderCachedKvStore {
+impl TxnService for LeaderCachedKvBackend {
     type Error = Error;
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
@@ -322,7 +322,7 @@ impl TxnService for LeaderCachedKvStore {
     }
 }
 
-impl ResettableKvStore for LeaderCachedKvStore {
+impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
         self.cache.reset()
     }
@@ -333,16 +333,15 @@ mod tests {
     use common_meta::rpc::KeyValue;
 
     use super::*;
-    use crate::service::store::memory::MemStore;
 
-    fn create_leader_cached_kv_store() -> LeaderCachedKvStore {
-        let store = Arc::new(MemStore::new());
-        LeaderCachedKvStore::with_always_leader(store)
+    fn create_leader_cached_kv_backend() -> LeaderCachedKvBackend {
+        let store = Arc::new(MemoryKvBackend::new());
+        LeaderCachedKvBackend::with_always_leader(store)
     }
 
     #[tokio::test]
     async fn test_get_put_delete() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_store = cached_store.store.clone();
         let inner_cache = cached_store.cache.clone();
 
@@ -374,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_get_put_delete() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_store = cached_store.store.clone();
         let inner_cache = cached_store.cache.clone();
 
@@ -416,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn() {
-        let cached_store = create_leader_cached_kv_store();
+        let cached_store = create_leader_cached_kv_backend();
         let inner_cache = cached_store.cache.clone();
 
         let kvs = (1..5)

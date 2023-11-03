@@ -24,6 +24,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -46,7 +47,6 @@ use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
-use crate::service::store::kv::{KvStoreRef, ResettableKvStoreRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
@@ -129,9 +129,9 @@ impl Default for DatanodeClientOptions {
 #[derive(Clone)]
 pub struct Context {
     pub server_addr: String,
-    pub in_memory: ResettableKvStoreRef,
-    pub kv_store: KvStoreRef,
-    pub leader_cached_kv_store: ResettableKvStoreRef,
+    pub in_memory: ResettableKvBackendRef,
+    pub kv_backend: KvBackendRef,
+    pub leader_cached_kv_backend: ResettableKvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
@@ -153,8 +153,8 @@ impl Context {
         self.in_memory.reset();
     }
 
-    pub fn reset_leader_cached_kv_store(&self) {
-        self.leader_cached_kv_store.reset();
+    pub fn reset_leader_cached_kv_backend(&self) {
+        self.leader_cached_kv_backend.reset();
     }
 }
 
@@ -164,7 +164,7 @@ pub struct LeaderValue(pub String);
 pub struct SelectorContext {
     pub server_addr: String,
     pub datanode_lease_secs: u64,
-    pub kv_store: KvStoreRef,
+    pub kv_backend: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
     pub table_id: Option<TableId>,
 }
@@ -209,9 +209,9 @@ pub struct MetaSrv {
     options: MetaSrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
-    in_memory: ResettableKvStoreRef,
-    kv_store: KvStoreRef,
-    leader_cached_kv_store: ResettableKvStoreRef,
+    in_memory: ResettableKvBackendRef,
+    kv_backend: KvBackendRef,
+    leader_cached_kv_backend: ResettableKvBackendRef,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
@@ -243,7 +243,7 @@ impl MetaSrv {
         if let Some(election) = self.election() {
             let procedure_manager = self.procedure_manager.clone();
             let in_memory = self.in_memory.clone();
-            let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+            let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
             let subscribe_manager = self.subscribe_manager();
             let mut rx = election.subscribe_leader_change();
             let greptimedb_telemetry_task = self.greptimedb_telemetry_task.clone();
@@ -260,7 +260,7 @@ impl MetaSrv {
                     match rx.recv().await {
                         Ok(msg) => {
                             in_memory.reset();
-                            leader_cached_kv_store.reset();
+                            leader_cached_kv_backend.reset();
                             info!("Leader's cache has bean cleared on leader change: {msg}");
                             match msg {
                                 LeaderChangeMessage::Elected(_) => {
@@ -329,16 +329,16 @@ impl MetaSrv {
         &self.options
     }
 
-    pub fn in_memory(&self) -> &ResettableKvStoreRef {
+    pub fn in_memory(&self) -> &ResettableKvBackendRef {
         &self.in_memory
     }
 
-    pub fn kv_store(&self) -> &KvStoreRef {
-        &self.kv_store
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
     }
 
-    pub fn leader_cached_kv_store(&self) -> &ResettableKvStoreRef {
-        &self.leader_cached_kv_store
+    pub fn leader_cached_kv_backend(&self) -> &ResettableKvBackendRef {
+        &self.leader_cached_kv_backend
     }
 
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
@@ -397,8 +397,8 @@ impl MetaSrv {
     pub fn new_ctx(&self) -> Context {
         let server_addr = self.options().server_addr.clone();
         let in_memory = self.in_memory.clone();
-        let kv_store = self.kv_store.clone();
-        let leader_cached_kv_store = self.leader_cached_kv_store.clone();
+        let kv_backend = self.kv_backend.clone();
+        let leader_cached_kv_backend = self.leader_cached_kv_backend.clone();
         let meta_peer_client = self.meta_peer_client.clone();
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
@@ -408,8 +408,8 @@ impl MetaSrv {
         Context {
             server_addr,
             in_memory,
-            kv_store,
-            leader_cached_kv_store,
+            kv_backend,
+            leader_cached_kv_backend,
             meta_peer_client,
             mailbox,
             election,

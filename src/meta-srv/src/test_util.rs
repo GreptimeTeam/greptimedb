@@ -17,6 +17,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::Sequence;
@@ -33,8 +34,6 @@ use crate::lock::memory::MemLock;
 use crate::metasrv::SelectorContext;
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::selector::lease_based::LeaseBasedSelector;
-use crate::service::store::kv::KvBackendAdapter;
-use crate::service::store::memory::MemStore;
 
 pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64) -> RegionRoute {
     let region = Region {
@@ -53,21 +52,16 @@ pub(crate) fn new_region_route(region_id: u64, peers: &[Peer], leader_node: u64)
 }
 
 pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
-    let kv_store = Arc::new(MemStore::new());
+    let kv_backend = Arc::new(MemoryKvBackend::new());
 
     let pushers = Pushers::default();
-    let mailbox_sequence = Sequence::new(
-        "test_heartbeat_mailbox",
-        0,
-        100,
-        KvBackendAdapter::wrap(kv_store.clone()),
-    );
+    let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
     let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
 
-    let state_store = Arc::new(KvStateStore::new(KvBackendAdapter::wrap(kv_store.clone())));
+    let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
     let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
 
-    let in_memory = Arc::new(MemStore::new());
+    let in_memory = Arc::new(MemoryKvBackend::new());
     let meta_peer_client = MetaPeerClientBuilder::default()
         .election(None)
         .in_memory(in_memory.clone())
@@ -80,7 +74,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let selector_ctx = SelectorContext {
         datanode_lease_secs: 10,
         server_addr: "127.0.0.1:3002".to_string(),
-        kv_store: kv_store.clone(),
+        kv_backend: kv_backend.clone(),
         meta_peer_client,
         table_id: None,
     };
@@ -92,7 +86,7 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
         procedure_manager,
         (selector, selector_ctx),
         Arc::new(MemLock::default()),
-        Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(kv_store))),
+        Arc::new(TableMetadataManager::new(kv_backend)),
     ))
 }
 

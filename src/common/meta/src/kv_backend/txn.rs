@@ -268,9 +268,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_one_compare_op() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
 
-        let _ = kv_store
+        let _ = kv_backend
             .put(PutRequest {
                 key: vec![11],
                 value: vec![3],
@@ -288,7 +288,7 @@ mod tests {
             .and_then(vec![TxnOp::Put(vec![11], vec![1])])
             .or_else(vec![TxnOp::Put(vec![11], vec![2])]);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
 
         assert!(txn_response.succeeded);
         assert_eq!(txn_response.responses.len(), 1);
@@ -296,10 +296,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_multi_compare_op() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
 
         for i in 1..3 {
-            let _ = kv_store
+            let _ = kv_backend
                 .put(PutRequest {
                     key: vec![i],
                     value: vec![i],
@@ -321,7 +321,7 @@ mod tests {
             ])
             .or_else(vec![TxnOp::Put(vec![1], vec![11])]);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
 
         assert!(txn_response.succeeded);
         assert_eq!(txn_response.responses.len(), 2);
@@ -329,9 +329,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_equal() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![101u8];
-        kv_store.delete(&key, false).await.unwrap();
+        kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -340,10 +340,10 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
             .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
         assert!(txn_response.succeeded);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
 
         let txn = Txn::new()
@@ -354,15 +354,15 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
             .or_else(vec![TxnOp::Put(key, vec![4])]);
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(txn_response.succeeded);
     }
 
     #[tokio::test]
     async fn test_txn_compare_greater() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![102u8];
-        kv_store.delete(&key, false).await.unwrap();
+        kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -371,10 +371,10 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
             .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
         assert!(!txn_response.succeeded);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(txn_response.succeeded);
 
         let txn = Txn::new()
@@ -385,7 +385,7 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
             .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_store.txn(txn).await.unwrap();
+        let mut txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
         let res = txn_response.responses.pop().unwrap();
         assert_eq!(
@@ -402,9 +402,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_less() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![103u8];
-        kv_store.delete(&[3], false).await.unwrap();
+        kv_backend.delete(&[3], false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -413,10 +413,10 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
             .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
         assert!(!txn_response.succeeded);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
 
         let txn = Txn::new()
@@ -427,7 +427,7 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
             .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_store.txn(txn).await.unwrap();
+        let mut txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
         let res = txn_response.responses.pop().unwrap();
         assert_eq!(
@@ -444,9 +444,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_txn_compare_not_equal() {
-        let kv_store = create_kv_store().await;
+        let kv_backend = create_kv_backend().await;
         let key = vec![104u8];
-        kv_store.delete(&key, false).await.unwrap();
+        kv_backend.delete(&key, false).await.unwrap();
 
         let txn = Txn::new()
             .when(vec![Compare::with_not_exist_value(
@@ -455,10 +455,10 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![1])])
             .or_else(vec![TxnOp::Put(key.clone(), vec![2])]);
-        let txn_response = kv_store.txn(txn.clone()).await.unwrap();
+        let txn_response = kv_backend.txn(txn.clone()).await.unwrap();
         assert!(!txn_response.succeeded);
 
-        let txn_response = kv_store.txn(txn).await.unwrap();
+        let txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(txn_response.succeeded);
 
         let txn = Txn::new()
@@ -469,7 +469,7 @@ mod tests {
             )])
             .and_then(vec![TxnOp::Put(key.clone(), vec![3])])
             .or_else(vec![TxnOp::Get(key.clone())]);
-        let mut txn_response = kv_store.txn(txn).await.unwrap();
+        let mut txn_response = kv_backend.txn(txn).await.unwrap();
         assert!(!txn_response.succeeded);
         let res = txn_response.responses.pop().unwrap();
         assert_eq!(
@@ -484,7 +484,7 @@ mod tests {
         );
     }
 
-    async fn create_kv_store() -> KvBackendRef {
+    async fn create_kv_backend() -> KvBackendRef {
         Arc::new(MemoryKvBackend::<Error>::new())
         // TODO(jiachun): Add a feature to test against etcd in github CI
         //

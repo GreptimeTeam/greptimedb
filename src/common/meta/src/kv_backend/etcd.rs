@@ -15,25 +15,47 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_meta::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
-use common_meta::kv_backend::{KvBackend, TxnService};
-use common_meta::metrics::METRIC_META_TXN_REQUEST;
-use common_meta::rpc::store::{
-    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
-    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
-    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
-};
-use common_meta::rpc::KeyValue;
 use etcd_client::{
     Client, Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse,
     TxnResponse,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error;
-use crate::error::{ConvertEtcdTxnObjectSnafu, Error, Result};
-use crate::service::store::etcd_util::KvPair;
-use crate::service::store::kv::KvStoreRef;
+use super::KvBackendRef;
+use crate::error::{self, Error, Result};
+use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
+use crate::kv_backend::{KvBackend, TxnService};
+use crate::metrics::METRIC_META_TXN_REQUEST;
+use crate::rpc::store::{
+    BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
+    BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
+    DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
+};
+use crate::rpc::KeyValue;
+
+pub struct KvPair<'a>(&'a etcd_client::KeyValue);
+
+impl<'a> KvPair<'a> {
+    /// Creates a `KvPair` from etcd KeyValue
+    #[inline]
+    pub fn new(kv: &'a etcd_client::KeyValue) -> Self {
+        Self(kv)
+    }
+
+    #[inline]
+    pub fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+        KeyValue::from(KvPair::new(kv))
+    }
+}
+
+impl<'a> From<KvPair<'a>> for KeyValue {
+    fn from(kv: KvPair<'a>) -> Self {
+        Self {
+            key: kv.0.key().to_vec(),
+            value: kv.0.value().to_vec(),
+        }
+    }
+}
 
 // Maximum number of operations permitted in a transaction.
 // The etcd default configuration's `--max-txn-ops` is 128.
@@ -46,7 +68,7 @@ pub struct EtcdStore {
 }
 
 impl EtcdStore {
-    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<KvStoreRef>
+    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<KvBackendRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -58,7 +80,7 @@ impl EtcdStore {
         Ok(Self::with_etcd_client(client))
     }
 
-    pub fn with_etcd_client(client: Client) -> KvStoreRef {
+    pub fn with_etcd_client(client: Client) -> KvBackendRef {
         Arc::new(Self { client })
     }
 
@@ -305,7 +327,7 @@ impl TxnService for EtcdStore {
             .txn(etcd_txn)
             .await
             .context(error::EtcdFailedSnafu)?;
-        txn_res.try_into().context(ConvertEtcdTxnObjectSnafu)
+        txn_res.try_into()
     }
 }
 

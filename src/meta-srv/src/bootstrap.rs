@@ -20,6 +20,9 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::lock_server::LockServer;
 use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
+use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
@@ -41,9 +44,6 @@ use crate::selector::lease_based::LeaseBasedSelector;
 use crate::selector::load_based::LoadBasedSelector;
 use crate::selector::SelectorType;
 use crate::service::admin;
-use crate::service::store::etcd::EtcdStore;
-use crate::service::store::kv::ResettableKvStoreRef;
-use crate::service::store::memory::MemStore;
 use crate::{error, Result};
 
 #[derive(Clone)]
@@ -162,9 +162,9 @@ pub fn router(meta_srv: MetaSrv) -> Router {
 }
 
 pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<MetaSrv> {
-    let (kv_store, election, lock) = if opts.use_memory_store {
+    let (kv_backend, election, lock) = if opts.use_memory_store {
         (
-            Arc::new(MemStore::new()) as _,
+            Arc::new(MemoryKvBackend::new()) as _,
             None,
             Some(Arc::new(MemLock::default()) as _),
         )
@@ -185,7 +185,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
         )
     };
 
-    let in_memory = Arc::new(MemStore::default()) as ResettableKvStoreRef;
+    let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
     let selector = match opts.selector {
         SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
@@ -194,7 +194,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
 
     MetaSrvBuilder::new()
         .options(opts.clone())
-        .kv_store(kv_store)
+        .kv_backend(kv_backend)
         .in_memory(in_memory)
         .selector(selector)
         .election(election)

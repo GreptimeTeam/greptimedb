@@ -22,6 +22,7 @@ use api::v1::meta::{
     RangeRequest as PbRangeRequest, RangeResponse as PbRangeResponse, ResponseHeader,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::kv_backend::ResettableKvBackendRef;
 use common_meta::rpc::store::{BatchGetRequest, RangeRequest};
 use common_meta::rpc::KeyValue;
 use common_meta::util;
@@ -33,14 +34,13 @@ use crate::error;
 use crate::error::{match_for_io_error, Result};
 use crate::keys::{StatKey, StatValue, DN_STAT_PREFIX};
 use crate::metasrv::ElectionRef;
-use crate::service::store::kv::ResettableKvStoreRef;
 
 pub type MetaPeerClientRef = Arc<MetaPeerClient>;
 
 #[derive(Builder)]
 pub struct MetaPeerClient {
     election: Option<ElectionRef>,
-    in_memory: ResettableKvStoreRef,
+    in_memory: ResettableKvBackendRef,
     #[builder(default = "ChannelManager::default()")]
     channel_manager: ChannelManager,
     #[builder(default = "3")]
@@ -93,7 +93,12 @@ impl MetaPeerClient {
                 ..Default::default()
             };
 
-            return self.in_memory.range(request).await.map(|resp| resp.kvs);
+            return self
+                .in_memory
+                .range(request)
+                .await
+                .map(|resp| resp.kvs)
+                .context(error::KvBackendSnafu);
         }
 
         let max_retry_count = self.max_retry_count;
@@ -162,7 +167,12 @@ impl MetaPeerClient {
         if self.is_leader() {
             let request = BatchGetRequest { keys };
 
-            return self.in_memory.batch_get(request).await.map(|resp| resp.kvs);
+            return self
+                .in_memory
+                .batch_get(request)
+                .await
+                .map(|resp| resp.kvs)
+                .context(error::KvBackendSnafu);
         }
 
         let max_retry_count = self.max_retry_count;

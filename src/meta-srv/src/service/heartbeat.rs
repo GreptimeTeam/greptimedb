@@ -167,18 +167,18 @@ mod tests {
 
     use api::v1::meta::heartbeat_server::Heartbeat;
     use api::v1::meta::*;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use tonic::IntoRequest;
 
     use super::get_node_id;
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::service::store::memory::MemStore;
 
     #[tokio::test]
     async fn test_ask_leader() {
-        let kv_store = Arc::new(MemStore::new());
+        let kv_backend = Arc::new(MemoryKvBackend::new());
 
         let meta_srv = MetaSrvBuilder::new()
-            .kv_store(kv_store)
+            .kv_backend(kv_backend)
             .build()
             .await
             .unwrap();

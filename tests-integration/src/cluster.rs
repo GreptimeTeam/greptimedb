@@ -21,6 +21,8 @@ use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
@@ -33,8 +35,6 @@ use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
-use meta_srv::service::store::kv::KvStoreRef;
-use meta_srv::service::store::memory::MemStore;
 use servers::grpc::GrpcServer;
 use servers::Mode;
 use tonic::transport::Server;
@@ -50,14 +50,14 @@ pub struct GreptimeDbCluster {
     pub _dir_guards: Vec<FileDirGuard>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
-    pub kv_store: KvStoreRef,
+    pub kv_backend: KvBackendRef,
     pub meta_srv: MetaSrv,
     pub frontend: Arc<FeInstance>,
 }
 
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
-    kv_store: KvStoreRef,
+    kv_backend: KvBackendRef,
     store_config: Option<ObjectStoreConfig>,
     datanodes: Option<u32>,
 }
@@ -66,7 +66,7 @@ impl GreptimeDbClusterBuilder {
     pub fn new(cluster_name: &str) -> Self {
         Self {
             cluster_name: cluster_name.to_string(),
-            kv_store: Arc::new(MemStore::default()),
+            kv_backend: Arc::new(MemoryKvBackend::new()),
             store_config: None,
             datanodes: None,
         }
@@ -110,7 +110,7 @@ impl GreptimeDbClusterBuilder {
             storage_guards,
             _dir_guards: dir_guards,
             datanode_instances,
-            kv_store: self.kv_store.clone(),
+            kv_backend: self.kv_backend.clone(),
             meta_srv: meta_srv.meta_srv,
             frontend,
         }
@@ -127,7 +127,7 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        meta_srv::mocks::mock(opt, self.kv_store.clone(), None, Some(datanode_clients)).await
+        meta_srv::mocks::mock(opt, self.kv_backend.clone(), None, Some(datanode_clients)).await
     }
 
     async fn build_datanodes(

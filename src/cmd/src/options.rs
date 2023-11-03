@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_config::KvStoreConfig;
+use common_config::KvBackendConfig;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
@@ -30,7 +30,7 @@ pub const ENV_LIST_SEP: &str = ",";
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,
-    pub metadata_store: KvStoreConfig,
+    pub metadata_store: KvBackendConfig,
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,

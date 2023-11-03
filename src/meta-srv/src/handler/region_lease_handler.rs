@@ -78,23 +78,20 @@ mod test {
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::service::store::kv::KvBackendAdapter;
     use crate::test_util;
 
     #[tokio::test]
     async fn test_handle_region_lease() {
         let region_failover_manager = test_util::create_region_failover_manager();
-        let kv_store = region_failover_manager
+        let kv_backend = region_failover_manager
             .create_context()
             .selector_ctx
-            .kv_store
+            .kv_backend
             .clone();
 
         let table_id = 1;
         let table_name = "my_table";
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-            kv_store.clone(),
-        )));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         test_util::prepare_table_region_and_info_value(&table_metadata_manager, table_name).await;
 
         let req = HeartbeatRequest {

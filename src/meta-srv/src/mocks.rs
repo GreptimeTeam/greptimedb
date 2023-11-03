@@ -21,13 +21,13 @@ use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
+use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::kv_backend::KvBackendRef;
 use tower::service_fn;
 
 use crate::metasrv::builder::MetaSrvBuilder;
 use crate::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
-use crate::service::store::etcd::EtcdStore;
-use crate::service::store::kv::{KvBackendAdapter, KvStoreRef};
-use crate::service::store::memory::MemStore;
 
 #[derive(Clone)]
 pub struct MockInfo {
@@ -37,34 +37,32 @@ pub struct MockInfo {
 }
 
 pub async fn mock_with_memstore() -> MockInfo {
-    let kv_store = Arc::new(MemStore::default());
-    mock(Default::default(), kv_store, None, None).await
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    mock(Default::default(), kv_backend, None, None).await
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
-    let kv_store = EtcdStore::with_endpoints([addr]).await.unwrap();
-    mock(Default::default(), kv_store, None, None).await
+    let kv_backend = EtcdStore::with_endpoints([addr]).await.unwrap();
+    mock(Default::default(), kv_backend, None, None).await
 }
 
 pub async fn mock_with_memstore_and_selector(selector: SelectorRef) -> MockInfo {
-    let kv_store = Arc::new(MemStore::default());
-    mock(Default::default(), kv_store, Some(selector), None).await
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    mock(Default::default(), kv_backend, Some(selector), None).await
 }
 
 pub async fn mock(
     opts: MetaSrvOptions,
-    kv_store: KvStoreRef,
+    kv_backend: KvBackendRef,
     selector: Option<SelectorRef>,
     datanode_clients: Option<Arc<DatanodeClients>>,
 ) -> MockInfo {
     let server_addr = opts.server_addr.clone();
-    let table_metadata_manager = Arc::new(TableMetadataManager::new(KvBackendAdapter::wrap(
-        kv_store.clone(),
-    )));
+    let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
     table_metadata_manager.init().await.unwrap();
 
-    let builder = MetaSrvBuilder::new().options(opts).kv_store(kv_store);
+    let builder = MetaSrvBuilder::new().options(opts).kv_backend(kv_backend);
 
     let builder = match selector {
         Some(s) => builder.selector(s),

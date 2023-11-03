@@ -100,16 +100,15 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use store_api::storage::RegionId;
 
     use super::RegionLeaseKeeper;
-    use crate::service::store::kv::KvBackendAdapter;
-    use crate::service::store::memory::MemStore;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
-        let store = KvBackendAdapter::wrap(Arc::new(MemStore::new()));
+        let store = Arc::new(MemoryKvBackend::new());
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(store));
 

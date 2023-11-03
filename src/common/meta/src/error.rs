@@ -28,6 +28,26 @@ use crate::peer::Peer;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Empty key is not allowed"))]
+    EmptyKey { location: Location },
+
+    #[snafu(display("Invalid result with a txn response: {}", err_msg))]
+    InvalidTxnResult { err_msg: String, location: Location },
+
+    #[snafu(display("Failed to connect to Etcd"))]
+    ConnectEtcd {
+        #[snafu(source)]
+        error: etcd_client::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute via Etcd"))]
+    EtcdFailed {
+        #[snafu(source)]
+        error: etcd_client::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to get sequence: {}", err_msg))]
     NextSequence { err_msg: String, location: Location },
 
@@ -254,7 +274,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
-            IllegalServerState { .. } | EtcdTxnOpResponse { .. } => StatusCode::Internal,
+            IllegalServerState { .. }
+            | EtcdTxnOpResponse { .. }
+            | EtcdFailed { .. }
+            | ConnectEtcd { .. } => StatusCode::Internal,
 
             SerdeJson { .. }
             | ParseOption { .. }
@@ -267,7 +290,8 @@ impl ErrorExt for Error {
             | NextSequence { .. }
             | SequenceOutOfRange { .. }
             | UnexpectedSequenceValue { .. }
-            | InvalidHeartbeatResponse { .. } => StatusCode::Unexpected,
+            | InvalidHeartbeatResponse { .. }
+            | InvalidTxnResult { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -277,7 +301,7 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } => StatusCode::InvalidArguments,
+            PrimaryKeyNotFound { .. } | &EmptyKey { .. } => StatusCode::InvalidArguments,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

@@ -253,9 +253,6 @@ pub enum Error {
     #[snafu(display("Invalid arguments: {}", err_msg))]
     InvalidArguments { err_msg: String, location: Location },
 
-    #[snafu(display("Invalid result with a txn response: {}", err_msg))]
-    InvalidTxnResult { err_msg: String, location: Location },
-
     #[snafu(display("Cannot parse catalog value"))]
     InvalidCatalogValue {
         location: Location,
@@ -502,12 +499,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to convert Etcd txn object: "))]
-    ConvertEtcdTxnObject {
-        source: common_meta::error::Error,
-        location: Location,
-    },
-
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error"))]
@@ -518,6 +509,12 @@ pub enum Error {
 
     #[snafu(display("Table metadata manager error"))]
     TableMetadataManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Keyvalue backend error"))]
+    KvBackend {
         source: common_meta::error::Error,
         location: Location,
     },
@@ -617,7 +614,6 @@ impl ErrorExt for Error {
             | Error::TableInfoNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::MoveValue { .. }
-            | Error::InvalidTxnResult { .. }
             | Error::InvalidUtf8Value { .. }
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
@@ -651,8 +647,8 @@ impl ErrorExt for Error {
             Error::TableRouteConversion { source, .. }
             | Error::ConvertProtoData { source, .. }
             | Error::TableMetadataManager { source, .. }
+            | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
-            | Error::ConvertEtcdTxnObject { source, .. }
             | Error::GetFullTableInfo { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } => source.status_code(),

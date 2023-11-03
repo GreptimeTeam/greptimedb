@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
-use meta_srv::service::store::etcd::EtcdStore;
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -24,7 +24,7 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let kv_store = EtcdStore::with_endpoints(["127.0.0.1:2380"]).await.unwrap();
+    let kv_backend = EtcdStore::with_endpoints(["127.0.0.1:2380"]).await.unwrap();
 
     // put
     let put_req = PutRequest {
@@ -32,7 +32,7 @@ async fn run() {
         value: b"value1".to_vec(),
         prev_kv: true,
     };
-    let res = kv_store.put(put_req).await;
+    let res = kv_backend.put(put_req).await;
     event!(Level::INFO, "put result: {:#?}", res);
 
     // get
@@ -40,7 +40,7 @@ async fn run() {
         key: b"key1".to_vec(),
         ..Default::default()
     };
-    let res = kv_store.range(range_req.clone()).await;
+    let res = kv_backend.range(range_req.clone()).await;
     event!(Level::INFO, "get range result: {:#?}", res);
 
     // delete
@@ -48,10 +48,10 @@ async fn run() {
         key: b"key1".to_vec(),
         ..Default::default()
     };
-    let res = kv_store.delete_range(delete_range_req).await;
+    let res = kv_backend.delete_range(delete_range_req).await;
     event!(Level::INFO, "delete range result: {:#?}", res);
 
     // get none
-    let res = kv_store.range(range_req).await;
+    let res = kv_backend.range(range_req).await;
     event!(Level::INFO, "get range result: {:#?}", res);
 }
