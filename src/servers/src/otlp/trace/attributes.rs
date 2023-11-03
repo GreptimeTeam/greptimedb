@@ -57,8 +57,12 @@ impl Serialize for OtlpAnyValue<'_> {
                 KvlistValue(v) => {
                     let mut map = zer.serialize_map(Some(v.values.len()))?;
                     for kv in &v.values {
-                        if let Some(val) = &kv.value {
-                            map.serialize_entry(&kv.key, &OtlpAnyValue::from(val))?;
+                        match &kv.value {
+                            Some(val) => map.serialize_entry(&kv.key, &OtlpAnyValue::from(val))?,
+                            None => map.serialize_entry(
+                                &kv.key,
+                                &OtlpAnyValue::from(&AnyValue { value: None }),
+                            )?,
                         }
                     }
                     map.end()
@@ -86,8 +90,11 @@ impl Serialize for Attributes {
     {
         let mut map = serializer.serialize_map(Some(self.0.len()))?;
         for attr in &self.0 {
-            if let Some(val) = &attr.value {
-                map.serialize_entry(&attr.key, &OtlpAnyValue::from(val))?;
+            match &attr.value {
+                Some(val) => map.serialize_entry(&attr.key, &OtlpAnyValue::from(val))?,
+                None => {
+                    map.serialize_entry(&attr.key, &OtlpAnyValue::from(&AnyValue { value: None }))?
+                }
             }
         }
         map.end()
@@ -115,7 +122,13 @@ mod tests {
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList};
 
-    use crate::otlp::trace::attributes::OtlpAnyValue;
+    use crate::otlp::trace::attributes::{Attributes, OtlpAnyValue};
+
+    #[test]
+    fn test_null_value() {
+        let otlp_value = OtlpAnyValue::from(&AnyValue { value: None });
+        assert_eq!("null", serde_json::to_string(&otlp_value).unwrap())
+    }
 
     #[test]
     fn test_any_value_primitive_type_serialize() {
@@ -133,10 +146,7 @@ mod tests {
         for (expect, val) in values {
             let any_val = AnyValue { value: Some(val) };
             let otlp_value = OtlpAnyValue::from(&any_val);
-            assert_eq!(
-                expect,
-                serde_json::to_string(&otlp_value).unwrap_or_default()
-            );
+            assert_eq!(expect, serde_json::to_string(&otlp_value).unwrap());
         }
     }
 
@@ -144,52 +154,89 @@ mod tests {
     fn test_any_value_array_type_serialize() {
         let values = vec![
             ("[]", vec![]),
+            ("[null]", vec![AnyValue { value: None }]),
             (
                 r#"["string1","string2","string3"]"#,
                 vec![
-                    Value::StringValue(String::from("string1")),
-                    Value::StringValue(String::from("string2")),
-                    Value::StringValue(String::from("string3")),
+                    AnyValue {
+                        value: Some(Value::StringValue(String::from("string1"))),
+                    },
+                    AnyValue {
+                        value: Some(Value::StringValue(String::from("string2"))),
+                    },
+                    AnyValue {
+                        value: Some(Value::StringValue(String::from("string3"))),
+                    },
                 ],
             ),
             (
                 "[1,2,3]",
-                vec![Value::IntValue(1), Value::IntValue(2), Value::IntValue(3)],
+                vec![
+                    AnyValue {
+                        value: Some(Value::IntValue(1)),
+                    },
+                    AnyValue {
+                        value: Some(Value::IntValue(2)),
+                    },
+                    AnyValue {
+                        value: Some(Value::IntValue(3)),
+                    },
+                ],
             ),
             (
                 "[1.1,2.2,3.3]",
                 vec![
-                    Value::DoubleValue(1.1),
-                    Value::DoubleValue(2.2),
-                    Value::DoubleValue(3.3),
+                    AnyValue {
+                        value: Some(Value::DoubleValue(1.1)),
+                    },
+                    AnyValue {
+                        value: Some(Value::DoubleValue(2.2)),
+                    },
+                    AnyValue {
+                        value: Some(Value::DoubleValue(3.3)),
+                    },
                 ],
             ),
             (
                 "[true,false,true]",
                 vec![
-                    Value::BoolValue(true),
-                    Value::BoolValue(false),
-                    Value::BoolValue(true),
+                    AnyValue {
+                        value: Some(Value::BoolValue(true)),
+                    },
+                    AnyValue {
+                        value: Some(Value::BoolValue(false)),
+                    },
+                    AnyValue {
+                        value: Some(Value::BoolValue(true)),
+                    },
+                ],
+            ),
+            (
+                r#"[1,1.1,"str_value",true,null]"#,
+                vec![
+                    AnyValue {
+                        value: Some(Value::IntValue(1)),
+                    },
+                    AnyValue {
+                        value: Some(Value::DoubleValue(1.1)),
+                    },
+                    AnyValue {
+                        value: Some(Value::StringValue("str_value".into())),
+                    },
+                    AnyValue {
+                        value: Some(Value::BoolValue(true)),
+                    },
+                    AnyValue { value: None },
                 ],
             ),
         ];
 
-        for (expect, vals) in values {
-            let array_values: Vec<AnyValue> = vals
-                .into_iter()
-                .map(|val| AnyValue { value: Some(val) })
-                .collect();
-
-            let value = Value::ArrayValue(ArrayValue {
-                values: array_values,
-            });
-
-            let any_val = AnyValue { value: Some(value) };
+        for (expect, values) in values {
+            let any_val = AnyValue {
+                value: Some(Value::ArrayValue(ArrayValue { values })),
+            };
             let otlp_value = OtlpAnyValue::from(&any_val);
-            assert_eq!(
-                expect,
-                serde_json::to_string(&otlp_value).unwrap_or_default()
-            );
+            assert_eq!(expect, serde_json::to_string(&otlp_value).unwrap());
         }
     }
 
@@ -198,28 +245,70 @@ mod tests {
         let cases = vec![
             ("{}", vec![]),
             (
+                r#"{"key1":null}"#,
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: None,
+                }],
+            ),
+            (
+                r#"{"key1":null}"#,
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: Some(AnyValue { value: None }),
+                }],
+            ),
+            (
                 r#"{"key1":"val1"}"#,
-                vec![("key1", Value::StringValue(String::from("val1")))],
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue(String::from("val1"))),
+                    }),
+                }],
             ),
         ];
 
-        for (expect, kv) in cases {
-            let kvlist: Vec<KeyValue> = kv
-                .into_iter()
-                .map(|(k, v)| KeyValue {
-                    key: k.into(),
-                    value: Some(AnyValue { value: Some(v) }),
-                })
-                .collect();
-
-            let value = Value::KvlistValue(KeyValueList { values: kvlist });
-
-            let any_val = AnyValue { value: Some(value) };
+        for (expect, values) in cases {
+            let any_val = AnyValue {
+                value: Some(Value::KvlistValue(KeyValueList { values })),
+            };
             let otlp_value = OtlpAnyValue::from(&any_val);
-            assert_eq!(
-                expect,
-                serde_json::to_string(&otlp_value).unwrap_or_default()
-            );
+            assert_eq!(expect, serde_json::to_string(&otlp_value).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_attributes_serialize() {
+        let cases = vec![
+            ("{}", vec![]),
+            (
+                r#"{"key1":null}"#,
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: None,
+                }],
+            ),
+            (
+                r#"{"key1":null}"#,
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: Some(AnyValue { value: None }),
+                }],
+            ),
+            (
+                r#"{"key1":"val1"}"#,
+                vec![KeyValue {
+                    key: "key1".into(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue(String::from("val1"))),
+                    }),
+                }],
+            ),
+        ];
+
+        for (expect, values) in cases {
+            assert_eq!(expect, serde_json::to_string(&Attributes(values)).unwrap());
         }
     }
 }
