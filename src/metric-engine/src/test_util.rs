@@ -88,3 +88,30 @@ impl TestEnv {
         RegionId::new(1, 2)
     }
 }
+
+#[cfg(test)]
+mod test {
+
+    use super::*;
+    use crate::engine::METADATA_REGION_SUBDIR;
+    use crate::utils::{self, to_metadata_region_id};
+
+    #[tokio::test]
+    async fn create_metadata_region() {
+        common_telemetry::init_default_ut_logging();
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_dir = join_dir(&env.data_home(), "test_metric_region");
+
+        // assert metadata region's dir
+        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
+        let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
+        assert!(exist);
+
+        // check mito engine
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        let _ = env.mito().get_metadata(metadata_region_id).await.unwrap();
+    }
+}
