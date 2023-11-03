@@ -271,7 +271,7 @@ async fn test_engine_truncate_during_flush() {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush");
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
-    let listener = Arc::new(FlushTruncateListener::new());
+    let listener = Arc::new(FlushTruncateListener::default());
     let engine = env
         .create_engine_with(
             MitoConfig::default(),

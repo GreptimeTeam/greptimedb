@@ -198,7 +198,7 @@ impl WorkerGroup {
 }
 
 // Tests methods.
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 impl WorkerGroup {
     /// Starts a worker group with `write_buffer_manager` and `listener` for tests.
     ///
@@ -583,12 +583,12 @@ impl<S> RegionWorkerLoop<S> {
 /// Wrapper that only calls event listener in tests.
 #[derive(Default, Clone)]
 pub(crate) struct WorkerListener {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     listener: Option<crate::engine::listener::EventListenerRef>,
 }
 
 impl WorkerListener {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn new(
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerListener {
@@ -597,7 +597,7 @@ impl WorkerListener {
 
     /// Flush is finished successfully.
     pub(crate) fn on_flush_success(&self, region_id: RegionId) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_flush_success(region_id);
         }
@@ -607,14 +607,14 @@ impl WorkerListener {
 
     /// Engine is stalled.
     pub(crate) fn on_write_stall(&self) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_write_stall();
         }
     }
 
     pub(crate) async fn on_flush_begin(&self, region_id: RegionId) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_flush_begin(region_id).await;
         }
@@ -623,7 +623,7 @@ impl WorkerListener {
     }
 
     pub(crate) fn on_later_drop_begin(&self, region_id: RegionId) -> Option<Duration> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             return listener.on_later_drop_begin(region_id);
         }
@@ -634,7 +634,7 @@ impl WorkerListener {
 
     /// On later drop task is finished.
     pub(crate) fn on_later_drop_end(&self, region_id: RegionId, removed: bool) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_later_drop_end(region_id, removed);
         }

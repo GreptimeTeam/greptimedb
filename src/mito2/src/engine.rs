@@ -28,8 +28,8 @@ mod create_test;
 mod drop_test;
 #[cfg(test)]
 mod flush_test;
-#[cfg(test)]
-pub(crate) mod listener;
+#[cfg(any(test, feature = "test"))]
+pub mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
@@ -60,6 +60,8 @@ use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
+
+pub const MITO_ENGINE_NAME: &str = "mito";
 
 /// Region engine implementation for timeseries data.
 #[derive(Clone)]
@@ -200,7 +202,7 @@ impl EngineInner {
 #[async_trait]
 impl RegionEngine for MitoEngine {
     fn name(&self) -> &str {
-        "mito"
+        MITO_ENGINE_NAME
     }
 
     async fn handle_request(
@@ -265,7 +267,7 @@ impl RegionEngine for MitoEngine {
 }
 
 // Tests methods.
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 impl MitoEngine {
     /// Returns a new [MitoEngine] for tests.
     pub fn new_for_test<S: LogStore>(

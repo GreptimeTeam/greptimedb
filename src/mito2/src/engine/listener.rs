@@ -51,18 +51,12 @@ pub trait EventListener: Send + Sync {
 pub type EventListenerRef = Arc<dyn EventListener>;
 
 /// Listener to watch flush events.
+#[derive(Default)]
 pub struct FlushListener {
     notify: Notify,
 }
 
 impl FlushListener {
-    /// Creates a new listener.
-    pub fn new() -> FlushListener {
-        FlushListener {
-            notify: Notify::new(),
-        }
-    }
-
     /// Wait until one flush job is done.
     pub async fn wait(&self) {
         self.notify.notified().await;
@@ -83,18 +77,12 @@ impl EventListener for FlushListener {
 }
 
 /// Listener to watch stall events.
+#[derive(Default)]
 pub struct StallListener {
     notify: Notify,
 }
 
 impl StallListener {
-    /// Creates a new listener.
-    pub fn new() -> StallListener {
-        StallListener {
-            notify: Notify::new(),
-        }
-    }
-
     /// Wait for a stall event.
     pub async fn wait(&self) {
         self.notify.notified().await;
@@ -120,6 +108,7 @@ impl EventListener for StallListener {
 /// to block and wait for `on_flush_region()`.
 /// When the background thread calls `on_flush_begin()`, the main thread is notified to truncate
 /// region, and background thread thread blocks and waits for `notify_flush()` to continue flushing.
+#[derive(Default)]
 pub struct FlushTruncateListener {
     /// Notify flush operation.
     notify_flush: Notify,
@@ -128,14 +117,6 @@ pub struct FlushTruncateListener {
 }
 
 impl FlushTruncateListener {
-    /// Creates a new listener.
-    pub fn new() -> FlushTruncateListener {
-        FlushTruncateListener {
-            notify_flush: Notify::new(),
-            notify_truncate: Notify::new(),
-        }
-    }
-
     /// Notify flush region to proceed.
     pub fn notify_flush(&self) {
         self.notify_flush.notify_one();

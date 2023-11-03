@@ -88,7 +88,7 @@ impl RegionId {
         RegionId(id)
     }
 
-    #[cfg(test)]
+    /// Construct a new [RegionId] from table id, region group and region sequence.
     pub const fn with_group_and_seq(
         table_id: TableId,
         group: RegionGroup,
