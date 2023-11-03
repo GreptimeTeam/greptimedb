@@ -77,14 +77,15 @@ impl MetadataRegion {
 
     /// Add a new column key to metadata.
     ///
-    /// This method won't check if the column already exists.
+    /// This method won't check if the column already exists. But
+    /// will return if the column is successfully added.
     pub async fn add_column(
         &self,
         region_id: RegionId,
         table_name: &str,
         column_name: &str,
         semantic_type: SemanticType,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(region_id);
         let column_key = Self::concat_column_key(table_name, column_name);
 
@@ -93,8 +94,7 @@ impl MetadataRegion {
             column_key,
             Self::serialize_semantic_type(semantic_type),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Check if the given table exists.
@@ -481,5 +481,63 @@ mod test {
         let result = metadata_region.get(region_id, &key).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_add_table() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        // add one table
+        let table_name = "table1";
+        metadata_region
+            .add_table(region_id, table_name)
+            .await
+            .unwrap();
+        assert!(metadata_region
+            .is_table_exist(region_id, table_name)
+            .await
+            .unwrap());
+
+        // add it again
+        assert!(metadata_region
+            .add_table(region_id, table_name)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_column() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        let table_name = "table1";
+        let column_name = "column1";
+        let semantic_type = SemanticType::Tag;
+        metadata_region
+            .add_column(region_id, table_name, column_name, semantic_type)
+            .await
+            .unwrap();
+        let actual_semantic_type = metadata_region
+            .column_semantic_type(region_id, table_name, column_name)
+            .await
+            .unwrap();
+        assert_eq!(actual_semantic_type, Some(semantic_type));
+
+        // duplicate column won't be updated
+        let is_updated = metadata_region
+            .add_column(region_id, table_name, column_name, SemanticType::Field)
+            .await
+            .unwrap();
+        assert!(!is_updated);
+        let actual_semantic_type = metadata_region
+            .column_semantic_type(region_id, table_name, column_name)
+            .await
+            .unwrap();
+        assert_eq!(actual_semantic_type, Some(semantic_type));
     }
 }
