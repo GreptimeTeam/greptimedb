@@ -42,7 +42,7 @@ pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
 pub const METRIC_METADATA_REGION_GROUP: RegionGroup = 1;
 
 const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
-const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "key";
+const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
 const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
 
 const METADATA_REGION_SUBDIR: &str = "metadata";
@@ -282,7 +282,6 @@ mod test {
             inner: Arc::new(MetricEngineInner { mito }),
         };
         let engine_dir = env.data_home();
-        info!("[DEBUG] {engine_dir}");
         let region_dir = join_dir(&engine_dir, "test_metric_region");
 
         let region_id = RegionId::new(1, 2);
@@ -299,11 +298,6 @@ mod test {
             .handle_request(region_id, RegionRequest::Create(region_create_request))
             .await
             .unwrap();
-
-        let mut ls_result = tokio::fs::read_dir(&engine_dir).await.unwrap();
-        while let Some(dir) = ls_result.next_entry().await.unwrap() {
-            info!("[DEBUG] {dir:?}");
-        }
 
         // assert metadata region's dir
         let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);

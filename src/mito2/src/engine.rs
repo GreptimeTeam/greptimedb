@@ -29,8 +29,7 @@ mod drop_test;
 #[cfg(test)]
 mod flush_test;
 #[cfg(any(test, feature = "test"))]
-#[cfg_attr(feature = "test", allow(unused))]
-pub(crate) mod listener;
+pub mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
