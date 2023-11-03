@@ -16,10 +16,14 @@
 
 use std::collections::HashMap;
 
+use api::v1::SemanticType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::test_util::TestEnv as MitoTestEnv;
 use object_store::util::join_dir;
+use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -66,7 +70,15 @@ impl TestEnv {
         let region_id = self.default_region_id();
         let region_create_request = RegionCreateRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
-            column_metadatas: vec![],
+            column_metadatas: vec![ColumnMetadata {
+                column_id: 0,
+                semantic_type: SemanticType::Timestamp,
+                column_schema: ColumnSchema::new(
+                    "greptime_timestamp",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            }],
             primary_key: vec![],
             options: HashMap::new(),
             region_dir: "test_metric_region".to_string(),
@@ -93,7 +105,7 @@ impl TestEnv {
 mod test {
 
     use super::*;
-    use crate::engine::METADATA_REGION_SUBDIR;
+    use crate::engine::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
     use crate::utils::{self, to_metadata_region_id};
 
     #[tokio::test]
@@ -110,8 +122,15 @@ mod test {
         let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
         assert!(exist);
 
+        // assert data region's dir
+        let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
+        let exist = tokio::fs::try_exists(data_region_dir).await.unwrap();
+        assert!(exist);
+
         // check mito engine
         let metadata_region_id = utils::to_metadata_region_id(region_id);
         let _ = env.mito().get_metadata(metadata_region_id).await.unwrap();
+        let data_region_id = utils::to_data_region_id(region_id);
+        let _ = env.mito().get_metadata(data_region_id).await.unwrap();
     }
 }

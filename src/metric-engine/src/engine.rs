@@ -30,6 +30,7 @@ use snafu::{ensure, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionGroup, RegionId, ScanRequest};
 
 use crate::error::{CreateMitoRegionSnafu, InternalColumnOccupiedSnafu, Result};
@@ -51,6 +52,7 @@ pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
 
 /// Column name of internal column `__metric_name` that stores the original metric name
 pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric_name";
+pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
 pub const DATA_REGION_SUBDIR: &str = "data";
@@ -149,6 +151,7 @@ struct MetricEngineInner {
 }
 
 impl MetricEngineInner {
+    /// Initialize a metric region at given region id.
     pub async fn create_region(
         &self,
         region_id: RegionId,
@@ -157,19 +160,10 @@ impl MetricEngineInner {
         Self::verify_region_create_request(&request)?;
 
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
-        let create_data_region_request = self.create_request_for_data_region(&request);
+
+        // create metadata region
         let create_metadata_region_request =
             self.create_request_for_metadata_region(&request.region_dir);
-
-        // self.mito
-        //     .handle_request(
-        //         data_region_id,
-        //         RegionRequest::Create(create_data_region_request),
-        //     )
-        //     .await
-        //     .with_context(|_| CreateMitoRegionSnafu {
-        //         region_type: DATA_REGION_SUBDIR,
-        //     })?;
         self.mito
             .handle_request(
                 metadata_region_id,
@@ -178,6 +172,18 @@ impl MetricEngineInner {
             .await
             .with_context(|_| CreateMitoRegionSnafu {
                 region_type: METADATA_REGION_SUBDIR,
+            })?;
+
+        // create data region
+        let create_data_region_request = self.create_request_for_data_region(&request);
+        self.mito
+            .handle_request(
+                data_region_id,
+                RegionRequest::Create(create_data_region_request),
+            )
+            .await
+            .with_context(|_| CreateMitoRegionSnafu {
+                region_type: DATA_REGION_SUBDIR,
             })?;
 
         Ok(())
@@ -198,6 +204,12 @@ impl MetricEngineInner {
             !name_to_index.contains_key(DATA_SCHEMA_METRIC_NAME_COLUMN_NAME),
             InternalColumnOccupiedSnafu {
                 column: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
+            }
+        );
+        ensure!(
+            !name_to_index.contains_key(DATA_SCHEMA_TSID_COLUMN_NAME),
+            InternalColumnOccupiedSnafu {
+                column: DATA_SCHEMA_TSID_COLUMN_NAME,
             }
         );
 
@@ -253,6 +265,7 @@ impl MetricEngineInner {
             ),
         };
 
+        // concat region dir
         let metadata_region_dir = join_dir(region_dir, METADATA_REGION_SUBDIR);
 
         RegionCreateRequest {
@@ -268,7 +281,12 @@ impl MetricEngineInner {
         }
     }
 
-    // todo: register "tag columns" to metadata
+    /// Convert [RegionCreateRequest] for data region.
+    ///
+    /// All tag columns in the original request will be converted to value columns.
+    /// Those columns real semantic type is stored in metadat region.
+    ///
+    /// This will also add internal columns to the request.
     pub fn create_request_for_data_region(
         &self,
         request: &RegionCreateRequest,
@@ -278,9 +296,39 @@ impl MetricEngineInner {
         // concat region dir
         data_region_request.region_dir = join_dir(&request.region_dir, DATA_REGION_SUBDIR);
 
-        // todo: change semantic type and primary key
+        // convert semantic type
+        data_region_request
+            .column_metadatas
+            .iter_mut()
+            .for_each(|metadata| {
+                if metadata.semantic_type == SemanticType::Tag {
+                    metadata.semantic_type = SemanticType::Field;
+                }
+            });
 
-        // todo: add internal column
+        // add internal columns
+        let metric_name_col = ColumnMetadata {
+            column_id: ReservedColumnId::metric_name(),
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+        };
+        let tsid_col = ColumnMetadata {
+            column_id: ReservedColumnId::tsid(),
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::int64_datatype(),
+                false,
+            ),
+        };
+        data_region_request.column_metadatas.push(metric_name_col);
+        data_region_request.column_metadatas.push(tsid_col);
+        data_region_request.primary_key =
+            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()];
 
         data_region_request
     }
@@ -289,6 +337,7 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::TestEnv;
 
     #[test]
     fn test_verify_region_create_request() {
@@ -355,5 +404,49 @@ mod tests {
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_request_for_data_region() {
+        let request = RegionCreateRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            column_metadatas: vec![
+                ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        "timestamp",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Tag,
+                    column_schema: ColumnSchema::new(
+                        "tag",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                },
+            ],
+            primary_key: vec![0],
+            options: HashMap::new(),
+            region_dir: "test_dir".to_string(),
+        };
+
+        let env = TestEnv::new().await;
+        let engine = MetricEngineInner { mito: env.mito() };
+        let data_region_request = engine.create_request_for_data_region(&request);
+
+        assert_eq!(
+            data_region_request.region_dir,
+            "/test_dir/data/".to_string()
+        );
+        assert_eq!(data_region_request.column_metadatas.len(), 4);
+        assert_eq!(
+            data_region_request.primary_key,
+            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()]
+        );
     }
 }
