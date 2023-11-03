@@ -46,7 +46,7 @@ pub trait WriteRequest: Send {
     fn delete(&mut self, keys: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
     /// Max sequence number to read, None for latest sequence.
     ///

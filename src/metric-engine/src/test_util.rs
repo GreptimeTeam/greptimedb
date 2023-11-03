@@ -14,10 +14,18 @@
 
 //! Utilities for testing.
 
+use std::collections::HashMap;
+
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::test_util::TestEnv as MitoTestEnv;
 use object_store::util::join_dir;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionCreateRequest, RegionRequest};
+use store_api::storage::RegionId;
+
+use crate::engine::{MetricEngine, METRIC_ENGINE_NAME};
+use crate::metadata_region::MetadataRegion;
 
 /// Env to test metric engine.
 pub struct TestEnv {
@@ -46,5 +54,37 @@ impl TestEnv {
     /// Returns a reference to the engine.
     pub fn mito(&self) -> MitoEngine {
         self.mito.clone()
+    }
+
+    pub fn metric(&self) -> MetricEngine {
+        MetricEngine::new(self.mito())
+    }
+
+    /// Create regions in [MetricEngine] under [`default_region_id`](TestEnv::default_region_id)
+    /// and region dir `"test_metric_region"`.
+    pub async fn init_metric_region(&self) {
+        let region_id = self.default_region_id();
+        let region_create_request = RegionCreateRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            column_metadatas: vec![],
+            primary_key: vec![],
+            options: HashMap::new(),
+            region_dir: "test_metric_region".to_string(),
+        };
+
+        // create regions
+        self.metric()
+            .handle_request(region_id, RegionRequest::Create(region_create_request))
+            .await
+            .unwrap();
+    }
+
+    pub fn metadata_region(&self) -> MetadataRegion {
+        MetadataRegion::new(self.mito())
+    }
+
+    /// `RegionId::new(1, 2)`
+    pub fn default_region_id(&self) -> RegionId {
+        RegionId::new(1, 2)
     }
 }

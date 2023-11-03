@@ -41,12 +41,16 @@ pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
 /// region group value for metadata region inside a metric region
 pub const METRIC_METADATA_REGION_GROUP: RegionGroup = 1;
 
-const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
-const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
-const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
+pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
+pub const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
+pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
 
-const METADATA_REGION_SUBDIR: &str = "metadata";
-const DATA_REGION_SUBDIR: &str = "data";
+pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX: usize = 0;
+pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
+pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
+
+pub const METADATA_REGION_SUBDIR: &str = "metadata";
+pub const DATA_REGION_SUBDIR: &str = "data";
 
 pub const METRIC_ENGINE_NAME: &str = "metric";
 
@@ -129,6 +133,14 @@ impl RegionEngine for MetricEngine {
     }
 }
 
+impl MetricEngine {
+    pub fn new(mito: MitoEngine) -> Self {
+        Self {
+            inner: Arc::new(MetricEngineInner { mito }),
+        }
+    }
+}
+
 struct MetricEngineInner {
     mito: MitoEngine,
 }
@@ -197,7 +209,7 @@ impl MetricEngineInner {
     pub fn create_request_for_metadata_region(&self, region_dir: &str) -> RegionCreateRequest {
         // ts TIME INDEX DEFAULT 0
         let timestamp_column_metadata = ColumnMetadata {
-            column_id: 0,
+            column_id: METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX as _,
             semantic_type: SemanticType::Timestamp,
             column_schema: ColumnSchema::new(
                 METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
@@ -211,7 +223,7 @@ impl MetricEngineInner {
         };
         // key STRING PRIMARY KEY
         let key_column_metadata = ColumnMetadata {
-            column_id: 1,
+            column_id: METADATA_SCHEMA_KEY_COLUMN_INDEX as _,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
                 METADATA_SCHEMA_KEY_COLUMN_NAME,
@@ -221,7 +233,7 @@ impl MetricEngineInner {
         };
         // val STRING
         let value_column_metadata = ColumnMetadata {
-            column_id: 2,
+            column_id: METADATA_SCHEMA_VALUE_COLUMN_INDEX as _,
             semantic_type: SemanticType::Field,
             column_schema: ColumnSchema::new(
                 METADATA_SCHEMA_VALUE_COLUMN_NAME,
@@ -239,7 +251,7 @@ impl MetricEngineInner {
                 key_column_metadata,
                 value_column_metadata,
             ],
-            primary_key: vec![1],
+            primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
             options: HashMap::new(),
             region_dir: metadata_region_dir,
         }
