@@ -24,7 +24,9 @@ use crate::value::Value;
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{TimestampMillisecondVector, VectorRef};
 
-const CURRENT_TIMESTAMP: &str = "current_timestamp()";
+const CURRENT_TIMESTAMP: &str = "current_timestamp";
+const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
+const NOW_FN: &str = "now()";
 
 /// Column's default constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +79,7 @@ impl ColumnDefaultConstraint {
         match self {
             ColumnDefaultConstraint::Function(expr) => {
                 ensure!(
-                    expr == CURRENT_TIMESTAMP,
+                    expr == CURRENT_TIMESTAMP || expr == CURRENT_TIMESTAMP_FN || expr == NOW_FN,
                     error::UnsupportedDefaultExprSnafu { expr }
                 );
                 ensure!(
@@ -130,7 +132,9 @@ impl ColumnDefaultConstraint {
                 match &expr[..] {
                     // TODO(dennis): we only supports current_timestamp right now,
                     //   it's better to use a expression framework in future.
-                    CURRENT_TIMESTAMP => create_current_timestamp_vector(data_type, num_rows),
+                    CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => {
+                        create_current_timestamp_vector(data_type, num_rows)
+                    }
                     _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
                 }
             }
@@ -160,7 +164,9 @@ impl ColumnDefaultConstraint {
                 // Functions should also ensure its return value is not null when
                 // is_nullable is true.
                 match &expr[..] {
-                    CURRENT_TIMESTAMP => create_current_timestamp(data_type),
+                    CURRENT_TIMESTAMP | CURRENT_TIMESTAMP_FN | NOW_FN => {
+                        create_current_timestamp(data_type)
+                    }
                     _ => error::UnsupportedDefaultExprSnafu { expr }.fail(),
                 }
             }
