@@ -41,8 +41,11 @@ const METASRV_ADDR: &str = "127.0.0.1:3002";
 const SERVER_ADDR: &str = "127.0.0.1:4001";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
+#[derive(Clone)]
 pub struct Env {
     data_home: PathBuf,
+    server_addr: Option<String>,
+    specified_mode: String,
 }
 
 #[allow(clippy::print_stdout)]
@@ -52,8 +55,56 @@ impl EnvController for Env {
 
     async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
         match mode {
-            "standalone" => self.start_standalone().await,
-            "distributed" => self.start_distributed().await,
+            "standalone" => {
+                if self.specified_mode == "all" || self.specified_mode == "standalone" {
+                    if let Some(server_addr) = self.server_addr.clone() {
+                        let client = Client::with_urls(vec![server_addr.clone()]);
+                        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+                        GreptimeDB {
+                            client: TokioMutex::new(db),
+                            server_processes: None,
+                            metasrv_process: None,
+                            frontend_process: None,
+                            ctx: GreptimeDBContext {
+                                time: 0,
+                                datanode_id: Default::default(),
+                            },
+                            is_standalone: false,
+                            env: self.clone(),
+                        }
+                    } else {
+                        self.start_standalone().await
+                    }
+                } else {
+                    // Exit and do nothing.
+                    std::process::exit(0);
+                }
+            }
+            "distributed" => {
+                if self.specified_mode == "all" || self.specified_mode == "distributed" {
+                    if let Some(server_addr) = self.server_addr.clone() {
+                        let client = Client::with_urls(vec![server_addr.clone()]);
+                        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+                        GreptimeDB {
+                            client: TokioMutex::new(db),
+                            server_processes: None,
+                            metasrv_process: None,
+                            frontend_process: None,
+                            ctx: GreptimeDBContext {
+                                time: 0,
+                                datanode_id: Default::default(),
+                            },
+                            is_standalone: false,
+                            env: self.clone(),
+                        }
+                    } else {
+                        self.start_distributed().await
+                    }
+                } else {
+                    // Exit and do nothing.
+                    std::process::exit(0);
+                }
+            }
             _ => panic!("Unexpected mode: {mode}"),
         }
     }
@@ -66,8 +117,12 @@ impl EnvController for Env {
 
 #[allow(clippy::print_stdout)]
 impl Env {
-    pub fn new(data_home: PathBuf) -> Self {
-        Self { data_home }
+    pub fn new(data_home: PathBuf, server_addr: Option<String>, specified_mode: String) -> Self {
+        Self {
+            data_home,
+            server_addr,
+            specified_mode,
+        }
     }
 
     async fn start_standalone(&self) -> GreptimeDB {
@@ -81,13 +136,13 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_processes: Arc::new(Mutex::new(vec![server_process])),
+            server_processes: Some(Arc::new(Mutex::new(vec![server_process]))),
             metasrv_process: None,
             frontend_process: None,
             client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: true,
-            env: Env::new(self.data_home.clone()),
+            env: self.clone(),
         }
     }
 
@@ -109,13 +164,15 @@ impl Env {
         let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
         GreptimeDB {
-            server_processes: Arc::new(Mutex::new(vec![datanode_1, datanode_2, datanode_3])),
+            server_processes: Some(Arc::new(Mutex::new(vec![
+                datanode_1, datanode_2, datanode_3,
+            ]))),
             metasrv_process: Some(meta_server),
             frontend_process: Some(frontend),
             client: TokioMutex::new(db),
             ctx: db_ctx,
             is_standalone: false,
-            env: Env::new(self.data_home.clone()),
+            env: self.clone(),
         }
     }
 
@@ -244,9 +301,11 @@ impl Env {
     /// stop and restart the server process
     async fn restart_server(&self, db: &GreptimeDB) {
         {
-            let mut server_processes = db.server_processes.lock().unwrap();
-            for server_process in server_processes.iter_mut() {
-                Env::stop_server(server_process);
+            if let Some(server_process) = db.server_processes.clone() {
+                let mut server_processes = server_process.lock().unwrap();
+                for server_process in server_processes.iter_mut() {
+                    Env::stop_server(server_process);
+                }
             }
         }
 
@@ -265,8 +324,10 @@ impl Env {
             processes
         };
 
-        let mut server_processes = db.server_processes.lock().unwrap();
-        *server_processes = new_server_processes;
+        if let Some(server_process) = db.server_processes.clone() {
+            let mut server_processes = server_process.lock().unwrap();
+            *server_processes = new_server_processes;
+        }
     }
 
     /// Generate config file to `/tmp/{subcommand}-{current_time}.toml`
@@ -332,7 +393,7 @@ impl Env {
 }
 
 pub struct GreptimeDB {
-    server_processes: Arc<Mutex<Vec<Child>>>,
+    server_processes: Option<Arc<Mutex<Vec<Child>>>>,
     metasrv_process: Option<Child>,
     frontend_process: Option<Child>,
     client: TokioMutex<DB>,
@@ -344,7 +405,7 @@ pub struct GreptimeDB {
 #[async_trait]
 impl Database for GreptimeDB {
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
-        if ctx.context.contains_key("restart") {
+        if ctx.context.contains_key("restart") && self.env.server_addr.is_none() {
             self.env.restart_server(self).await;
         }
 
@@ -383,9 +444,11 @@ impl Database for GreptimeDB {
 impl GreptimeDB {
     #![allow(clippy::print_stdout)]
     fn stop(&mut self) {
-        let mut servers = self.server_processes.lock().unwrap();
-        for server in servers.iter_mut() {
-            Env::stop_server(server);
+        if let Some(server_processes) = self.server_processes.clone() {
+            let mut server_processes = server_processes.lock().unwrap();
+            for server_process in server_processes.iter_mut() {
+                Env::stop_server(server_process);
+            }
         }
         if let Some(mut metasrv) = self.metasrv_process.take() {
             Env::stop_server(&mut metasrv);
@@ -399,7 +462,9 @@ impl GreptimeDB {
 
 impl Drop for GreptimeDB {
     fn drop(&mut self) {
-        self.stop();
+        if self.env.server_addr.is_none() {
+            self.stop();
+        }
     }
 }
 
