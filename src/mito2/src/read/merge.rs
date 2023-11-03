@@ -17,8 +17,10 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use common_telemetry::info;
 use common_time::Timestamp;
 
 use crate::error::Result;
@@ -27,6 +29,12 @@ use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Minimum batch size to output.
 const MIN_BATCH_SIZE: usize = 64;
+
+#[derive(Debug, Default)]
+#[allow(unused)]
+struct Metrics {
+    scan_cost: Duration,
+}
 
 /// Reader to merge sorted batches.
 ///
@@ -51,11 +59,13 @@ pub struct MergeReader {
     /// Suggested size of each batch. The batch returned by the reader can have more rows than the
     /// batch size.
     batch_size: usize,
+    metrics: Metrics,
 }
 
 #[async_trait]
 impl BatchReader for MergeReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let start = Instant::now();
         while !self.hot.is_empty() && self.batch_merger.num_rows() < self.batch_size {
             if let Some(current_key) = self.batch_merger.primary_key() {
                 // If the hottest node has a different key, we have finish collecting current key.
@@ -76,16 +86,26 @@ impl BatchReader for MergeReader {
 
         if self.batch_merger.is_empty() {
             // Nothing fetched.
+            self.metrics.scan_cost += start.elapsed();
             Ok(None)
         } else {
-            self.batch_merger.merge_batches()
+            let batch = self.batch_merger.merge_batches();
+            self.metrics.scan_cost += start.elapsed();
+            batch
         }
+    }
+}
+
+impl Drop for MergeReader {
+    fn drop(&mut self) {
+        info!("Merge reader metrics: {:?}", self.metrics);
     }
 }
 
 impl MergeReader {
     /// Creates and initializes a new [MergeReader].
     pub async fn new(sources: Vec<Source>, batch_size: usize) -> Result<MergeReader> {
+        let start = Instant::now();
         let mut cold = BinaryHeap::with_capacity(sources.len());
         let hot = BinaryHeap::with_capacity(sources.len());
         for source in sources {
@@ -101,10 +121,12 @@ impl MergeReader {
             cold,
             batch_merger: BatchMerger::new(),
             batch_size,
+            metrics: Metrics::default(),
         };
         // Initializes the reader.
         reader.refill_hot();
 
+        reader.metrics.scan_cost += start.elapsed();
         Ok(reader)
     }
 

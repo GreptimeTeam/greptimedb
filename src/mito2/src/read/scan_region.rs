@@ -15,7 +15,7 @@
 //! Scans a region according to the scan request.
 
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::info;
 use common_time::range::TimestampRange;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
@@ -175,7 +175,7 @@ impl ScanRegion {
             })
             .collect();
 
-        debug!(
+        info!(
             "Seq scan region {}, request: {:?}, memtables: {}, ssts_to_read: {}, total_ssts: {}",
             self.version.metadata.region_id,
             self.request,

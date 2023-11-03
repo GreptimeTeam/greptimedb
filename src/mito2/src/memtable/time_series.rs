@@ -17,9 +17,10 @@ use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, info};
 use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
@@ -319,6 +320,7 @@ impl SeriesSet {
             pk_schema: primary_key_schema,
             primary_key_builders,
             codec: self.codec.clone(),
+            metrics: Metrics::default(),
         }
     }
 }
@@ -346,6 +348,16 @@ fn primary_key_builders(
     (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
+#[derive(Default, Debug)]
+#[allow(unused)]
+struct Metrics {
+    num_rows: usize,
+    range_cost: Duration,
+    filter_cost: Duration,
+    scan_cost: Duration,
+    num_pruned_series: usize,
+}
+
 struct Iter {
     metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
@@ -355,23 +367,34 @@ struct Iter {
     pk_schema: arrow::datatypes::SchemaRef,
     primary_key_builders: Vec<Box<dyn MutableVector>>,
     codec: Arc<McmpRowCodec>,
+    metrics: Metrics,
+}
+
+impl Drop for Iter {
+    fn drop(&mut self) {
+        info!("iter memtable, metrics: {:?}", self.metrics);
+    }
 }
 
 impl Iterator for Iter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let next_start = Instant::now();
         let map = self.series.read().unwrap();
+        let start = Instant::now();
         let range = match &self.last_key {
             None => map.range::<Vec<u8>, _>(..),
             Some(last_key) => {
                 map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
             }
         };
+        self.metrics.range_cost += start.elapsed();
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
         for (primary_key, series) in range {
             let mut series = series.write().unwrap();
+            let start = Instant::now();
             if !self.predicate.is_empty()
                 && !prune_primary_key(
                     &self.codec,
@@ -383,15 +406,21 @@ impl Iterator for Iter {
                 )
             {
                 // read next series
+                self.metrics.filter_cost += start.elapsed();
+                self.metrics.num_pruned_series += 1;
                 continue;
             }
+            self.metrics.filter_cost += start.elapsed();
             self.last_key = Some(primary_key.clone());
 
             let values = series.compact(&self.metadata);
-            return Some(
-                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)),
-            );
+            let batch =
+                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
+            self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+            self.metrics.scan_cost += next_start.elapsed();
+            return Some(batch);
         }
+        self.metrics.scan_cost += next_start.elapsed();
         None
     }
 }

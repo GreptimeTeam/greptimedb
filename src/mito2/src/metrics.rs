@@ -105,4 +105,18 @@ lazy_static! {
     /// Counter of failed compaction task.
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("mito_compaction_failure_total", "mito compaction failure total").unwrap();
+    // ------- End of compaction metrics.
+
+    // Query metrics.
+    /// Timer of different stages to read a SST.
+    pub static ref SST_READ_ELAPSED_TOTAL: HistogramVec = register_histogram_vec!(
+        "mito_sst_read_total_elapsed",
+        "mito sst read total elapsed",
+        &[STAGE_LABEL]
+    )
+    .unwrap();
+    /// Counter of rows read from SSTs.
+    pub static ref SST_READ_ROWS_TOTAL: IntCounter =
+        register_int_counter!("mito_sst_read_rows_total", "mito sst read rows total").unwrap();
+    // ------- End of query metrics.
 }
