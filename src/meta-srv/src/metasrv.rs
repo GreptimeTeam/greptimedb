@@ -24,7 +24,7 @@ use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
-use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -39,7 +39,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::cluster::MetaPeerClientRef;
 use crate::election::{Election, LeaderChangeMessage};
 use crate::error::{
-    InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
+    self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
 use crate::handler::HeartbeatHandlerGroup;
@@ -47,6 +47,9 @@ use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
+use crate::service::store::cached_kv::LeaderCachedKvBackend;
+use crate::state::{become_follower, become_leader, StateRef};
+
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
@@ -176,10 +179,20 @@ pub struct MetaStateHandler {
     procedure_manager: ProcedureManagerRef,
     subscribe_manager: Option<SubscribeManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
+    leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
+    state: StateRef,
 }
 
 impl MetaStateHandler {
     pub async fn on_become_leader(&self) {
+        self.state.write().unwrap().next_state(become_leader(false));
+
+        if let Err(e) = self.leader_cached_kv_backend.load().await {
+            error!(e; "Failed to load kv into leader cache kv store");
+        } else {
+            self.state.write().unwrap().next_state(become_leader(true));
+        }
+
         if let Err(e) = self.procedure_manager.start().await {
             error!(e; "Failed to start procedure manager");
         }
@@ -187,6 +200,8 @@ impl MetaStateHandler {
     }
 
     pub async fn on_become_follower(&self) {
+        self.state.write().unwrap().next_state(become_follower());
+
         // Stops the procedures.
         if let Err(e) = self.procedure_manager.stop().await {
             error!(e; "Failed to stop procedure manager");
@@ -205,13 +220,14 @@ impl MetaStateHandler {
 
 #[derive(Clone)]
 pub struct MetaSrv {
+    state: StateRef,
     started: Arc<AtomicBool>,
     options: MetaSrvOptions,
     // It is only valid at the leader node and is used to temporarily
     // store some data that will not be persisted.
     in_memory: ResettableKvBackendRef,
     kv_backend: KvBackendRef,
-    leader_cached_kv_backend: ResettableKvBackendRef,
+    leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
     table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
@@ -254,6 +270,8 @@ impl MetaSrv {
                 greptimedb_telemetry_task,
                 subscribe_manager,
                 procedure_manager,
+                state: self.state.clone(),
+                leader_cached_kv_backend: leader_cached_kv_backend.clone(),
             };
             let _handle = common_runtime::spawn_bg(async move {
                 loop {
@@ -299,6 +317,11 @@ impl MetaSrv {
                 info!("MetaSrv stopped");
             });
         } else {
+            // Always load kv into cached kv store.
+            self.leader_cached_kv_backend
+                .load()
+                .await
+                .context(error::KvBackendSnafu)?;
             self.procedure_manager
                 .start()
                 .await
@@ -335,10 +358,6 @@ impl MetaSrv {
 
     pub fn kv_backend(&self) -> &KvBackendRef {
         &self.kv_backend
-    }
-
-    pub fn leader_cached_kv_backend(&self) -> &ResettableKvBackendRef {
-        &self.leader_cached_kv_backend
     }
 
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {

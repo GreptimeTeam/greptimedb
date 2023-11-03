@@ -15,20 +15,26 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use common_meta::error::{Error, Result};
+use common_meta::key::CACHE_KEY_PREFIXES;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnRequest, TxnResponse};
 use common_meta::kv_backend::{
     KvBackend, KvBackendRef, ResettableKvBackend, ResettableKvBackendRef, TxnService,
 };
+use common_meta::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use common_meta::rpc::KeyValue;
+use futures::TryStreamExt;
+
+use crate::metrics;
+use crate::state::State;
 
 pub type CheckLeaderRef = Arc<dyn CheckLeader>;
 
@@ -41,6 +47,12 @@ struct AlwaysLeader;
 impl CheckLeader for AlwaysLeader {
     fn check(&self) -> bool {
         true
+    }
+}
+
+impl CheckLeader for RwLock<State> {
+    fn check(&self) -> bool {
+        self.read().unwrap().enable_leader_cache()
     }
 }
 
@@ -77,6 +89,37 @@ impl LeaderCachedKvBackend {
     /// mainly used in test scenarios.
     pub fn with_always_leader(store: KvBackendRef) -> Self {
         Self::new(Arc::new(AlwaysLeader), store)
+    }
+
+    /// The caller MUST ensure during the loading, there are no mutation requests reaching the `LeaderCachedKvStore`.
+    pub async fn load(&self) -> Result<()> {
+        for prefix in &CACHE_KEY_PREFIXES[..] {
+            let _timer = metrics::METRIC_META_LEADER_CACHED_KV_LOAD.with_label_values(&[prefix]);
+
+            // TODO(weny): Refactors PaginationStream's output to unary output.
+            let stream = PaginationStream::new(
+                self.store.clone(),
+                RangeRequest::new().with_prefix(prefix.as_bytes()),
+                DEFAULT_PAGE_SIZE,
+                Arc::new(|kv| Ok((kv, ()))),
+            );
+
+            let kvs = stream
+                .try_collect::<Vec<_>>()
+                .await?
+                .into_iter()
+                .map(|(kv, _)| kv)
+                .collect();
+
+            self.cache
+                .batch_put(BatchPutRequest {
+                    kvs,
+                    prev_kv: false,
+                })
+                .await?;
+        }
+
+        Ok(())
     }
 
     #[inline]
@@ -141,7 +184,14 @@ impl KvBackend for LeaderCachedKvBackend {
 
         let ver = self.get_version();
 
-        let res = self.store.range(req.clone()).await?;
+        let res = self
+            .store
+            .range(RangeRequest {
+                // ignores `keys_only`
+                keys_only: false,
+                ..req.clone()
+            })
+            .await?;
         if !res.kvs.is_empty() {
             let KeyValue { key, value } = res.kvs[0].clone();
             let put_req = PutRequest {

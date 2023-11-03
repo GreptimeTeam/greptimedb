@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
@@ -55,6 +55,7 @@ use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
+use crate::state::State;
 use crate::table_meta_alloc::MetaSrvTableMetadataAllocator;
 
 // TODO(fys): try use derive_builder macro
@@ -157,7 +158,18 @@ impl MetaSrvBuilder {
 
         let kv_backend = kv_backend.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
-        let leader_cached_kv_backend = build_leader_cached_kv_backend(&election, &kv_backend);
+
+        let state = Arc::new(RwLock::new(match election {
+            None => State::leader(options.server_addr.to_string(), true),
+            Some(_) => State::follower(options.server_addr.to_string()),
+        }));
+
+        let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::new(
+            state.clone(),
+            kv_backend.clone(),
+        ));
+        let kv_backend = leader_cached_kv_backend.clone() as _;
+
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
@@ -241,6 +253,7 @@ impl MetaSrvBuilder {
         let metasrv_home = options.data_home.to_string();
 
         Ok(MetaSrv {
+            state,
             started,
             options,
             in_memory,
@@ -265,16 +278,6 @@ impl MetaSrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
         })
     }
-}
-
-fn build_leader_cached_kv_backend(
-    election: &Option<ElectionRef>,
-    kv_backend: &KvBackendRef,
-) -> Arc<LeaderCachedKvBackend> {
-    Arc::new(LeaderCachedKvBackend::new(
-        Arc::new(CheckLeaderByElection(election.clone())),
-        kv_backend.clone(),
-    ))
 }
 
 fn build_default_meta_peer_client(

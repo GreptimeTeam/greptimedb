@@ -39,7 +39,16 @@ enum PaginationStreamState<K, V> {
     Error,
 }
 
-pub const DEFAULT_PAGE_SIZE: usize = 512;
+/// The Range Request's default page size.
+///
+/// It dependents on upstream KvStore server side grpc message size limitation.
+/// (e.g., etcd has default grpc message size limitation is 4MiB)
+///
+/// Generally, almost all metadata is smaller than is 2700 Byte.
+/// Therefore, We can set the [DEFAULT_PAGE_SIZE] to 1536 statically.
+///
+/// TODO(weny): Considers updating the default page size dynamically.
+pub const DEFAULT_PAGE_SIZE: usize = 1536;
 
 struct PaginationStreamFactory {
     kv: KvBackendRef,

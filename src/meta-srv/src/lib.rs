@@ -14,6 +14,7 @@
 
 #![feature(async_closure)]
 #![feature(result_flattening)]
+#![feature(assert_matches)]
 
 pub mod bootstrap;
 mod cache_invalidator;
@@ -34,6 +35,7 @@ pub mod pubsub;
 pub mod region;
 pub mod selector;
 pub mod service;
+pub mod state;
 pub mod table_meta_alloc;
 
 pub use crate::error::Result;
