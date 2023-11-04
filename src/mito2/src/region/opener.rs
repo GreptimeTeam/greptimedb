@@ -250,7 +250,7 @@ impl RegionOpener {
 
     /// Returns a new manifest options.
     fn manifest_options(&self, config: &MitoConfig) -> Result<RegionManifestOptions> {
-        let options = RegionOptions::try_from(&self.options).unwrap(); // TODO: error handling
+        let options = RegionOptions::try_from(&self.options)?;
         let object_store = self.object_store(&options.storage)?.clone();
         Ok(RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
@@ -260,7 +260,7 @@ impl RegionOpener {
         })
     }
 
-    /// Returns a object store corresponding to the name. If the object sotre doesn't exist, this method returns the default object store.
+    /// Returns an object store corresponding to the name. If the object sotre doesn't exist, this method returns the default object store.
     fn object_store(&self, name: &Option<String>) -> Result<&object_store::ObjectStore> {
         if let Some(name) = name {
             Ok(self
