@@ -139,10 +139,10 @@ impl RegionOpener {
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_optionss = self.manifest_options(config)?;
+        let region_manifest_options = self.manifest_options(config)?;
         let metadata = Arc::new(self.metadata.unwrap());
         let manifest_manager =
-            RegionManifestManager::new(metadata.clone(), region_manifest_optionss).await?;
+            RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
 
         let mutable = self.memtable_builder.build(&metadata);
 
