@@ -182,7 +182,7 @@ impl Timestamp {
 
     /// Split a [Timestamp] into seconds part and nanoseconds part.
     /// Notice the seconds part of split result is always rounded down to floor.
-    fn split(&self) -> (i64, u32) {
+    pub fn split(&self) -> (i64, u32) {
         let sec_mul = (TimeUnit::Second.factor() / self.unit.factor()) as i64;
         let nsec_mul = (self.unit.factor() / TimeUnit::Nanosecond.factor()) as i64;
 
