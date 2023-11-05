@@ -271,7 +271,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_common_decimal() {
+    fn test_common_decimal128() {
         let decimal = Decimal128::new(123456789, 9, 3);
         assert_eq!(decimal.to_string(), "123456.789");
 
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decimal_from_str() {
+    fn test_decimal128_from_str() {
         // 0 < precision <= 28
         let decimal = Decimal128::from_str("1234567890.123456789").unwrap();
         assert_eq!(decimal.to_string(), "1234567890.123456789");
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn test_parse_decimal_speed() {
+    fn test_parse_decimal128_speed() {
         // RustDecimal::from_str: 1.124855167s
         for _ in 0..1500000 {
             let _ = RustDecimal::from_str("1234567890.123456789012345678999").unwrap();
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decimal_precision_and_scale() {
+    fn test_decimal128_precision_and_scale() {
         // precision and scale from Deicmal(1,0) to Decimal(38,38)
         for precision in 1..=38 {
             for scale in 1..=precision {
