@@ -110,8 +110,8 @@ impl PartialOrd for Decimal128 {
 }
 
 /// Convert from string to Decimal128
-/// If the string length is less than 18, the result is accurate.
-/// Otherwise, the result is a round value.
+/// If the string length is less than 28, the result of rust_decimal will underflow,
+/// In this case, use BigDecimal to get accurate result.
 impl FromStr for Decimal128 {
     type Err = Error;
 
@@ -387,13 +387,9 @@ mod tests {
         let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
         assert!(decimal1 != decimal2);
 
-        // different precision and scale, all false
+        // different precision and scale cmp is None
         let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
         let decimal2 = Decimal128::from_str("1234567890.123").unwrap();
-        assert!(!(decimal1 > decimal2));
-        assert!(!(decimal1 < decimal2));
-        assert!(!(decimal1 >= decimal2));
-        assert!(!(decimal1 <= decimal2));
-        assert!(!(decimal1 == decimal2));
+        assert_eq!(decimal1.partial_cmp(&decimal2), None);
     }
 }
