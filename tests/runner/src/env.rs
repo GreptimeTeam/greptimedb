@@ -45,7 +45,6 @@ const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafus
 pub struct Env {
     data_home: PathBuf,
     server_addr: Option<String>,
-    specified_mode: String,
 }
 
 #[allow(clippy::print_stdout)]
@@ -56,53 +55,43 @@ impl EnvController for Env {
     async fn start(&self, mode: &str, _config: Option<&Path>) -> Self::DB {
         match mode {
             "standalone" => {
-                if self.specified_mode == "all" || self.specified_mode == "standalone" {
-                    if let Some(server_addr) = self.server_addr.clone() {
-                        let client = Client::with_urls(vec![server_addr.clone()]);
-                        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-                        GreptimeDB {
-                            client: TokioMutex::new(db),
-                            server_processes: None,
-                            metasrv_process: None,
-                            frontend_process: None,
-                            ctx: GreptimeDBContext {
-                                time: 0,
-                                datanode_id: Default::default(),
-                            },
-                            is_standalone: false,
-                            env: self.clone(),
-                        }
-                    } else {
-                        self.start_standalone().await
+                if let Some(server_addr) = self.server_addr.clone() {
+                    let client = Client::with_urls(vec![server_addr.clone()]);
+                    let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+                    GreptimeDB {
+                        client: TokioMutex::new(db),
+                        server_processes: None,
+                        metasrv_process: None,
+                        frontend_process: None,
+                        ctx: GreptimeDBContext {
+                            time: 0,
+                            datanode_id: Default::default(),
+                        },
+                        is_standalone: false,
+                        env: self.clone(),
                     }
                 } else {
-                    // Exit and do nothing.
-                    std::process::exit(0);
+                    self.start_standalone().await
                 }
             }
             "distributed" => {
-                if self.specified_mode == "all" || self.specified_mode == "distributed" {
-                    if let Some(server_addr) = self.server_addr.clone() {
-                        let client = Client::with_urls(vec![server_addr.clone()]);
-                        let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
-                        GreptimeDB {
-                            client: TokioMutex::new(db),
-                            server_processes: None,
-                            metasrv_process: None,
-                            frontend_process: None,
-                            ctx: GreptimeDBContext {
-                                time: 0,
-                                datanode_id: Default::default(),
-                            },
-                            is_standalone: false,
-                            env: self.clone(),
-                        }
-                    } else {
-                        self.start_distributed().await
+                if let Some(server_addr) = self.server_addr.clone() {
+                    let client = Client::with_urls(vec![server_addr.clone()]);
+                    let db = DB::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+                    GreptimeDB {
+                        client: TokioMutex::new(db),
+                        server_processes: None,
+                        metasrv_process: None,
+                        frontend_process: None,
+                        ctx: GreptimeDBContext {
+                            time: 0,
+                            datanode_id: Default::default(),
+                        },
+                        is_standalone: false,
+                        env: self.clone(),
                     }
                 } else {
-                    // Exit and do nothing.
-                    std::process::exit(0);
+                    self.start_distributed().await
                 }
             }
             _ => panic!("Unexpected mode: {mode}"),
@@ -117,11 +106,10 @@ impl EnvController for Env {
 
 #[allow(clippy::print_stdout)]
 impl Env {
-    pub fn new(data_home: PathBuf, server_addr: Option<String>, specified_mode: String) -> Self {
+    pub fn new(data_home: PathBuf, server_addr: Option<String>) -> Self {
         Self {
             data_home,
             server_addr,
-            specified_mode,
         }
     }
 
