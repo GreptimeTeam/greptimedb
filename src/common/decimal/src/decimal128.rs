@@ -59,9 +59,8 @@ impl Decimal128 {
         }
     }
 
-    /// Create a new Decimal128 from i128, precision and scale.
-    /// If the precision or scale is invalid, return error.
-    pub fn new_with_check(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
+    pub fn try_new_decimal128(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
+        // make sure the precision and scale is valid.
         valid_precision_and_scale(precision as u64, scale as i64)?;
         Ok(Self {
             value,
@@ -92,21 +91,21 @@ impl Decimal128 {
 
 impl PartialEq for Decimal128 {
     fn eq(&self, other: &Self) -> bool {
-        self.value.eq(&other.value)
+        self.precision.eq(&other.precision)
+            && self.scale.eq(&other.scale)
+            && self.value.eq(&other.value)
     }
 }
 
 impl Eq for Decimal128 {}
 
+// Two decimal values can be compared if they have the same precision and scale.
 impl PartialOrd for Decimal128 {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Decimal128 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.value.cmp(&other.value)
+        if self.precision == other.precision && self.scale == other.scale {
+            return self.value.partial_cmp(&other.value);
+        }
+        None
     }
 }
 
@@ -196,7 +195,7 @@ impl TryFrom<BigDecimal> for Decimal128 {
         // conver big_int to i128, if convert failed, return error
         big_int
             .to_i128()
-            .map(|val| Self::new_with_check(val, precision as u8, scale as i8))
+            .map(|val| Self::try_new_decimal128(val, precision as u8, scale as i8))
             .unwrap_or_else(|| BigDecimalOutOfRangeSnafu { value }.fail())
     }
 }
@@ -275,31 +274,31 @@ mod tests {
         let decimal = Decimal128::new(123456789, 9, 3);
         assert_eq!(decimal.to_string(), "123456.789");
 
-        let decimal = Decimal128::new_with_check(123456789, 9, 0);
+        let decimal = Decimal128::try_new_decimal128(123456789, 9, 0);
         assert_eq!(decimal.unwrap().to_string(), "123456789");
 
-        let decimal = Decimal128::new_with_check(123456789, 9, 2);
+        let decimal = Decimal128::try_new_decimal128(123456789, 9, 2);
         assert_eq!(decimal.unwrap().to_string(), "1234567.89");
 
-        let decimal = Decimal128::new_with_check(123, 3, -2);
+        let decimal = Decimal128::try_new_decimal128(123, 3, -2);
         assert_eq!(decimal.unwrap().to_string(), "12300");
 
         // invalid precision or scale
 
         // precision is 0
-        let decimal = Decimal128::new_with_check(123, 0, 0);
+        let decimal = Decimal128::try_new_decimal128(123, 0, 0);
         assert!(decimal.is_err());
 
         // precision is greater than 38
-        let decimal = Decimal128::new_with_check(123, 39, 0);
+        let decimal = Decimal128::try_new_decimal128(123, 39, 0);
         assert!(decimal.is_err());
 
         // scale is greater than 38
-        let decimal = Decimal128::new_with_check(123, 38, 39);
+        let decimal = Decimal128::try_new_decimal128(123, 38, 39);
         assert!(decimal.is_err());
 
         // scale is greater than precision
-        let decimal = Decimal128::new_with_check(123, 3, 4);
+        let decimal = Decimal128::try_new_decimal128(123, 3, 4);
         assert!(decimal.is_err());
     }
 
@@ -359,5 +358,42 @@ mod tests {
                 assert_eq!(decimal_str, decimal.to_string());
             }
         }
+    }
+
+    #[test]
+    fn test_decimal128_compare() {
+        // the same precision and scale
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        assert!(decimal1 == decimal2);
+
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
+        assert!(decimal1 > decimal2);
+
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
+        assert!(decimal2 < decimal1);
+
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
+        assert!(decimal1 >= decimal2);
+
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
+        assert!(decimal2 <= decimal1);
+
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123456789012345678998").unwrap();
+        assert!(decimal1 != decimal2);
+
+        // different precision and scale, all false
+        let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
+        let decimal2 = Decimal128::from_str("1234567890.123").unwrap();
+        assert!(!(decimal1 > decimal2));
+        assert!(!(decimal1 < decimal2));
+        assert!(!(decimal1 >= decimal2));
+        assert!(!(decimal1 <= decimal2));
+        assert!(!(decimal1 == decimal2));
     }
 }
