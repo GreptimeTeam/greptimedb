@@ -4765,6 +4765,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "datafusion",
  "datatypes",
  "mito2",
  "object-store",

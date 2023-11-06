@@ -12,15 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::SemanticType;
+use api::v1::value::ValueData;
+use api::v1::{self, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
+use common_recordbatch::util::collect;
+use datafusion::prelude::{col, lit, Expr};
+use datatypes::vectors::StringVector;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionPutRequest, RegionReadRequest};
+use store_api::storage::{RegionId, ScanRequest};
 
+use crate::engine::{
+    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
+    METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
+};
 use crate::error::{
-    DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu, Result, TableAlreadyExistsSnafu,
+    CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu,
+    MitoReadOperationSnafu, MitoWriteOperationSnafu, Result, TableAlreadyExistsSnafu,
 };
 use crate::utils;
 
@@ -41,15 +52,21 @@ pub struct MetadataRegion {
 }
 
 impl MetadataRegion {
+    pub fn new(mito: MitoEngine) -> Self {
+        Self { mito }
+    }
+
     /// Add a new table key to metadata.
     ///
     /// This method will check if the table key already exists, if so, it will return
     /// a [TableAlreadyExistsSnafu] error.
-    pub fn add_table(&self, region_id: RegionId, table_name: &str) -> Result<()> {
+    pub async fn add_table(&self, region_id: RegionId, table_name: &str) -> Result<()> {
         let region_id = utils::to_metadata_region_id(region_id);
         let table_key = Self::concat_table_key(table_name);
 
-        let put_success = self.put_conditionally(region_id, table_key, String::new())?;
+        let put_success = self
+            .put_conditionally(region_id, table_key, String::new())
+            .await?;
 
         if !put_success {
             TableAlreadyExistsSnafu { table_name }.fail()
@@ -60,14 +77,15 @@ impl MetadataRegion {
 
     /// Add a new column key to metadata.
     ///
-    /// This method won't check if the column already exists.
-    pub fn add_column(
+    /// This method won't check if the column already exists. But
+    /// will return if the column is successfully added.
+    pub async fn add_column(
         &self,
         region_id: RegionId,
         table_name: &str,
         column_name: &str,
         semantic_type: SemanticType,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(region_id);
         let column_key = Self::concat_column_key(table_name, column_name);
 
@@ -75,8 +93,30 @@ impl MetadataRegion {
             region_id,
             column_key,
             Self::serialize_semantic_type(semantic_type),
-        )?;
-        Ok(())
+        )
+        .await
+    }
+
+    /// Check if the given table exists.
+    pub async fn is_table_exist(&self, region_id: RegionId, table_name: &str) -> Result<bool> {
+        let region_id = utils::to_metadata_region_id(region_id);
+        let table_key = Self::concat_table_key(table_name);
+        self.exist(region_id, &table_key).await
+    }
+
+    /// Check if the given column exists. Return the semantic type if exists.
+    pub async fn column_semantic_type(
+        &self,
+        region_id: RegionId,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<Option<SemanticType>> {
+        let region_id = utils::to_metadata_region_id(region_id);
+        let column_key = Self::concat_column_key(table_name, column_name);
+        let semantic_type = self.get(region_id, &column_key).await?;
+        semantic_type
+            .map(|s| Self::deserialize_semantic_type(&s))
+            .transpose()
     }
 }
 
@@ -136,24 +176,134 @@ impl MetadataRegion {
 impl MetadataRegion {
     /// Put if not exist, return if this put operation is successful (error other
     /// than "key already exist" will be wrapped in [Err]).
-    pub fn put_conditionally(
+    pub async fn put_conditionally(
         &self,
         region_id: RegionId,
         key: String,
         value: String,
     ) -> Result<bool> {
-        todo!()
+        if self.exist(region_id, &key).await? {
+            return Ok(false);
+        }
+
+        let put_request = Self::build_put_request(&key, &value);
+        self.mito
+            .handle_request(
+                region_id,
+                store_api::region_request::RegionRequest::Put(put_request),
+            )
+            .await
+            .context(MitoWriteOperationSnafu)?;
+        Ok(true)
     }
 
     /// Check if the given key exists.
-    pub fn exist(&self, region_id: RegionId, key: &str) -> Result<bool> {
-        todo!()
+    ///
+    /// Notice that due to mito doesn't support transaction, TOCTTOU is possible.
+    pub async fn exist(&self, region_id: RegionId, key: &str) -> Result<bool> {
+        let scan_req = Self::build_read_request(key);
+        let record_batch_stream = self
+            .mito
+            .handle_query(region_id, scan_req)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let scan_result = collect(record_batch_stream)
+            .await
+            .context(CollectRecordBatchStreamSnafu)?;
+
+        let exist = !scan_result.is_empty() && scan_result.first().unwrap().num_rows() != 0;
+        Ok(exist)
+    }
+
+    /// Retrieves the value associated with the given key in the specified region.
+    /// Returns `Ok(None)` if the key is not found.
+    pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
+        let scan_req = Self::build_read_request(key);
+        let record_batch_stream = self
+            .mito
+            .handle_query(region_id, scan_req)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let mut scan_result = collect(record_batch_stream)
+            .await
+            .context(CollectRecordBatchStreamSnafu)?;
+
+        let Some(first_batch) = scan_result.first() else {
+            return Ok(None);
+        };
+
+        let val = first_batch
+            .column(0)
+            .get_ref(0)
+            .as_string()
+            .unwrap()
+            .map(|s| s.to_string());
+
+        Ok(val)
+    }
+
+    /// Builds a [ScanRequest] to read metadata for a given key.
+    /// The request will contains a EQ filter on the key column.
+    ///
+    /// Only the value column is projected.
+    fn build_read_request(key: &str) -> ScanRequest {
+        let filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
+
+        ScanRequest {
+            sequence: None,
+            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            filters: vec![filter_expr.into()],
+            output_ordering: None,
+            limit: None,
+        }
+    }
+
+    fn build_put_request(key: &str, value: &str) -> RegionPutRequest {
+        let cols = vec![
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as _,
+                semantic_type: SemanticType::Timestamp as _,
+            },
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::String as _,
+                semantic_type: SemanticType::Tag as _,
+            },
+            ColumnSchema {
+                column_name: METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string(),
+                datatype: ColumnDataType::String as _,
+                semantic_type: SemanticType::Field as _,
+            },
+        ];
+        let rows = Rows {
+            schema: cols,
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(0)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::StringValue(key.to_string())),
+                    },
+                    Value {
+                        value_data: Some(ValueData::StringValue(value.to_string())),
+                    },
+                ],
+            }],
+        };
+
+        RegionPutRequest { rows }
     }
 }
 
 #[cfg(test)]
 mod test {
+    use store_api::region_request::RegionRequest;
+
     use super::*;
+    use crate::test_util::TestEnv;
+    use crate::utils::to_metadata_region_id;
 
     #[test]
     fn test_concat_table_key() {
@@ -225,5 +375,164 @@ mod test {
 
         let semantic_type = "\"InvalidType\"";
         assert!(MetadataRegion::deserialize_semantic_type(semantic_type).is_err());
+    }
+
+    #[test]
+    fn test_build_read_request() {
+        let key = "test_key";
+        let expected_filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
+        let expected_scan_request = ScanRequest {
+            sequence: None,
+            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            filters: vec![expected_filter_expr.into()],
+            output_ordering: None,
+            limit: None,
+        };
+        let actual_scan_request = MetadataRegion::build_read_request(key);
+        assert_eq!(actual_scan_request, expected_scan_request);
+    }
+
+    #[tokio::test]
+    async fn test_put_conditionally() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        // Test inserting a new key-value pair
+        let key = "test_key".to_string();
+        let value = "test_value".to_string();
+        let result = metadata_region
+            .put_conditionally(region_id, key.clone(), value.clone())
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap());
+
+        // Verify that the key-value pair was actually inserted
+        let scan_req = MetadataRegion::build_read_request("test_key");
+        let record_batch_stream = metadata_region
+            .mito
+            .handle_query(region_id, scan_req)
+            .await
+            .unwrap();
+        let scan_result = collect(record_batch_stream).await.unwrap();
+        assert_eq!(scan_result.len(), 1);
+
+        // Test inserting the same key-value pair again
+        let result = metadata_region
+            .put_conditionally(region_id, key.clone(), value.clone())
+            .await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap(),);
+    }
+
+    #[tokio::test]
+    async fn test_exist() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        // Test checking for a non-existent key
+        let key = "test_key".to_string();
+        let result = metadata_region.exist(region_id, &key).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+
+        // Test inserting a key and then checking for its existence
+        let value = "test_value".to_string();
+        let put_request = MetadataRegion::build_put_request(&key, &value);
+        metadata_region
+            .mito
+            .handle_request(region_id, RegionRequest::Put(put_request))
+            .await
+            .unwrap();
+        let result = metadata_region.exist(region_id, &key).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap(),);
+    }
+
+    #[tokio::test]
+    async fn test_get() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        // Test getting a non-existent key
+        let key = "test_key".to_string();
+        let result = metadata_region.get(region_id, &key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Test inserting a key and then getting its value
+        let value = "test_value".to_string();
+        let put_request = MetadataRegion::build_put_request(&key, &value);
+        metadata_region
+            .mito
+            .handle_request(region_id, RegionRequest::Put(put_request))
+            .await
+            .unwrap();
+        let result = metadata_region.get(region_id, &key).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(value));
+    }
+
+    #[tokio::test]
+    async fn test_add_table() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        // add one table
+        let table_name = "table1";
+        metadata_region
+            .add_table(region_id, table_name)
+            .await
+            .unwrap();
+        assert!(metadata_region
+            .is_table_exist(region_id, table_name)
+            .await
+            .unwrap());
+
+        // add it again
+        assert!(metadata_region
+            .add_table(region_id, table_name)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_add_column() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let metadata_region = env.metadata_region();
+        let region_id = to_metadata_region_id(env.default_region_id());
+
+        let table_name = "table1";
+        let column_name = "column1";
+        let semantic_type = SemanticType::Tag;
+        metadata_region
+            .add_column(region_id, table_name, column_name, semantic_type)
+            .await
+            .unwrap();
+        let actual_semantic_type = metadata_region
+            .column_semantic_type(region_id, table_name, column_name)
+            .await
+            .unwrap();
+        assert_eq!(actual_semantic_type, Some(semantic_type));
+
+        // duplicate column won't be updated
+        let is_updated = metadata_region
+            .add_column(region_id, table_name, column_name, SemanticType::Field)
+            .await
+            .unwrap();
+        assert!(!is_updated);
+        let actual_semantic_type = metadata_region
+            .column_semantic_type(region_id, table_name, column_name)
+            .await
+            .unwrap();
+        assert_eq!(actual_semantic_type, Some(semantic_type));
     }
 }

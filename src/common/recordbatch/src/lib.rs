@@ -43,7 +43,7 @@ pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
 
 pub type SendableRecordBatchStream = Pin<Box<dyn RecordBatchStream + Send>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderOption {
     pub name: String,
     pub options: SortOptions,

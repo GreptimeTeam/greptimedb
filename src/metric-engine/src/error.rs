@@ -53,6 +53,27 @@ pub enum Error {
         error: base64::DecodeError,
         location: Location,
     },
+
+    #[snafu(display("Mito read operation fails"))]
+    MitoReadOperation {
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Mito write operation fails"))]
+    MitoWriteOperation {
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to collect record batch stream"))]
+    CollectRecordBatchStream {
+        source: common_recordbatch::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Internal column {} is reserved", column))]
+    InternalColumnOccupied { column: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -62,11 +83,17 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            InternalColumnOccupied { .. } => StatusCode::InvalidArguments,
+
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
             | DecodeColumnValue { .. } => StatusCode::Unexpected,
 
-            CreateMitoRegion { source, .. } => source.status_code(),
+            CreateMitoRegion { source, .. }
+            | MitoReadOperation { source, .. }
+            | MitoWriteOperation { source, .. } => source.status_code(),
+
+            CollectRecordBatchStream { source, .. } => source.status_code(),
 
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
         }
