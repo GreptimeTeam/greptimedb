@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use api::v1::OpType;
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
@@ -400,7 +400,7 @@ fn prune_primary_key(
     codec: &Arc<McmpRowCodec>,
     pk: &[u8],
     series: &mut Series,
-    builders: &mut Vec<Box<dyn MutableVector>>,
+    builders: &mut [Box<dyn MutableVector>],
     pk_schema: arrow::datatypes::SchemaRef,
     predicate: &[Arc<dyn PhysicalExpr>],
 ) -> bool {
@@ -411,11 +411,18 @@ fn prune_primary_key(
 
     if let Some(rb) = series.pk_cache.as_ref() {
         let res = prune_inner(predicate, rb).unwrap_or(true);
-        debug!("Prune primary key: {:?}, res: {:?}", rb, res);
+        debug!(
+            "Prune primary key: {:?}, predicate: {:?}, res: {:?}",
+            rb, predicate, res
+        );
         res
     } else {
-        let Ok(rb) = pk_to_record_batch(codec, pk, builders, pk_schema) else {
-            return true;
+        let rb = match pk_to_record_batch(codec, pk, builders, pk_schema) {
+            Ok(rb) => rb,
+            Err(e) => {
+                error!(e; "Failed to build record batch from primary keys");
+                return true;
+            }
         };
         let res = prune_inner(predicate, &rb).unwrap_or(true);
         debug!("Prune primary key: {:?}, res: {:?}", rb, res);
@@ -459,11 +466,10 @@ fn prune_inner(predicates: &[Arc<dyn PhysicalExpr>], primary_key: &RecordBatch) 
 fn pk_to_record_batch(
     codec: &Arc<McmpRowCodec>,
     bytes: &[u8],
-    builders: &mut Vec<Box<dyn MutableVector>>,
+    builders: &mut [Box<dyn MutableVector>],
     pk_schema: arrow::datatypes::SchemaRef,
 ) -> Result<RecordBatch> {
     let pk_values = codec.decode(bytes).unwrap();
-    assert_eq!(builders.len(), pk_values.len());
 
     let arrays = builders
         .iter_mut()

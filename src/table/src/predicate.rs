@@ -38,7 +38,7 @@ use crate::predicate::stats::RowGroupPruningStatistics;
 
 mod stats;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Predicate {
     /// logical exprs
     exprs: Vec<Expr>,
@@ -67,13 +67,14 @@ impl Predicate {
         // registering variables.
         let execution_props = &ExecutionProps::new();
 
-        self.exprs
+        Ok(self
+            .exprs
             .iter()
-            .map(|expr| {
+            .filter_map(|expr| {
                 create_physical_expr(expr.df_expr(), df_schema.as_ref(), schema, execution_props)
+                    .ok()
             })
-            .collect::<Result<_, _>>()
-            .context(error::DatafusionSnafu)
+            .collect::<Vec<_>>())
     }
 
     /// Builds an empty predicate from given schema.
@@ -748,5 +749,22 @@ mod tests {
             .gt(30.lit())
             .or(datafusion_expr::Expr::Column(Column::from_name("cnt")).lt(20.lit()));
         assert_prune(40, vec![e.into()], vec![true, true, false, true]).await;
+    }
+
+    #[tokio::test]
+    async fn test_to_physical_expr() {
+        let predicate = Predicate::new(vec![
+            Expr::from(col("host").eq(lit("host_a"))),
+            Expr::from(col("ts").gt(lit(ScalarValue::TimestampMicrosecond(Some(123), None)))),
+        ]);
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![Field::new(
+            "host",
+            arrow::datatypes::DataType::Utf8,
+            false,
+        )]));
+
+        let predicates = predicate.to_physical_exprs(&schema).unwrap();
+        assert!(!predicates.is_empty());
     }
 }
