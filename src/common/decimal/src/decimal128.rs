@@ -52,7 +52,7 @@ pub struct Decimal128 {
 
 impl Decimal128 {
     /// Create a new Decimal128 from i128, precision and scale.
-    pub fn new(value: i128, precision: u8, scale: i8) -> Self {
+    pub fn new_unchecked(value: i128, precision: u8, scale: i8) -> Self {
         Self {
             value,
             precision,
@@ -60,7 +60,7 @@ impl Decimal128 {
         }
     }
 
-    pub fn try_new_decimal128(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
+    pub fn try_new(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
         // make sure the precision and scale is valid.
         valid_precision_and_scale(precision, scale)?;
         Ok(Self {
@@ -194,7 +194,7 @@ impl TryFrom<BigDecimal> for Decimal128 {
         // convert big_int to i128, if convert failed, return error
         big_int
             .to_i128()
-            .map(|val| Self::try_new_decimal128(val, precision as u8, scale as i8))
+            .map(|val| Self::try_new(val, precision as u8, scale as i8))
             .unwrap_or_else(|| BigDecimalOutOfRangeSnafu { value }.fail())
     }
 }
@@ -270,34 +270,34 @@ mod tests {
 
     #[test]
     fn test_common_decimal128() {
-        let decimal = Decimal128::new(123456789, 9, 3);
+        let decimal = Decimal128::new_unchecked(123456789, 9, 3);
         assert_eq!(decimal.to_string(), "123456.789");
 
-        let decimal = Decimal128::try_new_decimal128(123456789, 9, 0);
+        let decimal = Decimal128::try_new(123456789, 9, 0);
         assert_eq!(decimal.unwrap().to_string(), "123456789");
 
-        let decimal = Decimal128::try_new_decimal128(123456789, 9, 2);
+        let decimal = Decimal128::try_new(123456789, 9, 2);
         assert_eq!(decimal.unwrap().to_string(), "1234567.89");
 
-        let decimal = Decimal128::try_new_decimal128(123, 3, -2);
+        let decimal = Decimal128::try_new(123, 3, -2);
         assert_eq!(decimal.unwrap().to_string(), "12300");
 
         // invalid precision or scale
 
         // precision is 0
-        let decimal = Decimal128::try_new_decimal128(123, 0, 0);
+        let decimal = Decimal128::try_new(123, 0, 0);
         assert!(decimal.is_err());
 
         // precision is greater than 38
-        let decimal = Decimal128::try_new_decimal128(123, 39, 0);
+        let decimal = Decimal128::try_new(123, 39, 0);
         assert!(decimal.is_err());
 
         // scale is greater than 38
-        let decimal = Decimal128::try_new_decimal128(123, 38, 39);
+        let decimal = Decimal128::try_new(123, 38, 39);
         assert!(decimal.is_err());
 
         // scale is greater than precision
-        let decimal = Decimal128::try_new_decimal128(123, 3, 4);
+        let decimal = Decimal128::try_new(123, 3, 4);
         assert!(decimal.is_err());
     }
 
