@@ -378,10 +378,17 @@ struct Iter {
 
 impl Drop for Iter {
     fn drop(&mut self) {
-        debug!("Iter {} time series memtable, metrics: {:?}", self.metadata.region_id, self.metrics);
+        debug!(
+            "Iter {} time series memtable, metrics: {:?}",
+            self.metadata.region_id, self.metrics
+        );
 
-        READ_ROWS_TOTAL.with_label_values(&["time_series_memtable"]).inc_by(self.metrics.num_rows as u64);
-        READ_STAGE_ELAPSED.with_label_values(&["scan_memtable"]).observe(self.metrics.scan_cost.as_secs_f64());
+        READ_ROWS_TOTAL
+            .with_label_values(&["time_series_memtable"])
+            .inc_by(self.metrics.num_rows as u64);
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan_memtable"])
+            .observe(self.metrics.scan_cost.as_secs_f64());
     }
 }
 
@@ -421,7 +428,8 @@ impl Iterator for Iter {
             self.last_key = Some(primary_key.clone());
 
             let values = series.compact(&self.metadata);
-            let batch = values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
+            let batch =
+                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
 
             // Update metrics.
             self.metrics.num_batches += 1;
