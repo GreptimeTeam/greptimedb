@@ -192,7 +192,7 @@ impl TryFrom<BigDecimal> for Decimal128 {
     fn try_from(value: BigDecimal) -> Result<Self, Self::Error> {
         let precision = value.digits();
         let (big_int, scale) = value.as_bigint_and_exponent();
-        // conver big_int to i128, if convert failed, return error
+        // convert big_int to i128, if convert failed, return error
         big_int
             .to_i128()
             .map(|val| Self::try_new_decimal128(val, precision as u8, scale as i8))
