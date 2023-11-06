@@ -25,22 +25,26 @@ use snafu::ensure;
 
 use crate::scalars::function::{Function, FunctionContext};
 
+/// A function to convert the column into the unix timestamp in seconds.
 #[derive(Clone, Debug, Default)]
 pub struct ToUnixtimeFunction;
 
 const NAME: &str = "to_unixtime";
 
 fn convert_to_seconds(arg: &str) -> Option<i64> {
-    match DateTime::from_str(arg) {
-        Ok(dt) => Some(dt.val() / 1000),
-        Err(_) => match Timestamp::from_str(arg) {
-            Ok(ts) => Some(ts.split().0),
-            Err(_err) => match Date::from_str(arg) {
-                Ok(date) => Some(date.to_secs()),
-                Err(_) => None,
-            },
-        },
+    if let Ok(dt) = DateTime::from_str(arg) {
+        return Some(dt.val() / 1000);
     }
+
+    if let Ok(ts) = Timestamp::from_str(arg) {
+        return Some(ts.split().0);
+    }
+
+    if let Ok(date) = Date::from_str(arg) {
+        return Some(date.to_secs());
+    }
+
+    None
 }
 
 fn convert_timestamps_to_seconds(vector: &VectorRef) -> Vec<Option<i64>> {
