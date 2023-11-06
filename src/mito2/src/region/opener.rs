@@ -139,7 +139,7 @@ impl RegionOpener {
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
-        let region_manifest_options = self.manifest_options(config)?;
+        let region_manifest_options = self.manifest_options(config, &options)?;
         let metadata = Arc::new(self.metadata.unwrap());
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
@@ -205,8 +205,10 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        let options = self.manifest_options(config)?;
-        let Some(manifest_manager) = RegionManifestManager::open(options).await? else {
+        let region_options = RegionOptions::try_from(&self.options)?;
+        let region_manifest_options = self.manifest_options(config, &region_options)?;
+        let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
+        else {
             return Ok(None);
         };
 
@@ -214,8 +216,7 @@ impl RegionOpener {
         let metadata = manifest.metadata.clone();
 
         let region_id = self.region_id;
-        let options = RegionOptions::try_from(&self.options)?;
-        let object_store = self.object_store(&options.storage)?.clone();
+        let object_store = self.object_store(&region_options.storage)?.clone();
         let access_layer = Arc::new(AccessLayer::new(self.region_dir.clone(), object_store));
         let file_purger = Arc::new(LocalFilePurger::new(
             self.scheduler.clone(),
@@ -229,7 +230,7 @@ impl RegionOpener {
             .flushed_sequence(manifest.flushed_sequence)
             .truncated_entry_id(manifest.truncated_entry_id)
             .compaction_time_window(manifest.compaction_time_window)
-            .options(options)
+            .options(region_options)
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
@@ -249,8 +250,11 @@ impl RegionOpener {
     }
 
     /// Returns a new manifest options.
-    fn manifest_options(&self, config: &MitoConfig) -> Result<RegionManifestOptions> {
-        let options = RegionOptions::try_from(&self.options)?;
+    fn manifest_options(
+        &self,
+        config: &MitoConfig,
+        options: &RegionOptions,
+    ) -> Result<RegionManifestOptions> {
         let object_store = self.object_store(&options.storage)?.clone();
         Ok(RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
