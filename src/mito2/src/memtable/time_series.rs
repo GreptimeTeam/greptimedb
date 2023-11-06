@@ -20,7 +20,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use api::v1::OpType;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
@@ -48,6 +48,7 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
 };
+use crate::metrics::READ_ROWS_TOTAL;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -348,14 +349,19 @@ fn primary_key_builders(
     (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
-#[derive(Default, Debug)]
-#[allow(unused)]
+/// Metrics for reading the memtable.
+#[derive(Debug, Default)]
 struct Metrics {
-    num_rows: usize,
-    range_cost: Duration,
-    filter_cost: Duration,
-    scan_cost: Duration,
+    /// Total series in the memtable.
+    total_series: usize,
+    /// Number of series pruned.
     num_pruned_series: usize,
+    /// Number of rows read.
+    num_rows: usize,
+    /// Number of batch read.
+    num_batches: usize,
+    /// Duration to scan the memtable.
+    scan_cost: Duration,
 }
 
 struct Iter {
@@ -372,7 +378,14 @@ struct Iter {
 
 impl Drop for Iter {
     fn drop(&mut self) {
-        info!("iter memtable, metrics: {:?}", self.metrics);
+        debug!(
+            "Iter {} time series memtable, metrics: {:?}",
+            self.metadata.region_id, self.metrics
+        );
+
+        READ_ROWS_TOTAL
+            .with_label_values(&["time_series_memtable"])
+            .inc_by(self.metrics.num_rows as u64);
     }
 }
 
@@ -380,19 +393,19 @@ impl Iterator for Iter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let next_start = Instant::now();
-        let map = self.series.read().unwrap();
         let start = Instant::now();
+        let map = self.series.read().unwrap();
         let range = match &self.last_key {
             None => map.range::<Vec<u8>, _>(..),
             Some(last_key) => {
                 map.range::<Vec<u8>, _>((Bound::Excluded(last_key), Bound::Unbounded))
             }
         };
-        self.metrics.range_cost += start.elapsed();
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
         for (primary_key, series) in range {
+            self.metrics.total_series += 1;
+
             let mut series = series.write().unwrap();
             let start = Instant::now();
             if !self.predicate.is_empty()
@@ -406,21 +419,23 @@ impl Iterator for Iter {
                 )
             {
                 // read next series
-                self.metrics.filter_cost += start.elapsed();
                 self.metrics.num_pruned_series += 1;
                 continue;
             }
-            self.metrics.filter_cost += start.elapsed();
             self.last_key = Some(primary_key.clone());
 
             let values = series.compact(&self.metadata);
             let batch =
                 values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
+
+            // Update metrics.
+            self.metrics.num_batches += 1;
             self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
-            self.metrics.scan_cost += next_start.elapsed();
+            self.metrics.scan_cost += start.elapsed();
             return Some(batch);
         }
-        self.metrics.scan_cost += next_start.elapsed();
+        self.metrics.scan_cost += start.elapsed();
+
         None
     }
 }
