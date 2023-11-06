@@ -366,8 +366,8 @@ impl Export {
                     )
                     .await
                     .context(FileIoSnafu)?;
-                    file.flush().await.context(FileIoSnafu)?;
                 }
+                file.flush().await.context(FileIoSnafu)?;
 
                 info!("finished exporting {catalog}.{schema} copy_from.sql");
 
