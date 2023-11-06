@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
-use common_time::Timestamp;
+use common_time::{Date, Timestamp};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, VectorRef};
 use snafu::ensure;
@@ -33,13 +33,22 @@ const NAME: &str = "to_unixtime";
 fn convert_to_seconds(arg: &str) -> Option<i64> {
     match Timestamp::from_str(arg) {
         Ok(ts) => Some(ts.split().0),
-        Err(_err) => None,
+        Err(_err) => match Date::from_str(arg) {
+            Ok(date) => Some(date.to_secs()),
+            Err(_) => None,
+        },
     }
 }
 
 fn convert_timestamps_to_seconds(vector: &VectorRef) -> Vec<Option<i64>> {
     (0..vector.len())
         .map(|i| vector.get(i).as_timestamp().map(|ts| ts.split().0))
+        .collect::<Vec<Option<i64>>>()
+}
+
+fn convert_dates_to_seconds(vector: &VectorRef) -> Vec<Option<i64>> {
+    (0..vector.len())
+        .map(|i| vector.get(i).as_date().map(|dt| dt.to_secs()))
         .collect::<Vec<Option<i64>>>()
 }
 
@@ -59,6 +68,7 @@ impl Function for ToUnixtimeFunction {
                 ConcreteDataType::string_datatype(),
                 ConcreteDataType::int32_datatype(),
                 ConcreteDataType::int64_datatype(),
+                ConcreteDataType::date_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
@@ -90,6 +100,10 @@ impl Function for ToUnixtimeFunction {
             ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
                 // Safety: cast always successfully at here
                 Ok(vector.cast(&ConcreteDataType::int64_datatype()).unwrap())
+            }
+            ConcreteDataType::Date(_) => {
+                let seconds = convert_dates_to_seconds(vector);
+                Ok(Arc::new(Int64Vector::from(seconds)))
             }
             ConcreteDataType::Timestamp(_) => {
                 let seconds = convert_timestamps_to_seconds(vector);

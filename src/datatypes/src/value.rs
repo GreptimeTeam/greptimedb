@@ -203,6 +203,14 @@ impl Value {
         }
     }
 
+    /// Cast Value to Date. Return None if value is not a valid date data type.
+    pub fn as_date(&self) -> Option<Date> {
+        match self {
+            Value::Date(t) => Some(*t),
+            _ => None,
+        }
+    }
+
     /// Cast Value to [Time]. Return None if value is not a valid time data type.
     pub fn as_time(&self) -> Option<Time> {
         match self {
