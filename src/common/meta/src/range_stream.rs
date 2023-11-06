@@ -17,10 +17,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_telemetry::debug;
 use futures::future::BoxFuture;
 use futures::{ready, FutureExt, Stream};
+use snafu::ensure;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::{RangeRequest, RangeResponse};
 use crate::rpc::KeyValue;
@@ -64,9 +66,12 @@ struct PaginationStreamFactory {
     pub range_end: Vec<u8>,
 
     /// page_size is the pagination page size.
-    pub page_size: usize,
+    page_size: usize,
     /// keys_only when set returns only the keys and not the values.
     pub keys_only: bool,
+
+    /// It reduces the page size if the response size exceeds the limit.
+    pub adaptive_page_size: usize,
 
     pub more: bool,
 }
@@ -87,19 +92,58 @@ impl PaginationStreamFactory {
             page_size,
             keys_only,
             more,
+            adaptive_page_size: if page_size == 0 {
+                DEFAULT_ADAPTIVE_PAGE_SIZE
+            } else {
+                page_size
+            },
         }
     }
 }
 
+const DEFAULT_ADAPTIVE_PAGE_SIZE: usize = 1024;
+
 impl PaginationStreamFactory {
-    pub async fn read_next(self) -> Result<(Self, Option<RangeResponse>)> {
+    fn try_reduce_adaptive_page_size(&mut self) -> Result<()> {
+        self.adaptive_page_size /= 2;
+
+        ensure!(
+            self.adaptive_page_size != 0,
+            error::UnexpectedSnafu {
+                err_msg: "Exceeded maximum number of adaptive range retries"
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Decreases the `page size` if the response message size exceeds the limitation.
+    /// TODO(weny): Considers to add an E2e test.
+    #[async_recursion::async_recursion]
+    async fn adaptive_range(&mut self, req: RangeRequest) -> Result<RangeResponse> {
+        match self.kv.range(req.clone()).await {
+            Ok(resp) => Ok(resp),
+            Err(err) => {
+                if err.is_exceeded_size_limit() {
+                    self.try_reduce_adaptive_page_size()?;
+                    debug!("Reset page_size to {}", self.adaptive_page_size);
+
+                    self.adaptive_range(req.with_limit(self.adaptive_page_size as i64))
+                        .await
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    pub async fn read_next(mut self) -> Result<(Self, Option<RangeResponse>)> {
         if self.more {
             let resp = self
-                .kv
-                .range(RangeRequest {
+                .adaptive_range(RangeRequest {
                     key: self.key.clone(),
                     range_end: self.range_end.clone(),
-                    limit: self.page_size as i64,
+                    limit: self.adaptive_page_size as i64,
                     keys_only: self.keys_only,
                 })
                 .await?;
@@ -120,6 +164,7 @@ impl PaginationStreamFactory {
                     page_size: self.page_size,
                     keys_only: self.keys_only,
                     more: resp.more,
+                    adaptive_page_size: self.adaptive_page_size,
                 },
                 Some(resp),
             ))
@@ -223,6 +268,7 @@ impl<K, V> Stream for PaginationStream<K, V> {
 #[cfg(test)]
 mod tests {
 
+    use std::assert_matches::assert_matches;
     use std::collections::BTreeMap;
 
     use futures::TryStreamExt;
@@ -235,6 +281,41 @@ mod tests {
 
     fn decoder(kv: KeyValue) -> Result<(Vec<u8>, Vec<u8>)> {
         Ok((kv.key.clone(), kv.value))
+    }
+
+    #[test]
+    fn test_try_reduce_page_size() {
+        let kv_backend = Arc::new(MemoryKvBackend::<Error>::new()) as _;
+
+        let mut factory =
+            PaginationStreamFactory::new(&kv_backend, vec![], vec![], 2, false, false);
+
+        // new adaptive page size: 1
+        factory.try_reduce_adaptive_page_size().unwrap();
+
+        // new adaptive page size: 0
+        assert_matches!(
+            factory.try_reduce_adaptive_page_size().unwrap_err(),
+            error::Error::Unexpected { .. }
+        );
+
+        let mut factory =
+            PaginationStreamFactory::new(&kv_backend, vec![], vec![], 1024, false, false);
+
+        factory.try_reduce_adaptive_page_size().unwrap();
+
+        assert_eq!(factory.adaptive_page_size, 512);
+
+        factory.try_reduce_adaptive_page_size().unwrap();
+
+        assert_eq!(factory.adaptive_page_size, 256);
+
+        let mut factory =
+            PaginationStreamFactory::new(&kv_backend, vec![], vec![], 0, false, false);
+
+        factory.try_reduce_adaptive_page_size().unwrap();
+
+        assert_eq!(factory.adaptive_page_size, DEFAULT_ADAPTIVE_PAGE_SIZE / 2);
     }
 
     #[tokio::test]
