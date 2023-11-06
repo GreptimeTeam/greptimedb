@@ -54,6 +54,7 @@ message InvertedIndexFooter {
 
 message InvertedIndexMeta {
     string name;
+    uint64 row_count_in_group;
     uint64 fst_offset;
     uint64 fst_size;
     uint64 null_bitmap_offset;
@@ -71,7 +72,11 @@ message InvertedIndexStats {
 
 ## Bitmap
 
-Bitmaps are utilized as an expression of row groups. This is implemented using [BitVec](https://docs.rs/bitvec/latest/bitvec/), selected due to its efficient representation of dense data arrays typical of row group values.
+Bitmaps are used to represent indices of fixed-size groups. Rows are divided into groups of a fixed size, defined in the `InvertedIndexMeta` as `row_count_in_group`.
+
+For example, when `row_count_in_group` is `4096`, it means each group has `4096` rows. If there are a total of `10000` rows, there will be `3` groups in total. The first two groups will have `4096` rows each, and the last group will have `1808` rows. If the indexed values are found in row `200` and `9000`, they will correspond to the `0`th and `2`nd group, respectively. Therefore, the bitmap should show `0` and `2`.
+
+Bitmap is implemented using [BitVec](https://docs.rs/bitvec/latest/bitvec/), selected due to its efficient representation of dense data arrays typical of indices of groups.
 
 
 ## Finite State Transducer (FST)
