@@ -411,7 +411,7 @@ mod test {
             .put_conditionally(region_id, key.clone(), value.clone())
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
 
         // Verify that the key-value pair was actually inserted
         let scan_req = MetadataRegion::build_read_request("test_key");
@@ -428,7 +428,7 @@ mod test {
             .put_conditionally(region_id, key.clone(), value.clone())
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap(),);
     }
 
     #[tokio::test]
@@ -442,7 +442,7 @@ mod test {
         let key = "test_key".to_string();
         let result = metadata_region.exist(region_id, &key).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
 
         // Test inserting a key and then checking for its existence
         let value = "test_value".to_string();
@@ -454,7 +454,7 @@ mod test {
             .unwrap();
         let result = metadata_region.exist(region_id, &key).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap(),);
     }
 
     #[tokio::test]
