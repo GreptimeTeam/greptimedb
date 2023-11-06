@@ -151,6 +151,7 @@ mod tests {
                              ConcreteDataType::string_datatype(),
                              ConcreteDataType::int32_datatype(),
                              ConcreteDataType::int64_datatype(),
+                             ConcreteDataType::date_datatype(),
                              ConcreteDataType::timestamp_second_datatype(),
                              ConcreteDataType::timestamp_millisecond_datatype(),
                              ConcreteDataType::timestamp_microsecond_datatype(),
@@ -186,26 +187,6 @@ mod tests {
     #[test]
     fn test_int_to_unixtime() {
         let f = ToUnixtimeFunction;
-        assert_eq!("to_unixtime", f.name());
-        assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            f.return_type(&[]).unwrap()
-        );
-
-        assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(1, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![
-                             ConcreteDataType::string_datatype(),
-                             ConcreteDataType::int32_datatype(),
-                             ConcreteDataType::int64_datatype(),
-                             ConcreteDataType::timestamp_second_datatype(),
-                             ConcreteDataType::timestamp_millisecond_datatype(),
-                             ConcreteDataType::timestamp_microsecond_datatype(),
-                             ConcreteDataType::timestamp_nanosecond_datatype(),
-                         ]
-        ));
 
         let times = vec![Some(3_i64), None, Some(5_i64), None];
         let results = [Some(3), None, Some(5), None];
@@ -230,26 +211,6 @@ mod tests {
     #[test]
     fn test_timestamp_to_unixtime() {
         let f = ToUnixtimeFunction;
-        assert_eq!("to_unixtime", f.name());
-        assert_eq!(
-            ConcreteDataType::int64_datatype(),
-            f.return_type(&[]).unwrap()
-        );
-
-        assert!(matches!(f.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(1, valid_types),
-                             volatility: Volatility::Immutable
-                         } if  valid_types == vec![
-                             ConcreteDataType::string_datatype(),
-                             ConcreteDataType::int32_datatype(),
-                             ConcreteDataType::int64_datatype(),
-                             ConcreteDataType::timestamp_second_datatype(),
-                             ConcreteDataType::timestamp_millisecond_datatype(),
-                             ConcreteDataType::timestamp_microsecond_datatype(),
-                             ConcreteDataType::timestamp_nanosecond_datatype(),
-                         ]
-        ));
 
         let times = vec![Some(123), None, Some(42), None];
         let results = [Some(123), None, Some(42), None];
