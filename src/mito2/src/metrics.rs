@@ -108,10 +108,10 @@ lazy_static! {
     // ------- End of compaction metrics.
 
     // Query metrics.
-    /// Timer of different stages to read a SST.
-    pub static ref SST_READ_ELAPSED_TOTAL: HistogramVec = register_histogram_vec!(
-        "mito_sst_read_total_elapsed",
-        "mito sst read total elapsed",
+    /// Timer of different stages in query.
+    pub static ref READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "mito_read_stage_elapsed",
+        "mito read stage elapsed",
         &[STAGE_LABEL]
     )
     .unwrap();

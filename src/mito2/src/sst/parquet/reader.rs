@@ -40,7 +40,7 @@ use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu,
     Result,
 };
-use crate::metrics::{READ_ROWS_TOTAL, SST_READ_ELAPSED_TOTAL};
+use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
@@ -383,11 +383,11 @@ impl Drop for ParquetReader {
         );
 
         // Report metrics.
-        SST_READ_ELAPSED_TOTAL
-            .with_label_values(&["build"])
+        READ_STAGE_ELAPSED
+            .with_label_values(&["build_parquet_reader"])
             .observe(self.metrics.build_cost.as_secs_f64());
-        SST_READ_ELAPSED_TOTAL
-            .with_label_values(&["next_batch"])
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan_row_groups"])
             .observe(self.metrics.scan_cost.as_secs_f64());
         READ_ROWS_TOTAL
             .with_label_values(&["parquet"])
