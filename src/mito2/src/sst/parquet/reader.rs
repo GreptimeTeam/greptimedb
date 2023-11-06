@@ -40,7 +40,7 @@ use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu,
     Result,
 };
-use crate::metrics::{SST_READ_ELAPSED_TOTAL, SST_READ_ROWS_TOTAL};
+use crate::metrics::{READ_ROWS_TOTAL, SST_READ_ELAPSED_TOTAL};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::format::ReadFormat;
@@ -260,7 +260,7 @@ impl ParquetReaderBuilder {
 }
 
 /// Parquet reader metrics.
-#[derive(Default, Debug)]
+#[derive(Debug, Default)]
 struct Metrics {
     /// Number of row groups to read.
     read_row_groups: usize,
@@ -389,7 +389,9 @@ impl Drop for ParquetReader {
         SST_READ_ELAPSED_TOTAL
             .with_label_values(&["next_batch"])
             .observe(self.metrics.scan_cost.as_secs_f64());
-        SST_READ_ROWS_TOTAL.inc_by(self.metrics.num_rows as u64);
+        READ_ROWS_TOTAL
+            .with_label_values(&["parquet"])
+            .inc_by(self.metrics.num_rows as u64);
     }
 }
 

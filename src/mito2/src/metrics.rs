@@ -115,8 +115,8 @@ lazy_static! {
         &[STAGE_LABEL]
     )
     .unwrap();
-    /// Counter of rows read from SSTs.
-    pub static ref SST_READ_ROWS_TOTAL: IntCounter =
-        register_int_counter!("mito_sst_read_rows_total", "mito sst read rows total").unwrap();
+    /// Counter of rows read.
+    pub static ref READ_ROWS_TOTAL: IntCounterVec =
+        register_int_counter_vec!("mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
     // ------- End of query metrics.
 }
