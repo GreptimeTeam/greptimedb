@@ -44,14 +44,14 @@ pub const METRIC_METADATA_REGION_GROUP: RegionGroup = 1;
 
 pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
 pub const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
-pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "val";
+pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "v";
 
 pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX: usize = 0;
 pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
 pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
 
-/// Column name of internal column `__metric_name` that stores the original metric name
-pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric_name";
+/// Column name of internal column `__metric` that stores the original metric name
+pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric";
 pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
@@ -284,7 +284,7 @@ impl MetricEngineInner {
     /// Convert [RegionCreateRequest] for data region.
     ///
     /// All tag columns in the original request will be converted to value columns.
-    /// Those columns real semantic type is stored in metadat region.
+    /// Those columns real semantic type is stored in metadata region.
     ///
     /// This will also add internal columns to the request.
     pub fn create_request_for_data_region(
@@ -372,7 +372,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Internal column __metric_name is reserved".to_string()
+            "Internal column __metric is reserved".to_string()
         );
 
         // valid request

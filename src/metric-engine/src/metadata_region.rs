@@ -215,6 +215,8 @@ impl MetadataRegion {
         Ok(exist)
     }
 
+    /// Retrieves the value associated with the given key in the specified region.
+    /// Returns `Ok(None)` if the key is not found.
     pub async fn get(&self, region_id: RegionId, key: &str) -> Result<Option<String>> {
         let scan_req = Self::build_read_request(key);
         let record_batch_stream = self
@@ -229,13 +231,6 @@ impl MetadataRegion {
         let Some(first_batch) = scan_result.first() else {
             return Ok(None);
         };
-
-        // safety: only value column is projected in the result batch.
-        let value_col = first_batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringVector>()
-            .unwrap();
 
         let val = first_batch
             .column(0)
