@@ -27,7 +27,7 @@ use datatypes::scalars::ScalarVector;
 use datatypes::vectors::{StringVector, Vector};
 use snafu::{OptionExt, ResultExt};
 use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 
 use crate::cli::{Instance, Tool};
@@ -346,7 +346,8 @@ impl Export {
 
                 let copy_from_file =
                     Path::new(&self.output_dir).join(format!("{catalog}-{schema}_copy_from.sql"));
-                let mut file = File::create(copy_from_file).await.context(FileIoSnafu)?;
+                let mut writer =
+                    BufWriter::new(File::create(copy_from_file).await.context(FileIoSnafu)?);
 
                 for table_file in dir_filenames {
                     let table_file = table_file.unwrap();
@@ -356,18 +357,19 @@ impl Export {
                         .unwrap()
                         .replace(".parquet", "");
 
-                    file.write(
-                        format!(
-                            "copy {} from '{}' with (format='parquet');\n",
-                            table_name,
-                            table_file.path().to_str().unwrap()
+                    writer
+                        .write(
+                            format!(
+                                "copy {} from '{}' with (format='parquet');\n",
+                                table_name,
+                                table_file.path().to_str().unwrap()
+                            )
+                            .as_bytes(),
                         )
-                        .as_bytes(),
-                    )
-                    .await
-                    .context(FileIoSnafu)?;
+                        .await
+                        .context(FileIoSnafu)?;
                 }
-                file.flush().await.context(FileIoSnafu)?;
+                writer.flush().await.context(FileIoSnafu)?;
 
                 info!("finished exporting {catalog}.{schema} copy_from.sql");
 
