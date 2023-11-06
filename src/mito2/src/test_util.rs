@@ -124,6 +124,10 @@ impl TestEnv {
         self.data_home.path()
     }
 
+    pub fn get_object_store_manager(&self) -> Option<Arc<ObjectStoreManager>> {
+        self.object_store_manager.clone()
+    }
+
     /// Creates a new engine with specific config under this env.
     pub async fn create_engine(&mut self, config: MitoConfig) -> MitoEngine {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
@@ -145,6 +149,35 @@ impl TestEnv {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
         let logstore = Arc::new(log_store);
+        let object_store_manager = Arc::new(object_store_manager);
+        self.logstore = Some(logstore.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+        MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
+    }
+
+    pub async fn create_engine_with_multiple_object_stores(
+        &mut self,
+        config: MitoConfig,
+        manager: Option<WriteBufferManagerRef>,
+        listener: Option<EventListenerRef>,
+        custom_storage_names: &[&str],
+    ) -> MitoEngine {
+        let (logstore, mut object_store_manager) = self.create_log_and_object_store_manager().await;
+        for storage_name in custom_storage_names {
+            let data_path = self
+                .data_home
+                .path()
+                .join("data")
+                .join(storage_name)
+                .as_path()
+                .display()
+                .to_string();
+            let mut builder = Fs::default();
+            builder.root(&data_path);
+            let object_store = ObjectStore::new(builder).unwrap().finish();
+            object_store_manager.add(storage_name, object_store);
+        }
+        let logstore = Arc::new(logstore);
         let object_store_manager = Arc::new(object_store_manager);
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());

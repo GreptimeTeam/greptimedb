@@ -142,6 +142,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Object store not found: {}", object_store))]
+    ObjectStoreNotFound {
+        object_store: String,
+        location: Location,
+    },
+
     #[snafu(display("Region {} is corrupted, reason: {}", region_id, reason))]
     RegionCorrupted {
         region_id: RegionId,
@@ -427,7 +433,8 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
-            InvalidScanIndex { .. }
+            ObjectStoreNotFound { .. }
+            | InvalidScanIndex { .. }
             | InvalidMeta { .. }
             | InvalidRequest { .. }
             | FillDefault { .. }

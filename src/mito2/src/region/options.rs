@@ -35,6 +35,8 @@ pub struct RegionOptions {
     pub ttl: Option<Duration>,
     /// Compaction options.
     pub compaction: CompactionOptions,
+    /// Custom storage.
+    pub storage: Option<String>,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -54,6 +56,7 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         Ok(RegionOptions {
             ttl: options.ttl,
             compaction,
+            storage: options.storage,
         })
     }
 }
@@ -124,12 +127,16 @@ struct RegionOptionsWithoutEnum {
     /// Region SST files TTL.
     #[serde(with = "humantime_serde")]
     ttl: Option<Duration>,
+    storage: Option<String>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
     fn default() -> Self {
         let options = RegionOptions::default();
-        RegionOptionsWithoutEnum { ttl: options.ttl }
+        RegionOptionsWithoutEnum {
+            ttl: options.ttl,
+            storage: options.storage,
+        }
     }
 }
 
@@ -182,6 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn test_with_storage() {
+        let map = make_map(&[("storage", "S3")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            storage: Some("s3".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
     fn test_without_compaction_type() {
         // If `compaction.type` is not provided, we ignore all compaction
         // related options. Actually serde does not support deserialize
@@ -222,6 +240,7 @@ mod tests {
             ("compaction.twcs.max_inactive_window_files", "2"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
+            ("storage", "S3"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -231,6 +250,7 @@ mod tests {
                 max_inactive_window_files: 2,
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
+            storage: Some("s3".to_string()),
         };
         assert_eq!(expect, options);
     }
