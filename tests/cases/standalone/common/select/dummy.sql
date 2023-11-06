@@ -16,7 +16,13 @@ select TO_UNIXTIME('    2023-03-01T06:35:02Z    ');
 
 select TO_UNIXTIME(2);
 
-create table test_unixtime(a int, b timestamp time index);
+select TO_UNIXTIME('2023-03-01');
+
+select TO_UNIXTIME('2023-03-01'::date);
+
+select TO_UNIXTIME('2023-03-01 08:00:00+0000');
+
+create table test_unixtime(a int, b timestamp_sec time index);
 
 DESC TABLE test_unixtime;
 
