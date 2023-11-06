@@ -118,7 +118,7 @@ lazy_static! {
     /// Counter of rows read.
     pub static ref READ_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
-    /// Couter of filtered rows during merge.
+    /// Counter of filtered rows during merge.
     pub static ref MERGE_FILTER_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("mito_merge_filter_rows_total", "mito merge filter rows total", &[TYPE_LABEL]).unwrap();
     // ------- End of query metrics.
