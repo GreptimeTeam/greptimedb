@@ -40,6 +40,10 @@ struct Args {
     /// Name of test cases to run. Accept as a regexp.
     #[clap(short, long, default_value = ".*")]
     test_filter: String,
+
+    /// Address of the server
+    #[clap(short, long)]
+    server_addr: Option<String>,
 }
 
 #[tokio::main]
@@ -59,6 +63,6 @@ async fn main() {
         .env_config_file(args.env_config_file)
         .build()
         .unwrap();
-    let runner = Runner::new(config, Env::new(data_home));
+    let runner = Runner::new(config, Env::new(data_home, args.server_addr));
     runner.run().await.unwrap();
 }
