@@ -91,10 +91,10 @@ Two APIs `InvertedIndexBuilder` for building indexes and  `InvertedIndexSearcher
 
 ```rust
 type Bytes = Vec<u8>;
-type RowGroupId = u32;
+type GroupId = u64;
 
 trait InvertedIndexBuilder {
-    fn add(&mut self, name: &str, value: Option<&Bytes>, row_group: RowGroupId) -> Result<()>;
+    fn add(&mut self, name: &str, value: Option<&Bytes>, group_id: GroupId) -> Result<()>;
     fn finish(&mut self) -> Result<()>;
 }
 
@@ -108,6 +108,6 @@ enum Predicate {
 }
 
 trait InvertedIndexSearcher {
-    fn search(&mut self, name: &str, predicates: &[Predicate]) -> Result<impl IntoIterator<RowGroupId>>;
+    fn search(&mut self, name: &str, predicates: &[Predicate]) -> Result<impl IntoIterator<GroupId>>;
 }
 ```
