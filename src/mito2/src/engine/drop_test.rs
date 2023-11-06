@@ -148,7 +148,7 @@ async fn test_engine_drop_region_for_custom_store() {
         .unwrap();
     assert!(!engine.is_region_exists(custom_region_id));
 
-    // Wait for drop  task.
+    // Wait for drop task.
     listener.wait().await;
 
     assert!(!object_store_manager

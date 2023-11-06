@@ -264,7 +264,7 @@ impl RegionOpener {
         })
     }
 
-    /// Returns an object store corresponding to the name. If the object sotre doesn't exist, this method returns the default object store.
+    /// Returns an object store corresponding to `name`. If `name` is `None`, this method returns the default object store.
     fn object_store(&self, name: &Option<String>) -> Result<&object_store::ObjectStore> {
         if let Some(name) = name {
             Ok(self
