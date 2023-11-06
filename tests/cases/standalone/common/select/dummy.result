@@ -104,7 +104,7 @@ select TO_UNIXTIME(b) from test_unixtime;
 +------------------------------+
 | to_unixtime(test_unixtime.b) |
 +------------------------------+
-| 27                           |
+| 0                            |
 +------------------------------+
 
 DROP TABLE test_unixtime;

@@ -1,6 +1,6 @@
 -- description: Test scanning many big varchar strings with limited memory
 
-CREATE TABLE test (a VARCHAR, ts timestamp time index);
+CREATE TABLE test (a VARCHAR, ts timestamp_s time index);
 
 -- create a big varchar (10K characters)
 INSERT INTO test VALUES ('aaaaaaaaaa', 1);
@@ -13,7 +13,7 @@ INSERT INTO test SELECT a||a||a||a||a||a||a||a||a||a, to_unixtime(ts) * 5 FROM t
 INSERT INTO test SELECT a||a||a||a||a||a||a||a||a||a, to_unixtime(ts) * 7 FROM test WHERE LENGTH(a)=(SELECT MAX(LENGTH(a)) FROM test);
 
 -- now create a second table, we only insert the big varchar string in there
-CREATE TABLE bigtable (a VARCHAR, ts timestamp time index);
+CREATE TABLE bigtable (a VARCHAR, ts timestamp_s time index);
 
 INSERT INTO bigtable SELECT a, ts FROM test WHERE LENGTH(a)=(SELECT MAX(LENGTH(a)) FROM test);
 

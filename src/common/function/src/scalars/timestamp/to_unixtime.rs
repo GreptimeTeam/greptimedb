@@ -19,8 +19,8 @@ use std::sync::Arc;
 use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::{Signature, Volatility};
 use common_time::Timestamp;
-use datatypes::prelude::{ConcreteDataType, ScalarVector};
-use datatypes::vectors::{Int64Vector, StringVector, VectorRef};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::vectors::{Int64Vector, VectorRef};
 use snafu::ensure;
 
 use crate::scalars::function::{Function, FunctionContext};
@@ -30,13 +30,10 @@ pub struct ToUnixtimeFunction;
 
 const NAME: &str = "to_unixtime";
 
-fn convert_to_seconds(arg: &Option<&str>) -> Option<i64> {
-    match arg {
-        Some(arg) => match Timestamp::from_str(arg) {
-            Ok(ts) => Some(ts.split().0),
-            Err(_err) => None,
-        },
-        None => None,
+fn convert_to_seconds(arg: &str) -> Option<i64> {
+    match Timestamp::from_str(arg) {
+        Ok(ts) => Some(ts.split().0),
+        Err(_err) => None,
     }
 }
 
@@ -85,16 +82,11 @@ impl Function for ToUnixtimeFunction {
         let vector = &columns[0];
 
         match columns[0].data_type() {
-            ConcreteDataType::String(_) => {
-                let vector = vector.as_any().downcast_ref::<StringVector>().unwrap();
-
-                Ok(Arc::new(Int64Vector::from(
-                    vector
-                        .iter_data()
-                        .map(|v| convert_to_seconds(&v))
-                        .collect::<Vec<_>>(),
-                )))
-            }
+            ConcreteDataType::String(_) => Ok(Arc::new(Int64Vector::from(
+                (0..vector.len())
+                    .map(|i| convert_to_seconds(&vector.get(i).to_string()))
+                    .collect::<Vec<_>>(),
+            ))),
             ConcreteDataType::Int64(_) | ConcreteDataType::Int32(_) => {
                 // Safety: cast always successfully at here
                 Ok(vector.cast(&ConcreteDataType::int64_datatype()).unwrap())
