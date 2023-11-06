@@ -35,6 +35,7 @@ pub const DECIMAL128_MAX_SCALE: i8 = 38;
 /// The default scale for [Decimal128] values
 pub const DECIMAL128_DEFAULT_SCALE: i8 = 10;
 
+/// The maximum bytes length that an accurate RustDecimal can represent
 const BYTES_TO_OVERFLOW_RUST_DECIMAL: usize = 28;
 
 /// 128bit decimal, using the i128 to represent the decimal.
@@ -42,7 +43,7 @@ const BYTES_TO_OVERFLOW_RUST_DECIMAL: usize = 28;
 /// **precision**: the total number of digits in the number, it's range is \[1, 38\].
 ///
 /// **scale**: the number of digits to the right of the decimal point, it's range is \[0, precision\].
-#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Eq, Copy, Clone, Serialize, Deserialize)]
 pub struct Decimal128 {
     value: i128,
     precision: u8,
@@ -61,7 +62,7 @@ impl Decimal128 {
 
     pub fn try_new_decimal128(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
         // make sure the precision and scale is valid.
-        valid_precision_and_scale(precision as u64, scale as i64)?;
+        valid_precision_and_scale(precision, scale)?;
         Ok(Self {
             value,
             precision,
@@ -96,8 +97,6 @@ impl PartialEq for Decimal128 {
             && self.value.eq(&other.value)
     }
 }
-
-impl Eq for Decimal128 {}
 
 // Two decimal values can be compared if they have the same precision and scale.
 impl PartialOrd for Decimal128 {
@@ -227,7 +226,7 @@ fn format_decimal_str(value_str: &str, precision: usize, scale: i8) -> String {
 }
 
 /// check whether precision and scale is valid
-fn valid_precision_and_scale(precision: u64, scale: i64) -> error::Result<()> {
+fn valid_precision_and_scale(precision: u8, scale: i8) -> error::Result<()> {
     if precision == 0 {
         return InvalidPrecisionOrScaleSnafu {
             reason: format!(
@@ -237,7 +236,7 @@ fn valid_precision_and_scale(precision: u64, scale: i64) -> error::Result<()> {
         }
         .fail();
     }
-    if precision > DECIMAL128_MAX_PRECISION as u64 {
+    if precision > DECIMAL128_MAX_PRECISION {
         return InvalidPrecisionOrScaleSnafu {
             reason: format!(
                 "precision {} is greater than max {}",
@@ -246,7 +245,7 @@ fn valid_precision_and_scale(precision: u64, scale: i64) -> error::Result<()> {
         }
         .fail();
     }
-    if scale > DECIMAL128_MAX_SCALE as i64 {
+    if scale > DECIMAL128_MAX_SCALE {
         return InvalidPrecisionOrScaleSnafu {
             reason: format!(
                 "scale {} is greater than max {}",
@@ -255,7 +254,7 @@ fn valid_precision_and_scale(precision: u64, scale: i64) -> error::Result<()> {
         }
         .fail();
     }
-    if scale > 0 && scale as u64 > precision {
+    if scale > 0 && scale > precision as i8 {
         return InvalidPrecisionOrScaleSnafu {
             reason: format!("scale {} is greater than precision {}", scale, precision),
         }
@@ -350,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_decimal128_precision_and_scale() {
-        // precision and scale from Deicmal(1,0) to Decimal(38,38)
+        // precision and scale from Deicmal(1,1) to Decimal(38,38)
         for precision in 1..=38 {
             for scale in 1..=precision {
                 let decimal_str = format!("0.{}", "1".repeat(scale as usize));
