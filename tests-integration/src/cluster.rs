@@ -63,6 +63,7 @@ pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,
     store_config: Option<ObjectStoreConfig>,
+    custom_store_types: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
 }
 
@@ -87,12 +88,18 @@ impl GreptimeDbClusterBuilder {
             cluster_name: cluster_name.to_string(),
             kv_backend,
             store_config: None,
+            custom_store_types: None,
             datanodes: None,
         }
     }
 
     pub fn with_store_config(mut self, store_config: ObjectStoreConfig) -> Self {
         self.store_config = Some(store_config);
+        self
+    }
+
+    pub fn with_custom_store_types(mut self, store_types: Vec<StorageType>) -> Self {
+        self.custom_store_types = Some(store_types);
         self
     }
 
@@ -171,14 +178,15 @@ impl GreptimeDbClusterBuilder {
 
                 dir_guards.push(FileDirGuard::new(home_tmp_dir));
 
-                create_datanode_opts(store_config.clone(), home_dir)
+                create_datanode_opts(store_config.clone(), vec![], home_dir)
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
                     StorageType::File,
+                    self.custom_store_types.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                 );
 
-                storage_guards.push(guard.storage_guard);
+                storage_guards.push(guard.storage_guards);
                 dir_guards.push(guard.home_guard);
 
                 opts
@@ -190,7 +198,11 @@ impl GreptimeDbClusterBuilder {
 
             instances.insert(datanode_id, datanode);
         }
-        (instances, storage_guards, dir_guards)
+        (
+            instances,
+            storage_guards.into_iter().flatten().collect(),
+            dir_guards,
+        )
     }
 
     async fn wait_datanodes_alive(

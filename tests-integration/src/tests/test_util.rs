@@ -20,7 +20,9 @@ use common_test_util::find_workspace_path;
 use frontend::instance::Instance;
 use rstest_reuse::{self, template};
 
+use crate::cluster::GreptimeDbClusterBuilder;
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+use crate::test_util::StorageType;
 use crate::tests::{create_distributed_instance, MockDistributedInstance};
 
 pub(crate) trait MockInstance {
@@ -59,6 +61,41 @@ pub(crate) async fn distributed() -> Arc<dyn MockInstance> {
     let test_name = uuid::Uuid::new_v4().to_string();
     let instance = create_distributed_instance(&test_name).await;
     Arc::new(instance)
+}
+
+pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let storage_types = StorageType::build_storage_types_based_on_env();
+    let instance = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_custom_store_types(storage_types)
+        .build()
+        .await;
+    Arc::new(instance)
+}
+
+pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockInstance> {
+    let _ = dotenv::dotenv();
+    let test_name = uuid::Uuid::new_v4().to_string();
+    let custom_storage_types = StorageType::build_storage_types_based_on_env();
+    let cluster = GreptimeDbClusterBuilder::new(&test_name)
+        .with_custom_store_types(custom_storage_types)
+        .build()
+        .await;
+    Arc::new(MockDistributedInstance(cluster))
+}
+
+#[template]
+#[rstest]
+#[case::test_with_standalone(standalone_with_multiple_object_stores())]
+#[case::test_with_distributed(distributed_with_multiple_object_stores())]
+#[awt]
+#[tokio::test(flavor = "multi_thread")]
+pub(crate) fn both_instances_cases_with_custom_storages(
+    #[future]
+    #[case]
+    instance: Arc<dyn MockInstance>,
+) {
 }
 
 #[template]

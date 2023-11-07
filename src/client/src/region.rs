@@ -28,6 +28,7 @@ use common_telemetry::error;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
+use tonic::Code;
 
 use crate::error::Error::RegionServer;
 use crate::error::{
@@ -45,7 +46,13 @@ pub struct RegionRequester {
 impl Datanode for RegionRequester {
     async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         self.handle_inner(request).await.map_err(|err| {
-            if matches!(err, RegionServer { .. }) {
+            if !matches!(
+                err,
+                RegionServer {
+                    code: Code::InvalidArgument,
+                    ..
+                }
+            ) {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
                 }

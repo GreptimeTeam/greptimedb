@@ -37,7 +37,8 @@ pub struct GreptimeDbStandalone {
 
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
-    store_type: Option<StorageType>,
+    custom_store_types: Option<Vec<StorageType>>,
+    default_store: Option<StorageType>,
     plugin: Option<Plugins>,
 }
 
@@ -45,14 +46,23 @@ impl GreptimeDbStandaloneBuilder {
     pub fn new(instance_name: &str) -> Self {
         Self {
             instance_name: instance_name.to_string(),
-            store_type: None,
+            custom_store_types: None,
             plugin: None,
+            default_store: None,
         }
     }
 
-    pub fn with_store_type(self, store_type: StorageType) -> Self {
+    pub fn with_default_store_type(self, store_type: StorageType) -> Self {
         Self {
-            store_type: Some(store_type),
+            default_store: Some(store_type),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_custom_store_types(self, store_types: Vec<StorageType>) -> Self {
+        Self {
+            custom_store_types: Some(store_types),
             ..self
         }
     }
@@ -66,9 +76,11 @@ impl GreptimeDbStandaloneBuilder {
     }
 
     pub async fn build(self) -> GreptimeDbStandalone {
-        let store_type = self.store_type.unwrap_or(StorageType::File);
+        let default_store_type = self.default_store.unwrap_or(StorageType::File);
+        let store_types = self.custom_store_types.unwrap_or_default();
 
-        let (opts, guard) = create_tmp_dir_and_datanode_opts(store_type, &self.instance_name);
+        let (opts, guard) =
+            create_tmp_dir_and_datanode_opts(default_store_type, store_types, &self.instance_name);
 
         let procedure_config = ProcedureConfig::default();
         let kv_backend_config = KvBackendConfig::default();

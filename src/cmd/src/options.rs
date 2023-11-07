@@ -193,6 +193,7 @@ mod tests {
                     [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
+                        "default_store".to_uppercase(),
                         "type".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -203,6 +204,7 @@ mod tests {
                     [
                         env_prefix.to_string(),
                         "storage".to_uppercase(),
+                        "default_store".to_uppercase(),
                         "bucket".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -238,7 +240,7 @@ mod tests {
                 .unwrap();
 
                 // Check the configs from environment variables.
-                match opts.storage.store {
+                match &opts.storage.default_store {
                     ObjectStoreConfig::S3(s3_config) => {
                         assert_eq!(s3_config.bucket, "mybucket".to_string());
                     }

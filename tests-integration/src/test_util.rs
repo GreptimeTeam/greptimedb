@@ -77,6 +77,26 @@ impl Display for StorageType {
 }
 
 impl StorageType {
+    pub fn build_storage_types_based_on_env() -> Vec<StorageType> {
+        let mut storage_types = Vec::with_capacity(4);
+        storage_types.push(StorageType::File);
+        if let Ok(bucket) = env::var("GT_S3_BUCKET") {
+            if !bucket.is_empty() {
+                storage_types.push(StorageType::S3);
+            }
+        }
+        if env::var("GT_OSS_BUCKET").is_ok() {
+            storage_types.push(StorageType::Oss);
+        }
+        if env::var("GT_AZBLOB_CONTAINER").is_ok() {
+            storage_types.push(StorageType::Azblob);
+        }
+        if env::var("GT_GCS_BUCKET").is_ok() {
+            storage_types.push(StorageType::Gcs);
+        }
+        storage_types
+    }
+
     pub fn test_on(&self) -> bool {
         let _ = dotenv::dotenv();
 
@@ -244,7 +264,7 @@ pub enum TempDirGuard {
 
 pub struct TestGuard {
     pub home_guard: FileDirGuard,
-    pub storage_guard: StorageGuard,
+    pub storage_guards: Vec<StorageGuard>,
 }
 
 pub struct FileDirGuard {
@@ -261,42 +281,62 @@ pub struct StorageGuard(pub TempDirGuard);
 
 impl TestGuard {
     pub async fn remove_all(&mut self) {
-        if let TempDirGuard::S3(guard)
-        | TempDirGuard::Oss(guard)
-        | TempDirGuard::Azblob(guard)
-        | TempDirGuard::Gcs(guard) = &mut self.storage_guard.0
-        {
-            guard.remove_all().await.unwrap()
+        for storage_guard in self.storage_guards.iter_mut() {
+            if let TempDirGuard::S3(guard)
+            | TempDirGuard::Oss(guard)
+            | TempDirGuard::Azblob(guard)
+            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
+            {
+                guard.remove_all().await.unwrap()
+            }
         }
     }
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
-    store_type: StorageType,
+    default_store_type: StorageType,
+    custom_store_types: Vec<StorageType>,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
-    let (store, data_tmp_dir) = get_test_store_config(&store_type);
-    let opts = create_datanode_opts(store, home_dir);
+    // Excludes the default object store.
+    let mut custom_stores = Vec::with_capacity(custom_store_types.len());
+    // Includes the default object store.
+    let mut storage_guards = Vec::with_capacity(custom_store_types.len() + 1);
+
+    let (default_store, data_tmp_dir) = get_test_store_config(&default_store_type);
+    storage_guards.push(StorageGuard(data_tmp_dir));
+
+    for store_type in custom_store_types {
+        let (store, data_tmp_dir) = get_test_store_config(&store_type);
+        custom_stores.push(store);
+        storage_guards.push(StorageGuard(data_tmp_dir))
+    }
+    let opts = create_datanode_opts(default_store, custom_stores, home_dir);
 
     (
         opts,
         TestGuard {
             home_guard: FileDirGuard::new(home_tmp_dir),
-            storage_guard: StorageGuard(data_tmp_dir),
+            storage_guards,
         },
     )
 }
 
-pub(crate) fn create_datanode_opts(store: ObjectStoreConfig, home_dir: String) -> DatanodeOptions {
+pub(crate) fn create_datanode_opts(
+    default_store: ObjectStoreConfig,
+    custom_stores: Vec<ObjectStoreConfig>,
+    home_dir: String,
+) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),
         require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
-            store,
+            custom_stores,
+            default_store,
             ..Default::default()
         },
         mode: Mode::Standalone,
@@ -325,7 +365,7 @@ async fn setup_standalone_instance(
     store_type: StorageType,
 ) -> GreptimeDbStandalone {
     GreptimeDbStandaloneBuilder::new(test_name)
-        .with_store_type(store_type)
+        .with_default_store_type(store_type)
         .build()
         .await
 }

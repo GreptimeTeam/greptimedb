@@ -168,6 +168,8 @@ impl<'a> ParserContext<'a> {
                 }
             );
         }
+        // Sorts options so that `test_display_create_table` can always pass.
+        let options = options.into_iter().sorted().collect();
         let create_table = CreateTable {
             if_not_exists,
             name: table_name,
