@@ -14,8 +14,6 @@
 
 //! Utilities for testing.
 
-use std::collections::HashMap;
-
 use api::v1::SemanticType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -28,7 +26,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::engine::{MetricEngine, METRIC_ENGINE_NAME};
+use crate::engine::{MetricEngine, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use crate::metadata_region::MetadataRegion;
 
 /// Env to test metric engine.
@@ -80,7 +78,9 @@ impl TestEnv {
                 ),
             }],
             primary_key: vec![],
-            options: HashMap::new(),
+            options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                .into_iter()
+                .collect(),
             region_dir: "test_metric_region".to_string(),
         };
 

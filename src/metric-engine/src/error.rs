@@ -18,7 +18,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -34,9 +34,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table `{}` already exists", table_name))]
+    #[snafu(display("Table `{}` already exists", table_id))]
     TableAlreadyExists {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 
@@ -52,6 +52,14 @@ pub enum Error {
     DecodeColumnValue {
         #[snafu(source)]
         error: base64::DecodeError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse table id from {}", raw))]
+    ParseTableId {
+        raw: String,
+        #[snafu(source)]
+        error: <TableId as std::str::FromStr>::Err,
         location: Location,
     },
 
@@ -105,7 +113,8 @@ impl ErrorExt for Error {
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
-            | DecodeColumnValue { .. } => StatusCode::Unexpected,
+            | DecodeColumnValue { .. }
+            | ParseTableId { .. } => StatusCode::Unexpected,
 
             PhysicalTableNotFound { .. } => StatusCode::TableNotFound,
 
