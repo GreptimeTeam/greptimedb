@@ -27,13 +27,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateTimeType, DateType, DictionaryType, DurationMicrosecondType,
-    DurationMillisecondType, DurationNanosecondType, DurationSecondType, DurationType, Float32Type,
-    Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, ListType, NullType, StringType,
-    TimeMillisecondType, TimeType, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, TimestampType, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type,
+    BinaryType, BooleanType, DateTimeType, DateType, DecimalType, DictionaryType,
+    DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
+    DurationType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, ListType,
+    NullType, StringType, TimeMillisecondType, TimeType, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType, TimestampType,
+    UInt16Type, UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::value::Value;
 use crate::vectors::MutableVector;
@@ -55,6 +55,9 @@ pub enum ConcreteDataType {
     UInt64(UInt64Type),
     Float32(Float32Type),
     Float64(Float64Type),
+
+    // Decimal type:
+    Decimal128(DecimalType),
 
     // String types:
     Binary(BinaryType),
@@ -102,6 +105,9 @@ impl fmt::Display for ConcreteDataType {
             ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
             ConcreteDataType::Interval(_) => write!(f, "Interval"),
             ConcreteDataType::Duration(_) => write!(f, "Duration"),
+            ConcreteDataType::Decimal128(d) => {
+                write!(f, "Decimal128({},{})", d.precision(), d.scale())
+            }
         }
     }
 }
@@ -150,6 +156,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Time(_)
                 | ConcreteDataType::Interval(_)
                 | ConcreteDataType::Duration(_)
+                | ConcreteDataType::Decimal128(_)
         )
     }
 
@@ -181,6 +188,10 @@ impl ConcreteDataType {
 
     pub fn is_timestamp(&self) -> bool {
         matches!(self, ConcreteDataType::Timestamp(_))
+    }
+
+    pub fn is_decimal(&self) -> bool {
+        matches!(self, ConcreteDataType::Decimal128(_))
     }
 
     pub fn numerics() -> Vec<ConcreteDataType> {
@@ -291,6 +302,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Time64(u) => ConcreteDataType::Time(TimeType::from_unit(u.into())),
             ArrowDataType::Duration(u) => {
                 ConcreteDataType::Duration(DurationType::from_unit(u.into()))
+            }
+            ArrowDataType::Decimal128(precision, scale) => {
+                ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
             _ => {
                 return error::UnsupportedArrowTypeSnafu {
@@ -454,6 +468,10 @@ impl ConcreteDataType {
     ) -> ConcreteDataType {
         ConcreteDataType::Dictionary(DictionaryType::new(key_type, value_type))
     }
+
+    pub fn decimal128_datatype(precision: u8, scale: i8) -> ConcreteDataType {
+        ConcreteDataType::Decimal128(DecimalType::new(precision, scale))
+    }
 }
 
 /// Data type abstraction.
@@ -614,6 +632,14 @@ mod tests {
     }
 
     #[test]
+    fn test_is_decimal() {
+        assert!(!ConcreteDataType::int32_datatype().is_decimal());
+        assert!(!ConcreteDataType::float32_datatype().is_decimal());
+        assert!(ConcreteDataType::decimal128_datatype(10, 2).is_decimal());
+        assert!(ConcreteDataType::decimal128_datatype(18, 6).is_decimal());
+    }
+
+    #[test]
     fn test_is_stringifiable() {
         assert!(!ConcreteDataType::int32_datatype().is_stringifiable());
         assert!(!ConcreteDataType::float32_datatype().is_stringifiable());
@@ -670,6 +696,8 @@ mod tests {
 
         assert!(!ConcreteDataType::float32_datatype().is_signed());
         assert!(!ConcreteDataType::float64_datatype().is_signed());
+
+        assert!(ConcreteDataType::decimal128_datatype(10, 2).is_signed());
     }
 
     #[test]
@@ -695,6 +723,7 @@ mod tests {
         assert!(!ConcreteDataType::duration_millisecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::duration_microsecond_datatype().is_unsigned());
         assert!(!ConcreteDataType::duration_nanosecond_datatype().is_unsigned());
+        assert!(!ConcreteDataType::decimal128_datatype(10, 2).is_unsigned());
 
         assert!(ConcreteDataType::uint8_datatype().is_unsigned());
         assert!(ConcreteDataType::uint16_datatype().is_unsigned());
@@ -807,6 +836,10 @@ mod tests {
         assert_eq!(
             ConcreteDataType::duration_second_datatype().to_string(),
             "Duration"
+        );
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(10, 2).to_string(),
+            "Decimal128(10,2)"
         );
     }
 }
