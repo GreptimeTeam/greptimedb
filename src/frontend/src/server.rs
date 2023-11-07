@@ -52,7 +52,7 @@ impl Services {
         T: Into<FrontendOptions> + TomlSerializable,
         U: FrontendInstance,
     {
-        let toml = opts.to_toml();
+        let toml = opts.to_toml()?;
         let opts: FrontendOptions = opts.into();
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
         let user_provider = plugins.get::<UserProviderRef>();

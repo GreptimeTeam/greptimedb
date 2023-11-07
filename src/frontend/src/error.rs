@@ -272,6 +272,12 @@ pub enum Error {
 
     #[snafu(display("Invalid auth config"))]
     IllegalAuthConfig { source: auth::error::Error },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(source)]
+        error: toml::ser::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -279,7 +285,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::ParseAddr { .. }
+            Error::TomlFormat { .. }
+            | Error::ParseAddr { .. }
             | Error::InvalidSql { .. }
             | Error::InvalidInsertRequest { .. }
             | Error::InvalidDeleteRequest { .. }

@@ -16,6 +16,7 @@ use common_config::KvBackendConfig;
 use common_telemetry::logging::LoggingOptions;
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
+use frontend::error::{Result as FeResult, TomlFormatSnafu};
 use frontend::frontend::{FrontendOptions, TomlSerializable};
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
@@ -44,8 +45,8 @@ impl From<MixOptions> for FrontendOptions {
 }
 
 impl TomlSerializable for MixOptions {
-    fn to_toml(&self) -> String {
-        toml::to_string(self).unwrap()
+    fn to_toml(&self) -> FeResult<String> {
+        toml::to_string(self).context(TomlFormatSnafu)
     }
 }
 

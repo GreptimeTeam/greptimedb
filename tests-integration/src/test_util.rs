@@ -377,7 +377,7 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
             instance.instance.clone(),
         ))
         .with_script_handler(instance.instance.clone())
-        .with_greptime_config_options(instance.mix_options.to_toml());
+        .with_greptime_config_options(instance.mix_options.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
         http_server.with_user_provider(user_provider);

@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
+use snafu::prelude::*;
 
+use crate::error::{Result, TomlFormatSnafu};
 use crate::service_config::{
     DatanodeOptions, GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
     PostgresOptions, PromStoreOptions,
@@ -77,12 +79,12 @@ impl FrontendOptions {
 }
 
 pub trait TomlSerializable {
-    fn to_toml(&self) -> String;
+    fn to_toml(&self) -> Result<String>;
 }
 
 impl TomlSerializable for FrontendOptions {
-    fn to_toml(&self) -> String {
-        toml::to_string(&self).unwrap()
+    fn to_toml(&self) -> Result<String> {
+        toml::to_string(&self).context(TomlFormatSnafu)
     }
 }
 

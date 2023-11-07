@@ -317,8 +317,8 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
         #[allow(clippy::unnecessary_mut_passed)]
-        let mut fe_opts = opts.frontend.clone();
-        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
+        let fe_opts = opts.frontend.clone();
+        let fe_plugins = plugins::setup_frontend_plugins(&fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
