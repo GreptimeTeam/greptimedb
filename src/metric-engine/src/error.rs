@@ -90,6 +90,7 @@ pub enum Error {
     #[snafu(display("Region options are conflicted"))]
     ConflictRegionOption { location: Location },
 
+    // TODO: remove this
     #[snafu(display("Physical table {} not found", physical_table))]
     PhysicalTableNotFound {
         physical_table: String,
@@ -99,6 +100,12 @@ pub enum Error {
     #[snafu(display("Physical region {} not found", region_id))]
     PhysicalRegionNotFound {
         region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Logical table {} not found", table_id))]
+    LogicalTableNotFound {
+        table_id: TableId,
         location: Location,
     },
 }
@@ -119,7 +126,7 @@ impl ErrorExt for Error {
             | DecodeColumnValue { .. }
             | ParseTableId { .. } => StatusCode::Unexpected,
 
-            PhysicalTableNotFound { .. } => StatusCode::TableNotFound,
+            PhysicalTableNotFound { .. } | LogicalTableNotFound { .. } => StatusCode::TableNotFound,
 
             PhysicalRegionNotFound { .. } => StatusCode::RegionNotFound,
 

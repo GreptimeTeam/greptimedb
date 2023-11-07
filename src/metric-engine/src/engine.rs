@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -40,7 +40,8 @@ use tokio::sync::RwLock;
 use crate::data_region::DataRegion;
 use crate::error::{
     ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
-    MissingRegionOptionSnafu, PhysicalRegionNotFoundSnafu, PhysicalTableNotFoundSnafu, Result,
+    LogicalTableNotFoundSnafu, MissingRegionOptionSnafu, PhysicalRegionNotFoundSnafu,
+    PhysicalTableNotFoundSnafu, Result,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
@@ -331,9 +332,27 @@ impl MetricEngineInner {
             }
         }
 
+        self.add_columns_to_physical_data_region(
+            data_region_id,
+            metadata_region_id,
+            logical_table_id,
+            new_columns,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn add_columns_to_physical_data_region(
+        &self,
+        data_region_id: RegionId,
+        metadata_region_id: RegionId,
+        logical_table_id: TableId,
+        new_columns: Vec<ColumnMetadata>,
+    ) -> Result<()> {
         // alter data region
         self.data_region
-            .add_columns(region_id, new_columns.clone())
+            .add_columns(data_region_id, new_columns.clone())
             .await?;
 
         // register columns to metadata region
@@ -354,16 +373,14 @@ impl MetricEngineInner {
         for col in &new_columns {
             column_set.insert(col.column_schema.name.clone());
         }
-        info!("Create table {logical_table_id} leads to adding columns {new_columns:?} to physical region {physical_region_id}");
+        info!("Create table {logical_table_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
 
         // register table to metadata region
         self.metadata_region
             .add_table(metadata_region_id, logical_table_id)
             .await?;
-        info!(
-            "Created new logical table {logical_table_id} on physical region {physical_region_id}"
-        );
+        info!("Created new logical table {logical_table_id} on physical region {data_region_id}");
         LOGICAL_REGION_COUNT.inc();
 
         Ok(())
@@ -529,7 +546,7 @@ impl MetricEngineInner {
 }
 
 impl MetricEngineInner {
-    pub fn alter_logic_region(
+    pub async fn alter_logic_region(
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
@@ -538,20 +555,48 @@ impl MetricEngineInner {
         let AlterKind::AddColumns { columns } = request.kind else {
             return Ok(());
         };
+        let logical_table_id = region_id.table_id();
 
-        // let mut columns_to_add = vec![];
-        // for col in columns {
-        //     if self
-        //         .metadata_region
-        //         .column_semantic_type(region_id, table_name, column_name)
-        //         .await?
-        //         .is_none()
-        //     {
-        //         columns_to_add.push(col);
-        //     }
-        // }
+        // check if the table exists
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        if !self
+            .metadata_region
+            .is_table_exist(metadata_region_id, logical_table_id)
+            .await?
+        {
+            error!("Trying to alter an nonexistent table {logical_table_id}");
+            return LogicalTableNotFoundSnafu {
+                table_id: logical_table_id,
+            }
+            .fail();
+        }
 
-        todo!()
+        let mut columns_to_add = vec![];
+        for col in columns {
+            if self
+                .metadata_region
+                .column_semantic_type(
+                    metadata_region_id,
+                    logical_table_id,
+                    &col.column_metadata.column_schema.name,
+                )
+                .await?
+                .is_none()
+            {
+                columns_to_add.push(col.column_metadata);
+            }
+        }
+
+        let data_region_id = utils::to_data_region_id(region_id);
+        self.add_columns_to_physical_data_region(
+            data_region_id,
+            metadata_region_id,
+            logical_table_id,
+            columns_to_add,
+        )
+        .await?;
+
+        Ok(())
     }
 }
 
