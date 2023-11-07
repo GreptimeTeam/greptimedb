@@ -177,6 +177,7 @@ impl ParquetReaderBuilder {
                 .context(ReadParquetSnafu { path: &file_path })?;
 
         let reader_builder = RowGroupReaderBuilder {
+            file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
             file_reader: reader,
@@ -191,7 +192,6 @@ impl ParquetReaderBuilder {
         };
 
         Ok(ParquetReader {
-            _file_handle: self.file_handle.clone(),
             row_groups,
             read_format,
             reader_builder,
@@ -278,6 +278,10 @@ struct Metrics {
 
 /// Builder to build a [ParquetRecordBatchReader] for a row group.
 struct RowGroupReaderBuilder {
+    /// SST file to read.
+    ///
+    /// Holds the file handle to avoid the file purge purge it.
+    file_handle: FileHandle,
     /// Path of the file.
     file_path: String,
     /// Metadata of the parquet file.
@@ -323,10 +327,6 @@ impl RowGroupReaderBuilder {
 
 /// Parquet batch reader to read our SST format.
 pub struct ParquetReader {
-    /// SST file to read.
-    ///
-    /// Holds the file handle to avoid the file purge purge it.
-    _file_handle: FileHandle,
     /// Indices of row groups to read.
     row_groups: VecDeque<usize>,
     /// Helper to read record batches.
