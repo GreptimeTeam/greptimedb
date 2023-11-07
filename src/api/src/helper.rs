@@ -158,7 +158,8 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
             },
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
-            | ConcreteDataType::Dictionary(_) => {
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Decimal128(_) => {
                 return error::IntoColumnDataTypeSnafu { from: datatype }.fail()
             }
         });
@@ -341,7 +342,7 @@ pub fn push_vals(column: &mut Column, origin_count: usize, vector: VectorRef) {
             TimeUnit::Microsecond => values.duration_microsecond_values.push(val.value()),
             TimeUnit::Nanosecond => values.duration_nanosecond_values.push(val.value()),
         },
-        Value::List(_) => unreachable!(),
+        Value::List(_) | Value::Decimal128(_) => unreachable!(),
     });
     column.null_mask = null_mask.into_vec();
 }
@@ -522,7 +523,10 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
                 values.duration_nanosecond_values,
             )),
         },
-        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_)
+        | ConcreteDataType::Decimal128(_) => {
             unreachable!()
         }
     }
@@ -692,7 +696,10 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             .into_iter()
             .map(|v| Value::Duration(Duration::new_nanosecond(v)))
             .collect(),
-        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_)
+        | ConcreteDataType::Decimal128(_) => {
             unreachable!()
         }
     }
@@ -816,7 +823,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
                 value_data: Some(ValueData::DurationNanosecondValue(v.value())),
             },
         },
-        Value::List(_) => return None,
+        Value::List(_) | Value::Decimal128(_) => return None,
     };
 
     Some(proto_value)
@@ -908,9 +915,10 @@ pub fn to_column_data_type(data_type: &ConcreteDataType) -> Option<ColumnDataTyp
             ColumnDataType::IntervalMonthDayNano
         }
         ConcreteDataType::Interval(IntervalType::DayTime(_)) => ColumnDataType::IntervalDayTime,
-        ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
-            return None
-        }
+        ConcreteDataType::Null(_)
+        | ConcreteDataType::List(_)
+        | ConcreteDataType::Dictionary(_)
+        | ConcreteDataType::Decimal128(_) => return None,
     };
 
     Some(column_data_type)
@@ -974,7 +982,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Microsecond => ValueData::DurationMicrosecondValue(v.value()),
                 TimeUnit::Nanosecond => ValueData::DurationNanosecondValue(v.value()),
             }),
-            Value::List(_) => unreachable!(),
+            Value::List(_) | Value::Decimal128(_) => unreachable!(),
         },
     }
 }

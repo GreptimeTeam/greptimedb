@@ -19,6 +19,8 @@ use arrow::compute::cast as arrow_array_cast;
 use arrow::datatypes::{
     DataType as ArrowDataType, IntervalUnit as ArrowIntervalUnit, TimeUnit as ArrowTimeUnit,
 };
+use arrow_schema::DECIMAL_DEFAULT_SCALE;
+use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use common_time::interval::IntervalUnit;
 use common_time::timestamp::TimeUnit;
 use paste::paste;
@@ -242,6 +244,13 @@ impl ConcreteDataType {
         match self {
             ConcreteDataType::Int64(_) => Some(TimeType::Millisecond(TimeMillisecondType)),
             ConcreteDataType::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    pub fn as_decimal(&self) -> Option<DecimalType> {
+        match self {
+            ConcreteDataType::Decimal128(d) => Some(*d),
             _ => None,
         }
     }
@@ -471,6 +480,10 @@ impl ConcreteDataType {
 
     pub fn decimal128_datatype(precision: u8, scale: i8) -> ConcreteDataType {
         ConcreteDataType::Decimal128(DecimalType::new(precision, scale))
+    }
+
+    pub fn decimal128_default_datatype() -> ConcreteDataType {
+        Self::decimal128_datatype(DECIMAL128_MAX_PRECISION, DECIMAL_DEFAULT_SCALE)
     }
 }
 

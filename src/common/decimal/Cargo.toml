@@ -1,5 +1,5 @@
 [package]
-name = "decimal"
+name = "common-decimal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

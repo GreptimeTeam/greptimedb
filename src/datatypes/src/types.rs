@@ -17,6 +17,7 @@ mod boolean_type;
 pub mod cast;
 mod date_type;
 mod datetime_type;
+mod decimal_type;
 mod dictionary_type;
 mod duration_type;
 mod interval_type;
@@ -29,9 +30,10 @@ mod timestamp_type;
 
 pub use binary_type::BinaryType;
 pub use boolean_type::BooleanType;
-pub use cast::cast_with_opt;
+pub use cast::{cast, cast_with_opt};
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
+pub use decimal_type::DecimalType;
 pub use dictionary_type::DictionaryType;
 pub use duration_type::{
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,

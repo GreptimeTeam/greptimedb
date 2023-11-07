@@ -43,7 +43,7 @@ const BYTES_TO_OVERFLOW_RUST_DECIMAL: usize = 28;
 /// **precision**: the total number of digits in the number, it's range is \[1, 38\].
 ///
 /// **scale**: the number of digits to the right of the decimal point, it's range is \[0, precision\].
-#[derive(Debug, Default, Eq, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Eq, Copy, Clone, Serialize, Deserialize)]
 pub struct Decimal128 {
     value: i128,
     precision: u8,
@@ -87,6 +87,17 @@ impl Decimal128 {
     /// Convert to ScalarValue
     pub fn to_scalar_value(&self) -> (Option<i128>, u8, i8) {
         (Some(self.value), self.precision, self.scale)
+    }
+}
+
+/// The default value of Decimal128 is 0, and its precision is 1 and scale is 0.
+impl Default for Decimal128 {
+    fn default() -> Self {
+        Self {
+            value: 0,
+            precision: 1,
+            scale: 0,
+        }
     }
 }
 

@@ -22,7 +22,9 @@ use crate::value::Value;
 use crate::vectors::{Decimal128VectorBuilder, MutableVector};
 
 /// Decimal type with precision and scale information.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct DecimalType {
     precision: u8,
     scale: i8,

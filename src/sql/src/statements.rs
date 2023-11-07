@@ -34,7 +34,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::{AddColumnLocation as Location, SemanticType};
 use common_base::bytes::Bytes;
-use common_decimal::Decimal128;
 use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
@@ -147,14 +146,8 @@ macro_rules! parse_number_to_value {
                 Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
             },
             ConcreteDataType::Decimal128(_) => {
-                let decimal = match Decimal128::from_str($n){
-                    Ok(val) => val,
-                    Err(e) => ParseSqlValueSnafu {
-                        msg: format!("Fail to parse number {}, {e:?}",$n),
-                    }.fail()?,
-                };
-
-                Ok(Value::Decimal128(decimal))
+                // TODO(QuenKar): parse decimal128 string with precision and scale
+                unimplemented!("insert Decimal128 is not supported yet")
             }
 
             _ => ParseSqlValueSnafu {

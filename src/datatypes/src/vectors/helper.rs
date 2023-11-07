@@ -25,7 +25,10 @@ use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
-use super::{IntervalDayTimeVector, IntervalYearMonthVector};
+use super::{
+    Decimal128Vector, DurationMicrosecondVector, DurationMillisecondVector,
+    DurationNanosecondVector, DurationSecondVector, IntervalDayTimeVector, IntervalYearMonthVector,
+};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
@@ -218,12 +221,23 @@ impl Helper {
             ScalarValue::IntervalMonthDayNano(v) => {
                 ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
             }
-            ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::DurationSecond(_)
-            | ScalarValue::DurationMillisecond(_)
-            | ScalarValue::DurationMicrosecond(_)
-            | ScalarValue::DurationNanosecond(_)
+            ScalarValue::DurationSecond(v) => {
+                ConstantVector::new(Arc::new(DurationSecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationMillisecond(v) => {
+                ConstantVector::new(Arc::new(DurationMillisecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationMicrosecond(v) => {
+                ConstantVector::new(Arc::new(DurationMicrosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationNanosecond(v) => {
+                ConstantVector::new(Arc::new(DurationNanosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::Decimal128(v, p, s) => {
+                let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
+                ConstantVector::new(Arc::new(vector), length)
+            }
+            ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
@@ -318,14 +332,29 @@ impl Helper {
                     IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
                 ),
             },
+            ArrowDataType::Duration(unit) => match unit {
+                TimeUnit::Second => {
+                    Arc::new(DurationSecondVector::try_from_arrow_duration_array(array)?)
+                }
+                TimeUnit::Millisecond => Arc::new(
+                    DurationMillisecondVector::try_from_arrow_duration_array(array)?,
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    DurationMicrosecondVector::try_from_arrow_duration_array(array)?,
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    DurationNanosecondVector::try_from_arrow_duration_array(array)?,
+                ),
+            },
+            ArrowDataType::Decimal128(_, _) => {
+                Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::Float16
-            | ArrowDataType::Duration(_)
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
             | ArrowDataType::Union(_, _)
             | ArrowDataType::Dictionary(_, _)
-            | ArrowDataType::Decimal128(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _) => {

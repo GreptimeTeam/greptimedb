@@ -134,6 +134,7 @@ common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
+common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }

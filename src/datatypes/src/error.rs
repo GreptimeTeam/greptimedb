@@ -122,6 +122,13 @@ pub enum Error {
 
     #[snafu(display("Failed to unpack value to given type: {}", reason))]
     TryFromValue { reason: String, location: Location },
+
+    #[snafu(display("Invalid arguments, reason: {}", error))]
+    InvalidArguments {
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {

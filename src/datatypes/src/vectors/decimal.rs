@@ -26,12 +26,13 @@ use snafu::{OptionExt, ResultExt};
 use super::{MutableVector, Validity, Vector, VectorRef};
 use crate::arrow::datatypes::DataType as ArrowDataType;
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, ArrowPrecisionOrScaleSnafu, CastTypeSnafu, Result};
+use crate::error::{self, CastTypeSnafu, InvalidArgumentsSnafu, Result};
 use crate::prelude::{ScalarVector, ScalarVectorBuilder};
 use crate::serialize::Serializable;
 use crate::value::{Value, ValueRef};
 use crate::vectors;
 
+/// Decimal128Vector is a vector keep i128 values with precision and scale.
 #[derive(Debug, PartialEq)]
 pub struct Decimal128Vector {
     array: Decimal128Array,
@@ -48,7 +49,22 @@ impl Decimal128Vector {
         }
     }
 
+    /// Construct Vector from i128 values
     pub fn from_values<I: IntoIterator<Item = i128>>(iter: I) -> Self {
+        Self {
+            array: Decimal128Array::from_iter_values(iter),
+        }
+    }
+
+    pub fn from_slice<P: AsRef<[i128]>>(slice: P) -> Self {
+        let iter = slice.as_ref().iter().copied();
+        Self {
+            array: Decimal128Array::from_iter_values(iter),
+        }
+    }
+
+    pub fn from_wrapper_slice<P: AsRef<[Decimal128]>>(slice: P) -> Self {
+        let iter = slice.as_ref().iter().copied().map(|v| v.val());
         Self {
             array: Decimal128Array::from_iter_values(iter),
         }
@@ -63,15 +79,42 @@ impl Decimal128Vector {
         Self::from_array_data(data)
     }
 
+    /// Change the precision and scale of the Decimal128Vector,
+    /// And check precision and scale if compatible.
     pub fn with_precision_and_scale(self, precision: u8, scale: i8) -> Result<Self> {
         let array = self
             .array
             .with_precision_and_scale(precision, scale)
-            .context(ArrowPrecisionOrScaleSnafu { precision, scale })?;
+            .context(InvalidArgumentsSnafu {})?;
         Ok(Self { array })
     }
 
-    pub fn as_arrow(&self) -> &Decimal128Array {
+    pub fn null_if_overflow_precision(&self, precision: u8) -> Self {
+        Self {
+            array: self.array.null_if_overflow_precision(precision),
+        }
+    }
+
+    pub fn validate_decimal_precision(&self, precision: u8) -> Result<()> {
+        self.array
+            .validate_decimal_precision(precision)
+            .context(InvalidArgumentsSnafu {})
+    }
+
+    /// Return decimal value as string
+    pub fn value_as_string(&self, idx: usize) -> String {
+        self.array.value_as_string(idx)
+    }
+
+    pub fn precision(&self) -> u8 {
+        self.array.precision()
+    }
+
+    pub fn scale(&self) -> i8 {
+        self.array.scale()
+    }
+
+    pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
 }
@@ -81,7 +124,7 @@ impl Vector for Decimal128Vector {
         if let ArrowDataType::Decimal128(p, s) = self.array.data_type() {
             ConcreteDataType::decimal128_datatype(*p, *s)
         } else {
-            unreachable!()
+            ConcreteDataType::decimal128_default_datatype()
         }
     }
 
@@ -123,7 +166,7 @@ impl Vector for Decimal128Vector {
         self.array.is_null(row)
     }
 
-    fn slice(&self, offset: usize, length: usize) -> super::VectorRef {
+    fn slice(&self, offset: usize, length: usize) -> VectorRef {
         let data = self.array.to_data().slice(offset, length);
         Arc::new(Self::from_array_data(data))
     }
@@ -218,7 +261,7 @@ impl ScalarVector for Decimal128Vector {
     type Builder = Decimal128VectorBuilder;
 
     fn get_data(&self, idx: usize) -> Option<Self::RefItem<'_>> {
-        if self.array.is_valid(idx) {
+        if !self.array.is_valid(idx) {
             return None;
         }
 
@@ -226,6 +269,7 @@ impl ScalarVector for Decimal128Vector {
             ArrowDataType::Decimal128(precision, scale) => {
                 // Safety: The index have been checked by `is_valid()`.
                 let value = unsafe { self.array.value_unchecked(idx) };
+                // Safety: The precision and scale have been checked by ArrowDataType.
                 Some(Decimal128::new_unchecked(value, *precision, *scale))
             }
             _ => None,
@@ -315,3 +359,107 @@ impl ScalarVectorBuilder for Decimal128VectorBuilder {
 }
 
 vectors::impl_try_from_arrow_array_for_vector!(Decimal128Array, Decimal128Vector);
+
+#[cfg(test)]
+pub mod tests {
+    use arrow_array::Decimal128Array;
+    use common_decimal::Decimal128;
+
+    use super::*;
+    use crate::vectors::operations::VectorOp;
+    use crate::vectors::Int8Vector;
+
+    #[test]
+    fn test_from_arrow_decimal128_array() {
+        let decimal_array = Decimal128Array::from(vec![Some(123), Some(456)]);
+        let decimal_vector = Decimal128Vector::from(decimal_array);
+        let expect = Decimal128Vector::from_values(vec![123, 456]);
+
+        assert_eq!(decimal_vector, expect);
+    }
+
+    #[test]
+    fn test_from_slice() {
+        let decimal_vector = Decimal128Vector::from_slice([123, 456]);
+        let decimal_vector2 = Decimal128Vector::from_wrapper_slice([
+            Decimal128::new_unchecked(123, 10, 2),
+            Decimal128::new_unchecked(456, 10, 2),
+        ]);
+        let expect = Decimal128Vector::from_values(vec![123, 456]);
+
+        assert_eq!(decimal_vector, expect);
+        assert_eq!(decimal_vector2, expect);
+    }
+
+    #[test]
+    fn test_decimal128_vector_basic() {
+        let data = vec![100, 200, 300];
+        // create a decimal vector
+        let decimal_vector = Decimal128Vector::from_values(data.clone())
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+
+        assert_eq!(decimal_vector.len(), 3);
+        // check the first value
+        assert_eq!(
+            decimal_vector.get(0),
+            Value::Decimal128(Decimal128::new_unchecked(100, 10, 2))
+        );
+
+        // iterator for-loop
+        for (i, _) in data.iter().enumerate() {
+            assert_eq!(
+                decimal_vector.get_data(i),
+                Some(Decimal128::new_unchecked((i + 1) as i128 * 100, 10, 2))
+            );
+            assert_eq!(
+                decimal_vector.get(i),
+                Value::Decimal128(Decimal128::new_unchecked((i + 1) as i128 * 100, 10, 2))
+            )
+        }
+    }
+
+    #[test]
+    fn test_decimal128_vector_builder() {
+        let mut decimal_builder = Decimal128VectorBuilder::with_capacity(3);
+        decimal_builder.push(Some(Decimal128::new_unchecked(100, 10, 2)));
+        decimal_builder.push(Some(Decimal128::new_unchecked(200, 10, 2)));
+        decimal_builder.push(Some(Decimal128::new_unchecked(300, 10, 2)));
+        let decimal_vector = decimal_builder
+            .finish()
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_eq!(decimal_vector.len(), 3);
+        assert_eq!(
+            decimal_vector.get(0),
+            Value::Decimal128(Decimal128::new_unchecked(100, 10, 2))
+        );
+        assert_eq!(
+            decimal_vector.get(1),
+            Value::Decimal128(Decimal128::new_unchecked(200, 10, 2))
+        );
+        assert_eq!(
+            decimal_vector.get(2),
+            Value::Decimal128(Decimal128::new_unchecked(300, 10, 2))
+        );
+
+        // push value error
+        let mut decimal_builder = Decimal128VectorBuilder::with_capacity(3);
+        decimal_builder.push(Some(Decimal128::new_unchecked(123, 10, 2)));
+        decimal_builder.push(Some(Decimal128::new_unchecked(1234, 10, 2)));
+        decimal_builder.push(Some(Decimal128::new_unchecked(12345, 10, 2)));
+        let decimal_vector = decimal_builder.finish().with_precision_and_scale(3, 2);
+        assert!(decimal_vector.is_ok());
+    }
+
+    #[test]
+    fn test_cast() {
+        let vector = Int8Vector::from_values(vec![1, 2, 3, 4, 100]);
+        let casted_vector = vector.cast(&ConcreteDataType::decimal128_datatype(3, 1));
+        assert!(casted_vector.is_ok());
+        let vector = casted_vector.unwrap();
+        let array = vector.as_any().downcast_ref::<Decimal128Vector>().unwrap();
+        // because 100 is out of Decimal(3, 1) range, so it will be null
+        assert!(array.is_null(4));
+    }
+}
