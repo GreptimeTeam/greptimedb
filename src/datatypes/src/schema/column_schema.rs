@@ -133,6 +133,11 @@ impl ColumnSchema {
         Ok(self)
     }
 
+    pub fn with_nullable(mut self, nullable: bool) -> Self {
+        self.is_nullable = nullable;
+        self
+    }
+
     /// Creates a new [`ColumnSchema`] with given metadata.
     pub fn with_metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = metadata;

@@ -85,7 +85,10 @@ pub enum Error {
     InternalColumnOccupied { column: String, location: Location },
 
     #[snafu(display("Required table option is missing"))]
-    MissingTableOption { location: Location },
+    MissingRegionOption { location: Location },
+
+    #[snafu(display("Region options are conflicted"))]
+    ConflictRegionOption { location: Location },
 
     #[snafu(display("Physical table {} not found", physical_table))]
     PhysicalTableNotFound {
@@ -107,9 +110,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InternalColumnOccupied { .. } | MissingTableOption { .. } => {
-                StatusCode::InvalidArguments
-            }
+            InternalColumnOccupied { .. }
+            | MissingRegionOption { .. }
+            | ConflictRegionOption { .. } => StatusCode::InvalidArguments,
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }

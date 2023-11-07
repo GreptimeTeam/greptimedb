@@ -39,8 +39,8 @@ use tokio::sync::RwLock;
 
 use crate::data_region::DataRegion;
 use crate::error::{
-    CreateMitoRegionSnafu, InternalColumnOccupiedSnafu, MissingTableOptionSnafu,
-    PhysicalRegionNotFoundSnafu, PhysicalTableNotFoundSnafu, Result,
+    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
+    MissingRegionOptionSnafu, PhysicalRegionNotFoundSnafu, PhysicalTableNotFoundSnafu, Result,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
@@ -217,7 +217,7 @@ impl MetricEngineInner {
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             self.create_logical_region(region_id, request).await
         } else {
-            MissingTableOptionSnafu {}.fail()
+            MissingRegionOptionSnafu {}.fail()
         }
     }
 
@@ -234,7 +234,7 @@ impl MetricEngineInner {
         let physical_table_name = request
             .options
             .get(PHYSICAL_TABLE_METADATA_KEY)
-            .ok_or(MissingTableOptionSnafu {}.build())?
+            .ok_or(MissingRegionOptionSnafu {}.build())?
             .to_string();
 
         // create metadata region
@@ -293,7 +293,7 @@ impl MetricEngineInner {
         let physical_table_name = request
             .options
             .get(LOGICAL_TABLE_METADATA_KEY)
-            .ok_or(MissingTableOptionSnafu {}.build())?;
+            .ok_or(MissingRegionOptionSnafu {}.build())?;
         let physical_table_id = *self
             .physical_tables
             .read()
@@ -399,7 +399,12 @@ impl MetricEngineInner {
         ensure!(
             request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
                 || request.options.contains_key(LOGICAL_TABLE_METADATA_KEY),
-            MissingTableOptionSnafu {}
+            MissingRegionOptionSnafu {}
+        );
+        ensure!(
+            !(request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+                && request.options.contains_key(LOGICAL_TABLE_METADATA_KEY)),
+            ConflictRegionOptionSnafu {}
         );
 
         Ok(())
@@ -552,6 +557,8 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::Hash;
+
     use super::*;
     use crate::test_util::TestEnv;
 
@@ -616,8 +623,39 @@ mod tests {
             region_dir: "test_dir".to_string(),
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
+            options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+                .into_iter()
+                .collect(),
+        };
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_region_create_request_options() {
+        let mut request = RegionCreateRequest {
+            column_metadatas: vec![],
+            region_dir: "test_dir".to_string(),
+            engine: METRIC_ENGINE_NAME.to_string(),
+            primary_key: vec![],
             options: HashMap::new(),
         };
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_err());
+
+        let mut options = HashMap::new();
+        options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
+        request.options = options.clone();
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_ok());
+
+        options.insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "value".to_string());
+        request.options = options.clone();
+        let result = MetricEngineInner::verify_region_create_request(&request);
+        assert!(result.is_err());
+
+        options.remove(PHYSICAL_TABLE_METADATA_KEY).unwrap();
+        request.options = options;
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_ok());
     }

@@ -44,6 +44,11 @@ impl DataRegion {
     /// This method will change the semantic type of those given columns.
     /// [SemanticType::Tag] will become [SemanticType::Field]. The procedure framework
     /// ensures there is no concurrent conflict.
+    ///
+    /// Invoker don't need to set up or verify the column id. This method will adjust
+    /// it using underlying schema.
+    ///
+    /// This method will also set the nullable marker to true.
     pub async fn add_columns(
         &self,
         region_id: RegionId,
@@ -59,10 +64,19 @@ impl DataRegion {
             .context(MitoReadOperationSnafu)?;
         let version = region_metadata.schema_version;
 
+        // find the max column id
+        let max_column_id = 1 + region_metadata
+            .column_metadatas
+            .iter()
+            .map(|c| c.column_id)
+            .max()
+            .unwrap_or(0);
+
         // overwrite semantic type
         let columns = columns
             .into_iter()
-            .map(|mut c| {
+            .enumerate()
+            .map(|(delta, mut c)| {
                 if c.semantic_type == SemanticType::Tag {
                     c.semantic_type = SemanticType::Field;
                 } else {
@@ -71,6 +85,10 @@ impl DataRegion {
                         c.column_schema.name
                     );
                 };
+
+                c.column_id = max_column_id + delta as u32;
+
+                c.column_schema = c.column_schema.with_nullable(true);
 
                 AddColumn {
                     column_metadata: c,
@@ -94,5 +112,68 @@ impl DataRegion {
         timer.stop_and_record();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_add_columns() {
+        common_telemetry::init_default_ut_logging();
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let current_version = env
+            .mito()
+            .get_metadata(utils::to_data_region_id(env.default_region_id()))
+            .await
+            .unwrap()
+            .schema_version;
+        assert_eq!(current_version, 0);
+
+        let new_columns = vec![
+            ColumnMetadata {
+                column_id: 0,
+                semantic_type: SemanticType::Tag,
+                column_schema: ColumnSchema::new(
+                    "tag2",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+            },
+            ColumnMetadata {
+                column_id: 0,
+                semantic_type: SemanticType::Tag,
+                column_schema: ColumnSchema::new(
+                    "tag3",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+            },
+        ];
+        env.data_region()
+            .add_columns(env.default_region_id(), new_columns)
+            .await
+            .unwrap();
+
+        let new_metadata = env
+            .mito()
+            .get_metadata(utils::to_data_region_id(env.default_region_id()))
+            .await
+            .unwrap();
+        let column_names = new_metadata
+            .column_metadatas
+            .iter()
+            .map(|c| &c.column_schema.name)
+            .collect::<Vec<_>>();
+        let expected = vec!["greptime_timestamp", "__metric", "__tsid", "tag2", "tag3"];
+        assert_eq!(column_names, expected);
     }
 }

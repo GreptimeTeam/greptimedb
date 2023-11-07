@@ -26,6 +26,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCreateRequest, RegionRequest};
 use store_api::storage::RegionId;
 
+use crate::data_region::DataRegion;
 use crate::engine::{MetricEngine, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use crate::metadata_region::MetadataRegion;
 
@@ -93,6 +94,10 @@ impl TestEnv {
 
     pub fn metadata_region(&self) -> MetadataRegion {
         MetadataRegion::new(self.mito())
+    }
+
+    pub fn data_region(&self) -> DataRegion {
+        DataRegion::new(self.mito())
     }
 
     /// `RegionId::new(1, 2)`
