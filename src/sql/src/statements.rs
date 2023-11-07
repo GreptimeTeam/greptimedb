@@ -34,15 +34,16 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::add_column_location::LocationType;
 use api::v1::{AddColumnLocation as Location, SemanticType};
 use common_base::bytes::Bytes;
+use common_decimal::Decimal128;
 use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
-use datatypes::types::cast::CastOption;
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
+use sqlparser::ast::ExactNumberInfo;
 pub use transform::{get_data_type_by_alias_name, transform_statements};
 
 use crate::ast::{
@@ -145,6 +146,16 @@ macro_rules! parse_number_to_value {
                 let n  = parse_sql_number::<i64>($n)?;
                 Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
             },
+            ConcreteDataType::Decimal128(_) => {
+                let decimal = match Decimal128::from_str($n){
+                    Ok(val) => val,
+                    Err(e) => ParseSqlValueSnafu {
+                        msg: format!("Fail to parse number {}, {e:?}",$n),
+                    }.fail()?,
+                };
+
+                Ok(Value::Decimal128(decimal))
+            }
 
             _ => ParseSqlValueSnafu {
                 msg: format!("Fail to parse number {}, invalid column type: {:?}",
@@ -222,11 +233,9 @@ pub fn sql_value_to_value(
         }
     };
     if value.data_type() != *data_type {
-        cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
-            InvalidCastSnafu {
-                sql_value: sql_val.clone(),
-                datatype: data_type,
-            }
+        cast(value, data_type).with_context(|_| InvalidCastSnafu {
+            sql_value: sql_val.clone(),
+            datatype: data_type,
         })
     } else {
         Ok(value)
@@ -439,6 +448,9 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         )),
         ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
+        ConcreteDataType::Decimal128(d) => Ok(SqlDataType::Decimal(
+            ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
+        )),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)
