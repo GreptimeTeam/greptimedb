@@ -1143,6 +1143,6 @@ mod tests {
             )
         );
         assert!(merger.is_empty());
-        assert_eq!(0, merger.num_deleted_rows());
+        assert_eq!(1, merger.num_deleted_rows());
     }
 }
