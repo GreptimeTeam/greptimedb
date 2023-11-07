@@ -213,3 +213,56 @@ async fn test_prune_memtable() {
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
+
+#[tokio::test]
+async fn test_prune_memtable_complex_expr() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+
+    let column_schemas = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // 0 ~ 10 in memtable
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 10),
+        },
+    )
+    .await;
+
+    // ts filter will be ignored when pruning time series in memtable.
+    let filters = vec![time_range_expr(4, 7), Expr::from(col("tag_0").lt(lit("6")))];
+
+    let stream = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                filters,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
+| 5     | 5.0     | 1970-01-01T00:00:05 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
