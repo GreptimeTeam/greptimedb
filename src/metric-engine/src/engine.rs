@@ -37,12 +37,13 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
 use tokio::sync::RwLock;
 
+use crate::data_region::DataRegion;
 use crate::error::{
     CreateMitoRegionSnafu, InternalColumnOccupiedSnafu, MissingTableOptionSnafu,
     PhysicalRegionNotFoundSnafu, PhysicalTableNotFoundSnafu, Result,
 };
 use crate::metadata_region::MetadataRegion;
-use crate::metrics::PHYSICAL_REGION_COUNT;
+use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
 
 /// region group value for data region inside a metric region
@@ -177,10 +178,12 @@ impl RegionEngine for MetricEngine {
 impl MetricEngine {
     pub fn new(mito: MitoEngine) -> Self {
         let metadata_region = MetadataRegion::new(mito.clone());
+        let data_region = DataRegion::new(mito.clone());
         Self {
             inner: Arc::new(MetricEngineInner {
                 mito,
                 metadata_region,
+                data_region,
                 physical_tables: RwLock::default(),
                 physical_columns: RwLock::default(),
             }),
@@ -191,6 +194,7 @@ impl MetricEngine {
 struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
+    data_region: DataRegion,
     // TODO(ruihang): handle different catalog/schema
     /// Map from physical table name to table id.
     physical_tables: RwLock<HashMap<String, TableId>>,
@@ -278,6 +282,8 @@ impl MetricEngineInner {
     /// represent the "logical region" to request.
     ///
     /// This method will alter the data region to add columns if necessary.
+    ///
+    /// If the logical region to create already exists, this method will do nothing.
     async fn create_logical_region(
         &self,
         region_id: RegionId,
@@ -296,8 +302,19 @@ impl MetricEngineInner {
             .with_context(|| PhysicalTableNotFoundSnafu {
                 physical_table: physical_table_name,
             })?;
+        let logical_table_id = region_id.table_id();
         let physical_region_id = RegionId::new(physical_table_id, region_id.region_number());
         let (data_region_id, metadata_region_id) = Self::transform_region_id(physical_region_id);
+
+        // check if the logical table already exist
+        if self
+            .metadata_region
+            .is_table_exist(metadata_region_id, logical_table_id)
+            .await?
+        {
+            info!("Create a existing logical region {region_id}. Skipped");
+            return Ok(());
+        }
 
         // find new columns to add
         let physical_columns = self.physical_columns.read().await;
@@ -315,12 +332,41 @@ impl MetricEngineInner {
         }
 
         // alter data region
+        self.data_region
+            .add_columns(region_id, new_columns.clone())
+            .await?;
 
         // register columns to metadata region
+        for col in &new_columns {
+            self.metadata_region
+                .add_column(
+                    metadata_region_id,
+                    logical_table_id,
+                    &col.column_schema.name,
+                    col.semantic_type,
+                )
+                .await?;
+        }
+
+        let mut physical_columns = self.physical_columns.write().await;
+        // safety: previous step has checked this
+        let mut column_set = physical_columns.get_mut(&data_region_id).unwrap();
+        for col in &new_columns {
+            column_set.insert(col.column_schema.name.clone());
+        }
+        info!("Create table {logical_table_id} leads to adding columns {new_columns:?} to physical region {physical_region_id}");
+        PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
 
         // register table to metadata region
+        self.metadata_region
+            .add_table(metadata_region_id, logical_table_id)
+            .await?;
+        info!(
+            "Created new logical table {logical_table_id} on physical region {physical_region_id}"
+        );
+        LOGICAL_REGION_COUNT.inc();
 
-        todo!()
+        Ok(())
     }
 
     /// Check if

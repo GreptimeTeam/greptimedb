@@ -18,12 +18,19 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    /// Gauge for open regions
+    /// Gauge for opened regions
     pub static ref PHYSICAL_REGION_COUNT: IntGauge =
         register_int_gauge!("metric_physical_region_count", "metric engine physical region count").unwrap();
-
 
     /// Gauge of columns across all opened regions
     pub static ref PHYSICAL_COLUMN_COUNT: IntGauge =
         register_int_gauge!("metric_physical_column_count", "metric engine physical column count").unwrap();
+
+    /// Gauge for opened logical regions
+    pub static ref LOGICAL_REGION_COUNT: IntGauge =
+        register_int_gauge!("metric_logical_region_count", "metric engine logical region count").unwrap();
+
+    /// Gauge for opened logical regions
+    pub static ref MITO_DDL_DURATION: Histogram =
+        register_histogram!("metric_engine_mito_ddl", "metric engine mito ddl").unwrap();
 }
