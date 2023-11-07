@@ -72,6 +72,39 @@ pub fn convert_to_region_leader_map(region_routes: &[RegionRoute]) -> HashMap<Re
         .collect::<HashMap<_, _>>()
 }
 
+/// Returns the HashMap<[RegionNumber], HashSet<DatanodeId>>
+pub fn convert_to_region_peer_map(
+    region_routes: &[RegionRoute],
+) -> HashMap<RegionNumber, HashSet<u64>> {
+    region_routes
+        .iter()
+        .map(|x| {
+            let set = x
+                .follower_peers
+                .iter()
+                .map(|p| p.id)
+                .chain(x.leader_peer.as_ref().map(|p| p.id))
+                .collect::<HashSet<_>>();
+
+            (x.region.id.region_number(), set)
+        })
+        .collect::<HashMap<_, _>>()
+}
+
+/// Returns the HashMap<[RegionNumber], [RegionStatus]>;
+pub fn convert_to_region_leader_status_map(
+    region_routes: &[RegionRoute],
+) -> HashMap<RegionNumber, RegionStatus> {
+    region_routes
+        .iter()
+        .filter_map(|x| {
+            x.leader_status
+                .as_ref()
+                .map(|status| (x.region.id.region_number(), *status))
+        })
+        .collect::<HashMap<_, _>>()
+}
+
 pub fn find_region_leader(
     region_routes: &[RegionRoute],
     region_number: RegionNumber,
@@ -209,7 +242,7 @@ pub struct RegionRoute {
 }
 
 /// The Status of the [Region].
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 pub enum RegionStatus {
     /// The following cases in which the [Region] will be downgraded.
     ///
