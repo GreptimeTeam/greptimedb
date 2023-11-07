@@ -23,7 +23,7 @@ use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionPutRequest, RegionReadRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TableId};
 
 use crate::engine::{
     METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
@@ -36,9 +36,9 @@ use crate::error::{
 use crate::utils;
 
 /// The other two fields key and value will be used as a k-v storage.
-/// It contains two group of key:
-/// - `__table_<TABLE_NAME>` is used for marking table existence. It doesn't have value.
-/// - `__column_<TABLE_NAME>_<COLUMN_NAME>` is used for marking column existence,
+/// It contains two group of key (TABLE_ID refers to the logical table's id):
+/// - `__table_<TABLE_ID>` is used for marking table existence. It doesn't have value.
+/// - `__column_<TABLE_ID>_<COLUMN_NAME>` is used for marking column existence,
 ///   the value is column's semantic type. To avoid the key conflict, this column key
 ///   will be encoded by base64([STANDARD_NO_PAD]).
 ///
@@ -47,6 +47,10 @@ use crate::utils;
 /// every operation should be associated to a [RegionId], which is the physical
 /// table id + region sequence. This handler will transform the region group by
 /// itself.
+///
+/// Notice that all the `region_id` in the public interfaces refers to the
+/// physical region id of metadata region. While the `table_id` refers to
+/// the logical table id.
 pub struct MetadataRegion {
     mito: MitoEngine,
 }

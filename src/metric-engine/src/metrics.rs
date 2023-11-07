@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[allow(unused)]
-pub mod engine;
-pub mod error;
-#[allow(unused)]
-mod metadata_region;
-mod metrics;
-#[cfg(test)]
-mod test_util;
-mod utils;
+//! Internal metrics for observability.
+
+use lazy_static::lazy_static;
+use prometheus::*;
+
+lazy_static! {
+    /// Gauge for open regions
+    pub static ref PHYSICAL_REGION_COUNT: IntGauge =
+        register_int_gauge!("metric_physical_region_count", "metric engine physical region count").unwrap();
+
+
+    /// Gauge of columns across all opened regions
+    pub static ref PHYSICAL_COLUMN_COUNT: IntGauge =
+        register_int_gauge!("metric_physical_column_count", "metric engine physical column count").unwrap();
+}

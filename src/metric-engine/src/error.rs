@@ -18,6 +18,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -74,6 +75,21 @@ pub enum Error {
 
     #[snafu(display("Internal column {} is reserved", column))]
     InternalColumnOccupied { column: String, location: Location },
+
+    #[snafu(display("Required table option is missing"))]
+    MissingTableOption { location: Location },
+
+    #[snafu(display("Physical table {} not found", physical_table))]
+    PhysicalTableNotFound {
+        physical_table: String,
+        location: Location,
+    },
+
+    #[snafu(display("Physical region {} not found", region_id))]
+    PhysicalRegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -83,11 +99,17 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InternalColumnOccupied { .. } => StatusCode::InvalidArguments,
+            InternalColumnOccupied { .. } | MissingTableOption { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
             | DecodeColumnValue { .. } => StatusCode::Unexpected,
+
+            PhysicalTableNotFound { .. } => StatusCode::TableNotFound,
+
+            PhysicalRegionNotFound { .. } => StatusCode::RegionNotFound,
 
             CreateMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
