@@ -319,10 +319,36 @@ impl PromPlanner {
                 }
             }
             PromExpr::Paren(ParenExpr { expr }) => self.prom_expr_to_plan(*expr.clone()).await?,
-            PromExpr::Subquery(SubqueryExpr { .. }) => UnsupportedExprSnafu {
-                name: "Prom Subquery",
+            PromExpr::Subquery(SubqueryExpr {
+                expr, range, step, ..
+            }) => {
+                let input = self.prom_expr_to_plan(*expr.clone()).await?;
+
+                ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+                let range_ms = range.as_millis() as _;
+                self.ctx.range = Some(range_ms);
+                if let Some(step) = step {
+                    self.ctx.interval = step.as_millis() as _;
+                }
+
+                let manipulate = RangeManipulate::new(
+                    self.ctx.start,
+                    self.ctx.end,
+                    self.ctx.interval,
+                    range_ms,
+                    self.ctx
+                        .time_index_column
+                        .clone()
+                        .expect("time index should be set in `setup_context`"),
+                    self.ctx.field_columns.clone(),
+                    input,
+                )
+                .context(DataFusionPlanningSnafu)?;
+
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
             }
-            .fail()?,
             PromExpr::NumberLiteral(NumberLiteral { val }) => {
                 self.ctx.time_index_column = Some(DEFAULT_TIME_INDEX_COLUMN.to_string());
                 self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
