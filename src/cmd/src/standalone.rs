@@ -316,9 +316,9 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
+        let mut fe_opts = opts.frontend.clone();
         #[allow(clippy::unnecessary_mut_passed)]
-        let fe_opts = opts.frontend.clone();
-        let fe_plugins = plugins::setup_frontend_plugins(&fe_opts)
+        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it
             .await
             .context(StartFrontendSnafu)?;
 
