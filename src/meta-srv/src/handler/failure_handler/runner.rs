@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinHandle;
 
-use crate::failure_detector::PhiAccrualFailureDetector;
+use crate::failure_detector::{PhiAccrualFailureDetector, PhiAccrualFailureDetectorOptions};
 use crate::handler::failure_handler::DatanodeHeartbeat;
 use crate::metasrv::ElectionRef;
 use crate::procedure::region_failover::RegionFailoverManager;
@@ -40,6 +40,7 @@ pub(crate) enum FailureDetectControl {
 pub(crate) struct FailureDetectRunner {
     election: Option<ElectionRef>,
     region_failover_manager: Arc<RegionFailoverManager>,
+    failure_detector_options: PhiAccrualFailureDetectorOptions,
 
     heartbeat_tx: Sender<DatanodeHeartbeat>,
     heartbeat_rx: Option<Receiver<DatanodeHeartbeat>>,
@@ -55,12 +56,14 @@ impl FailureDetectRunner {
     pub(super) fn new(
         election: Option<ElectionRef>,
         region_failover_manager: Arc<RegionFailoverManager>,
+        failure_detector_options: PhiAccrualFailureDetectorOptions,
     ) -> Self {
         let (heartbeat_tx, heartbeat_rx) = mpsc::channel::<DatanodeHeartbeat>(1024);
         let (control_tx, control_rx) = mpsc::channel::<FailureDetectControl>(1024);
         Self {
             election,
             region_failover_manager,
+            failure_detector_options,
             heartbeat_tx,
             heartbeat_rx: Some(heartbeat_rx),
             control_tx,
@@ -83,7 +86,10 @@ impl FailureDetectRunner {
     }
 
     pub(crate) async fn start(&mut self) {
-        let failure_detectors = Arc::new(FailureDetectorContainer(DashMap::new()));
+        let failure_detectors = Arc::new(FailureDetectorContainer {
+            detectors: DashMap::new(),
+            options: self.failure_detector_options.clone(),
+        });
         self.start_with(failure_detectors).await
     }
 
@@ -215,33 +221,41 @@ impl FailureDetectorEntry<'_> {
     }
 }
 
-pub(crate) struct FailureDetectorContainer(DashMap<RegionIdent, PhiAccrualFailureDetector>);
+pub(crate) struct FailureDetectorContainer {
+    options: PhiAccrualFailureDetectorOptions,
+    detectors: DashMap<RegionIdent, PhiAccrualFailureDetector>,
+}
 
 impl FailureDetectorContainer {
     fn get_failure_detector(
         &self,
         ident: RegionIdent,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
-        self.0.entry(ident).or_default()
+        self.detectors.entry(ident).or_insert_with(|| {
+            PhiAccrualFailureDetector::from_options(self.options.clone())
+        })
     }
 
     pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = FailureDetectorEntry> + '_> {
-        Box::new(self.0.iter().map(move |e| FailureDetectorEntry { e })) as _
+        Box::new(self.detectors.iter().map(move |e| FailureDetectorEntry { e })) as _
     }
 
     fn remove(&self, ident: &RegionIdent) {
-        let _ = self.0.remove(ident);
+        let _ = self.detectors.remove(ident);
     }
 
     fn clear(&self) {
-        self.0.clear()
+        self.detectors.clear()
     }
 
     #[cfg(test)]
     fn dump(&self) -> FailureDetectorContainer {
-        let mut m = DashMap::with_capacity(self.0.len());
-        m.extend(self.0.iter().map(|x| (x.key().clone(), x.value().clone())));
-        Self(m)
+        let mut m = DashMap::with_capacity(self.detectors.len());
+        m.extend(self.detectors.iter().map(|x| (x.key().clone(), x.value().clone())));
+        Self {
+            detectors: m,
+            options: self.options.clone(),
+        }
     }
 }
 
@@ -254,7 +268,10 @@ mod tests {
 
     #[test]
     fn test_default_failure_detector_container() {
-        let container = FailureDetectorContainer(DashMap::new());
+        let container = FailureDetectorContainer {
+            detectors: DashMap::new(),
+            options: PhiAccrualFailureDetectorOptions::default(),
+        };
         let ident = RegionIdent {
             table_id: 1,
             cluster_id: 3,
@@ -263,7 +280,7 @@ mod tests {
             engine: "mito2".to_string(),
         };
         let _ = container.get_failure_detector(ident.clone());
-        assert!(container.0.contains_key(&ident));
+        assert!(container.detectors.contains_key(&ident));
 
         {
             let mut iter = container.iter();
@@ -272,12 +289,15 @@ mod tests {
         }
 
         container.clear();
-        assert!(container.0.is_empty());
+        assert!(container.detectors.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_control() {
-        let container = FailureDetectorContainer(DashMap::new());
+        let container = FailureDetectorContainer {
+            detectors: DashMap::new(),
+            options: PhiAccrualFailureDetectorOptions::default(),
+        };
 
         let ident = RegionIdent {
             table_id: 1,
@@ -289,7 +309,8 @@ mod tests {
         let _ = container.get_failure_detector(ident.clone());
 
         let region_failover_manager = create_region_failover_manager();
-        let mut runner = FailureDetectRunner::new(None, region_failover_manager);
+        let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
+        let mut runner = FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
         runner.start_with(Arc::new(container)).await;
 
         let dump = runner.dump().await;
@@ -304,7 +325,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
-        let mut runner = FailureDetectRunner::new(None, region_failover_manager);
+        let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
+        let mut runner = FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
         runner.start().await;
 
         // Generate 2000 heartbeats start from now. Heartbeat interval is one second, plus some random millis.

@@ -83,7 +83,12 @@ impl Default for PhiAccrualFailureDetectorOptions {
 
 impl Default for PhiAccrualFailureDetector {
     fn default() -> Self {
-        let options = PhiAccrualFailureDetectorOptions::default();
+        PhiAccrualFailureDetector::from_options(PhiAccrualFailureDetectorOptions::default())
+    }
+}
+
+impl PhiAccrualFailureDetector {
+    pub(crate) fn from_options(options: PhiAccrualFailureDetectorOptions) -> Self {
         Self {
             threshold: options.threshold,
             min_std_deviation_millis: options.min_std_deviation_millis,
@@ -93,9 +98,7 @@ impl Default for PhiAccrualFailureDetector {
             last_heartbeat_millis: None,
         }
     }
-}
 
-impl PhiAccrualFailureDetector {
     pub(crate) fn heartbeat(&mut self, ts_millis: i64) {
         if let Some(last_heartbeat_millis) = self.last_heartbeat_millis {
             if ts_millis < last_heartbeat_millis {

@@ -23,6 +23,7 @@ use common_meta::RegionIdent;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::{Context, ElectionRef};
@@ -41,11 +42,12 @@ impl RegionFailureHandler {
     pub(crate) async fn try_new(
         election: Option<ElectionRef>,
         region_failover_manager: Arc<RegionFailoverManager>,
+        failure_detector_options: PhiAccrualFailureDetectorOptions,
     ) -> Result<Self> {
         region_failover_manager.try_start()?;
 
         let mut failure_detect_runner =
-            FailureDetectRunner::new(election, region_failover_manager.clone());
+            FailureDetectRunner::new(election, region_failover_manager.clone(), failure_detector_options);
         failure_detect_runner.start().await;
 
         Ok(Self {
@@ -112,7 +114,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
-        let handler = RegionFailureHandler::try_new(None, region_failover_manager)
+        let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
+        let handler = RegionFailureHandler::try_new(None, region_failover_manager, failure_detector_options)
             .await
             .unwrap();
 
