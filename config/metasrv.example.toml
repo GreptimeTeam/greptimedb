@@ -28,6 +28,13 @@ max_retry_times = 12
 # Initial retry delay of procedures, increases exponentially
 retry_delay = "500ms"
 
+# Failure detectors options.
+[failure_detector]
+threshold = 8.0
+min_std_deviation_millis = 100.0
+acceptable_heartbeat_pause_millis = 3000
+first_heartbeat_estimate_millis = 1000
+
 # # Datanode options.
 # [datanode]
 # # Datanode client options.

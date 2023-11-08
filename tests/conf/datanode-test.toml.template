@@ -22,12 +22,6 @@ timeout_millis = 3000
 connect_timeout_millis = 5000
 tcp_nodelay = false
 
-[failure_detector]
-threshold = 8.0
-min_std_deviation_millis = 100.0
-acceptable_heartbeat_pause_millis = 3000
-first_heartbeat_estimate_millis = 1000
-
 [procedure]
 max_retry_times = 3
 retry_delay = "500ms"
