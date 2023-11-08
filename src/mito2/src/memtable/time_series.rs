@@ -20,7 +20,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use api::v1::OpType;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, trace};
 use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
@@ -457,12 +457,7 @@ fn prune_primary_key(
     }
 
     if let Some(rb) = series.pk_cache.as_ref() {
-        let res = prune_inner(predicate, rb).unwrap_or(true);
-        debug!(
-            "Prune primary key: {:?}, predicate: {:?}, res: {:?}",
-            rb, predicate, res
-        );
-        res
+        prune_inner(predicate, rb).unwrap_or(true)
     } else {
         let rb = match pk_to_record_batch(codec, pk, builders, pk_schema) {
             Ok(rb) => rb,
@@ -472,7 +467,6 @@ fn prune_primary_key(
             }
         };
         let res = prune_inner(predicate, &rb).unwrap_or(true);
-        debug!("Prune primary key: {:?}, res: {:?}", rb, res);
         series.update_pk_cache(rb);
         res
     }
@@ -499,9 +493,11 @@ fn prune_inner(predicates: &[Arc<dyn PhysicalExpr>], primary_key: &RecordBatch) 
                 unreachable!("Unexpected primary key record batch evaluation result: {:?}, primary key: {:?}", eva, primary_key);
             }
         };
-        debug!(
+        trace!(
             "Evaluate primary key {:?} against filter: {:?}, result: {:?}",
-            primary_key, expr, result
+            primary_key,
+            expr,
+            result
         );
         if !result {
             return Ok(false);
