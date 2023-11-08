@@ -61,6 +61,7 @@ snafu.workspace = true
 substrait = { workspace = true }
 table = { workspace = true }
 tokio.workspace = true
+toml.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.5"
@@ -69,7 +70,6 @@ tikv-jemallocator = "0.5"
 common-test-util = { workspace = true }
 serde.workspace = true
 temp-env = "0.3"
-toml.workspace = true
 
 [target.'cfg(not(windows))'.dev-dependencies]
 rexpect = "0.5"

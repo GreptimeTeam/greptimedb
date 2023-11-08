@@ -604,7 +604,77 @@ pub async fn test_config_api(store_type: StorageType) {
     let res_get = client.get("/config").send().await;
     assert_eq!(res_get.status(), StatusCode::OK);
     let expected_toml_str = format!(
-        r#"mode = "standalone"
+        r#"
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"
+
+[metadata_store]
+file_size = "256MiB"
+purge_threshold = "4GiB"
+
+[frontend]
+mode = "standalone"
+
+[frontend.heartbeat]
+interval = "18s"
+retry_interval = "3s"
+
+[frontend.http]
+addr = "127.0.0.1:4000"
+timeout = "30s"
+body_limit = "64MiB"
+
+[frontend.grpc]
+addr = "127.0.0.1:4001"
+runtime_size = 8
+max_recv_message_size = "512MiB"
+max_send_message_size = "512MiB"
+
+[frontend.mysql]
+enable = true
+addr = "127.0.0.1:4002"
+runtime_size = 2
+
+[frontend.mysql.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+[frontend.postgres]
+enable = true
+addr = "127.0.0.1:4003"
+runtime_size = 2
+
+[frontend.postgres.tls]
+mode = "disable"
+cert_path = ""
+key_path = ""
+
+[frontend.opentsdb]
+enable = true
+addr = "127.0.0.1:4242"
+runtime_size = 2
+
+[frontend.influxdb]
+enable = true
+
+[frontend.prom_store]
+enable = true
+
+[frontend.otlp]
+enable = true
+
+[frontend.logging]
+enable_jaeger_tracing = false
+
+[frontend.datanode.client]
+timeout = "10s"
+connect_timeout = "1s"
+tcp_nodelay = true
+
+[datanode]
+mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
 rpc_addr = "127.0.0.1:3001"
@@ -613,45 +683,45 @@ rpc_max_recv_message_size = "512MiB"
 rpc_max_send_message_size = "512MiB"
 enable_telemetry = true
 
-[heartbeat]
+[datanode.heartbeat]
 interval = "3s"
 retry_interval = "3s"
 
-[http]
+[datanode.http]
 addr = "127.0.0.1:4000"
 timeout = "30s"
 body_limit = "64MiB"
 
-[wal]
+[datanode.wal]
 file_size = "256MiB"
 purge_threshold = "4GiB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
 
-[storage]
+[datanode.storage]
 type = "{}"
 
-[storage.compaction]
+[datanode.storage.compaction]
 max_inflight_tasks = 4
 max_files_in_level0 = 8
 max_purge_tasks = 32
 sst_write_buffer_size = "8MiB"
 
-[storage.manifest]
+[datanode.storage.manifest]
 checkpoint_margin = 10
 gc_duration = "10m"
 compress = false
 
-[storage.flush]
+[datanode.storage.flush]
 max_flush_tasks = 8
 region_write_buffer_size = "32MiB"
 picker_schedule_interval = "5m"
 auto_flush_interval = "1h"
 
-[[region_engine]]
+[[datanode.region_engine]]
 
-[region_engine.mito]
+[datanode.region_engine.mito]
 num_workers = 1
 worker_channel_size = 128
 worker_request_batch_size = 64
@@ -664,9 +734,12 @@ global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
 
-[[region_engine]]
+[[datanode.region_engine]]
 
-[region_engine.file]
+[datanode.region_engine.file]
+
+[datanode.logging]
+enable_jaeger_tracing = false
 
 [logging]
 enable_jaeger_tracing = false"#,

@@ -316,13 +316,13 @@ impl StartCommand {
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
     async fn build(self, opts: MixOptions) -> Result<Instance> {
-        let mut fe_opts = opts.frontend;
         #[allow(clippy::unnecessary_mut_passed)]
-        let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts)
+        let fe_opts = opts.frontend.clone();
+        let fe_plugins = plugins::setup_frontend_plugins(&fe_opts)
             .await
             .context(StartFrontendSnafu)?;
 
-        let dn_opts = opts.datanode;
+        let dn_opts = opts.datanode.clone();
 
         info!("Standalone start command: {:#?}", self);
         info!(
@@ -338,8 +338,8 @@ impl StartCommand {
         let metadata_dir = metadata_store_dir(&opts.data_home);
         let (kv_backend, procedure_manager) = FeInstance::try_build_standalone_components(
             metadata_dir,
-            opts.metadata_store,
-            opts.procedure,
+            opts.metadata_store.clone(),
+            opts.procedure.clone(),
         )
         .await
         .context(StartFrontendSnafu)?;
@@ -377,7 +377,7 @@ impl StartCommand {
         .await?;
 
         frontend
-            .build_servers(&fe_opts)
+            .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;
 

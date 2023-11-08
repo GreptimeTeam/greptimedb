@@ -33,7 +33,7 @@ use servers::server::Server;
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
-use crate::frontend::FrontendOptions;
+use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::instance::FrontendInstance;
 
 pub(crate) struct Services;
@@ -43,14 +43,17 @@ pub type ServerHandlers = HashMap<String, ServerHandler>;
 pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 
 impl Services {
-    pub(crate) async fn build<T>(
-        opts: &FrontendOptions,
-        instance: Arc<T>,
+    pub(crate) async fn build<T, U>(
+        opts: T,
+        instance: Arc<U>,
         plugins: Plugins,
     ) -> Result<ServerHandlers>
     where
-        T: FrontendInstance,
+        T: Into<FrontendOptions> + TomlSerializable,
+        U: FrontendInstance,
     {
+        let toml = opts.to_toml()?;
+        let opts: FrontendOptions = opts.into();
         let mut result = Vec::<ServerHandler>::with_capacity(plugins.len());
         let user_provider = plugins.get::<UserProviderRef>();
 
@@ -120,7 +123,7 @@ impl Services {
                 .with_metrics_handler(MetricsHandler)
                 .with_script_handler(instance.clone())
                 .with_plugins(plugins)
-                .with_greptime_config_options(opts.to_toml_string())
+                .with_greptime_config_options(toml)
                 .build();
             result.push((Box::new(http_server), http_addr));
         }

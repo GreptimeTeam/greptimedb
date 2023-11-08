@@ -16,6 +16,7 @@ axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", br
 catalog = { workspace = true }
 chrono.workspace = true
 client = { workspace = true, features = ["testing"] }
+cmd.workspace = true
 common-base = { workspace = true }
 common-catalog = { workspace = true }
 common-config = { workspace = true }
