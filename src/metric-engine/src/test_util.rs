@@ -117,15 +117,19 @@ mod test {
         let region_id = to_metadata_region_id(env.default_region_id());
         let region_dir = join_dir(&env.data_home(), "test_metric_region");
 
-        // assert metadata region's dir
-        let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
-        let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
-        assert!(exist);
+        // `join_dir` doesn't suit windows path
+        #[cfg(not(target_os = "windows"))]
+        {
+            // assert metadata region's dir
+            let metadata_region_dir = join_dir(&region_dir, METADATA_REGION_SUBDIR);
+            let exist = tokio::fs::try_exists(metadata_region_dir).await.unwrap();
+            assert!(exist);
 
-        // assert data region's dir
-        let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
-        let exist = tokio::fs::try_exists(data_region_dir).await.unwrap();
-        assert!(exist);
+            // assert data region's dir
+            let data_region_dir = join_dir(&region_dir, DATA_REGION_SUBDIR);
+            let exist = tokio::fs::try_exists(data_region_dir).await.unwrap();
+            assert!(exist);
+        }
 
         // check mito engine
         let metadata_region_id = utils::to_metadata_region_id(region_id);
