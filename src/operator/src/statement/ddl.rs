@@ -18,7 +18,7 @@ use std::sync::Arc;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::{column_def, AlterExpr, CreateTableExpr};
 use catalog::CatalogManagerRef;
-use chrono::DateTime;
+use chrono::Utc;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::format_full_table_name;
 use common_meta::cache_invalidator::Context;
@@ -477,7 +477,7 @@ fn create_table_info(
         next_column_id: column_schemas.len() as u32,
         region_numbers: vec![],
         options: table_options,
-        created_on: DateTime::default(),
+        created_on: Utc::now(),
         partition_key_indices,
     };
 
