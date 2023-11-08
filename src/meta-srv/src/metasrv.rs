@@ -42,6 +42,7 @@ use crate::error::{
     self, InitMetadataSnafu, Result, StartProcedureManagerSnafu, StartTelemetryTaskSnafu,
     StopProcedureManagerSnafu,
 };
+use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
@@ -65,6 +66,7 @@ pub struct MetaSrvOptions {
     pub http: HttpOptions,
     pub logging: LoggingOptions,
     pub procedure: ProcedureConfig,
+    pub failure_detector: PhiAccrualFailureDetectorOptions,
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
@@ -88,6 +90,7 @@ impl Default for MetaSrvOptions {
                 max_retry_times: 12,
                 retry_delay: Duration::from_millis(500),
             },
+            failure_detector: PhiAccrualFailureDetectorOptions::default(),
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),

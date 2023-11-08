@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use serde::{Deserialize, Serialize};
 
 /// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/main/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
 /// You can find it's document here:
@@ -58,7 +59,16 @@ pub(crate) struct PhiAccrualFailureDetector {
     last_heartbeat_millis: Option<i64>,
 }
 
-impl Default for PhiAccrualFailureDetector {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct PhiAccrualFailureDetectorOptions {
+    pub(crate) threshold: f32,
+    pub(crate) min_std_deviation_millis: f32,
+    pub(crate) acceptable_heartbeat_pause_millis: u32,
+    pub(crate) first_heartbeat_estimate_millis: u32,
+}
+
+impl Default for PhiAccrualFailureDetectorOptions {
     fn default() -> Self {
         // default configuration is the same as of Akka:
         // https://github.com/akka/akka/blob/main/akka-cluster/src/main/resources/reference.conf#L181
@@ -67,6 +77,18 @@ impl Default for PhiAccrualFailureDetector {
             min_std_deviation_millis: 100_f32,
             acceptable_heartbeat_pause_millis: 3000,
             first_heartbeat_estimate_millis: 1000,
+        }
+    }
+}
+
+impl Default for PhiAccrualFailureDetector {
+    fn default() -> Self {
+        let options = PhiAccrualFailureDetectorOptions::default();
+        Self {
+            threshold: options.threshold,
+            min_std_deviation_millis: options.min_std_deviation_millis,
+            acceptable_heartbeat_pause_millis: options.acceptable_heartbeat_pause_millis,
+            first_heartbeat_estimate_millis: options.first_heartbeat_estimate_millis,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         }
