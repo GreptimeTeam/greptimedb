@@ -250,8 +250,6 @@ pub struct CompactionConfig {
     pub max_files_in_level0: usize,
     /// Max task number for SST purge task after compaction.
     pub max_purge_tasks: usize,
-    /// Buffer threshold while writing SST files
-    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl Default for CompactionConfig {
@@ -260,7 +258,6 @@ impl Default for CompactionConfig {
             max_inflight_tasks: 4,
             max_files_in_level0: 8,
             max_purge_tasks: 32,
-            sst_write_buffer_size: ReadableSize::mb(8),
         }
     }
 }
@@ -312,7 +309,6 @@ impl From<&DatanodeOptions> for StorageEngineConfig {
             manifest_gc_duration: value.storage.manifest.gc_duration,
             max_files_in_l0: value.storage.compaction.max_files_in_level0,
             max_purge_tasks: value.storage.compaction.max_purge_tasks,
-            sst_write_buffer_size: value.storage.compaction.sst_write_buffer_size,
             max_flush_tasks: value.storage.flush.max_flush_tasks,
             region_write_buffer_size: value.storage.flush.region_write_buffer_size,
             picker_schedule_interval: value.storage.flush.picker_schedule_interval,

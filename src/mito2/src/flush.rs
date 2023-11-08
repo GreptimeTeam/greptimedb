@@ -26,6 +26,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
+use crate::config::MitoConfig;
 use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
@@ -198,6 +199,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) memtable_builder: MemtableBuilderRef,
     pub(crate) file_purger: FilePurgerRef,
     pub(crate) listener: WorkerListener,
+    pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
 }
 
@@ -290,7 +292,10 @@ impl RegionFlushTask {
             .start_timer();
 
         // TODO(yingwen): Make it configurable.
-        let mut write_opts = WriteOptions::default();
+        let mut write_opts = WriteOptions {
+            write_buffer_size: self.engine_config.sst_write_buffer_size,
+            ..Default::default()
+        };
         if let Some(row_group_size) = self.row_group_size {
             write_opts.row_group_size = row_group_size;
         }
@@ -723,6 +728,7 @@ mod tests {
             memtable_builder: builder.memtable_builder(),
             file_purger: builder.file_purger(),
             listener: WorkerListener::default(),
+            engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));

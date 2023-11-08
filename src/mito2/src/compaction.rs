@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
@@ -30,6 +31,7 @@ use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
 use crate::compaction::twcs::TwcsPicker;
+use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
@@ -51,6 +53,8 @@ pub struct CompactionRequest {
     pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
+    /// Buffering threshold while writing SST files.
+    pub(crate) sst_write_buffer_size: ReadableSize,
 }
 
 impl CompactionRequest {
@@ -103,6 +107,7 @@ impl CompactionScheduler {
         access_layer: &AccessLayerRef,
         file_purger: &FilePurgerRef,
         waiter: OptionOutputTx,
+        engine_config: Arc<MitoConfig>,
     ) -> Result<()> {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             // Region is compacting. Add the waiter to pending list.
@@ -117,19 +122,27 @@ impl CompactionScheduler {
             access_layer.clone(),
             file_purger.clone(),
         );
-        let request = status.new_compaction_request(self.request_sender.clone(), waiter);
+        let request =
+            status.new_compaction_request(self.request_sender.clone(), waiter, engine_config);
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
-    pub(crate) fn on_compaction_finished(&mut self, region_id: RegionId) {
+    pub(crate) fn on_compaction_finished(
+        &mut self,
+        region_id: RegionId,
+        engine_config: Arc<MitoConfig>,
+    ) {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
         // We should always try to compact the region until picker returns None.
-        let request =
-            status.new_compaction_request(self.request_sender.clone(), OptionOutputTx::none());
+        let request = status.new_compaction_request(
+            self.request_sender.clone(),
+            OptionOutputTx::none(),
+            engine_config,
+        );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self.schedule_compaction_request(request) {
             error!(e; "Failed to schedule next compaction for region {}", region_id);
@@ -138,7 +151,7 @@ impl CompactionScheduler {
 
     /// Notifies the scheduler that the compaction job is failed.
     pub(crate) fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
-        error!(err; "Region {} failed to flush, cancel all pending tasks", region_id);
+        error!(err; "Region {} failed to compact, cancel all pending tasks", region_id);
         // Remove this region.
         let Some(status) = self.region_status.remove(&region_id) else {
             return;
@@ -236,7 +249,7 @@ impl PendingCompaction {
         }
     }
 
-    /// Send flush error to waiter.
+    /// Send compaction error to waiter.
     fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
         for waiter in self.waiters.drain(..) {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
@@ -300,6 +313,7 @@ impl CompactionStatus {
         &mut self,
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
+        engine_config: Arc<MitoConfig>,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
@@ -310,6 +324,7 @@ impl CompactionStatus {
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
             start_time,
+            sst_write_buffer_size: engine_config.sst_write_buffer_size,
         };
 
         if let Some(pending) = self.pending_compaction.take() {
@@ -352,6 +367,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 waiter,
+                Arc::new(MitoConfig::default()),
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
@@ -369,6 +385,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 waiter,
+                Arc::new(MitoConfig::default()),
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
@@ -427,6 +444,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
+                Arc::new(MitoConfig::default()),
             )
             .unwrap();
         // Should schedule 1 compaction.
@@ -454,6 +472,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
+                Arc::new(MitoConfig::default()),
             )
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
@@ -466,7 +485,7 @@ mod tests {
             .is_some());
 
         // On compaction finished and schedule next compaction.
-        scheduler.on_compaction_finished(region_id);
+        scheduler.on_compaction_finished(region_id, Arc::new(MitoConfig::default()));
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(2, job_scheduler.num_jobs());
         // 5 files for next compaction.
@@ -484,6 +503,7 @@ mod tests {
                 &env.access_layer,
                 &purger,
                 OptionOutputTx::none(),
+                Arc::new(MitoConfig::default()),
             )
             .unwrap();
         assert_eq!(2, job_scheduler.num_jobs());

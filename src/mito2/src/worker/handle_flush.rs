@@ -14,12 +14,15 @@
 
 //! Handling flush related requests.
 
+use std::sync::Arc;
+
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionFlushRequest;
 use store_api::storage::RegionId;
 
+use crate::config::MitoConfig;
 use crate::error::{RegionTruncatedSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -39,7 +42,12 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
 
-        let mut task = self.new_flush_task(&region, FlushReason::Manual, request.row_group_size);
+        let mut task = self.new_flush_task(
+            &region,
+            FlushReason::Manual,
+            request.row_group_size,
+            self.config.clone(),
+        );
         task.push_sender(sender);
         if let Err(e) =
             self.flush_scheduler
@@ -94,7 +102,8 @@ impl<S> RegionWorkerLoop<S> {
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
-                let task = self.new_flush_task(region, FlushReason::EngineFull, None);
+                let task =
+                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -107,7 +116,8 @@ impl<S> RegionWorkerLoop<S> {
         // TODO(yingwen): Maybe flush more tables to reduce write buffer size.
         if let Some(region) = max_mem_region {
             if !self.flush_scheduler.is_flush_requested(region.region_id) {
-                let task = self.new_flush_task(region, FlushReason::EngineFull, None);
+                let task =
+                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
                 self.flush_scheduler.schedule_flush(
                     region.region_id,
                     &region.version_control,
@@ -125,6 +135,7 @@ impl<S> RegionWorkerLoop<S> {
         region: &MitoRegionRef,
         reason: FlushReason,
         row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
     ) -> RegionFlushTask {
         // TODO(yingwen): metrics for flush requested.
         RegionFlushTask {
@@ -136,6 +147,7 @@ impl<S> RegionWorkerLoop<S> {
             memtable_builder: self.memtable_builder.clone(),
             file_purger: region.file_purger.clone(),
             listener: self.listener.clone(),
+            engine_config,
             row_group_size,
         }
     }
@@ -220,6 +232,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &region.access_layer,
             &region.file_purger,
             OptionOutputTx::none(),
+            self.config.clone(),
         ) {
             warn!(
                 "Failed to schedule compaction after flush, region: {}, err: {}",

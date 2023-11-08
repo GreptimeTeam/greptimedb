@@ -374,7 +374,7 @@ where
         let mut inner = self.inner.lock().await;
 
         ensure!(!inner.is_closed(), error::ClosedRegionSnafu);
-        let sst_write_buffer_size = inner.engine_config.sst_write_buffer_size;
+        let sst_write_buffer_size = ReadableSize::mb(8); // deprecated usage
 
         inner
             .manual_compact(

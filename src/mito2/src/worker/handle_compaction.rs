@@ -38,6 +38,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &region.access_layer,
             &region.file_purger,
             sender,
+            self.config.clone(),
         ) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
@@ -86,8 +87,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
         // compaction finished.
         request.on_success();
+
         // Schedule next compaction if necessary.
-        self.compaction_scheduler.on_compaction_finished(region_id);
+        self.compaction_scheduler
+            .on_compaction_finished(region_id, self.config.clone());
     }
 
     /// When compaction fails, we simply log the error.

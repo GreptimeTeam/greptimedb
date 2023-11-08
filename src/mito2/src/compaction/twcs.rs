@@ -120,6 +120,7 @@ impl Picker for TwcsPicker {
             waiters,
             file_purger,
             start_time,
+            sst_write_buffer_size,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -167,7 +168,7 @@ impl Picker for TwcsPicker {
             sst_layer: access_layer,
             outputs,
             expired_ssts,
-            sst_write_buffer_size: ReadableSize::mb(4),
+            sst_write_buffer_size,
             compaction_time_window: Some(time_window_size),
             request_sender,
             waiters,
