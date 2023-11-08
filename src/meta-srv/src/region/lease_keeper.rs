@@ -39,7 +39,7 @@ impl RegionLeaseKeeper {
 }
 
 impl RegionLeaseKeeper {
-    fn collect_table(&self, datanode_regions: &[RegionId]) -> HashMap<TableId, Vec<RegionId>> {
+    fn collect_tables(&self, datanode_regions: &[RegionId]) -> HashMap<TableId, Vec<RegionId>> {
         let mut tables = HashMap::<TableId, Vec<RegionId>>::new();
 
         // Group by `table_id`.
@@ -51,7 +51,7 @@ impl RegionLeaseKeeper {
         tables
     }
 
-    async fn collect_table_metadata(
+    async fn collect_tables_metadata(
         &self,
         table_ids: &[TableId],
     ) -> Result<HashMap<TableId, TableRouteValue>> {
@@ -83,9 +83,9 @@ impl RegionLeaseKeeper {
         datanode_id: u64,
         datanode_regions: &[RegionId],
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
-        let tables = self.collect_table(datanode_regions);
+        let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_table_metadata(&table_ids).await?;
+        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
 
         let mut closable_set = HashSet::new();
         let mut downgradable_set = HashSet::new();
@@ -122,9 +122,9 @@ impl RegionLeaseKeeper {
         datanode_id: u64,
         datanode_regions: &[RegionId],
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
-        let tables = self.collect_table(datanode_regions);
+        let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_table_metadata(&table_ids).await?;
+        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
 
         let mut upgradable_set = HashSet::new();
         let mut closable_set = HashSet::new();
