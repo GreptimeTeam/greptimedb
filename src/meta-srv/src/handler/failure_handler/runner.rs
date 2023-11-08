@@ -231,13 +231,17 @@ impl FailureDetectorContainer {
         &self,
         ident: RegionIdent,
     ) -> impl DerefMut<Target = PhiAccrualFailureDetector> + '_ {
-        self.detectors.entry(ident).or_insert_with(|| {
-            PhiAccrualFailureDetector::from_options(self.options.clone())
-        })
+        self.detectors
+            .entry(ident)
+            .or_insert_with(|| PhiAccrualFailureDetector::from_options(self.options.clone()))
     }
 
     pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = FailureDetectorEntry> + '_> {
-        Box::new(self.detectors.iter().map(move |e| FailureDetectorEntry { e })) as _
+        Box::new(
+            self.detectors
+                .iter()
+                .map(move |e| FailureDetectorEntry { e }),
+        ) as _
     }
 
     fn remove(&self, ident: &RegionIdent) {
@@ -251,7 +255,11 @@ impl FailureDetectorContainer {
     #[cfg(test)]
     fn dump(&self) -> FailureDetectorContainer {
         let mut m = DashMap::with_capacity(self.detectors.len());
-        m.extend(self.detectors.iter().map(|x| (x.key().clone(), x.value().clone())));
+        m.extend(
+            self.detectors
+                .iter()
+                .map(|x| (x.key().clone(), x.value().clone())),
+        );
         Self {
             detectors: m,
             options: self.options.clone(),
@@ -310,7 +318,8 @@ mod tests {
 
         let region_failover_manager = create_region_failover_manager();
         let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
-        let mut runner = FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
+        let mut runner =
+            FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
         runner.start_with(Arc::new(container)).await;
 
         let dump = runner.dump().await;
@@ -326,7 +335,8 @@ mod tests {
     async fn test_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
         let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
-        let mut runner = FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
+        let mut runner =
+            FailureDetectRunner::new(None, region_failover_manager, failure_detector_options);
         runner.start().await;
 
         // Generate 2000 heartbeats start from now. Heartbeat interval is one second, plus some random millis.

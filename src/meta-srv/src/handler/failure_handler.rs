@@ -46,8 +46,11 @@ impl RegionFailureHandler {
     ) -> Result<Self> {
         region_failover_manager.try_start()?;
 
-        let mut failure_detect_runner =
-            FailureDetectRunner::new(election, region_failover_manager.clone(), failure_detector_options);
+        let mut failure_detect_runner = FailureDetectRunner::new(
+            election,
+            region_failover_manager.clone(),
+            failure_detector_options,
+        );
         failure_detect_runner.start().await;
 
         Ok(Self {
@@ -115,9 +118,10 @@ mod tests {
     async fn test_handle_heartbeat() {
         let region_failover_manager = create_region_failover_manager();
         let failure_detector_options = PhiAccrualFailureDetectorOptions::default();
-        let handler = RegionFailureHandler::try_new(None, region_failover_manager, failure_detector_options)
-            .await
-            .unwrap();
+        let handler =
+            RegionFailureHandler::try_new(None, region_failover_manager, failure_detector_options)
+                .await
+                .unwrap();
 
         let req = &HeartbeatRequest::default();
 
