@@ -85,6 +85,8 @@ impl BatchReader for MergeReader {
         if self.batch_merger.is_empty() {
             // Nothing fetched.
             self.metrics.scan_cost += start.elapsed();
+            // Update deleted rows num.
+            self.metrics.num_deleted_rows = self.batch_merger.num_deleted_rows();
             Ok(None)
         } else {
             let batch = self.batch_merger.merge_batches()?;
@@ -97,18 +99,14 @@ impl BatchReader for MergeReader {
 
 impl Drop for MergeReader {
     fn drop(&mut self) {
-        debug!(
-            "Merge reader finished, deleted_rows: {}, metrics: {:?}",
-            self.batch_merger.num_deleted_rows(),
-            self.metrics
-        );
+        debug!("Merge reader finished, metrics: {:?}", self.metrics);
 
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["dedup"])
             .inc_by(self.metrics.num_duplicate_rows as u64);
         MERGE_FILTER_ROWS_TOTAL
             .with_label_values(&["delete"])
-            .inc_by(self.batch_merger.num_deleted_rows() as u64);
+            .inc_by(self.metrics.num_deleted_rows as u64);
         READ_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .observe(self.metrics.scan_cost.as_secs_f64());
@@ -136,7 +134,7 @@ impl MergeReader {
             cold,
             batch_merger: BatchMerger::new(),
             batch_size,
-            metrics: Metrics::default(),
+            metrics,
         };
         // Initializes the reader.
         reader.refill_hot();
@@ -249,6 +247,7 @@ impl MergeReader {
             if max_seq < next_first_seq {
                 // The next node has larger seq.
                 max_seq_node.skip_rows(1, &mut self.metrics).await?;
+                self.metrics.num_duplicate_rows += 1;
                 if !max_seq_node.is_eof() {
                     self.cold.push(max_seq_node);
                 }
@@ -256,6 +255,7 @@ impl MergeReader {
                 max_seq = next_first_seq;
             } else {
                 next_node.skip_rows(1, &mut self.metrics).await?;
+                self.metrics.num_duplicate_rows += 1;
                 if !next_node.is_eof() {
                     // If the next node has smaller seq, skip that row.
                     self.cold.push(next_node);
@@ -367,6 +367,8 @@ struct Metrics {
     num_duplicate_rows: usize,
     /// Number of output rows.
     num_output_rows: usize,
+    /// Number of deleted rows.
+    num_deleted_rows: usize,
 }
 
 /// Helper to collect and merge small batches for same primary key.
@@ -543,8 +545,6 @@ impl Node {
         let batch = self.current_batch();
         debug_assert!(batch.num_rows() >= num_to_skip);
 
-        metrics.num_duplicate_rows += num_to_skip;
-
         let remaining = batch.num_rows() - num_to_skip;
         if remaining == 0 {
             // Nothing remains, we need to fetch next batch to ensure the batch is not empty.
@@ -684,6 +684,10 @@ mod tests {
             ],
         )
         .await;
+
+        assert_eq!(8, reader.metrics.num_input_rows);
+        assert_eq!(6, reader.metrics.num_output_rows);
+        assert_eq!(2, reader.metrics.num_deleted_rows);
     }
 
     #[tokio::test]
@@ -796,6 +800,11 @@ mod tests {
             ],
         )
         .await;
+
+        assert_eq!(11, reader.metrics.num_input_rows);
+        assert_eq!(7, reader.metrics.num_output_rows);
+        assert_eq!(2, reader.metrics.num_deleted_rows);
+        assert_eq!(2, reader.metrics.num_duplicate_rows);
     }
 
     #[tokio::test]
