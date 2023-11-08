@@ -84,7 +84,7 @@ impl Default for PhiAccrualFailureDetectorOptions {
 
 impl Default for PhiAccrualFailureDetector {
     fn default() -> Self {
-        PhiAccrualFailureDetector::from_options(PhiAccrualFailureDetectorOptions::default())
+        Self::from_options(Default::default())
     }
 }
 
