@@ -105,4 +105,21 @@ lazy_static! {
     /// Counter of failed compaction task.
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("mito_compaction_failure_total", "mito compaction failure total").unwrap();
+    // ------- End of compaction metrics.
+
+    // Query metrics.
+    /// Timer of different stages in query.
+    pub static ref READ_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "mito_read_stage_elapsed",
+        "mito read stage elapsed",
+        &[STAGE_LABEL]
+    )
+    .unwrap();
+    /// Counter of rows read.
+    pub static ref READ_ROWS_TOTAL: IntCounterVec =
+        register_int_counter_vec!("mito_read_rows_total", "mito read rows total", &[TYPE_LABEL]).unwrap();
+    /// Counter of filtered rows during merge.
+    pub static ref MERGE_FILTER_ROWS_TOTAL: IntCounterVec =
+        register_int_counter_vec!("mito_merge_filter_rows_total", "mito merge filter rows total", &[TYPE_LABEL]).unwrap();
+    // ------- End of query metrics.
 }

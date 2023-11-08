@@ -17,9 +17,10 @@ use std::collections::{BTreeMap, Bound, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, trace};
 use common_time::Timestamp;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::ScalarValue;
@@ -47,6 +48,7 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, KeyValues, Memtable, MemtableBuilder, MemtableId,
     MemtableRef, MemtableStats,
 };
+use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
@@ -319,6 +321,7 @@ impl SeriesSet {
             pk_schema: primary_key_schema,
             primary_key_builders,
             codec: self.codec.clone(),
+            metrics: Metrics::default(),
         }
     }
 }
@@ -346,6 +349,21 @@ fn primary_key_builders(
     (builders, Arc::new(arrow::datatypes::Schema::new(fields)))
 }
 
+/// Metrics for reading the memtable.
+#[derive(Debug, Default)]
+struct Metrics {
+    /// Total series in the memtable.
+    total_series: usize,
+    /// Number of series pruned.
+    num_pruned_series: usize,
+    /// Number of rows read.
+    num_rows: usize,
+    /// Number of batch read.
+    num_batches: usize,
+    /// Duration to scan the memtable.
+    scan_cost: Duration,
+}
+
 struct Iter {
     metadata: RegionMetadataRef,
     series: Arc<SeriesRwLockMap>,
@@ -355,12 +373,30 @@ struct Iter {
     pk_schema: arrow::datatypes::SchemaRef,
     primary_key_builders: Vec<Box<dyn MutableVector>>,
     codec: Arc<McmpRowCodec>,
+    metrics: Metrics,
+}
+
+impl Drop for Iter {
+    fn drop(&mut self) {
+        debug!(
+            "Iter {} time series memtable, metrics: {:?}",
+            self.metadata.region_id, self.metrics
+        );
+
+        READ_ROWS_TOTAL
+            .with_label_values(&["time_series_memtable"])
+            .inc_by(self.metrics.num_rows as u64);
+        READ_STAGE_ELAPSED
+            .with_label_values(&["scan_memtable"])
+            .observe(self.metrics.scan_cost.as_secs_f64());
+    }
 }
 
 impl Iterator for Iter {
     type Item = Result<Batch>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let start = Instant::now();
         let map = self.series.read().unwrap();
         let range = match &self.last_key {
             None => map.range::<Vec<u8>, _>(..),
@@ -371,7 +407,10 @@ impl Iterator for Iter {
 
         // TODO(hl): maybe yield more than one time series to amortize range overhead.
         for (primary_key, series) in range {
+            self.metrics.total_series += 1;
+
             let mut series = series.write().unwrap();
+            let start = Instant::now();
             if !self.predicate.is_empty()
                 && !prune_primary_key(
                     &self.codec,
@@ -383,15 +422,23 @@ impl Iterator for Iter {
                 )
             {
                 // read next series
+                self.metrics.num_pruned_series += 1;
                 continue;
             }
             self.last_key = Some(primary_key.clone());
 
             let values = series.compact(&self.metadata);
-            return Some(
-                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection)),
-            );
+            let batch =
+                values.and_then(|v| v.to_batch(primary_key, &self.metadata, &self.projection));
+
+            // Update metrics.
+            self.metrics.num_batches += 1;
+            self.metrics.num_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+            self.metrics.scan_cost += start.elapsed();
+            return Some(batch);
         }
+        self.metrics.scan_cost += start.elapsed();
+
         None
     }
 }
@@ -410,12 +457,7 @@ fn prune_primary_key(
     }
 
     if let Some(rb) = series.pk_cache.as_ref() {
-        let res = prune_inner(predicate, rb).unwrap_or(true);
-        debug!(
-            "Prune primary key: {:?}, predicate: {:?}, res: {:?}",
-            rb, predicate, res
-        );
-        res
+        prune_inner(predicate, rb).unwrap_or(true)
     } else {
         let rb = match pk_to_record_batch(codec, pk, builders, pk_schema) {
             Ok(rb) => rb,
@@ -425,7 +467,6 @@ fn prune_primary_key(
             }
         };
         let res = prune_inner(predicate, &rb).unwrap_or(true);
-        debug!("Prune primary key: {:?}, res: {:?}", rb, res);
         series.update_pk_cache(rb);
         res
     }
@@ -452,9 +493,11 @@ fn prune_inner(predicates: &[Arc<dyn PhysicalExpr>], primary_key: &RecordBatch) 
                 unreachable!("Unexpected primary key record batch evaluation result: {:?}, primary key: {:?}", eva, primary_key);
             }
         };
-        debug!(
+        trace!(
             "Evaluate primary key {:?} against filter: {:?}, result: {:?}",
-            primary_key, expr, result
+            primary_key,
+            expr,
+            result
         );
         if !result {
             return Ok(false);

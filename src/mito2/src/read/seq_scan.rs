@@ -15,19 +15,22 @@
 //! Sequential scan.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use table::predicate::Predicate;
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::CacheManagerRef;
+use crate::cache::{CacheManager, CacheManagerRef};
 use crate::error::Result;
 use crate::memtable::MemtableRef;
+use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
@@ -105,22 +108,27 @@ impl SeqScan {
 
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
+        let start = Instant::now();
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut reader = self.build_reader().await?;
+        let mut metrics = Metrics {
+            scan_cost: start.elapsed(),
+        };
 
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
         let cache_manager = self.cache_manager.clone();
         let stream = try_stream! {
             let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
-            while let Some(batch) = reader
-                .next_batch()
-                .await
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?
+            while let Some(batch) =
+                Self::fetch_record_batch(&mut reader, &mapper, cache, &mut metrics).await?
             {
-                yield mapper.convert(&batch, cache)?;
+                yield batch;
             }
+
+            debug!("Seq scan finished, region_id: {:?}, metrics: {:?}", mapper.metadata().region_id, metrics);
+            // Update metrics.
+            READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.scan_cost.as_secs_f64());
         };
         let stream = Box::pin(RecordBatchStreamAdaptor::new(
             self.mapper.output_schema(),
@@ -160,6 +168,39 @@ impl SeqScan {
         }
         Ok(Box::new(builder.build().await?))
     }
+
+    /// Fetch a batch from the reader and convert it into a record batch.
+    async fn fetch_record_batch(
+        reader: &mut dyn BatchReader,
+        mapper: &ProjectionMapper,
+        cache: Option<&CacheManager>,
+        metrics: &mut Metrics,
+    ) -> common_recordbatch::error::Result<Option<RecordBatch>> {
+        let start = Instant::now();
+
+        let Some(batch) = reader
+            .next_batch()
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        else {
+            metrics.scan_cost += start.elapsed();
+
+            return Ok(None);
+        };
+
+        let record_batch = mapper.convert(&batch, cache)?;
+        metrics.scan_cost += start.elapsed();
+
+        Ok(Some(record_batch))
+    }
+}
+
+/// Metrics for [SeqScan].
+#[derive(Debug, Default)]
+struct Metrics {
+    /// Duration to scan data.
+    scan_cost: Duration,
 }
 
 #[cfg(test)]

@@ -17,12 +17,15 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use common_telemetry::debug;
 use common_time::Timestamp;
 
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
+use crate::metrics::{MERGE_FILTER_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Minimum batch size to output.
@@ -51,11 +54,14 @@ pub struct MergeReader {
     /// Suggested size of each batch. The batch returned by the reader can have more rows than the
     /// batch size.
     batch_size: usize,
+    /// Local metrics.
+    metrics: Metrics,
 }
 
 #[async_trait]
 impl BatchReader for MergeReader {
     async fn next_batch(&mut self) -> Result<Option<Batch>> {
+        let start = Instant::now();
         while !self.hot.is_empty() && self.batch_merger.num_rows() < self.batch_size {
             if let Some(current_key) = self.batch_merger.primary_key() {
                 // If the hottest node has a different key, we have finish collecting current key.
@@ -68,28 +74,55 @@ impl BatchReader for MergeReader {
             if self.hot.len() == 1 {
                 // No need to do merge sort if only one batch in the hot heap.
                 self.fetch_batch_from_hottest().await?;
+                self.metrics.num_fetch_by_batches += 1;
             } else {
                 // We could only fetch rows that less than the next node from the hottest node.
                 self.fetch_rows_from_hottest().await?;
+                self.metrics.num_fetch_by_rows += 1;
             }
         }
 
         if self.batch_merger.is_empty() {
             // Nothing fetched.
+            self.metrics.scan_cost += start.elapsed();
+            // Update deleted rows num.
+            self.metrics.num_deleted_rows = self.batch_merger.num_deleted_rows();
             Ok(None)
         } else {
-            self.batch_merger.merge_batches()
+            let batch = self.batch_merger.merge_batches()?;
+            self.metrics.scan_cost += start.elapsed();
+            self.metrics.num_output_rows += batch.as_ref().map(|b| b.num_rows()).unwrap_or(0);
+            Ok(batch)
         }
+    }
+}
+
+impl Drop for MergeReader {
+    fn drop(&mut self) {
+        debug!("Merge reader finished, metrics: {:?}", self.metrics);
+
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["dedup"])
+            .inc_by(self.metrics.num_duplicate_rows as u64);
+        MERGE_FILTER_ROWS_TOTAL
+            .with_label_values(&["delete"])
+            .inc_by(self.metrics.num_deleted_rows as u64);
+        READ_STAGE_ELAPSED
+            .with_label_values(&["merge"])
+            .observe(self.metrics.scan_cost.as_secs_f64());
     }
 }
 
 impl MergeReader {
     /// Creates and initializes a new [MergeReader].
     pub async fn new(sources: Vec<Source>, batch_size: usize) -> Result<MergeReader> {
+        let start = Instant::now();
+        let mut metrics = Metrics::default();
+
         let mut cold = BinaryHeap::with_capacity(sources.len());
         let hot = BinaryHeap::with_capacity(sources.len());
         for source in sources {
-            let node = Node::new(source).await?;
+            let node = Node::new(source, &mut metrics).await?;
             if !node.is_eof() {
                 // Ensure `cold` don't have eof nodes.
                 cold.push(node);
@@ -101,10 +134,12 @@ impl MergeReader {
             cold,
             batch_merger: BatchMerger::new(),
             batch_size,
+            metrics,
         };
         // Initializes the reader.
         reader.refill_hot();
 
+        reader.metrics.scan_cost += start.elapsed();
         Ok(reader)
     }
 
@@ -132,7 +167,7 @@ impl MergeReader {
         assert_eq!(1, self.hot.len());
 
         let mut hottest = self.hot.pop().unwrap();
-        let batch = hottest.fetch_batch().await?;
+        let batch = hottest.fetch_batch(&mut self.metrics).await?;
         self.batch_merger.push(batch)?;
         self.reheap(hottest)
     }
@@ -161,12 +196,12 @@ impl MergeReader {
         // value directly.
         match timestamps.binary_search(&next_min_ts.value()) {
             Ok(pos) => {
-                // They have duplicate timestamps. Outputs timestamps before the duplciated timestamp.
+                // They have duplicate timestamps. Outputs timestamps before the duplicated timestamp.
                 // Batch itself doesn't contain duplicate timestamps so timestamps before `pos`
                 // must be less than `next_min_ts`.
                 self.batch_merger.push(top.slice(0, pos))?;
                 // This keep the duplicate timestamp in the node.
-                top_node.skip_rows(pos).await?;
+                top_node.skip_rows(pos, &mut self.metrics).await?;
                 // The merge window should contain this timestamp so only nodes in the hot heap
                 // have this timestamp.
                 self.filter_first_duplicate_timestamp_in_hot(top_node, next_min_ts)
@@ -175,7 +210,7 @@ impl MergeReader {
             Err(pos) => {
                 // No duplicate timestamp. Outputs timestamp before `pos`.
                 self.batch_merger.push(top.slice(0, pos))?;
-                top_node.skip_rows(pos).await?;
+                top_node.skip_rows(pos, &mut self.metrics).await?;
                 self.reheap(top_node)?;
             }
         }
@@ -211,16 +246,18 @@ impl MergeReader {
 
             if max_seq < next_first_seq {
                 // The next node has larger seq.
-                max_seq_node.skip_rows(1).await?;
+                max_seq_node.skip_rows(1, &mut self.metrics).await?;
+                self.metrics.num_duplicate_rows += 1;
                 if !max_seq_node.is_eof() {
                     self.cold.push(max_seq_node);
                 }
                 max_seq_node = next_node;
                 max_seq = next_first_seq;
             } else {
-                next_node.skip_rows(1).await?;
+                next_node.skip_rows(1, &mut self.metrics).await?;
+                self.metrics.num_duplicate_rows += 1;
                 if !next_node.is_eof() {
-                    // If the next node is
+                    // If the next node has smaller seq, skip that row.
                     self.cold.push(next_node);
                 }
             }
@@ -315,12 +352,33 @@ impl Default for MergeReaderBuilder {
     }
 }
 
+/// Metrics for the merge reader.
+#[derive(Debug, Default)]
+struct Metrics {
+    /// Total scan cost of the reader.
+    scan_cost: Duration,
+    /// Number of times to fetch batches.
+    num_fetch_by_batches: usize,
+    /// Number of times to fetch rows.
+    num_fetch_by_rows: usize,
+    /// Number of input rows.
+    num_input_rows: usize,
+    /// Number of skipped duplicate rows.
+    num_duplicate_rows: usize,
+    /// Number of output rows.
+    num_output_rows: usize,
+    /// Number of deleted rows.
+    num_deleted_rows: usize,
+}
+
 /// Helper to collect and merge small batches for same primary key.
 struct BatchMerger {
     /// Buffered non-empty batches to merge.
     batches: Vec<Batch>,
     /// Number of rows in the batch.
     num_rows: usize,
+    /// Number of rows deleted.
+    num_deleted_rows: usize,
 }
 
 impl BatchMerger {
@@ -329,12 +387,18 @@ impl BatchMerger {
         BatchMerger {
             batches: Vec::new(),
             num_rows: 0,
+            num_deleted_rows: 0,
         }
     }
 
     /// Returns the number of rows.
     fn num_rows(&self) -> usize {
         self.num_rows
+    }
+
+    /// Returns the number of rows deleted.
+    fn num_deleted_rows(&self) -> usize {
+        self.num_deleted_rows
     }
 
     /// Returns true if the merger is empty.
@@ -360,7 +424,9 @@ impl BatchMerger {
             .map(|b| b.primary_key() == batch.primary_key())
             .unwrap_or(true));
 
+        let num_rows = batch.num_rows();
         batch.filter_deleted()?;
+        self.num_deleted_rows += num_rows - batch.num_rows();
         if batch.is_empty() {
             return Ok(());
         }
@@ -402,9 +468,11 @@ impl Node {
     /// Initialize a node.
     ///
     /// It tries to fetch one batch from the `source`.
-    async fn new(mut source: Source) -> Result<Node> {
+    async fn new(mut source: Source, metrics: &mut Metrics) -> Result<Node> {
         // Ensures batch is not empty.
         let current_batch = source.next_batch().await?.map(CompareFirst);
+        metrics.num_input_rows += current_batch.as_ref().map(|b| b.0.num_rows()).unwrap_or(0);
+
         Ok(Node {
             source,
             current_batch,
@@ -437,10 +505,15 @@ impl Node {
     ///
     /// # Panics
     /// Panics if the node has reached EOF.
-    async fn fetch_batch(&mut self) -> Result<Batch> {
+    async fn fetch_batch(&mut self, metrics: &mut Metrics) -> Result<Batch> {
         let current = self.current_batch.take().unwrap();
         // Ensures batch is not empty.
         self.current_batch = self.source.next_batch().await?.map(CompareFirst);
+        metrics.num_input_rows += self
+            .current_batch
+            .as_ref()
+            .map(|b| b.0.num_rows())
+            .unwrap_or(0);
         Ok(current.0)
     }
 
@@ -468,13 +541,14 @@ impl Node {
     ///
     /// # Panics
     /// Panics if the node is EOF.
-    async fn skip_rows(&mut self, num_to_skip: usize) -> Result<()> {
+    async fn skip_rows(&mut self, num_to_skip: usize, metrics: &mut Metrics) -> Result<()> {
         let batch = self.current_batch();
         debug_assert!(batch.num_rows() >= num_to_skip);
+
         let remaining = batch.num_rows() - num_to_skip;
         if remaining == 0 {
             // Nothing remains, we need to fetch next batch to ensure the batch is not empty.
-            self.fetch_batch().await?;
+            self.fetch_batch(metrics).await?;
         } else {
             debug_assert!(!batch.is_empty());
             self.current_batch = Some(CompareFirst(batch.slice(num_to_skip, remaining)));
@@ -610,6 +684,10 @@ mod tests {
             ],
         )
         .await;
+
+        assert_eq!(8, reader.metrics.num_input_rows);
+        assert_eq!(6, reader.metrics.num_output_rows);
+        assert_eq!(2, reader.metrics.num_deleted_rows);
     }
 
     #[tokio::test]
@@ -722,6 +800,11 @@ mod tests {
             ],
         )
         .await;
+
+        assert_eq!(11, reader.metrics.num_input_rows);
+        assert_eq!(7, reader.metrics.num_output_rows);
+        assert_eq!(2, reader.metrics.num_deleted_rows);
+        assert_eq!(2, reader.metrics.num_duplicate_rows);
     }
 
     #[tokio::test]
@@ -1051,6 +1134,11 @@ mod tests {
             .push(new_batch(b"k1", &[2], &[10], &[OpType::Put], &[22]))
             .unwrap();
         assert_eq!(2, merger.num_rows());
+        merger
+            .push(new_batch(b"k1", &[3], &[10], &[OpType::Delete], &[23]))
+            .unwrap();
+        assert_eq!(2, merger.num_rows());
+
         let batch = merger.merge_batches().unwrap().unwrap();
         assert_eq!(2, batch.num_rows());
         assert_eq!(
@@ -1064,5 +1152,6 @@ mod tests {
             )
         );
         assert!(merger.is_empty());
+        assert_eq!(1, merger.num_deleted_rows());
     }
 }
