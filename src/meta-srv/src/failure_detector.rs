@@ -59,13 +59,13 @@ pub(crate) struct PhiAccrualFailureDetector {
     last_heartbeat_millis: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct PhiAccrualFailureDetectorOptions {
-    pub(crate) threshold: f32,
-    pub(crate) min_std_deviation_millis: f32,
-    pub(crate) acceptable_heartbeat_pause_millis: u32,
-    pub(crate) first_heartbeat_estimate_millis: u32,
+pub struct PhiAccrualFailureDetectorOptions {
+    pub threshold: f32,
+    pub min_std_deviation_millis: f32,
+    pub acceptable_heartbeat_pause_millis: u32,
+    pub first_heartbeat_estimate_millis: u32,
 }
 
 impl Default for PhiAccrualFailureDetectorOptions {

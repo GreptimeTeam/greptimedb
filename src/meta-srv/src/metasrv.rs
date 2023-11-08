@@ -54,7 +54,7 @@ use crate::state::{become_follower, become_leader, StateRef};
 pub const TABLE_ID_SEQ: &str = "table_id";
 pub const METASRV_HOME: &str = "/tmp/metasrv";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetaSrvOptions {
     pub bind_addr: String,
