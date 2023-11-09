@@ -57,6 +57,7 @@ body:
       label: What did you expect to see?
     validations:
       required: true
+
   - type: textarea
     id: actual-manner
     attributes:
