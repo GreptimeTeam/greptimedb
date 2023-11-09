@@ -69,6 +69,7 @@ arrow-flight = "47.0"
 arrow-schema = { version = "47.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
+base64 = "0.21"
 bigdecimal = "0.4.2"
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
@@ -110,7 +111,7 @@ rust_decimal = "1.32.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1"
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu = "0.7"
 # on branch v0.38.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd", features = [
     "visitor",
@@ -122,6 +123,7 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
+
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }

@@ -6,9 +6,9 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-telemetry = { workspace = true }
+common-error.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 paste.workspace = true

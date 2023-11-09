@@ -12,25 +12,25 @@ protobuf-build = { version = "0.15", default-features = false, features = [
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
-base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
-common-base = { workspace = true }
-common-config = { workspace = true }
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-meta = { workspace = true, features = ["testing"] }
-common-runtime = { workspace = true }
-common-telemetry = { workspace = true }
+common-base.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
-raft-engine = { workspace = true }
-snafu = { version = "0.7", features = ["backtraces"] }
-store-api = { workspace = true }
+raft-engine.workspace = true
+snafu.workspace = true
+store-api.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-common-test-util = { workspace = true }
+common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
 rand.workspace = true

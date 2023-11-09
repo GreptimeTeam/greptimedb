@@ -6,4 +6,4 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-common-procedure = { workspace = true }
+common-procedure.workspace = true

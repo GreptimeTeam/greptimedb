@@ -5,5 +5,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 strum.workspace = true
