@@ -5,8 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common-error = { workspace = true }
-common-macro = { workspace = true }
+common-error.workspace = true
+common-macro.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

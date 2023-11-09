@@ -8,22 +8,22 @@ license.workspace = true
 testing = []
 
 [dependencies]
-api = { workspace = true }
+api.workspace = true
 arrow-flight.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
-common-base = { workspace = true }
-common-catalog = { workspace = true }
-common-error = { workspace = true }
-common-grpc = { workspace = true }
-common-macro = { workspace = true }
-common-meta = { workspace = true }
-common-query = { workspace = true }
-common-recordbatch = { workspace = true }
-common-telemetry = { workspace = true }
-common-time = { workspace = true }
+common-base.workspace = true
+common-catalog.workspace = true
+common-error.workspace = true
+common-grpc.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
 datafusion.workspace = true
-datatypes = { workspace = true }
+datatypes.workspace = true
 derive_builder.workspace = true
 enum_dispatch = "0.3"
 futures-util.workspace = true
@@ -33,17 +33,17 @@ parking_lot = "0.12"
 prometheus.workspace = true
 prost.workspace = true
 rand.workspace = true
-session = { workspace = true }
+session.workspace = true
 snafu.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]
-common-grpc-expr = { workspace = true }
-datanode = { workspace = true }
+common-grpc-expr.workspace = true
+datanode.workspace = true
 derive-new = "0.5"
-substrait = { workspace = true }
+substrait.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

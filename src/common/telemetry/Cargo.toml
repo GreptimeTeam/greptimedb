@@ -10,7 +10,7 @@ deadlock_detection = ["parking_lot/deadlock_detection"]
 
 [dependencies]
 backtrace = "0.3"
-common-error = { workspace = true }
+common-error.workspace = true
 console-subscriber = { version = "0.1", optional = true }
 lazy_static.workspace = true
 once_cell.workspace = true

@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common-base = { workspace = true }
-common-error = { workspace = true }
-common-macro = { workspace = true }
-common-time = { workspace = true }
-datatypes = { workspace = true }
+common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-time.workspace = true
+datatypes.workspace = true
 greptime-proto.workspace = true
 prost.workspace = true
 snafu.workspace = true

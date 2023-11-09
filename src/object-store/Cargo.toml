@@ -25,6 +25,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 anyhow = "1.0"
-common-telemetry = { workspace = true }
-common-test-util = { workspace = true }
+common-telemetry.workspace = true
+common-test-util.workspace = true
 tokio.workspace = true

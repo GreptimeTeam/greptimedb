@@ -28,30 +28,30 @@ api.workspace = true
 arc-swap = "1.0"
 arrow.workspace = true
 async-trait.workspace = true
-catalog = { workspace = true }
-common-catalog = { workspace = true }
-common-error = { workspace = true }
-common-function = { workspace = true }
-common-macro = { workspace = true }
-common-query = { workspace = true }
-common-recordbatch = { workspace = true }
-common-runtime = { workspace = true }
-common-telemetry = { workspace = true }
-common-time = { workspace = true }
+catalog.workspace = true
+common-catalog.workspace = true
+common-error.workspace = true
+common-function.workspace = true
+common-macro.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
 console = "0.15"
 crossbeam-utils = "0.8.14"
 datafusion = { workspace = true, optional = true }
 datafusion-common = { workspace = true, optional = true }
 datafusion-expr = { workspace = true, optional = true }
 datafusion-physical-expr = { workspace = true, optional = true }
-datatypes = { workspace = true }
+datatypes.workspace = true
 futures-util.workspace = true
 futures.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 paste = { workspace = true, optional = true }
 prometheus.workspace = true
-query = { workspace = true }
+query.workspace = true
 # TODO(discord9): This is a forked and tweaked version of RustPython, please update it to newest original RustPython After RustPython support GC
 pyo3 = { version = "0.19", optional = true, features = ["abi3", "abi3-py37"] }
 rustpython-ast = { git = "https://github.com/discord9/RustPython", optional = true, rev = "9ed5137412" }
@@ -68,24 +68,24 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
     "codegen",
 ] }
 servers.workspace = true
-session = { workspace = true }
+session.workspace = true
 snafu.workspace = true
-sql = { workspace = true }
-store-api = { workspace = true }
-table = { workspace = true }
+sql.workspace = true
+store-api.workspace = true
+table.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
-common-test-util = { workspace = true }
+common-test-util.workspace = true
 criterion = { version = "0.4", features = ["html_reports", "async_tokio"] }
-log-store = { workspace = true }
+log-store.workspace = true
 operator.workspace = true
 rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
-storage = { workspace = true }
+storage.workspace = true
 tokio-test = "0.4"
 
 [[bench]]

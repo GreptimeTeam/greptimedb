@@ -5,11 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common-error = { workspace = true }
-common-macro = { workspace = true }
+common-error.workspace = true
+common-macro.workspace = true
 datafusion-common.workspace = true
 datafusion.workspace = true
-datatypes = { workspace = true }
+datatypes.workspace = true
 futures.workspace = true
 paste = "1.0"
 serde.workspace = true
