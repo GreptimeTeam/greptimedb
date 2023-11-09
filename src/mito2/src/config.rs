@@ -26,6 +26,8 @@ const DEFAULT_NUM_WORKERS: usize = 1;
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
+const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
+
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -121,10 +123,10 @@ impl MitoConfig {
             );
         }
 
-        if self.sst_write_buffer_size < ReadableSize::mb(5) {
-            self.sst_write_buffer_size = ReadableSize::mb(5);
+        if self.sst_write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
+            self.sst_write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
             warn!(
-                "Sanitize sst write buffer reject size to {}",
+                "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
             );
         }

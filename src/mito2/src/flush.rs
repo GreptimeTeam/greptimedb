@@ -291,7 +291,6 @@ impl RegionFlushTask {
             .with_label_values(&["flush_memtables"])
             .start_timer();
 
-        // TODO(yingwen): Make it configurable.
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
             ..Default::default()
