@@ -138,11 +138,8 @@ impl ColumnSchema {
     }
 
     /// Set the nullablity to `true` of the column.
-    ///
-    /// This method will also change default constraint to `None`.
     pub fn with_nullable_set(mut self) -> Self {
         self.is_nullable = true;
-        self.default_constraint = None;
         self
     }
 
