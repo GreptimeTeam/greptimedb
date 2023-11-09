@@ -114,6 +114,8 @@ serde_json = "1.0"
 smallvec = "1"
 snafu = "0.7"
 # on branch v0.38.x
+bitflags = "2.4.1"
+pin-project = "1.0"
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd", features = [
     "visitor",
 ] }
@@ -124,8 +126,6 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
-pin-project = "1.0"
-bitflags = "2.4.1"
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }

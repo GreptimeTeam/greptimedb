@@ -5,15 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+async-trait.workspace = true
+bitflags.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
 derive_builder.workspace = true
-tokio.workspace = true
 futures.workspace = true
 pin-project.workspace = true
-tokio-util.workspace = true
-bitflags.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
-common-macro.workspace = true
-common-error.workspace = true
-async-trait.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
