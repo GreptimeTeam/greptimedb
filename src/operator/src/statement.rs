@@ -160,7 +160,7 @@ impl StatementExecutor {
                 self.truncate_table(table_name).await
             }
 
-            Statement::CreateDatabase(mut stmt) => {
+            Statement::CreateDatabase(stmt) => {
                 self.create_database(
                     query_ctx.current_catalog(),
                     &format_raw_object_name(&stmt.name),
