@@ -13,7 +13,7 @@ arrow-flight.workspace = true
 async-recursion = "1.0"
 async-stream.workspace = true
 async-trait.workspace = true
-base64 = "0.21"
+base64.workspace = true
 bytes = "1.4"
 common-catalog = { workspace = true }
 common-error = { workspace = true }

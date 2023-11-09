@@ -4416,7 +4416,6 @@ version = "0.4.2"
 dependencies = [
  "async-stream",
  "async-trait",
- "base64 0.13.1",
  "byteorder",
  "bytes",
  "common-base",
@@ -8217,7 +8216,7 @@ dependencies = [
  "axum",
  "axum-macros",
  "axum-test-helper",
- "base64 0.13.1",
+ "base64 0.21.5",
  "build-data",
  "bytes",
  "catalog",

@@ -18,7 +18,7 @@ async-trait = "0.1"
 auth.workspace = true
 axum = { version = "0.6", features = ["headers"] }
 axum-macros = "0.3.8"
-base64 = "0.13"
+base64.workspace = true
 bytes = "1.2"
 catalog = { workspace = true }
 chrono.workspace = true

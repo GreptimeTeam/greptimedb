@@ -17,6 +17,8 @@ use std::marker::PhantomData;
 use ::auth::UserProviderRef;
 use axum::http::{self, Request, StatusCode};
 use axum::response::Response;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
@@ -244,7 +246,9 @@ fn auth_header<B>(req: &Request<B>) -> Result<AuthScheme> {
 }
 
 fn decode_basic(credential: Credential) -> Result<(Username, Password)> {
-    let decoded = base64::decode(credential).context(error::InvalidBase64ValueSnafu)?;
+    let decoded = BASE64_STANDARD
+        .decode(credential)
+        .context(error::InvalidBase64ValueSnafu)?;
     let as_utf8 = String::from_utf8(decoded).context(error::InvalidUtf8ValueSnafu)?;
 
     if let Some((user_id, password)) = as_utf8.split_once(':') {

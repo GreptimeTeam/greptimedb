@@ -12,7 +12,6 @@ protobuf-build = { version = "0.15", default-features = false, features = [
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
-base64 = "0.13"
 byteorder = "1.4"
 bytes = "1.1"
 common-base = { workspace = true }
