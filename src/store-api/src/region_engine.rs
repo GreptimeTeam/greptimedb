@@ -35,6 +35,12 @@ pub enum RegionRole {
     Leader,
 }
 
+impl RegionRole {
+    pub fn writable(&self) -> bool {
+        matches!(self, RegionRole::Leader)
+    }
+}
+
 impl From<RegionRole> for PbRegionRole {
     fn from(value: RegionRole) -> Self {
         match value {
