@@ -211,8 +211,12 @@ impl MetaSrvBuilder {
                         table_metadata_manager.clone(),
                     ));
                     Some(
-                        RegionFailureHandler::try_new(election.clone(), region_failover_manager)
-                            .await?,
+                        RegionFailureHandler::try_new(
+                            election.clone(),
+                            region_failover_manager,
+                            options.failure_detector.clone(),
+                        )
+                        .await?,
                     )
                 } else {
                     None
