@@ -23,7 +23,7 @@ use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionPutRequest, RegionReadRequest};
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{RegionId, ScanRequest, TableId};
 
 use crate::engine::{
     METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
@@ -31,14 +31,15 @@ use crate::engine::{
 };
 use crate::error::{
     CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu,
-    MitoReadOperationSnafu, MitoWriteOperationSnafu, Result, TableAlreadyExistsSnafu,
+    MitoReadOperationSnafu, MitoWriteOperationSnafu, ParseTableIdSnafu, Result,
+    TableAlreadyExistsSnafu,
 };
 use crate::utils;
 
 /// The other two fields key and value will be used as a k-v storage.
-/// It contains two group of key:
-/// - `__table_<TABLE_NAME>` is used for marking table existence. It doesn't have value.
-/// - `__column_<TABLE_NAME>_<COLUMN_NAME>` is used for marking column existence,
+/// It contains two group of key (TABLE_ID refers to the logical table's id):
+/// - `__table_<TABLE_ID>` is used for marking table existence. It doesn't have value.
+/// - `__column_<TABLE_ID>_<COLUMN_NAME>` is used for marking column existence,
 ///   the value is column's semantic type. To avoid the key conflict, this column key
 ///   will be encoded by base64([STANDARD_NO_PAD]).
 ///
@@ -47,6 +48,10 @@ use crate::utils;
 /// every operation should be associated to a [RegionId], which is the physical
 /// table id + region sequence. This handler will transform the region group by
 /// itself.
+///
+/// Notice that all the `region_id` in the public interfaces refers to the
+/// physical region id of metadata region. While the `table_id` refers to
+/// the logical table id.
 pub struct MetadataRegion {
     mito: MitoEngine,
 }
@@ -60,16 +65,16 @@ impl MetadataRegion {
     ///
     /// This method will check if the table key already exists, if so, it will return
     /// a [TableAlreadyExistsSnafu] error.
-    pub async fn add_table(&self, region_id: RegionId, table_name: &str) -> Result<()> {
+    pub async fn add_table(&self, region_id: RegionId, table_id: TableId) -> Result<()> {
         let region_id = utils::to_metadata_region_id(region_id);
-        let table_key = Self::concat_table_key(table_name);
+        let table_key = Self::concat_table_key(table_id);
 
         let put_success = self
             .put_conditionally(region_id, table_key, String::new())
             .await?;
 
         if !put_success {
-            TableAlreadyExistsSnafu { table_name }.fail()
+            TableAlreadyExistsSnafu { table_id }.fail()
         } else {
             Ok(())
         }
@@ -82,12 +87,12 @@ impl MetadataRegion {
     pub async fn add_column(
         &self,
         region_id: RegionId,
-        table_name: &str,
+        table_id: TableId,
         column_name: &str,
         semantic_type: SemanticType,
     ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(region_id);
-        let column_key = Self::concat_column_key(table_name, column_name);
+        let column_key = Self::concat_column_key(table_id, column_name);
 
         self.put_conditionally(
             region_id,
@@ -98,9 +103,9 @@ impl MetadataRegion {
     }
 
     /// Check if the given table exists.
-    pub async fn is_table_exist(&self, region_id: RegionId, table_name: &str) -> Result<bool> {
+    pub async fn is_table_exist(&self, region_id: RegionId, table_id: TableId) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(region_id);
-        let table_key = Self::concat_table_key(table_name);
+        let table_key = Self::concat_table_key(table_id);
         self.exist(region_id, &table_key).await
     }
 
@@ -108,11 +113,11 @@ impl MetadataRegion {
     pub async fn column_semantic_type(
         &self,
         region_id: RegionId,
-        table_name: &str,
+        table_id: TableId,
         column_name: &str,
     ) -> Result<Option<SemanticType>> {
         let region_id = utils::to_metadata_region_id(region_id);
-        let column_key = Self::concat_column_key(table_name, column_name);
+        let column_key = Self::concat_column_key(table_id, column_name);
         let semantic_type = self.get(region_id, &column_key).await?;
         semantic_type
             .map(|s| Self::deserialize_semantic_type(&s))
@@ -122,14 +127,14 @@ impl MetadataRegion {
 
 // utils to concat and parse key/value
 impl MetadataRegion {
-    pub fn concat_table_key(table_name: &str) -> String {
-        format!("__table_{}", table_name)
+    pub fn concat_table_key(table_id: TableId) -> String {
+        format!("__table_{}", table_id)
     }
 
-    pub fn concat_column_key(table_name: &str, column_name: &str) -> String {
-        let encoded_table_name = STANDARD_NO_PAD.encode(table_name);
+    /// Column name will be encoded by base64([STANDARD_NO_PAD])
+    pub fn concat_column_key(table_id: TableId, column_name: &str) -> String {
         let encoded_column_name = STANDARD_NO_PAD.encode(column_name);
-        format!("__column_{}_{}", encoded_table_name, encoded_column_name)
+        format!("__column_{}_{}", table_id, encoded_column_name)
     }
 
     pub fn parse_table_key(key: &str) -> Option<&str> {
@@ -137,23 +142,21 @@ impl MetadataRegion {
     }
 
     /// Parse column key to (table_name, column_name)
-    pub fn parse_column_key(key: &str) -> Result<Option<(String, String)>> {
+    pub fn parse_column_key(key: &str) -> Result<Option<(TableId, String)>> {
         if let Some(stripped) = key.strip_prefix("__column_") {
             let mut iter = stripped.split('_');
-            let encoded_table_name = iter.next().unwrap();
-            let encoded_column_name = iter.next().unwrap();
 
-            let table_name = STANDARD_NO_PAD
-                .decode(encoded_table_name)
-                .context(DecodeColumnValueSnafu)?;
+            let table_id_raw = iter.next().unwrap();
+            let table_id = table_id_raw
+                .parse()
+                .with_context(|_| ParseTableIdSnafu { raw: table_id_raw })?;
+
+            let encoded_column_name = iter.next().unwrap();
             let column_name = STANDARD_NO_PAD
                 .decode(encoded_column_name)
                 .context(DecodeColumnValueSnafu)?;
 
-            Ok(Some((
-                String::from_utf8(table_name).unwrap(),
-                String::from_utf8(column_name).unwrap(),
-            )))
+            Ok(Some((table_id, String::from_utf8(column_name).unwrap())))
         } else {
             Ok(None)
         }
@@ -307,44 +310,40 @@ mod test {
 
     #[test]
     fn test_concat_table_key() {
-        let table_name = "my_table";
-        let expected = "__table_my_table".to_string();
-        assert_eq!(MetadataRegion::concat_table_key(table_name), expected);
+        let table_id = 12934;
+        let expected = "__table_12934".to_string();
+        assert_eq!(MetadataRegion::concat_table_key(table_id), expected);
     }
 
     #[test]
     fn test_concat_column_key() {
-        let table_name = "my_table";
+        let table_id = 91959;
         let column_name = "my_column";
-        let expected = "__column_bXlfdGFibGU_bXlfY29sdW1u".to_string();
+        let expected = "__column_91959_bXlfY29sdW1u".to_string();
         assert_eq!(
-            MetadataRegion::concat_column_key(table_name, column_name),
+            MetadataRegion::concat_column_key(table_id, column_name),
             expected
         );
     }
 
     #[test]
     fn test_parse_table_key() {
-        let encoded = MetadataRegion::concat_column_key("my_table", "my_column");
-        assert_eq!(encoded, "__column_bXlfdGFibGU_bXlfY29sdW1u");
+        let table_id = 93585;
+        let encoded = MetadataRegion::concat_column_key(table_id, "my_column");
+        assert_eq!(encoded, "__column_93585_bXlfY29sdW1u");
 
         let decoded = MetadataRegion::parse_column_key(&encoded).unwrap();
-        assert_eq!(
-            decoded,
-            Some(("my_table".to_string(), "my_column".to_string()))
-        );
+        assert_eq!(decoded, Some((table_id, "my_column".to_string())));
     }
 
     #[test]
     fn test_parse_valid_column_key() {
-        let encoded = MetadataRegion::concat_column_key("my_table", "my_column");
-        assert_eq!(encoded, "__column_bXlfdGFibGU_bXlfY29sdW1u");
+        let table_id = 73952;
+        let encoded = MetadataRegion::concat_column_key(table_id, "my_column");
+        assert_eq!(encoded, "__column_73952_bXlfY29sdW1u");
 
         let decoded = MetadataRegion::parse_column_key(&encoded).unwrap();
-        assert_eq!(
-            decoded,
-            Some(("my_table".to_string(), "my_column".to_string()))
-        );
+        assert_eq!(decoded, Some((table_id, "my_column".to_string())));
     }
 
     #[test]
@@ -486,19 +485,19 @@ mod test {
         let region_id = to_metadata_region_id(env.default_region_id());
 
         // add one table
-        let table_name = "table1";
+        let table_id = 77889;
         metadata_region
-            .add_table(region_id, table_name)
+            .add_table(region_id, table_id)
             .await
             .unwrap();
         assert!(metadata_region
-            .is_table_exist(region_id, table_name)
+            .is_table_exist(region_id, table_id)
             .await
             .unwrap());
 
         // add it again
         assert!(metadata_region
-            .add_table(region_id, table_name)
+            .add_table(region_id, table_id)
             .await
             .is_err());
     }
@@ -510,27 +509,27 @@ mod test {
         let metadata_region = env.metadata_region();
         let region_id = to_metadata_region_id(env.default_region_id());
 
-        let table_name = "table1";
+        let table_id = 23638;
         let column_name = "column1";
         let semantic_type = SemanticType::Tag;
         metadata_region
-            .add_column(region_id, table_name, column_name, semantic_type)
+            .add_column(region_id, table_id, column_name, semantic_type)
             .await
             .unwrap();
         let actual_semantic_type = metadata_region
-            .column_semantic_type(region_id, table_name, column_name)
+            .column_semantic_type(region_id, table_id, column_name)
             .await
             .unwrap();
         assert_eq!(actual_semantic_type, Some(semantic_type));
 
         // duplicate column won't be updated
         let is_updated = metadata_region
-            .add_column(region_id, table_name, column_name, SemanticType::Field)
+            .add_column(region_id, table_id, column_name, SemanticType::Field)
             .await
             .unwrap();
         assert!(!is_updated);
         let actual_semantic_type = metadata_region
-            .column_semantic_type(region_id, table_name, column_name)
+            .column_semantic_type(region_id, table_id, column_name)
             .await
             .unwrap();
         assert_eq!(actual_semantic_type, Some(semantic_type));

@@ -17,7 +17,9 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
+use store_api::storage::{RegionId, TableId};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -33,9 +35,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table `{}` already exists", table_name))]
+    #[snafu(display("Table `{}` already exists", table_id))]
     TableAlreadyExists {
-        table_name: String,
+        table_id: TableId,
         location: Location,
     },
 
@@ -51,6 +53,14 @@ pub enum Error {
     DecodeColumnValue {
         #[snafu(source)]
         error: base64::DecodeError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse table id from {}", raw))]
+    ParseTableId {
+        raw: String,
+        #[snafu(source)]
+        error: <TableId as std::str::FromStr>::Err,
         location: Location,
     },
 
@@ -74,6 +84,37 @@ pub enum Error {
 
     #[snafu(display("Internal column {} is reserved", column))]
     InternalColumnOccupied { column: String, location: Location },
+
+    #[snafu(display("Required table option is missing"))]
+    MissingRegionOption { location: Location },
+
+    #[snafu(display("Region options are conflicted"))]
+    ConflictRegionOption { location: Location },
+
+    // TODO: remove this
+    #[snafu(display("Physical table {} not found", physical_table))]
+    PhysicalTableNotFound {
+        physical_table: String,
+        location: Location,
+    },
+
+    #[snafu(display("Physical region {} not found", region_id))]
+    PhysicalRegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
+    #[snafu(display("Logical table {} not found", table_id))]
+    LogicalTableNotFound {
+        table_id: TableId,
+        location: Location,
+    },
+
+    #[snafu(display("Column type mismatch. Expect string, got {:?}", column_type))]
+    ColumnTypeMismatch {
+        column_type: ConcreteDataType,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -83,11 +124,19 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            InternalColumnOccupied { .. } => StatusCode::InvalidArguments,
+            InternalColumnOccupied { .. }
+            | MissingRegionOption { .. }
+            | ConflictRegionOption { .. }
+            | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
-            | DecodeColumnValue { .. } => StatusCode::Unexpected,
+            | DecodeColumnValue { .. }
+            | ParseTableId { .. } => StatusCode::Unexpected,
+
+            PhysicalTableNotFound { .. } | LogicalTableNotFound { .. } => StatusCode::TableNotFound,
+
+            PhysicalRegionNotFound { .. } => StatusCode::RegionNotFound,
 
             CreateMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
