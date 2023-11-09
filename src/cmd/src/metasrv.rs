@@ -219,9 +219,9 @@ mod tests {
             
             [failure_detector]
             threshold = 8.0
-            min_std_deviation = '100ms'
-            acceptable_heartbeat_pause = '3000ms'
-            first_heartbeat_estimate = '1000ms'
+            min_std_deviation = "100ms"
+            acceptable_heartbeat_pause = "3000ms"
+            first_heartbeat_estimate = "1000ms"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
