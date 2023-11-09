@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
+use api::v1::meta::{GrantedRegion, HeartbeatRequest, RegionLease, RegionRole, Role};
 use async_trait::async_trait;
 
 use crate::error::Result;
@@ -55,9 +55,17 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .retain_active_regions(stat.cluster_id, stat.id, &mut region_ids)
             .await?;
 
+        let regions = region_ids
+            .into_iter()
+            .map(|region_id| GrantedRegion {
+                region_id,
+                role: RegionRole::Leader.into(),
+            })
+            .collect();
+
         acc.inactive_region_ids = inactive_region_ids;
         acc.region_lease = Some(RegionLease {
-            region_ids,
+            regions,
             duration_since_epoch: req.duration_since_epoch,
             lease_seconds: self.region_lease_seconds,
         });
@@ -70,9 +78,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
 mod test {
     use std::sync::Arc;
 
+    use api::v1::meta::RegionRole;
     use common_meta::key::TableMetadataManager;
     use common_meta::{distributed_time_constants, RegionIdent};
-    use store_api::region_engine::RegionRole;
     use store_api::storage::{RegionId, RegionNumber};
 
     use super::*;
@@ -113,7 +121,7 @@ mod test {
                 approximate_bytes: 0,
                 approximate_rows: 0,
                 engine: String::new(),
-                role: RegionRole::Leader,
+                role: RegionRole::Leader.into(),
             }
         };
         acc.stat = Some(Stat {
@@ -152,7 +160,13 @@ mod test {
 
         assert!(acc.region_lease.is_some());
         let lease = acc.region_lease.as_ref().unwrap();
-        assert_eq!(lease.region_ids, vec![RegionId::new(table_id, 2).as_u64()]);
+        assert_eq!(
+            lease.regions,
+            vec![GrantedRegion {
+                region_id: RegionId::new(table_id, 2).as_u64(),
+                role: RegionRole::Leader.into()
+            }]
+        );
         assert_eq!(lease.duration_since_epoch, 1234);
         assert_eq!(
             lease.lease_seconds,

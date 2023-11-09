@@ -17,6 +17,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use api::v1::meta::GrantedRegion;
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -26,6 +27,7 @@ use common_meta::heartbeat::handler::{
 };
 use common_telemetry::{debug, error, info, trace, warn};
 use snafu::OptionExt;
+use store_api::region_engine::RegionRole;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 #[cfg(test)]
@@ -122,10 +124,11 @@ impl RegionAliveKeeper {
         }
     }
 
-    async fn keep_lived(&self, designated_regions: Vec<RegionId>, deadline: Instant) {
-        for region_id in designated_regions {
+    async fn keep_lived(&self, regions: &[GrantedRegion], deadline: Instant) {
+        for region in regions {
+            let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
-                handle.reset_deadline(deadline).await;
+                handle.reset_deadline(role, deadline).await;
             }
             // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
         }
@@ -235,12 +238,8 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
             })?;
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
         let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
-        let region_ids = region_lease
-            .region_ids
-            .iter()
-            .map(|id| RegionId::from_u64(*id))
-            .collect();
-        self.keep_lived(region_ids, deadline).await;
+
+        self.keep_lived(&region_lease.regions, deadline).await;
         Ok(HandleControl::Continue)
     }
 }
@@ -251,7 +250,8 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    Reset(Instant),
+    /// (NextRole, Deadline)
+    Reset((RegionRole, Instant)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -319,8 +319,12 @@ impl CountdownTaskHandle {
         None
     }
 
-    async fn reset_deadline(&self, deadline: Instant) {
-        if let Err(e) = self.tx.send(CountdownCommand::Reset(deadline)).await {
+    async fn reset_deadline(&self, role: RegionRole, deadline: Instant) {
+        if let Err(e) = self
+            .tx
+            .send(CountdownCommand::Reset((role, deadline)))
+            .await
+        {
             warn!(
                 "Failed to reset region alive keeper deadline: {e}. \
                 Maybe the task is stopped due to region been closed."
@@ -368,13 +372,13 @@ impl CountdownTask {
                             let first_deadline = Instant::now() + Duration::from_millis(heartbeat_interval_millis) * 4;
                             countdown.set(tokio::time::sleep_until(first_deadline));
                         },
-                        Some(CountdownCommand::Reset(deadline)) => {
+                        Some(CountdownCommand::Reset((role, deadline))) => {
                             if countdown.deadline() < deadline {
                                 trace!(
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
-                                let _ = self.region_server.set_writable(self.region_id, true);
+                                let _ = self.region_server.set_writable(self.region_id, role.writable());
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:
@@ -434,6 +438,8 @@ impl CountdownTask {
 
 #[cfg(test)]
 mod test {
+    use api::v1::meta::RegionRole;
+
     use super::*;
     use crate::tests::mock_region_server;
 
@@ -455,7 +461,13 @@ mod test {
 
         // extend lease then sleep
         alive_keeper
-            .keep_lived(vec![region_id], Instant::now() + Duration::from_millis(500))
+            .keep_lived(
+                &[GrantedRegion {
+                    region_id: region_id.as_u64(),
+                    role: RegionRole::Leader.into(),
+                }],
+                Instant::now() + Duration::from_millis(500),
+            )
             .await;
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
@@ -499,7 +511,10 @@ mod test {
         // reset deadline
         // a nearer deadline will be ignored
         countdown_handle
-            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis))
+            .reset_deadline(
+                RegionRole::Leader.into(),
+                Instant::now() + Duration::from_millis(heartbeat_interval_millis),
+            )
             .await;
         assert!(
             countdown_handle.deadline().await.unwrap()
@@ -508,7 +523,10 @@ mod test {
 
         // only a farther deadline will be accepted
         countdown_handle
-            .reset_deadline(Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5))
+            .reset_deadline(
+                RegionRole::Leader.into(),
+                Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
+            )
             .await;
         assert!(
             countdown_handle.deadline().await.unwrap()
