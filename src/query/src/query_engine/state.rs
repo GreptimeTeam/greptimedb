@@ -80,13 +80,13 @@ impl QueryEngineState {
         let session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         // Apply the type conversion rule first.
         let mut analyzer = Analyzer::new();
-        if with_dist_planner {
-            analyzer.rules.insert(0, Arc::new(DistPlannerAnalyzer));
-        }
         analyzer.rules.insert(0, Arc::new(TypeConversionRule));
         analyzer.rules.insert(0, Arc::new(StringNormalizationRule));
         Self::remove_analyzer_rule(&mut analyzer.rules, CountWildcardRule {}.name());
         analyzer.rules.insert(0, Arc::new(CountWildcardRule {}));
+        if with_dist_planner {
+            analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+        }
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(OrderHintRule));
 
