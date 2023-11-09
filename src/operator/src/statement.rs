@@ -43,6 +43,7 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
+use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
 use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
@@ -160,13 +161,9 @@ impl StatementExecutor {
             }
 
             Statement::CreateDatabase(mut stmt) => {
-                for ident in stmt.name.0.iter_mut() {
-                    ident.quote_style = None;
-                }
-
                 self.create_database(
                     query_ctx.current_catalog(),
-                    &stmt.name.to_string(),
+                    &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
                 )
                 .await

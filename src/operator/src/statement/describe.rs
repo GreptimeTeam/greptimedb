@@ -17,6 +17,7 @@ use common_query::Output;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
+use sql::util::format_raw_object_name;
 
 use crate::error::{
     CatalogSnafu, DescribeStatementSnafu, ExternalSnafu, Result, TableNotFoundSnafu,
@@ -40,7 +41,7 @@ impl StatementExecutor {
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
-                table_name: stmt.name().to_string(),
+                table_name: format_raw_object_name(stmt.name()),
             })?;
 
         query::sql::describe_table(table).context(DescribeStatementSnafu)

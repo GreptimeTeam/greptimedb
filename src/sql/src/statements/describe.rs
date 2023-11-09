@@ -39,6 +39,7 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParserContext;
     use crate::statements::statement::Statement;
+    use crate::util::format_raw_object_name;
 
     #[test]
     pub fn test_describe_table() {
@@ -49,7 +50,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test");
+                assert_eq!(format_raw_object_name(&show.name), "test");
             }
             _ => {
                 unreachable!();
@@ -66,7 +67,7 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test_schema.test");
+                assert_eq!(format_raw_object_name(&show.name), "test_schema.test");
             }
             _ => {
                 unreachable!();
@@ -83,7 +84,10 @@ mod tests {
         assert_matches!(&stmts[0], Statement::DescribeTable { .. });
         match &stmts[0] {
             Statement::DescribeTable(show) => {
-                assert_eq!(show.name.to_string(), "test_catalog.test_schema.test");
+                assert_eq!(
+                    format_raw_object_name(&show.name),
+                    "test_catalog.test_schema.test"
+                );
             }
             _ => {
                 unreachable!();
