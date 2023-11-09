@@ -11,6 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 use sqlparser::ast::{ObjectName, Query, SetExpr, Statement, UnaryOperator, Values};
 use sqlparser::parser::ParserError;
 use sqlparser_derive::{Visit, VisitMut};

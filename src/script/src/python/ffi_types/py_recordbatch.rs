@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! PyRecordBatch is a Python class that wraps a RecordBatch,
 
 //! PyRecordBatch is a Python class that wraps a RecordBatch,
 //! and provide a PyMapping Protocol to
