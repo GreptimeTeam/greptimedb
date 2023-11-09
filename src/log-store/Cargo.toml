@@ -19,18 +19,19 @@ common-base = { workspace = true }
 common-config = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
-common-meta = { workspace = true, features = ["testing"] }
+common-meta.workspace = true
 common-runtime = { workspace = true }
 common-telemetry = { workspace = true }
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine = { workspace = true }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 store-api = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util = { workspace = true }
 rand.workspace = true
