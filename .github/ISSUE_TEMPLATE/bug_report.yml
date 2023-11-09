@@ -41,13 +41,26 @@ body:
       required: true
 
   - type: textarea
-    id: what-happened
+    id: reproduce
     attributes:
-      label: What happened?
+      label: Minimal reproduce step
       description: |
-        Tell us what happened and also what you would have expected to
-        happen instead.
-      placeholder: "Describe the bug"
+        Please walk us through and provide steps and details on how
+        to reproduce the issue. If possible, provide scripts that we
+        can run to trigger the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-manner
+    attributes:
+      label: What did you expect to see?
+    validations:
+      required: true
+  - type: textarea
+    id: actual-manner
+    attributes:
+      label: What did you see instead?
     validations:
       required: true
 
@@ -72,14 +85,3 @@ body:
         trace. This will be automatically formatted into code, so no
         need for backticks.
       render: bash
-
-  - type: textarea
-    id: reproduce
-    attributes:
-      label: How can we reproduce the bug?
-      description: |
-        Please walk us through and provide steps and details on how
-        to reproduce the issue. If possible, provide scripts that we
-        can run to trigger the bug.
-    validations:
-      required: true
