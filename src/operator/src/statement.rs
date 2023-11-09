@@ -159,7 +159,11 @@ impl StatementExecutor {
                 self.truncate_table(table_name).await
             }
 
-            Statement::CreateDatabase(stmt) => {
+            Statement::CreateDatabase(mut stmt) => {
+                for ident in stmt.name.0.iter_mut() {
+                    ident.quote_style = None;
+                }
+
                 self.create_database(
                     query_ctx.current_catalog(),
                     &stmt.name.to_string(),
