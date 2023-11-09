@@ -275,6 +275,11 @@ impl RegionRoute {
     pub fn downgrade_leader(&mut self) {
         self.leader_status = Some(RegionStatus::Downgraded)
     }
+
+    /// Sets the leader status.
+    pub fn set_leader_status(&mut self, status: Option<RegionStatus>) {
+        self.leader_status = status
+    }
 }
 
 pub struct RegionRoutes(pub Vec<RegionRoute>);
