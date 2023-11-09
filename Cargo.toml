@@ -111,7 +111,7 @@ rust_decimal = "1.32.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1"
-snafu = { version = "0.7" }
+snafu = "0.7"
 # on branch v0.38.x
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd", features = [
     "visitor",
