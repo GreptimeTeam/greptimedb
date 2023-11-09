@@ -86,6 +86,7 @@ impl UpdateRegionMetadata {
         for region_route in new_region_routes.iter_mut() {
             if region_route.region.id.region_number() == failed_region.region_number {
                 region_route.leader_peer = Some(self.candidate.clone());
+                region_route.set_leader_status(None);
                 break;
             }
         }
