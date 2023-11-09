@@ -9,7 +9,6 @@ testing = []
 
 [dependencies]
 api = { workspace = true }
-arrow-flight.workspace = true
 async-recursion = "1.0"
 async-stream.workspace = true
 async-trait.workspace = true

@@ -1634,8 +1634,6 @@ dependencies = [
  "chrono",
  "common-error",
  "common-macro",
- "serde",
- "serde_json",
  "snafu",
  "tokio",
 ]
@@ -1782,9 +1780,7 @@ name = "common-macro"
 version = "0.4.2"
 dependencies = [
  "arc-swap",
- "backtrace",
  "common-query",
- "common-telemetry",
  "datatypes",
  "proc-macro2",
  "quote",
@@ -1812,7 +1808,6 @@ name = "common-meta"
 version = "0.4.2"
 dependencies = [
  "api",
- "arrow-flight",
  "async-recursion",
  "async-stream",
  "async-trait",
