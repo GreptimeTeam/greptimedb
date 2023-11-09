@@ -16,9 +16,11 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
-/// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/main/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
+/// This is our port of Akka's "[PhiAccrualFailureDetector](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/main/scala/akka/remote/PhiAccrualFailureDetector.scala)"
+/// under Apache License 2.0.
+///
 /// You can find it's document here:
-/// <https://doc.akka.io/docs/akka/current/typed/failure-detector.html>
+/// <https://doc.akka.io/docs/akka/2.6.21/typed/failure-detector.html>
 ///
 /// Implementation of 'The Phi Accrual Failure Detector' by Hayashibara et al. as defined in their
 /// paper: <https://oneofus.la/have-emacs-will-hack/files/HDY04.pdf>
@@ -72,7 +74,7 @@ pub struct PhiAccrualFailureDetectorOptions {
 impl Default for PhiAccrualFailureDetectorOptions {
     fn default() -> Self {
         // default configuration is the same as of Akka:
-        // https://github.com/akka/akka/blob/main/akka-cluster/src/main/resources/reference.conf#L181
+        // https://github.com/akka/akka/blob/v2.6.21/akka-cluster/src/main/resources/reference.conf#L181
         Self {
             threshold: 8_f32,
             min_std_deviation_millis: 100_f32,
@@ -302,8 +304,8 @@ mod tests {
         assert!(fd.phi(now) >= fd.threshold as _);
     }
 
-    // The following test cases are port from Akka's test:
-    // [AccrualFailureDetectorSpec.scala](https://github.com/akka/akka/blob/main/akka-remote/src/test/scala/akka/remote/AccrualFailureDetectorSpec.scala).
+    // The following test cases are port from Akka's tests under Apache License 2.0:
+    // [AccrualFailureDetectorSpec.scala](https://github.com/akka/akka/blob/v2.6.21/akka-remote/src/test/scala/akka/remote/AccrualFailureDetectorSpec.scala).
 
     #[test]
     fn test_use_good_enough_cumulative_distribution_function() {
