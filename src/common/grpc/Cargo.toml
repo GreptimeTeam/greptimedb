@@ -23,7 +23,7 @@ flatbuffers = "23.1"
 futures = "0.3"
 lazy_static.workspace = true
 prost.workspace = true
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tower = "0.4"

@@ -12,7 +12,7 @@ common-time = { workspace = true }
 datatypes = { workspace = true }
 greptime-proto.workspace = true
 prost.workspace = true
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 tonic.workspace = true
 
 [build-dependencies]

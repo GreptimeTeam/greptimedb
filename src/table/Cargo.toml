@@ -32,7 +32,7 @@ humantime = "2.1"
 humantime-serde.workspace = true
 paste = "1.0"
 serde.workspace = true
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 store-api = { workspace = true }
 tokio.workspace = true
 

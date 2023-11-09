@@ -15,7 +15,7 @@ common-query = { workspace = true }
 common-telemetry = { workspace = true }
 common-time = { workspace = true }
 datatypes = { workspace = true }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 table = { workspace = true }
 
 [dev-dependencies]

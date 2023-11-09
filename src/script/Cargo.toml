@@ -69,7 +69,7 @@ rustpython-vm = { git = "https://github.com/discord9/RustPython", optional = tru
 ] }
 servers.workspace = true
 session = { workspace = true }
-snafu = { version = "0.7", features = ["backtraces"] }
+snafu.workspace = true
 sql = { workspace = true }
 store-api = { workspace = true }
 table = { workspace = true }

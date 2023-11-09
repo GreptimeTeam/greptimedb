@@ -8468,7 +8468,6 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4de37ad025c587a29e8f3f5605c00f70b98715ef90b9061a815b9e59e9042d6"
 dependencies = [
- "backtrace",
  "doc-comment",
  "snafu-derive",
 ]
