@@ -43,6 +43,7 @@ members = [
     "src/partition",
     "src/plugins",
     "src/promql",
+    "src/puffin",
     "src/query",
     "src/script",
     "src/servers",
@@ -123,7 +124,8 @@ tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
-
+pin-project = "1.0"
+bitflags = "2.4.1"
 ## workspaces members
 api = { path = "src/api" }
 auth = { path = "src/auth" }

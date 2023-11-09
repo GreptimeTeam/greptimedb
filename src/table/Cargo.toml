@@ -40,4 +40,4 @@ tokio.workspace = true
 common-test-util.workspace = true
 parquet = { workspace = true, features = ["async"] }
 serde_json.workspace = true
-tokio-util = { version = "0.7", features = ["compat"] }
+tokio-util.workspace = true
