@@ -32,6 +32,7 @@ derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
 h2 = "0.3"
+humantime-serde.workspace = true
 http-body = "0.4"
 lazy_static.workspace = true
 once_cell.workspace = true

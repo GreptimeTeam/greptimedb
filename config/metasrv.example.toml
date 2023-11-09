@@ -31,9 +31,9 @@ retry_delay = "500ms"
 # Failure detectors options.
 [failure_detector]
 threshold = 8.0
-min_std_deviation_millis = 100.0
-acceptable_heartbeat_pause_millis = 3000
-first_heartbeat_estimate_millis = 1000
+min_std_deviation = '100ms'
+acceptable_heartbeat_pause = '3000ms'
+first_heartbeat_estimate = '1000ms'
 
 # # Datanode options.
 # [datanode]
