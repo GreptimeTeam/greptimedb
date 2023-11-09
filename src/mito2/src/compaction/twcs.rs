@@ -356,7 +356,7 @@ impl CompactionTask for TwcsCompactionTask {
             Ok((added, deleted)) => {
                 info!(
                     "Compacted SST files, input: {:?}, output: {:?}, window: {:?}",
-                    added, deleted, self.compaction_time_window
+                    deleted, added, self.compaction_time_window
                 );
 
                 BackgroundNotify::CompactionFinished(CompactionFinished {
