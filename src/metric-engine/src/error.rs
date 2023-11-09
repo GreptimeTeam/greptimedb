@@ -110,11 +110,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Logical region {} not found", region_id))]
+    LogicalRegionNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Column type mismatch. Expect string, got {:?}", column_type))]
     ColumnTypeMismatch {
         column_type: ConcreteDataType,
         location: Location,
     },
+
+    #[snafu(display("Alter request to physical region is forbidden"))]
+    ForbiddenPhysicalAlter { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -129,6 +138,8 @@ impl ErrorExt for Error {
             | ConflictRegionOption { .. }
             | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
 
+            ForbiddenPhysicalAlter { .. } => StatusCode::Unsupported,
+
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
             | DecodeColumnValue { .. }
@@ -136,7 +147,9 @@ impl ErrorExt for Error {
 
             PhysicalTableNotFound { .. } | LogicalTableNotFound { .. } => StatusCode::TableNotFound,
 
-            PhysicalRegionNotFound { .. } => StatusCode::RegionNotFound,
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
+                StatusCode::RegionNotFound
+            }
 
             CreateMitoRegion { source, .. }
             | MitoReadOperation { source, .. }

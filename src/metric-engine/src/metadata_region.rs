@@ -396,7 +396,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         // Test inserting a new key-value pair
         let key = "test_key".to_string();
@@ -430,7 +430,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         // Test checking for a non-existent key
         let key = "test_key".to_string();
@@ -456,7 +456,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         // Test getting a non-existent key
         let key = "test_key".to_string();
@@ -482,7 +482,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         // add one table
         let table_id = 77889;
@@ -507,7 +507,7 @@ mod test {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let metadata_region = env.metadata_region();
-        let region_id = to_metadata_region_id(env.default_region_id());
+        let region_id = to_metadata_region_id(env.default_physical_region_id());
 
         let table_id = 23638;
         let column_name = "column1";

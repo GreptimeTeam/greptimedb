@@ -134,18 +134,17 @@ mod test {
 
     #[tokio::test]
     async fn test_add_columns() {
-        common_telemetry::init_default_ut_logging();
-
         let env = TestEnv::new().await;
         env.init_metric_region().await;
 
         let current_version = env
             .mito()
-            .get_metadata(utils::to_data_region_id(env.default_region_id()))
+            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
             .await
             .unwrap()
             .schema_version;
-        assert_eq!(current_version, 0);
+        // TestEnv will create a logical region which changes the version to 1.
+        assert_eq!(current_version, 1);
 
         let new_columns = vec![
             ColumnMetadata {
@@ -168,13 +167,13 @@ mod test {
             },
         ];
         env.data_region()
-            .add_columns(env.default_region_id(), new_columns)
+            .add_columns(env.default_physical_region_id(), new_columns)
             .await
             .unwrap();
 
         let new_metadata = env
             .mito()
-            .get_metadata(utils::to_data_region_id(env.default_region_id()))
+            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
             .await
             .unwrap();
         let column_names = new_metadata
@@ -182,15 +181,21 @@ mod test {
             .iter()
             .map(|c| &c.column_schema.name)
             .collect::<Vec<_>>();
-        let expected = vec!["greptime_timestamp", "__metric", "__tsid", "tag2", "tag3"];
+        let expected = vec![
+            "greptime_timestamp",
+            "greptime_value",
+            "__metric",
+            "__tsid",
+            "job",
+            "tag2",
+            "tag3",
+        ];
         assert_eq!(column_names, expected);
     }
 
     // Only string is allowed for tag column
     #[tokio::test]
     async fn test_add_invalid_column() {
-        common_telemetry::init_default_ut_logging();
-
         let env = TestEnv::new().await;
         env.init_metric_region().await;
 
@@ -201,7 +206,7 @@ mod test {
         }];
         let result = env
             .data_region()
-            .add_columns(env.default_region_id(), new_columns)
+            .add_columns(env.default_physical_region_id(), new_columns)
             .await;
         assert!(result.is_err());
     }

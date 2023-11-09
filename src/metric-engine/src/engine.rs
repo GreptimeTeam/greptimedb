@@ -39,12 +39,15 @@ use tokio::sync::RwLock;
 
 use crate::data_region::DataRegion;
 use crate::error::{
-    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
-    LogicalTableNotFoundSnafu, MissingRegionOptionSnafu, PhysicalRegionNotFoundSnafu,
+    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, ForbiddenPhysicalAlterSnafu,
+    InternalColumnOccupiedSnafu, LogicalRegionNotFoundSnafu, LogicalTableNotFoundSnafu,
+    MissingRegionOptionSnafu, ParseTableIdSnafu, PhysicalRegionNotFoundSnafu,
     PhysicalTableNotFoundSnafu, Result,
 };
 use crate::metadata_region::MetadataRegion;
-use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT};
+use crate::metrics::{
+    FORBIDDEN_OPERATION_COUNT, LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT,
+};
 use crate::utils;
 
 /// region group value for data region inside a metric region
@@ -97,6 +100,7 @@ pub const PHYSICAL_TABLE_METADATA_KEY: &str = "physical_metric_table";
 /// ```
 pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 
+#[derive(Clone)]
 pub struct MetricEngine {
     inner: Arc<MetricEngineInner>,
 }
@@ -127,7 +131,11 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Drop(_) => todo!(),
             RegionRequest::Open(_) => todo!(),
             RegionRequest::Close(_) => todo!(),
-            RegionRequest::Alter(_) => todo!(),
+            RegionRequest::Alter(alter) => self
+                .inner
+                .alter_region(region_id, alter)
+                .await
+                .map(|_| Output::AffectedRows(0)),
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),
@@ -187,6 +195,7 @@ impl MetricEngine {
                 data_region,
                 physical_tables: RwLock::default(),
                 physical_columns: RwLock::default(),
+                logical_tables: RwLock::default(),
             }),
         }
     }
@@ -196,12 +205,13 @@ struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
     data_region: DataRegion,
-    // TODO(ruihang): handle different catalog/schema
-    /// Map from physical table name to table id.
-    physical_tables: RwLock<HashMap<String, TableId>>,
+    /// Mapping from physical table id to its logical table ids
+    physical_tables: RwLock<HashMap<RegionId, HashSet<RegionId>>>,
     /// Cache for the columns of physical regions.
     /// The region id in key is the data region id.
     physical_columns: RwLock<HashMap<RegionId, HashSet<String>>>,
+    /// Mapping from logical table id to physical table id
+    logical_tables: RwLock<HashMap<RegionId, RegionId>>,
 }
 
 impl MetricEngineInner {
@@ -230,14 +240,6 @@ impl MetricEngineInner {
     ) -> Result<()> {
         let (data_region_id, metadata_region_id) = Self::transform_region_id(region_id);
 
-        // TODO: workaround for now, should find another way to retrieve the
-        // table name.
-        let physical_table_name = request
-            .options
-            .get(PHYSICAL_TABLE_METADATA_KEY)
-            .ok_or(MissingRegionOptionSnafu {}.build())?
-            .to_string();
-
         // create metadata region
         let create_metadata_region_request =
             self.create_request_for_metadata_region(&request.region_dir);
@@ -253,6 +255,11 @@ impl MetricEngineInner {
 
         // create data region
         let create_data_region_request = self.create_request_for_data_region(&request);
+        let physical_column_set = create_data_region_request
+            .column_metadatas
+            .iter()
+            .map(|metadata| metadata.column_schema.name.clone())
+            .collect::<HashSet<_>>();
         self.mito
             .handle_request(
                 data_region_id,
@@ -263,14 +270,18 @@ impl MetricEngineInner {
                 region_type: DATA_REGION_SUBDIR,
             })?;
 
-        info!("Created physical metric region {region_id:?} with table name {physical_table_name}");
+        info!("Created physical metric region {region_id:?}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
         self.physical_tables
             .write()
             .await
-            .insert(physical_table_name, region_id.table_id());
+            .insert(region_id, HashSet::new());
+        self.physical_columns
+            .write()
+            .await
+            .insert(data_region_id, physical_column_set);
 
         Ok(())
     }
@@ -287,24 +298,21 @@ impl MetricEngineInner {
     /// If the logical region to create already exists, this method will do nothing.
     async fn create_logical_region(
         &self,
-        region_id: RegionId,
+        logical_region_id: RegionId,
         request: RegionCreateRequest,
     ) -> Result<()> {
         // transform IDs
-        let physical_table_name = request
+        let physical_region_id_raw = request
             .options
             .get(LOGICAL_TABLE_METADATA_KEY)
             .ok_or(MissingRegionOptionSnafu {}.build())?;
-        let physical_table_id = *self
-            .physical_tables
-            .read()
-            .await
-            .get(physical_table_name)
-            .with_context(|| PhysicalTableNotFoundSnafu {
-                physical_table: physical_table_name,
-            })?;
-        let logical_table_id = region_id.table_id();
-        let physical_region_id = RegionId::new(physical_table_id, region_id.region_number());
+        let physical_region_id: RegionId = physical_region_id_raw
+            .parse::<u64>()
+            .with_context(|_| ParseTableIdSnafu {
+                raw: physical_region_id_raw,
+            })?
+            .into();
+        let logical_table_id = logical_region_id.table_id();
         let (data_region_id, metadata_region_id) = Self::transform_region_id(physical_region_id);
 
         // check if the logical table already exist
@@ -313,22 +321,23 @@ impl MetricEngineInner {
             .is_table_exist(metadata_region_id, logical_table_id)
             .await?
         {
-            info!("Create a existing logical region {region_id}. Skipped");
+            info!("Create a existing logical region {logical_region_id}. Skipped");
             return Ok(());
         }
 
         // find new columns to add
-        let physical_columns = self.physical_columns.read().await;
-        let physical_columns =
-            physical_columns
-                .get(&data_region_id)
-                .with_context(|| PhysicalRegionNotFoundSnafu {
-                    region_id: data_region_id,
-                })?;
         let mut new_columns = vec![];
-        for col in &request.column_metadatas {
-            if !physical_columns.contains(&col.column_schema.name) {
-                new_columns.push(col.clone());
+        {
+            let physical_columns = self.physical_columns.read().await;
+            let physical_columns = physical_columns.get(&data_region_id).with_context(|| {
+                PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                }
+            })?;
+            for col in &request.column_metadatas {
+                if !physical_columns.contains(&col.column_schema.name) {
+                    new_columns.push(col.clone());
+                }
             }
         }
 
@@ -339,6 +348,22 @@ impl MetricEngineInner {
             new_columns,
         )
         .await?;
+
+        // register table to metadata region
+        self.metadata_region
+            .add_table(metadata_region_id, logical_table_id)
+            .await?;
+        // update the mapping
+        let mut physical_tables = self.physical_tables.write().await;
+        // Safety: previous steps ensure the physical table must exist
+        physical_tables
+            .get_mut(&physical_region_id)
+            .unwrap()
+            .insert(logical_region_id);
+        let mut logical_tables = self.logical_tables.write().await;
+        logical_tables.insert(logical_region_id, physical_region_id);
+        info!("Created new logical table {logical_table_id} on physical region {data_region_id}");
+        LOGICAL_REGION_COUNT.inc();
 
         Ok(())
     }
@@ -375,13 +400,6 @@ impl MetricEngineInner {
         }
         info!("Create table {logical_table_id} leads to adding columns {new_columns:?} to physical region {data_region_id}");
         PHYSICAL_COLUMN_COUNT.add(new_columns.len() as _);
-
-        // register table to metadata region
-        self.metadata_region
-            .add_table(metadata_region_id, logical_table_id)
-            .await?;
-        info!("Created new logical table {logical_table_id} on physical region {data_region_id}");
-        LOGICAL_REGION_COUNT.inc();
 
         Ok(())
     }
@@ -546,38 +564,43 @@ impl MetricEngineInner {
 }
 
 impl MetricEngineInner {
-    pub async fn alter_logic_region(
+    /// Dispatch region alter request
+    pub async fn alter_region(
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<()> {
+        if self.physical_tables.read().await.contains_key(&region_id) {
+            self.alter_physical_region(region_id, request).await
+        } else {
+            self.alter_logical_region(region_id, request).await
+        }
+    }
+
+    async fn alter_logical_region(
+        &self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+    ) -> Result<()> {
+        let logical_tables = self.logical_tables.read().await;
+        let physical_region_id = *logical_tables.get(&region_id).with_context(|| {
+            error!("Trying to alter an nonexistent region {region_id}");
+            LogicalRegionNotFoundSnafu { region_id }
+        })?;
+
         // only handle adding column
         let AlterKind::AddColumns { columns } = request.kind else {
             return Ok(());
         };
-        let logical_table_id = region_id.table_id();
 
-        // check if the table exists
-        let metadata_region_id = utils::to_metadata_region_id(region_id);
-        if !self
-            .metadata_region
-            .is_table_exist(metadata_region_id, logical_table_id)
-            .await?
-        {
-            error!("Trying to alter an nonexistent table {logical_table_id}");
-            return LogicalTableNotFoundSnafu {
-                table_id: logical_table_id,
-            }
-            .fail();
-        }
-
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let mut columns_to_add = vec![];
         for col in columns {
             if self
                 .metadata_region
                 .column_semantic_type(
                     metadata_region_id,
-                    logical_table_id,
+                    region_id.table_id(),
                     &col.column_metadata.column_schema.name,
                 )
                 .await?
@@ -587,22 +610,35 @@ impl MetricEngineInner {
             }
         }
 
-        let data_region_id = utils::to_data_region_id(region_id);
+        let data_region_id = utils::to_data_region_id(physical_region_id);
         self.add_columns_to_physical_data_region(
             data_region_id,
             metadata_region_id,
-            logical_table_id,
+            region_id.table_id(),
             columns_to_add,
         )
         .await?;
 
         Ok(())
     }
+
+    async fn alter_physical_region(
+        &self,
+        region_id: RegionId,
+        request: RegionAlterRequest,
+    ) -> Result<()> {
+        info!("Metric region received alter request {request:?} on physical region {region_id:?}");
+        FORBIDDEN_OPERATION_COUNT.inc();
+
+        ForbiddenPhysicalAlterSnafu.fail()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::hash::Hash;
+
+    use store_api::region_request::AddColumn;
 
     use super::*;
     use crate::test_util::TestEnv;
@@ -748,5 +784,64 @@ mod tests {
             data_region_request.primary_key,
             vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_alter_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let engine_inner = engine.inner;
+
+        // alter physical region
+        let physical_region_id = env.default_physical_region_id();
+        let request = RegionAlterRequest {
+            schema_version: 0,
+            kind: AlterKind::AddColumns {
+                columns: vec![AddColumn {
+                    column_metadata: ColumnMetadata {
+                        column_id: 0,
+                        semantic_type: SemanticType::Tag,
+                        column_schema: ColumnSchema::new(
+                            "tag1",
+                            ConcreteDataType::string_datatype(),
+                            false,
+                        ),
+                    },
+                    location: None,
+                }],
+            },
+        };
+
+        let result = engine_inner
+            .alter_physical_region(physical_region_id, request.clone())
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Alter request to physical region is forbidden".to_string()
+        );
+
+        // alter logical region
+        let metadata_region = env.metadata_region();
+        let logical_region_id = env.default_logical_region_id();
+        let is_column_exist = metadata_region
+            .column_semantic_type(physical_region_id, logical_region_id.table_id(), "tag1")
+            .await
+            .unwrap()
+            .is_some();
+        assert!(!is_column_exist);
+
+        let region_id = env.default_logical_region_id();
+        engine_inner
+            .alter_logical_region(region_id, request)
+            .await
+            .unwrap();
+        let semantic_type = metadata_region
+            .column_semantic_type(physical_region_id, logical_region_id.table_id(), "tag1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(semantic_type, SemanticType::Tag);
     }
 }

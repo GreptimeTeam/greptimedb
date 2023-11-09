@@ -30,7 +30,11 @@ lazy_static! {
     pub static ref LOGICAL_REGION_COUNT: IntGauge =
         register_int_gauge!("metric_logical_region_count", "metric engine logical region count").unwrap();
 
-    /// Gauge for opened logical regions
+    /// Histogram for opened logical regions
     pub static ref MITO_DDL_DURATION: Histogram =
         register_histogram!("metric_engine_mito_ddl", "metric engine mito ddl").unwrap();
+
+    /// Counter for forbidden operations
+    pub static ref FORBIDDEN_OPERATION_COUNT: IntCounter =
+        register_int_counter!("metric_forbidden_request", "metric forbidden request").unwrap();
 }
