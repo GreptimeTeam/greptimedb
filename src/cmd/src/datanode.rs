@@ -191,7 +191,6 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
-    use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig};
     use servers::heartbeat_options::HeartbeatOptions;
@@ -300,7 +299,6 @@ mod tests {
                 max_inflight_tasks: 3,
                 max_files_in_level0: 7,
                 max_purge_tasks: 32,
-                sst_write_buffer_size: ReadableSize::mb(8),
             },
             options.storage.compaction,
         );

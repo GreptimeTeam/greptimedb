@@ -34,7 +34,6 @@ pub struct EngineConfig {
     pub manifest_gc_duration: Option<Duration>,
     pub max_files_in_l0: usize,
     pub max_purge_tasks: usize,
-    pub sst_write_buffer_size: ReadableSize,
     /// Max inflight flush tasks.
     pub max_flush_tasks: usize,
     /// Default write buffer size for a region.
@@ -59,7 +58,6 @@ impl Default for EngineConfig {
             manifest_gc_duration: Some(Duration::from_secs(30)),
             max_files_in_l0: 8,
             max_purge_tasks: 32,
-            sst_write_buffer_size: ReadableSize::mb(8),
             max_flush_tasks: DEFAULT_MAX_FLUSH_TASKS,
             region_write_buffer_size: DEFAULT_REGION_WRITE_BUFFER_SIZE,
             picker_schedule_interval: Duration::from_millis(

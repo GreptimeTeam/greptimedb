@@ -706,7 +706,6 @@ type = "{}"
 max_inflight_tasks = 4
 max_files_in_level0 = 8
 max_purge_tasks = 32
-sst_write_buffer_size = "8MiB"
 
 [datanode.storage.manifest]
 checkpoint_margin = 10
@@ -733,6 +732,7 @@ global_write_buffer_size = "1GiB"
 global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
+sst_write_buffer_size = "8MiB"
 
 [[datanode.region_engine]]
 

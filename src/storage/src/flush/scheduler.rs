@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use common_base::readable_size::ReadableSize;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::logging;
 use snafu::{ensure, ResultExt};
@@ -147,7 +148,7 @@ impl<S: LogStore> From<&FlushRegionRequest<S>> for CompactionRequestImpl<S> {
             compaction_time_window: req.compaction_time_window,
             sender: None,
             picker: req.compaction_picker.clone(),
-            sst_write_buffer_size: req.engine_config.sst_write_buffer_size,
+            sst_write_buffer_size: ReadableSize::mb(8), // deprecated usage
             // compaction triggered by flush always reschedules
             reschedule_on_finish: true,
         }

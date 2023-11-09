@@ -18,6 +18,7 @@ mod scheduler;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::logging;
 pub use picker::{FlushPicker, PickerConfig};
 pub use scheduler::{
@@ -269,7 +270,7 @@ impl<S: LogStore> FlushJob<S> {
             let iter = m.iter(iter_ctx.clone())?;
             let sst_layer = self.sst_layer.clone();
             let write_options = WriteOptions {
-                sst_write_buffer_size: self.engine_config.sst_write_buffer_size,
+                sst_write_buffer_size: ReadableSize::mb(8), // deprecated usage
             };
             futures.push(async move {
                 Ok(sst_layer

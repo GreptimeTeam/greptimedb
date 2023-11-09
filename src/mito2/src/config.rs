@@ -26,6 +26,8 @@ const DEFAULT_NUM_WORKERS: usize = 1;
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
+const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
+
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
@@ -63,6 +65,8 @@ pub struct MitoConfig {
     pub sst_meta_cache_size: ReadableSize,
     /// Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
     pub vector_cache_size: ReadableSize,
+    /// Buffer size for SST writing.
+    pub sst_write_buffer_size: ReadableSize,
 }
 
 impl Default for MitoConfig {
@@ -79,6 +83,7 @@ impl Default for MitoConfig {
             global_write_buffer_reject_size: ReadableSize::gb(2),
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
+            sst_write_buffer_size: ReadableSize::mb(8),
         }
     }
 }
@@ -115,6 +120,14 @@ impl MitoConfig {
             warn!(
                 "Sanitize global write buffer reject size to {}",
                 self.global_write_buffer_reject_size
+            );
+        }
+
+        if self.sst_write_buffer_size < MULTIPART_UPLOAD_MINIMUM_SIZE {
+            self.sst_write_buffer_size = MULTIPART_UPLOAD_MINIMUM_SIZE;
+            warn!(
+                "Sanitize sst write buffer size to {}",
+                self.sst_write_buffer_size
             );
         }
     }
