@@ -219,9 +219,9 @@ mod tests {
             
             [failure_detector]
             threshold = 8.0
-            min_std_deviation_millis = 100.0
-            acceptable_heartbeat_pause_millis = 3000
-            first_heartbeat_estimate_millis = 1000
+            min_std_deviation = "100ms"
+            acceptable_heartbeat_pause = "3000ms"
+            first_heartbeat_estimate = "1000ms"
         "#;
         write!(file, "{}", toml_str).unwrap();
 
@@ -241,14 +241,23 @@ mod tests {
         assert_eq!("debug", options.logging.level.as_ref().unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
         assert_eq!(8.0, options.failure_detector.threshold);
-        assert_eq!(100.0, options.failure_detector.min_std_deviation_millis);
+        assert_eq!(
+            100.0,
+            options.failure_detector.min_std_deviation.as_millis() as f32
+        );
         assert_eq!(
             3000,
-            options.failure_detector.acceptable_heartbeat_pause_millis
+            options
+                .failure_detector
+                .acceptable_heartbeat_pause
+                .as_millis()
         );
         assert_eq!(
             1000,
-            options.failure_detector.first_heartbeat_estimate_millis
+            options
+                .failure_detector
+                .first_heartbeat_estimate
+                .as_millis()
         );
     }
 

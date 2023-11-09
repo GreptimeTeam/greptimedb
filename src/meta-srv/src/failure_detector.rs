@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -66,9 +67,12 @@ pub(crate) struct PhiAccrualFailureDetector {
 #[serde(default)]
 pub struct PhiAccrualFailureDetectorOptions {
     pub threshold: f32,
-    pub min_std_deviation_millis: f32,
-    pub acceptable_heartbeat_pause_millis: u32,
-    pub first_heartbeat_estimate_millis: u32,
+    #[serde(with = "humantime_serde")]
+    pub min_std_deviation: Duration,
+    #[serde(with = "humantime_serde")]
+    pub acceptable_heartbeat_pause: Duration,
+    #[serde(with = "humantime_serde")]
+    pub first_heartbeat_estimate: Duration,
 }
 
 impl Default for PhiAccrualFailureDetectorOptions {
@@ -77,9 +81,9 @@ impl Default for PhiAccrualFailureDetectorOptions {
         // https://github.com/akka/akka/blob/v2.6.21/akka-cluster/src/main/resources/reference.conf#L181
         Self {
             threshold: 8_f32,
-            min_std_deviation_millis: 100_f32,
-            acceptable_heartbeat_pause_millis: 3000,
-            first_heartbeat_estimate_millis: 1000,
+            min_std_deviation: Duration::from_millis(100),
+            acceptable_heartbeat_pause: Duration::from_millis(3000),
+            first_heartbeat_estimate: Duration::from_millis(1000),
         }
     }
 }
@@ -94,9 +98,10 @@ impl PhiAccrualFailureDetector {
     pub(crate) fn from_options(options: PhiAccrualFailureDetectorOptions) -> Self {
         Self {
             threshold: options.threshold,
-            min_std_deviation_millis: options.min_std_deviation_millis,
-            acceptable_heartbeat_pause_millis: options.acceptable_heartbeat_pause_millis,
-            first_heartbeat_estimate_millis: options.first_heartbeat_estimate_millis,
+            min_std_deviation_millis: options.min_std_deviation.as_millis() as f32,
+            acceptable_heartbeat_pause_millis: options.acceptable_heartbeat_pause.as_millis()
+                as u32,
+            first_heartbeat_estimate_millis: options.first_heartbeat_estimate.as_millis() as u32,
             heartbeat_history: HeartbeatHistory::new(1000),
             last_heartbeat_millis: None,
         }
