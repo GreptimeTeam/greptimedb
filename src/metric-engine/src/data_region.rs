@@ -21,7 +21,9 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::error::{MitoReadOperationSnafu, MitoWriteOperationSnafu, Result};
+use crate::error::{
+    ColumnTypeMismatchSnafu, MitoReadOperationSnafu, MitoWriteOperationSnafu, Result,
+};
 use crate::metrics::MITO_DDL_DURATION;
 use crate::utils;
 
@@ -65,7 +67,7 @@ impl DataRegion {
         let version = region_metadata.schema_version;
 
         // find the max column id
-        let max_column_id = 1 + region_metadata
+        let new_column_id_start = 1 + region_metadata
             .column_metadatas
             .iter()
             .map(|c| c.column_id)
@@ -79,6 +81,12 @@ impl DataRegion {
             .map(|(delta, mut c)| {
                 if c.semantic_type == SemanticType::Tag {
                     c.semantic_type = SemanticType::Field;
+                    if !c.column_schema.data_type.is_string() {
+                        return ColumnTypeMismatchSnafu {
+                            column_type: c.column_schema.data_type,
+                        }
+                        .fail();
+                    }
                 } else {
                     warn!(
                         "Column {} in region {region_id} is not a tag",
@@ -86,16 +94,16 @@ impl DataRegion {
                     );
                 };
 
-                c.column_id = max_column_id + delta as u32;
+                c.column_id = new_column_id_start + delta as u32;
 
-                c.column_schema = c.column_schema.with_nullable(true);
+                c.column_schema = c.column_schema.with_nullable_set();
 
-                AddColumn {
+                Ok(AddColumn {
                     column_metadata: c,
                     location: None,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         // assemble alter request
         let alter_request = RegionRequest::Alter(RegionAlterRequest {
@@ -104,12 +112,13 @@ impl DataRegion {
         });
 
         // submit alter request
-        let timer = MITO_DDL_DURATION.start_timer();
-        self.mito
-            .handle_request(region_id, alter_request)
-            .await
-            .context(MitoWriteOperationSnafu)?;
-        timer.stop_and_record();
+        {
+            let _timer = MITO_DDL_DURATION.start_timer();
+            self.mito
+                .handle_request(region_id, alter_request)
+                .await
+                .context(MitoWriteOperationSnafu)?;
+        }
 
         Ok(())
     }
@@ -175,5 +184,25 @@ mod test {
             .collect::<Vec<_>>();
         let expected = vec!["greptime_timestamp", "__metric", "__tsid", "tag2", "tag3"];
         assert_eq!(column_names, expected);
+    }
+
+    // Only string is allowed for tag column
+    #[tokio::test]
+    async fn test_add_invalid_column() {
+        common_telemetry::init_default_ut_logging();
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let new_columns = vec![ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new("tag2", ConcreteDataType::int64_datatype(), false),
+        }];
+        let result = env
+            .data_region()
+            .add_columns(env.default_region_id(), new_columns)
+            .await;
+        assert!(result.is_err());
     }
 }

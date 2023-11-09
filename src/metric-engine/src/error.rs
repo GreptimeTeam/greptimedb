@@ -17,6 +17,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
 use store_api::storage::{RegionId, TableId};
 
@@ -108,6 +109,12 @@ pub enum Error {
         table_id: TableId,
         location: Location,
     },
+
+    #[snafu(display("Column type mismatch. Expect string, got {:?}", column_type))]
+    ColumnTypeMismatch {
+        column_type: ConcreteDataType,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -119,7 +126,8 @@ impl ErrorExt for Error {
         match self {
             InternalColumnOccupied { .. }
             | MissingRegionOption { .. }
-            | ConflictRegionOption { .. } => StatusCode::InvalidArguments,
+            | ConflictRegionOption { .. }
+            | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }

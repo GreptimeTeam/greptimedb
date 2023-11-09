@@ -121,6 +121,10 @@ impl ColumnSchema {
         self
     }
 
+    /// Set default constraint.
+    ///
+    /// If a default constraint exists for the column, this method will
+    /// validate it against the column's data type and nullability.
     pub fn with_default_constraint(
         mut self,
         default_constraint: Option<ColumnDefaultConstraint>,
@@ -133,8 +137,12 @@ impl ColumnSchema {
         Ok(self)
     }
 
-    pub fn with_nullable(mut self, nullable: bool) -> Self {
-        self.is_nullable = nullable;
+    /// Set the nullablity to `true` of the column.
+    ///
+    /// This method will also change default constraint to `None`.
+    pub fn with_nullable_set(mut self) -> Self {
+        self.is_nullable = true;
+        self.default_constraint = None;
         self
     }
 
