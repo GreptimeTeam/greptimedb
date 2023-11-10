@@ -277,8 +277,13 @@ impl RegionRoute {
     }
 
     /// Sets the leader status.
-    pub fn set_leader_status(&mut self, status: Option<RegionStatus>) {
-        self.leader_status = status
+    ///
+    /// Returns true if updated.
+    pub fn set_leader_status(&mut self, status: Option<RegionStatus>) -> bool {
+        let updated = self.leader_status != status;
+
+        self.leader_status = status;
+        updated
     }
 }
 
