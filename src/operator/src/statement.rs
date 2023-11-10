@@ -43,6 +43,7 @@ use snafu::{OptionExt, ResultExt};
 use sql::statements::copy::{CopyDatabaseArgument, CopyTable, CopyTableArgument};
 use sql::statements::statement::Statement;
 use sql::statements::OptionMap;
+use sql::util::format_raw_object_name;
 use sqlparser::ast::ObjectName;
 use table::engine::TableReference;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
@@ -162,7 +163,7 @@ impl StatementExecutor {
             Statement::CreateDatabase(stmt) => {
                 self.create_database(
                     query_ctx.current_catalog(),
-                    &stmt.name.to_string(),
+                    &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
                 )
                 .await

@@ -1,0 +1,19 @@
+create database illegal-database;
+
+Error: 1001(Unsupported), SQL statement is not supported: create database illegal-database;, keyword: -
+
+create database 'illegal-database';
+
+Affected Rows: 1
+
+show databases;
+
++--------------------+
+| Schemas            |
++--------------------+
+| illegal-database   |
+| information_schema |
+| public             |
+| test_public_schema |
++--------------------+
+

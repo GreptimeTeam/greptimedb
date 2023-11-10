@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::sync::LazyLock;
 
 use regex::Regex;
-use sqlparser::ast::{SqlOption, Value};
+use sqlparser::ast::{ObjectName, SqlOption, Value};
 
 static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
@@ -24,6 +25,27 @@ static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r#"(?i)secret_access_key=["'](\w*)["'].*"#).unwrap(),
     ]
 });
+
+/// Format an [ObjectName] without any quote of its idents.
+pub fn format_raw_object_name(name: &ObjectName) -> String {
+    struct Inner<'a> {
+        name: &'a ObjectName,
+    }
+
+    impl<'a> Display for Inner<'a> {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            let mut delim = "";
+            for ident in self.name.0.iter() {
+                write!(f, "{delim}")?;
+                delim = ".";
+                write!(f, "{}", ident.value)?;
+            }
+            Ok(())
+        }
+    }
+
+    format!("{}", Inner { name })
+}
 
 pub fn parse_option_string(value: Value) -> Option<String> {
     match value {
