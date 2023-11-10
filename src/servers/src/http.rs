@@ -66,7 +66,7 @@ use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
 use crate::http::prometheus::{
-    instant_query, label_values_query, labels_query, range_query, series_query,
+    format_query, instant_query, label_values_query, labels_query, range_query, series_query,
 };
 use crate::metrics::{
     HTTP_TRACK_METRICS, METRIC_HTTP_REQUESTS_ELAPSED, METRIC_HTTP_REQUESTS_TOTAL,
@@ -623,6 +623,10 @@ impl HttpServer {
 
     fn route_prometheus<S>(&self, prometheus_handler: PrometheusHandlerRef) -> Router<S> {
         Router::new()
+            .route(
+                "/format_query",
+                routing::post(format_query).get(format_query),
+            )
             .route("/query", routing::post(instant_query).get(instant_query))
             .route("/query_range", routing::post(range_query).get(range_query))
             .route("/labels", routing::post(labels_query).get(labels_query))
