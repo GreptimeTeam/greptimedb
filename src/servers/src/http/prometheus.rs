@@ -70,6 +70,7 @@ pub enum PrometheusResponse {
     Labels(Vec<String>),
     Series(Vec<HashMap<String, String>>),
     LabelValues(Vec<String>),
+    FormatQuery(String),
 }
 
 impl Default for PrometheusResponse {
@@ -287,6 +288,33 @@ impl PrometheusJsonResponse {
         });
 
         Ok(data)
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct FormatQuery {
+    query: Option<String>,
+}
+
+#[axum_macros::debug_handler]
+pub async fn format_query(
+    State(_handler): State<PrometheusHandlerRef>,
+    Query(params): Query<InstantQuery>,
+    Extension(_query_ctx): Extension<QueryContextRef>,
+    Form(form_params): Form<InstantQuery>,
+) -> Json<PrometheusJsonResponse> {
+    let _timer = crate::metrics::METRIC_HTTP_PROMQL_FORMAT_QUERY_ELAPSED.start_timer();
+
+    let query = params.query.or(form_params.query).unwrap_or_default();
+    match promql_parser::parser::parse(&query) {
+        Ok(expr) => {
+            let pretty = expr.prettify();
+            PrometheusJsonResponse::success(PrometheusResponse::FormatQuery(pretty))
+        }
+        Err(reason) => {
+            let err = InvalidQuerySnafu { reason }.build();
+            PrometheusJsonResponse::error(err.status_code().to_string(), err.output_msg())
+        }
     }
 }
 

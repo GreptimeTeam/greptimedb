@@ -100,6 +100,11 @@ lazy_static! {
         "servers opentsdb line write elapsed"
     )
     .unwrap();
+    pub static ref METRIC_HTTP_PROMQL_FORMAT_QUERY_ELAPSED: Histogram = register_histogram!(
+        "servers_http_promql_format_query_elapsed",
+        "servers http promql format query elapsed"
+    )
+    .unwrap();
     pub static ref METRIC_HTTP_PROMQL_INSTANT_QUERY_ELAPSED: Histogram = register_histogram!(
         "servers_http_promql_instant_query_elapsed",
         "servers http promql instant query elapsed"
