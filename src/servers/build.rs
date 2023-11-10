@@ -80,4 +80,5 @@ or it's a network error, just try again or enable/disable some proxy."#;
             panic!("{}", e);
         }
     }
+    println!("cargo:rerun-if-changed=dashboard/VERSION");
 }
