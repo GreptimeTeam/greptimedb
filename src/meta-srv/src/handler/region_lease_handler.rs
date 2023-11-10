@@ -145,7 +145,7 @@ mod test {
     fn new_empty_region_stat(region_id: RegionId, role: RegionRole) -> RegionStat {
         RegionStat {
             id: region_id.as_u64(),
-            role: role.into(),
+            role,
             rcus: 0,
             wcus: 0,
             approximate_bytes: 0,
@@ -209,10 +209,7 @@ mod test {
 
         handler.handle(&req, ctx, acc).await.unwrap();
 
-        assert_region_lease(
-            &acc,
-            vec![GrantedRegion::new(region_id, RegionRole::Leader)],
-        );
+        assert_region_lease(acc, vec![GrantedRegion::new(region_id, RegionRole::Leader)]);
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -234,7 +231,7 @@ mod test {
         );
 
         assert_region_lease(
-            &acc,
+            acc,
             vec![GrantedRegion::new(region_id, RegionRole::Follower)],
         );
     }
@@ -305,7 +302,7 @@ mod test {
         handler.handle(&req, ctx, acc).await.unwrap();
 
         assert_region_lease(
-            &acc,
+            acc,
             vec![
                 GrantedRegion::new(region_id, RegionRole::Follower),
                 GrantedRegion::new(another_region_id, RegionRole::Leader),

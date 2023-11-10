@@ -77,7 +77,7 @@ impl Stat {
     pub fn regions(&self) -> Vec<(RegionId, RegionRole)> {
         self.region_stats
             .iter()
-            .map(|s| (RegionId::from(s.id), s.role.into()))
+            .map(|s| (RegionId::from(s.id), s.role))
             .collect()
     }
 
