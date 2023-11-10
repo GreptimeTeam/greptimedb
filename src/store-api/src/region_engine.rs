@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use api::greptime_proto::v1::meta::RegionRole as PbRegionRole;
+use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -26,6 +26,38 @@ use serde::{Deserialize, Serialize};
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantedRegion {
+    pub region_id: RegionId,
+    pub region_role: RegionRole,
+}
+impl GrantedRegion {
+    pub fn new(region_id: RegionId, region_role: RegionRole) -> Self {
+        Self {
+            region_id,
+            region_role,
+        }
+    }
+}
+
+impl From<GrantedRegion> for PbGrantedRegion {
+    fn from(value: GrantedRegion) -> Self {
+        PbGrantedRegion {
+            region_id: value.region_id.as_u64(),
+            role: PbRegionRole::from(value.region_role).into(),
+        }
+    }
+}
+
+impl From<PbGrantedRegion> for GrantedRegion {
+    fn from(value: PbGrantedRegion) -> Self {
+        GrantedRegion {
+            region_id: RegionId::from_u64(value.region_id),
+            region_role: value.role().into(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {

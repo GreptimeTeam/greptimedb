@@ -373,12 +373,16 @@ impl CountdownTask {
                             countdown.set(tokio::time::sleep_until(first_deadline));
                         },
                         Some(CountdownCommand::Reset((role, deadline))) => {
+                            // The first-time granted regions might be ignored because the `first_deadline` is larger than the `region_lease_timeout`.
+                            // Therefore, we set writable at the outside.
+                            // TODO(weny): Considers setting `first_deadline` to `region_lease_timeout`.
+                            let _ = self.region_server.set_writable(self.region_id, role.writable());
+
                             if countdown.deadline() < deadline {
                                 trace!(
                                     "Reset deadline of region {region_id} to approximately {} seconds later",
                                     (deadline - Instant::now()).as_secs_f32(),
                                 );
-                                let _ = self.region_server.set_writable(self.region_id, role.writable());
                                 countdown.set(tokio::time::sleep_until(deadline));
                             }
                             // Else the countdown could be either:

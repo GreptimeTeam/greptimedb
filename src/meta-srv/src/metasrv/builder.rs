@@ -227,8 +227,10 @@ impl MetaSrvBuilder {
                     .and_then(|plugins| plugins.get::<PublishRef>())
                     .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
-                let region_lease_handler =
-                    RegionLeaseHandler::new(distributed_time_constants::REGION_LEASE_SECS);
+                let region_lease_handler = RegionLeaseHandler::new(
+                    distributed_time_constants::REGION_LEASE_SECS,
+                    table_metadata_manager.clone(),
+                );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;
