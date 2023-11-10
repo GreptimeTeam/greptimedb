@@ -32,6 +32,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::tracing;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -194,6 +195,8 @@ impl StatementExecutor {
         stmt: QueryStatement,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
+        let span = tracing::info_span!("StatementExecutor::plan");
+        let _enter = span.enter();
         self.query_engine
             .planner()
             .plan(stmt, query_ctx)
@@ -202,6 +205,8 @@ impl StatementExecutor {
     }
 
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
+        let span = tracing::info_span!("StatementExecutor::plan_exec");
+        let _enter = span.enter();
         let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.query_engine
             .execute(plan, query_ctx)

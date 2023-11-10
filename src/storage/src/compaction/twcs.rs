@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 
-use common_telemetry::tracing::warn;
+use common_telemetry::warn;
 use common_telemetry::{debug, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;

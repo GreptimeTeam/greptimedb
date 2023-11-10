@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use common_query::Output;
+use common_telemetry::tracing;
 use query::parser::{PromQuery, QueryLanguageParser, ANALYZE_NODE_NAME, EXPLAIN_NODE_NAME};
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -25,6 +26,8 @@ use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
     pub(super) async fn execute_tql(&self, tql: Tql, query_ctx: QueryContextRef) -> Result<Output> {
+        let span = tracing::info_span!("StatementExecutor::execute_tql");
+        let _enter = span.enter();
         let stmt = match tql {
             Tql::Eval(eval) => {
                 let promql = PromQuery {

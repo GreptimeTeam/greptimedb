@@ -14,6 +14,7 @@
 
 use common_error::ext::BoxedError;
 use common_query::Output;
+use common_telemetry::tracing;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
@@ -31,6 +32,8 @@ impl StatementExecutor {
         stmt: DescribeTable,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let span = tracing::info_span!("StatementExecutor::describe_table");
+        let _enter = span.enter();
         let (catalog, schema, table) = table_idents_to_full_name(stmt.name(), query_ctx)
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;

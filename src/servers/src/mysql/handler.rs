@@ -24,7 +24,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, warn};
+use common_telemetry::{error, info, logging, warn, tracing};
 use datatypes::prelude::ConcreteDataType;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
@@ -92,17 +92,15 @@ impl MysqlInstanceShim {
     }
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        let root = tracing::info_span!("MysqlInstanceShim::do_query");
+        let _enter = root.enter();
+        info!("execute query: {}", query);
         if let Some(output) =
             crate::mysql::federated::check(query, query_ctx.clone(), self.session.clone())
         {
             vec![Ok(output)]
         } else {
-            let trace_id = query_ctx.trace_id();
-            common_telemetry::TRACE_ID
-                .scope(trace_id, async move {
-                    self.query_handler.do_query(query, query_ctx).await
-                })
-                .await
+            self.query_handler.do_query(query, query_ctx).await
         }
     }
 

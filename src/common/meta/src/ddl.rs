@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
@@ -34,6 +35,7 @@ pub mod utils;
 #[derive(Debug, Default)]
 pub struct ExecutorContext {
     pub cluster_id: Option<u64>,
+    pub tracing_context: Option<HashMap<String, String>>,
 }
 
 #[async_trait::async_trait]

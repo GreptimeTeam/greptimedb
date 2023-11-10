@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -199,7 +200,7 @@ impl CreateTableProcedure {
             for request in requests {
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
                     body: Some(request),

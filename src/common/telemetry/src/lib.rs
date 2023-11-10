@@ -16,34 +16,19 @@ pub mod logging;
 mod macros;
 pub mod metric;
 mod panic_hook;
+pub mod tracing_context;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub use logging::{init_default_ut_logging, init_global_logging, trace_id, TRACE_ID};
+pub use logging::{init_default_ut_logging, init_global_logging};
 pub use metric::dump_metrics;
 use once_cell::sync::OnceCell;
 pub use panic_hook::set_panic_hook;
-use parking_lot::Mutex;
 use rand::random;
-use snowflake::SnowflakeIdBucket;
-pub use {common_error, tracing, tracing_appender, tracing_futures, tracing_subscriber};
+pub use {common_error, tracing};
 
 static NODE_ID: OnceCell<u64> = OnceCell::new();
-static TRACE_BUCKET: OnceCell<Mutex<SnowflakeIdBucket>> = OnceCell::new();
-
-pub fn gen_trace_id() -> u64 {
-    let mut bucket = TRACE_BUCKET
-        .get_or_init(|| {
-            // if node_id is not initialized, how about random one?
-            let node_id = NODE_ID.get_or_init(|| 0);
-            info!("initializing bucket with node_id: {}", node_id);
-            let bucket = SnowflakeIdBucket::new(1, (*node_id) as i32);
-            Mutex::new(bucket)
-        })
-        .lock();
-    (*bucket).get_id() as u64
-}
 
 pub fn init_node_id(node_id: Option<String>) {
     let node_id = node_id.map(|id| calculate_hash(&id)).unwrap_or(random());

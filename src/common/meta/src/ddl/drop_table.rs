@@ -22,6 +22,7 @@ use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -157,7 +158,7 @@ impl DropTableProcedure {
 
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
                     body: Some(region_request::Body::Drop(PbDropRegionRequest {

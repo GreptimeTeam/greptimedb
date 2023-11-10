@@ -34,6 +34,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{
     EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
+use common_telemetry::tracing;
 use datafusion::common::Column;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -82,6 +83,8 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let span = tracing::info_span!("DatafusionQueryEngine::exec_query_plan");
+        let _enter = span.enter();
         let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
@@ -102,6 +105,8 @@ impl DatafusionQueryEngine {
         dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
+        let span = tracing::info_span!("DatafusionQueryEngine::exec_dml_statement");
+        let _enter = span.enter();
         ensure!(
             matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
@@ -154,6 +159,8 @@ impl DatafusionQueryEngine {
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
+        let span = tracing::info_span!("DatafusionQueryEngine::delete");
+        let _enter = span.enter();
         let catalog_name = table_name.catalog.to_string();
         let schema_name = table_name.schema.to_string();
         let table_name = table_name.table.to_string();
@@ -195,6 +202,8 @@ impl DatafusionQueryEngine {
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
+        let span = tracing::info_span!("DatafusionQueryEngine::insert");
+        let _enter = span.enter();
         let request = InsertRequest {
             catalog_name: table_name.catalog.to_string(),
             schema_name: table_name.schema.to_string(),
@@ -286,6 +295,8 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
+        let span = tracing::info_span!("DatafusionQueryEngine::optimize_logical_plan");
+        let _enter = span.enter();
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
@@ -310,6 +321,8 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
+        let span = tracing::info_span!("DatafusionQueryEngine::create_physical_plan");
+        let _enter = span.enter();
         let _timer = metrics::METRIC_CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {
@@ -343,6 +356,8 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
+        let span = tracing::info_span!("DatafusionQueryEngine::optimize_physical_plan");
+        let _enter = span.enter();
         let _timer = metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
         let state = ctx.state();
@@ -390,6 +405,8 @@ impl QueryExecutor for DatafusionQueryEngine {
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
+        let span = tracing::info_span!("DatafusionQueryEngine::execute_stream");
+        let _enter = span.enter();
         let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 

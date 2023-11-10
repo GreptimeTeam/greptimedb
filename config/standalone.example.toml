@@ -153,8 +153,9 @@ auto_flush_interval = "1h"
 global_write_buffer_size = "1GB"
 
 # Log options
-# [logging]
+[logging]
 # Specify logs directory.
-# dir = "/tmp/greptimedb/logs"
+dir = "/tmp/greptimedb/logs"
 # Specify the log level [info | debug | error | warn]
-# level = "info"
+level = "info"
+enable_jaeger_tracing = true

@@ -18,9 +18,8 @@ use std::sync::{Arc, Mutex, Once};
 
 use once_cell::sync::Lazy;
 use opentelemetry::global;
-use opentelemetry::sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use serde::{Deserialize, Serialize};
-pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
@@ -29,31 +28,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{filter, EnvFilter, Registry};
 
-pub use crate::{debug, error, info, log, trace, warn};
-
-tokio::task_local! {
-    /// Task local trace id. See [trace_id](crate::trace_id) for more details.
-    pub static TRACE_ID: u64;
-}
-
-/// Get current [TRACE_ID] from tokio [task_local](tokio::task_local) storage.
-///
-/// # Usage
-/// To set current trace id, wrap your async code like this:
-/// ```rust, no_run
-/// common_telemetry::TRACE_ID
-///     .scope(id, async move {
-///         query_handler
-///             .do_query(query, self.session.context())
-///             .await
-///     })
-///     .await
-/// ```
-/// Then all functions called from this stack will be able to retrieve the trace id
-/// via this method.
-pub fn trace_id() -> Option<u64> {
-    TRACE_ID.try_with(|id| Some(*id)).unwrap_or(None)
-}
+pub use crate::{debug, error, info, trace, warn};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -108,7 +83,7 @@ pub fn init_default_ut_logging() {
             TracingOptions::default(),
         ));
 
-        info!("logs dir = {}", dir);
+        crate::info!("logs dir = {}", dir);
     });
 }
 
@@ -207,9 +182,11 @@ pub fn init_global_logging(
     if enable_jaeger_tracing {
         // Jaeger layer.
         global::set_text_map_propagator(TraceContextPropagator::new());
-        let tracer = opentelemetry_jaeger::new_pipeline()
+        let tracer = opentelemetry_jaeger::new_agent_pipeline()
             .with_service_name(app_name)
-            .install_batch(opentelemetry::runtime::Tokio)
+            .with_auto_split_batch(true)
+            .with_max_packet_size(9216)
+            .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("install");
         let jaeger_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
         let subscriber = subscriber.with(jaeger_layer);

@@ -46,6 +46,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -89,7 +90,7 @@ mod tests {
         };
 
         let req = HeartbeatRequest {
-            header: Some(RequestHeader::new((1, 2), Role::Datanode)),
+            header: Some(RequestHeader::new((1, 2), Role::Datanode, HashMap::new())),
             ..Default::default()
         };
         let mut acc = HeartbeatAccumulator::default();

@@ -28,6 +28,8 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
+use common_telemetry::tracing::info_span;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
@@ -198,15 +200,18 @@ impl FlightCraft for RegionServer {
         let ticket = request.into_inner().ticket;
         let request = QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
-        let trace_id = request
+        let tracing_context = request
             .header
             .as_ref()
-            .map(|h| h.trace_id)
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default();
 
-        let result = self.handle_read(request).await?;
+        let result = self
+            .handle_read(request)
+            .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
+            .await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result, trace_id));
+        let stream = Box::pin(FlightRecordBatchStream::new(result, tracing_context));
         Ok(Response::new(stream))
     }
 }

@@ -27,7 +27,8 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
     DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream,
 };
-use common_telemetry::trace_id;
+use common_telemetry::tracing;
+use common_telemetry::tracing_context::TracingContext;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet, Time,
 };
@@ -156,6 +157,8 @@ impl MergeScanExec {
     }
 
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
+        let span = tracing::info_span!("MergeScanExec::MERGE_SCAN_REGIONS");
+        let _enter = span.enter();
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
@@ -163,7 +166,8 @@ impl MergeScanExec {
         let schema = Self::arrow_schema_to_schema(self.schema())?;
 
         let dbname = context.task_id().unwrap_or_default();
-        let trace_id = trace_id().unwrap_or_default();
+
+        let tracing_context = TracingContext::from_span(&span).to_w3c();
 
         let stream = Box::pin(stream!({
             METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);
@@ -174,8 +178,7 @@ impl MergeScanExec {
             for region_id in regions {
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id,
-                        span_id: 0,
+                        tracing_context: tracing_context.clone(),
                         dbname: dbname.clone(),
                     }),
                     region_id: region_id.into(),

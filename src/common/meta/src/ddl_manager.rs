@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::info;
+use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -146,6 +147,8 @@ impl DdlManager {
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
     ) -> Result<ProcedureId> {
+        let span = tracing::info_span!("DdlManager::submit_alter_table_task");
+        let _enter = span.enter();
         let context = self.create_context();
 
         let procedure =
@@ -162,6 +165,8 @@ impl DdlManager {
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
+        let span = tracing::info_span!("DdlManager::submit_create_table_task");
+        let _enter = span.enter();
         let context = self.create_context();
 
         let procedure =
@@ -179,6 +184,8 @@ impl DdlManager {
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         table_route_value: DeserializedValueWithBytes<TableRouteValue>,
     ) -> Result<ProcedureId> {
+        let span = tracing::info_span!("DdlManager::submit_drop_table_task");
+        let _enter = span.enter();
         let context = self.create_context();
 
         let procedure = DropTableProcedure::new(
@@ -201,6 +208,8 @@ impl DdlManager {
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         region_routes: Vec<RegionRoute>,
     ) -> Result<ProcedureId> {
+        let span = tracing::info_span!("DdlManager::submit_truncate_table_task");
+        let _enter = span.enter();
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(
             cluster_id,
@@ -383,6 +392,13 @@ impl DdlTaskExecutor for DdlManager {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
+        let span = ctx
+            .tracing_context
+            .as_ref()
+            .map(TracingContext::from_w3c)
+            .unwrap_or(TracingContext::from_current_span())
+            .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
+        let _enter = span.enter();
         let cluster_id = ctx.cluster_id.unwrap_or_default();
         info!("Submitting Ddl task: {:?}", request.task);
         match request.task {

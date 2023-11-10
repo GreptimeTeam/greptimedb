@@ -44,8 +44,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
-use common_telemetry::error;
 use common_telemetry::logging::info;
+use common_telemetry::{error, tracing};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -410,6 +410,8 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
 
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
+        let span = tracing::info_span!("Instance::query_statement");
+        let _enter = span.enter();
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let stmt = QueryStatement::Sql(stmt);

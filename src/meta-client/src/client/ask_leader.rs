@@ -19,6 +19,7 @@ use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{AskLeaderRequest, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
 use common_meta::distributed_time_constants::META_KEEP_ALIVE_INTERVAL_SECS;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
 use rand::seq::SliceRandom;
 use snafu::{OptionExt, ResultExt};
@@ -77,7 +78,11 @@ impl AskLeader {
         peers.shuffle(&mut rand::thread_rng());
 
         let req = AskLeaderRequest {
-            header: Some(RequestHeader::new(self.id, self.role)),
+            header: Some(RequestHeader::new(
+                self.id,
+                self.role,
+                TracingContext::from_current_span().to_w3c(),
+            )),
         };
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(peers.len());
