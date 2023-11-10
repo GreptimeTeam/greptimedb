@@ -24,8 +24,7 @@ use crate::blob_metadata::BlobMetadata;
 pub struct FileMetadata {
     /// Metadata for each blob in the file
     #[builder(default)]
-    #[serde(rename = "blobs")]
-    pub blob_metadata: Vec<BlobMetadata>,
+    pub blobs: Vec<BlobMetadata>,
 
     /// Storage for arbitrary meta-information, like writer identification/version
     #[builder(default)]
@@ -54,13 +53,13 @@ mod tests {
             .unwrap();
 
         let metadata = FileMetadataBuilder::default()
-            .blob_metadata(vec![blob_metadata.clone()])
+            .blobs(vec![blob_metadata.clone()])
             .properties(properties.clone())
             .build()
             .unwrap();
 
         assert_eq!(properties, metadata.properties);
-        assert_eq!(vec![blob_metadata], metadata.blob_metadata);
+        assert_eq!(vec![blob_metadata], metadata.blobs);
     }
 
     #[test]
@@ -76,7 +75,7 @@ mod tests {
             .unwrap();
 
         let metadata = FileMetadataBuilder::default()
-            .blob_metadata(vec![blob_metadata.clone()])
+            .blobs(vec![blob_metadata.clone()])
             .properties(properties.clone())
             .build()
             .unwrap();
@@ -93,9 +92,9 @@ mod tests {
         let data = r#"{"blobs":[{"type":"type1","fields":[],"snapshot-id":0,"sequence-number":0,"offset":10,"length":30}],"properties":{"key1":"value1"}}"#;
         let deserialized: FileMetadata = serde_json::from_str(data).unwrap();
 
-        assert_eq!(deserialized.blob_metadata[0].blob_type, "type1");
-        assert_eq!(deserialized.blob_metadata[0].offset, 10);
-        assert_eq!(deserialized.blob_metadata[0].length, 30);
+        assert_eq!(deserialized.blobs[0].blob_type, "type1");
+        assert_eq!(deserialized.blobs[0].offset, 10);
+        assert_eq!(deserialized.blobs[0].length, 30);
         assert_eq!(deserialized.properties.get("key1").unwrap(), "value1");
     }
 
@@ -109,7 +108,7 @@ mod tests {
             .unwrap();
 
         let metadata = FileMetadataBuilder::default()
-            .blob_metadata(vec![blob_metadata.clone()])
+            .blobs(vec![blob_metadata.clone()])
             .build()
             .unwrap();
 
@@ -123,7 +122,7 @@ mod tests {
     #[test]
     fn test_empty_blobs_serialization() {
         let metadata = FileMetadataBuilder::default()
-            .blob_metadata(vec![])
+            .blobs(vec![])
             .build()
             .unwrap();
 

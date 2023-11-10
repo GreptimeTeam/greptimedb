@@ -74,18 +74,18 @@ pub struct BlobMetadata {
 pub enum CompressionCodec {
     /// Single [LZ4 compression frame](https://github.com/lz4/lz4/blob/77d1b93f72628af7bbde0243b4bba9205c3138d9/doc/lz4_Frame_format.md),
     /// with content size present
-    LZ4,
+    Lz4,
 
     /// Single [Zstandard compression frame](https://github.com/facebook/zstd/blob/8af64f41161f6c2e0ba842006fe238c664a6a437/doc/zstd_compression_format.md#zstandard-frames),
     /// with content size present
-    ZSTD,
+    Zstd,
 }
 
 impl fmt::Display for CompressionCodec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompressionCodec::LZ4 => write!(f, "lz4"),
-            CompressionCodec::ZSTD => write!(f, "zstd"),
+            CompressionCodec::Lz4 => write!(f, "lz4"),
+            CompressionCodec::Zstd => write!(f, "zstd"),
         }
     }
 }
@@ -107,7 +107,7 @@ mod tests {
             .sequence_number(200)
             .offset(300)
             .length(400)
-            .compression_codec(CompressionCodec::LZ4)
+            .compression_codec(CompressionCodec::Lz4)
             .properties(properties)
             .build()
             .unwrap();
@@ -118,7 +118,7 @@ mod tests {
         assert_eq!(200, blob_metadata.sequence_number);
         assert_eq!(300, blob_metadata.offset);
         assert_eq!(400, blob_metadata.length);
-        assert_eq!(Some(CompressionCodec::LZ4), blob_metadata.compression_codec);
+        assert_eq!(Some(CompressionCodec::Lz4), blob_metadata.compression_codec);
         assert_eq!(
             "value1",
             blob_metadata.properties.get("property1").unwrap().as_str()
@@ -188,7 +188,7 @@ mod tests {
             sequence_number: 67890,
             offset: 100,
             length: 200,
-            compression_codec: Some(CompressionCodec::LZ4),
+            compression_codec: Some(CompressionCodec::Lz4),
             properties: properties.clone(),
         };
 
@@ -248,7 +248,7 @@ mod tests {
             sequence_number: 67890,
             offset: 100,
             length: 200,
-            compression_codec: Some(CompressionCodec::LZ4),
+            compression_codec: Some(CompressionCodec::Lz4),
             properties: expected_properties.clone(),
         };
 
@@ -277,7 +277,7 @@ mod tests {
             sequence_number: 67890,
             offset: 100,
             length: 200,
-            compression_codec: Some(CompressionCodec::LZ4),
+            compression_codec: Some(CompressionCodec::Lz4),
             properties: HashMap::new(),
         };
 
@@ -307,7 +307,7 @@ mod tests {
             sequence_number: 67890,
             offset: 100,
             length: 200,
-            compression_codec: Some(CompressionCodec::LZ4),
+            compression_codec: Some(CompressionCodec::Lz4),
             properties: expected_properties.clone(),
         };
 
