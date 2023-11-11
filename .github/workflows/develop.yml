@@ -140,7 +140,7 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  coverage:
+  tests:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-20.04-8-cores
     timeout-minutes: 60
@@ -161,16 +161,20 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
       - name: Install PyArrow Package
         run: pip install pyarrow
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect coverage data
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
+      - name: Setup etcd server
+        working-directory: tests-integration/fixtures/etcd
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Run nextest cases
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info \
+                -F pyo3_backend -F dashboard --test-threads 1
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
           RUST_BACKTRACE: 1
@@ -179,6 +183,7 @@ jobs:
           GT_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           GT_S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
           GT_S3_REGION: ${{ secrets.S3_REGION }}
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
           UNITTEST_LOG_DIR: "__unittest_logs"
       - name: Codecov upload
         uses: codecov/codecov-action@v2

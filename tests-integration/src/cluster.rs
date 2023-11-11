@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -63,10 +65,24 @@ pub struct GreptimeDbClusterBuilder {
 }
 
 impl GreptimeDbClusterBuilder {
-    pub fn new(cluster_name: &str) -> Self {
+    pub async fn new(cluster_name: &str) -> Self {
+        let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+
+        let kv_backend = if endpoints.is_empty() {
+            Arc::new(MemoryKvBackend::new())
+        } else {
+            let endpoints = endpoints
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            EtcdStore::with_endpoints(endpoints)
+                .await
+                .expect("malformed endpoints")
+        };
+
         Self {
             cluster_name: cluster_name.to_string(),
-            kv_backend: Arc::new(MemoryKvBackend::new()),
+            kv_backend,
             store_config: None,
             datanodes: None,
         }
