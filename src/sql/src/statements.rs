@@ -408,6 +408,15 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
             .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
         SqlDataType::Interval => Ok(ConcreteDataType::interval_month_day_nano_datatype()),
+        SqlDataType::Decimal(exact_info) => match exact_info {
+            ExactNumberInfo::None => Ok(ConcreteDataType::decimal128_default_datatype()),
+            // refer to https://dev.mysql.com/doc/refman/8.0/en/fixed-point-types.html
+            // In standard SQL, the syntax DECIMAL(M) is equivalent to DECIMAL(M,0).
+            ExactNumberInfo::Precision(p) => Ok(ConcreteDataType::decimal128_datatype(*p as u8, 0)),
+            ExactNumberInfo::PrecisionAndScale(p, s) => {
+                Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
+            }
+        },
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
