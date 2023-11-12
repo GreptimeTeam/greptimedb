@@ -50,10 +50,10 @@ The concept "Table" in GreptimeDB is a bit "heavy" compared to other time-series
 	```
 
 The following parts will describe these implementation details:
-    - How to route these metric region tables and how those table are distributed
-    - How to maintain the schema and other metadata of the underlying mito engine table
-    - How to maintain the schema of metric engine table
-    - How the query goes
+- How to route these metric region tables and how those table are distributed
+- How to maintain the schema and other metadata of the underlying mito engine table
+- How to maintain the schema of metric engine table
+- How the query goes
 
 ## Routing
 
