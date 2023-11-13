@@ -176,10 +176,6 @@ impl State for ActivateRegion {
 
         self.handle_response(mailbox_receiver, failed_region).await
     }
-
-    fn remark_inactive_region_if_needed(&mut self) {
-        self.remark_inactive_region = true;
-    }
 }
 
 #[cfg(test)]
