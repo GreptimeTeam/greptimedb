@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
 use store_api::region_engine::{GrantedRegion, RegionRole};
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
@@ -37,6 +39,36 @@ impl RegionLeaseHandler {
         Self {
             region_lease_seconds,
             region_lease_keeper: Arc::new(region_lease_keeper),
+        }
+    }
+}
+
+fn flip_role(role: RegionRole) -> RegionRole {
+    match role {
+        RegionRole::Follower => RegionRole::Leader,
+        RegionRole::Leader => RegionRole::Follower,
+    }
+}
+
+/// Grants lease of regions.
+///
+/// - If a region is in an `operable` set, it will be granted an `flip_role(current)`([RegionRole]);
+/// otherwise, it will be granted a `current`([RegionRole]).
+/// - If a region is in a `closable` set, it won't be granted.
+fn grant(
+    granted_regions: &mut Vec<GrantedRegion>,
+    operable: &HashSet<RegionId>,
+    closable: &HashSet<RegionId>,
+    regions: &[RegionId],
+    current: RegionRole,
+) {
+    for region in regions {
+        if operable.contains(region) {
+            granted_regions.push(GrantedRegion::new(*region, flip_role(current)));
+        } else if closable.contains(region) {
+            // Filters out the closable regions.
+        } else {
+            granted_regions.push(GrantedRegion::new(*region, current))
         }
     }
 }
@@ -77,15 +109,13 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .find_staled_leader_regions(cluster_id, datanode_id, &leaders)
             .await?;
 
-        for leader in leaders {
-            if downgradable.contains(&leader) {
-                granted_regions.push(GrantedRegion::new(leader, RegionRole::Follower))
-            } else if closable.contains(&leader) {
-                // Filters out the closable regions.
-            } else {
-                granted_regions.push(GrantedRegion::new(leader, RegionRole::Leader))
-            }
-        }
+        grant(
+            &mut granted_regions,
+            &downgradable,
+            &closable,
+            &leaders,
+            RegionRole::Leader,
+        );
 
         let followers = followers.into_iter().flatten().collect::<Vec<_>>();
 
@@ -94,15 +124,13 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .find_staled_follower_regions(cluster_id, datanode_id, &followers)
             .await?;
 
-        for follower in followers {
-            if upgradeable.contains(&follower) {
-                granted_regions.push(GrantedRegion::new(follower, RegionRole::Leader))
-            } else if closable.contains(&follower) {
-                // Filters out the closable regions.
-            } else {
-                granted_regions.push(GrantedRegion::new(follower, RegionRole::Follower))
-            }
-        }
+        grant(
+            &mut granted_regions,
+            &upgradeable,
+            &closable,
+            &followers,
+            RegionRole::Follower,
+        );
 
         acc.region_lease = Some(RegionLease {
             regions: granted_regions
