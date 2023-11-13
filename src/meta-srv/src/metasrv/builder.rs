@@ -168,7 +168,6 @@ impl MetaSrvBuilder {
             state.clone(),
             kv_backend.clone(),
         ));
-        let kv_backend = leader_cached_kv_backend.clone() as _;
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
@@ -177,7 +176,9 @@ impl MetaSrvBuilder {
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(
+            leader_cached_kv_backend.clone() as _,
+        ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
