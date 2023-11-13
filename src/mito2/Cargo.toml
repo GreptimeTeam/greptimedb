@@ -42,6 +42,7 @@ lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
 moka = { workspace = true, features = ["sync"] }
+num_cpus = "1.13"
 object-store.workspace = true
 parquet = { workspace = true, features = ["async"] }
 paste.workspace = true

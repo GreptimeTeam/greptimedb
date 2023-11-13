@@ -52,7 +52,6 @@ influxdb_line_protocol = { git = "https://github.com/evenyag/influxdb_iox", bran
 itertools.workspace = true
 lazy_static.workspace = true
 mime_guess = "2.0"
-num_cpus = "1.13"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
 opensrv-mysql = "0.4"
