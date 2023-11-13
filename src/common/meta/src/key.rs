@@ -660,9 +660,7 @@ impl TableMetadataManager {
             .table_route_manager()
             .build_update_txn(table_id, &current_table_route_value, &new_table_route_value)?;
 
-        let txn = Txn::merge_all(vec![update_table_route_txn]);
-
-        let r = self.kv_backend.txn(txn).await?;
+        let r = self.kv_backend.txn(update_table_route_txn).await?;
 
         // Checks whether metadata was already updated.
         if !r.succeeded {
