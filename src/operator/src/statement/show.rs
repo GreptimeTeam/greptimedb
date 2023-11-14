@@ -14,7 +14,6 @@
 
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
@@ -34,8 +33,6 @@ impl StatementExecutor {
         stmt: ShowDatabases,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::show_databases");
-        let _enter = span.enter();
         query::sql::show_databases(stmt, self.catalog_manager.clone(), query_ctx)
             .await
             .context(ExecuteStatementSnafu)
@@ -46,8 +43,6 @@ impl StatementExecutor {
         stmt: ShowTables,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::show_tables");
-        let _enter = span.enter();
         query::sql::show_tables(stmt, self.catalog_manager.clone(), query_ctx)
             .await
             .context(ExecuteStatementSnafu)
@@ -59,8 +54,6 @@ impl StatementExecutor {
         table: TableRef,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::show_create_table");
-        let _enter = span.enter();
         let partitions = self
             .partition_manager
             .find_table_partitions(table.table_info().table_id())

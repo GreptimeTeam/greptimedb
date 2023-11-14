@@ -156,9 +156,19 @@ impl RegionServerHandler for RegionServer {
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
+        let tracing_context = TracingContext::from_current_span();
         let join_tasks = requests.into_iter().map(|(region_id, req)| {
             let self_to_move = self.clone();
-            async move { self_to_move.handle_request(region_id, req).await }
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = region_id.to_string()
+            ));
+            async move {
+                self_to_move
+                    .handle_request(region_id, req)
+                    .trace(span)
+                    .await
+            }
         });
 
         let results = try_join_all(join_tasks)
@@ -288,6 +298,10 @@ impl RegionServerInner {
 
         let result = engine
             .handle_request(region_id, request)
+            .trace(info_span!(
+                "RegionEngine::handle_region_request",
+                engine_type
+            ))
             .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })?;
 

@@ -157,7 +157,7 @@ impl MergeScanExec {
     }
 
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let span = tracing::info_span!("MergeScanExec::MERGE_SCAN_REGIONS");
+        let span = tracing::info_span!("MergeScanExec::merge_scan_regions");
         let _enter = span.enter();
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();

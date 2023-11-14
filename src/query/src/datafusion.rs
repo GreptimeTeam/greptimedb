@@ -35,6 +35,7 @@ use common_recordbatch::{
     EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
 use common_telemetry::tracing;
+use common_telemetry::tracing_context::FutureExt;
 use datafusion::common::Column;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -83,12 +84,15 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("DatafusionQueryEngine::exec_query_plan");
-        let _enter = span.enter();
         let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
-        let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
+        let physical_plan = self
+            .create_physical_plan(&mut ctx, &plan)
+            .trace(tracing::info_span!(
+                "DatafusionQueryEngine::create_physical_plan"
+            ))
+            .await?;
         let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
@@ -105,8 +109,6 @@ impl DatafusionQueryEngine {
         dml: DmlStatement,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("DatafusionQueryEngine::exec_dml_statement");
-        let _enter = span.enter();
         ensure!(
             matches!(dml.op, WriteOp::InsertInto | WriteOp::Delete),
             UnsupportedExprSnafu {
@@ -139,10 +141,12 @@ impl DatafusionQueryEngine {
             let rows = match dml.op {
                 WriteOp::InsertInto => {
                     self.insert(&table_name, column_vectors, query_ctx.clone())
+                        .trace(tracing::info_span!("DatafusionQueryEngine::insert"))
                         .await?
                 }
                 WriteOp::Delete => {
                     self.delete(&table_name, &table, column_vectors, query_ctx.clone())
+                        .trace(tracing::info_span!("DatafusionQueryEngine::delete"))
                         .await?
                 }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
@@ -159,8 +163,6 @@ impl DatafusionQueryEngine {
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
-        let span = tracing::info_span!("DatafusionQueryEngine::delete");
-        let _enter = span.enter();
         let catalog_name = table_name.catalog.to_string();
         let schema_name = table_name.schema.to_string();
         let table_name = table_name.table.to_string();
@@ -202,8 +204,6 @@ impl DatafusionQueryEngine {
         column_vectors: HashMap<String, VectorRef>,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
-        let span = tracing::info_span!("DatafusionQueryEngine::insert");
-        let _enter = span.enter();
         let request = InsertRequest {
             catalog_name: table_name.catalog.to_string(),
             schema_name: table_name.schema.to_string(),
@@ -257,9 +257,19 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
             LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
-                self.exec_dml_statement(dml, query_ctx).await
+                self.exec_dml_statement(dml, query_ctx)
+                    .trace(tracing::info_span!(
+                        "DatafusionQueryEngine::exec_dml_statement"
+                    ))
+                    .await
             }
-            _ => self.exec_query_plan(plan, query_ctx).await,
+            _ => {
+                self.exec_query_plan(plan, query_ctx)
+                    .trace(tracing::info_span!(
+                        "DatafusionQueryEngine::exec_query_plan"
+                    ))
+                    .await
+            }
         }
     }
 
@@ -295,8 +305,7 @@ impl QueryEngine for DatafusionQueryEngine {
 
 impl LogicalOptimizer for DatafusionQueryEngine {
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let span = tracing::info_span!("DatafusionQueryEngine::optimize_logical_plan");
-        let _enter = span.enter();
+        let _span = tracing::info_span!("DatafusionQueryEngine::optimize_logical_plan").entered();
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
@@ -321,8 +330,6 @@ impl PhysicalPlanner for DatafusionQueryEngine {
         ctx: &mut QueryEngineContext,
         logical_plan: &LogicalPlan,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let span = tracing::info_span!("DatafusionQueryEngine::create_physical_plan");
-        let _enter = span.enter();
         let _timer = metrics::METRIC_CREATE_PHYSICAL_ELAPSED.start_timer();
         match logical_plan {
             LogicalPlan::DfPlan(df_plan) => {

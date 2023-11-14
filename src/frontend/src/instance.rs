@@ -45,6 +45,7 @@ use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::logging::info;
+use common_telemetry::tracing_context::FutureExt;
 use common_telemetry::{error, tracing};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
@@ -410,13 +411,12 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
 
 impl Instance {
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
-        let span = tracing::info_span!("Instance::query_statement");
-        let _enter = span.enter();
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let stmt = QueryStatement::Sql(stmt);
         self.statement_executor
             .execute_stmt(stmt, query_ctx)
+            .trace(tracing::info_span!("Instance::query_statement"))
             .await
             .context(TableOperationSnafu)
     }
@@ -427,6 +427,7 @@ impl SqlQueryHandler for Instance {
     type Error = Error;
 
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        info!("execute query: {}", query);
         let _timer = metrics::METRIC_HANDLE_SQL_ELAPSED.start_timer();
         let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor_opt.as_ref();

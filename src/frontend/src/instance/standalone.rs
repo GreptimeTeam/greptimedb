@@ -79,9 +79,9 @@ impl Datanode for RegionInvoker {
             .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default()
             .attach(tracing::info_span!("RegionInvoker::handle_region_request"));
-        let _enter = span.enter();
         let response = self
             .handle_inner(request)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;

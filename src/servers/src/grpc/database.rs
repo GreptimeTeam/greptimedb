@@ -18,8 +18,6 @@ use api::v1::{AffectedRows, GreptimeRequest, GreptimeResponse, ResponseHeader};
 use async_trait::async_trait;
 use common_error::status_code::StatusCode;
 use common_query::Output;
-use common_telemetry::tracing::info_span;
-use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -43,13 +41,7 @@ impl GreptimeDatabase for DatabaseService {
         request: Request<GreptimeRequest>,
     ) -> TonicResult<Response<GreptimeResponse>> {
         let request = request.into_inner();
-        let root = request
-            .header
-            .as_ref()
-            .map(|h| TracingContext::from_w3c(&h.tracing_context))
-            .unwrap_or_default()
-            .attach(info_span!("DatabaseService::handle"));
-        let output = self.handler.handle_request(request).trace(root).await?;
+        let output = self.handler.handle_request(request).await?;
         let message = match output {
             Output::AffectedRows(rows) => GreptimeResponse {
                 header: Some(ResponseHeader {
@@ -76,13 +68,7 @@ impl GreptimeDatabase for DatabaseService {
         let mut stream = request.into_inner();
         while let Some(request) = stream.next().await {
             let request = request?;
-            let root = request
-                .header
-                .as_ref()
-                .map(|h| TracingContext::from_w3c(&h.tracing_context))
-                .unwrap_or_default()
-                .attach(info_span!("DatabaseService::handle_requests"));
-            let output = self.handler.handle_request(request).trace(root).await?;
+            let output = self.handler.handle_request(request).await?;
             match output {
                 Output::AffectedRows(rows) => affected_rows += rows,
                 Output::Stream(_) | Output::RecordBatches(_) => {

@@ -28,7 +28,7 @@ use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::{info, tracing};
+use common_telemetry::info;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
@@ -59,8 +59,6 @@ impl StatementExecutor {
     }
 
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let span = tracing::info_span!("StatementExecutor::create_table");
-        let _enter = span.enter();
         let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx)?;
         self.create_table_inner(create_expr, stmt.partitions).await
     }
@@ -70,8 +68,6 @@ impl StatementExecutor {
         create_expr: CreateExternalTable,
         ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        let span = tracing::info_span!("StatementExecutor::create_external_table");
-        let _enter = span.enter();
         let create_expr = &mut expr_factory::create_external_expr(create_expr, ctx).await?;
         self.create_table_inner(create_expr, None).await
     }
@@ -156,8 +152,6 @@ impl StatementExecutor {
     }
 
     pub async fn drop_table(&self, table_name: TableName) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::drop_table");
-        let _enter = span.enter();
         let table = self
             .catalog_manager
             .table(
@@ -188,8 +182,6 @@ impl StatementExecutor {
     }
 
     pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::truncate_table");
-        let _enter = span.enter();
         let table = self
             .catalog_manager
             .table(
@@ -234,8 +226,6 @@ impl StatementExecutor {
         alter_table: AlterTable,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::alter_table");
-        let _enter = span.enter();
         let expr = expr_factory::to_alter_expr(alter_table, query_ctx)?;
         self.alter_table_inner(expr).await
     }
@@ -363,8 +353,6 @@ impl StatementExecutor {
         database: &str,
         create_if_not_exists: bool,
     ) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::create_database");
-        let _enter = span.enter();
         // TODO(weny): considers executing it in the procedures.
         let schema_key = SchemaNameKey::new(catalog, database);
         let exists = self

@@ -156,7 +156,6 @@ macro_rules! trace {
 mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-
     use tracing::Level;
 
     macro_rules! all_log_macros {

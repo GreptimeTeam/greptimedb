@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use common_query::Output;
-use common_telemetry::tracing;
 use query::parser::QueryStatement;
 use session::context::QueryContextRef;
 use sql::statements::insert::Insert;
@@ -24,8 +23,6 @@ use crate::error::Result;
 
 impl StatementExecutor {
     pub async fn insert(&self, insert: Box<Insert>, query_ctx: QueryContextRef) -> Result<Output> {
-        let span = tracing::info_span!("StatementExecutor::insert");
-        let _enter = span.enter();
         if insert.can_extract_values() {
             // Fast path: plain insert ("insert with literal values") is executed directly
             self.inserter

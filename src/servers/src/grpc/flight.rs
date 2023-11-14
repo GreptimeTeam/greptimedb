@@ -26,8 +26,7 @@ use arrow_flight::{
 use async_trait::async_trait;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_query::Output;
-use common_telemetry::tracing::info_span;
-use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::tracing_context::TracingContext;
 use futures::Stream;
 use prost::Message;
 use snafu::ResultExt;
@@ -152,24 +151,19 @@ impl FlightCraft for GreptimeRequestHandler {
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let tracing_context = request
-            .header
-            .as_ref()
-            .map(|h| TracingContext::from_w3c(&h.tracing_context))
-            .unwrap_or_default();
 
-        let output = self
-            .handle_request(request)
-            .trace(tracing_context.attach(info_span!("GreptimeRequestHandler::handle_request")))
-            .await?;
+        let output = self.handle_request(request).await?;
 
         let stream: Pin<Box<dyn Stream<Item = Result<FlightData, Status>> + Send + Sync>> =
-            to_flight_data_stream(output, tracing_context);
+            to_flight_data_stream(output, TracingContext::none());
         Ok(Response::new(stream))
     }
 }
 
-fn to_flight_data_stream(output: Output, tracing_context: TracingContext) -> TonicStream<FlightData> {
+fn to_flight_data_stream(
+    output: Output,
+    tracing_context: TracingContext,
+) -> TonicStream<FlightData> {
     match output {
         Output::Stream(stream) => {
             let stream = FlightRecordBatchStream::new(stream, tracing_context);

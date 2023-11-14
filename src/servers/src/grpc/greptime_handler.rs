@@ -79,18 +79,15 @@ impl GreptimeRequestHandler {
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
         let handle = self.runtime.spawn(async move {
-            handler
-                .do_query(query, query_ctx)
-                .await
-                .map_err(|e| {
-                    if e.status_code().should_log_error() {
-                        logging::error!(e; "Failed to handle request");
-                    } else {
-                        // Currently, we still print a debug log.
-                        logging::debug!("Failed to handle request, err: {}", e);
-                    }
-                    e
-                })
+            handler.do_query(query, query_ctx).await.map_err(|e| {
+                if e.status_code().should_log_error() {
+                    logging::error!(e; "Failed to handle request");
+                } else {
+                    // Currently, we still print a debug log.
+                    logging::debug!("Failed to handle request, err: {}", e);
+                }
+                e
+            })
         });
 
         handle.await.context(JoinTaskSnafu).map_err(|e| {

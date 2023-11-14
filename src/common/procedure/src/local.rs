@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use backon::ExponentialBuilder;
 use common_runtime::{RepeatedTask, TaskFunction};
-use common_telemetry::tracing_context::FutureExt;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, logging, tracing};
 use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
@@ -453,13 +453,19 @@ impl LocalManager {
             DuplicateProcedureSnafu { procedure_id },
         );
 
-        let span = tracing::info_span!("LocalManager::submit_root_procedure");
+        let tracing_context = TracingContext::from_current_span();
 
         let _handle = common_runtime::spawn_bg(async move {
             // Run the root procedure.
             // The task was moved to another runtime for execution.
             // In order not to interrupt tracing, a span needs to be created to continue tracing the current task.
-            runner.run().trace(span).await;
+            runner
+                .run()
+                .trace(
+                    tracing_context
+                        .attach(tracing::info_span!("LocalManager::submit_root_procedure")),
+                )
+                .await;
         });
 
         Ok(watcher)

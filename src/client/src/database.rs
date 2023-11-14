@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -160,7 +162,8 @@ impl Database {
                 schema: self.schema.clone(),
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
-                tracing_context: common_telemetry::tracing_context::TracingContext::from_current_span().to_w3c(),
+                // TODO(Taylor-lagrange): add client grpc tracing
+                tracing_context: HashMap::new(),
             }),
             request: Some(request),
         }

@@ -47,14 +47,14 @@ impl RegionServerRequestHandler {
     }
 
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
-        let tracing_context = request
-            .header
-            .context(InvalidQuerySnafu {
-                reason: "Expecting non-empty region request header.",
-            })?
-            .tracing_context;
-        let root = TracingContext::from_w3c(&tracing_context)
-            .attach(info_span!("RegionServerRequestHandler::handle"));
+        let tracing_context = TracingContext::from_w3c(
+            &request
+                .header
+                .context(InvalidQuerySnafu {
+                    reason: "Expecting non-empty region request header.",
+                })?
+                .tracing_context,
+        );
         let query = request.body.context(InvalidQuerySnafu {
             reason: "Expecting non-empty region request body.",
         })?;
@@ -69,15 +69,19 @@ impl RegionServerRequestHandler {
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
         let handle = self.runtime.spawn(async move {
-            handler.handle(query).trace(root).await.map_err(|e| {
-                if e.status_code().should_log_error() {
-                    error!(e; "Failed to handle request");
-                } else {
-                    // Currently, we still print a debug log.
-                    debug!("Failed to handle request, err: {:?}", e);
-                }
-                e
-            })
+            handler
+                .handle(query)
+                .trace(tracing_context.attach(info_span!("RegionServerRequestHandler::handle")))
+                .await
+                .map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to handle request");
+                    } else {
+                        // Currently, we still print a debug log.
+                        debug!("Failed to handle request, err: {}", e);
+                    }
+                    e
+                })
         });
 
         handle.await.context(JoinTaskSnafu)?
