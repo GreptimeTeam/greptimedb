@@ -21,7 +21,7 @@ use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
-use common_telemetry::debug;
+use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use table::predicate::Predicate;
@@ -55,6 +55,8 @@ pub struct SeqScan {
     files: Vec<FileHandle>,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
+    /// Ignores file not found error.
+    ignore_file_not_found: bool,
 }
 
 impl SeqScan {
@@ -69,6 +71,7 @@ impl SeqScan {
             memtables: Vec::new(),
             files: Vec::new(),
             cache_manager: None,
+            ignore_file_not_found: false,
         }
     }
 
@@ -101,8 +104,16 @@ impl SeqScan {
     }
 
     /// Sets cache for this query.
+    #[must_use]
     pub(crate) fn with_cache(mut self, cache: Option<CacheManagerRef>) -> Self {
         self.cache_manager = cache;
+        self
+    }
+
+    /// Ignores file not found error.
+    #[must_use]
+    pub(crate) fn with_ignore_file_not_found(mut self, ignore: bool) -> Self {
+        self.ignore_file_not_found = ignore;
         self
     }
 
@@ -147,7 +158,7 @@ impl SeqScan {
             builder.push_batch_iter(iter);
         }
         for file in &self.files {
-            let reader = self
+            let maybe_reader = self
                 .access_layer
                 .read_sst(file.clone())
                 .predicate(self.predicate.clone())
@@ -155,7 +166,18 @@ impl SeqScan {
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())
                 .build()
-                .await?;
+                .await;
+            let reader = match maybe_reader {
+                Ok(reader) => reader,
+                Err(e) => {
+                    if e.is_object_not_found() && self.ignore_file_not_found {
+                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
             if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
                 builder.push_batch_reader(Box::new(reader));
             } else {
