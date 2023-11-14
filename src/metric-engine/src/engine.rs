@@ -34,7 +34,7 @@ use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionCreateRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
+use store_api::storage::{RegionGroup, RegionId, ScanRequest};
 use tokio::sync::RwLock;
 
 use crate::data_region::DataRegion;
@@ -395,13 +395,13 @@ impl MetricEngineInner {
         )
         .await?;
 
-        // register table to metadata region
+        // register logical region to metadata region
         self.metadata_region
             .add_logical_region(metadata_region_id, logical_region_id)
             .await?;
 
         // update the mapping
-        // Safety: previous steps ensure the physical table must exist
+        // Safety: previous steps ensure the physical region exist
         self.state
             .write()
             .await
