@@ -79,6 +79,8 @@ async fn build_sst_reader(
 ) -> error::Result<BoxedBatchReader> {
     SeqScan::new(sst_layer, ProjectionMapper::all(&schema)?)
         .with_files(inputs.to_vec())
+        // We ignore file not found error during compaction.
+        .with_ignore_file_not_found(true)
         .build_reader()
         .await
 }
