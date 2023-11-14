@@ -18,6 +18,7 @@ use api::v1::meta::HeartbeatRequest;
 use common_time::util as time_util;
 use serde::{Deserialize, Serialize};
 use store_api::region_engine::RegionRole;
+use store_api::storage::RegionId;
 
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
@@ -72,8 +73,12 @@ impl Stat {
         }
     }
 
-    pub fn region_ids(&self) -> Vec<u64> {
-        self.region_stats.iter().map(|s| s.id).collect()
+    /// Returns a tuple array containing [RegionId] and [RegionRole].
+    pub fn regions(&self) -> Vec<(RegionId, RegionRole)> {
+        self.region_stats
+            .iter()
+            .map(|s| (RegionId::from(s.id), s.role))
+            .collect()
     }
 
     pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<u64>) {

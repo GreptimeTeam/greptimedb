@@ -14,7 +14,6 @@
 
 mod health;
 mod heartbeat;
-mod inactive_regions;
 mod leader;
 mod meta;
 mod node_lease;
@@ -90,20 +89,6 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
     let router = router
         .route("/route", handler.clone())
         .route("/route/help", handler);
-
-    let router = router.route(
-        "/inactive-regions/view",
-        inactive_regions::ViewInactiveRegionsHandler {
-            store: meta_srv.in_memory().clone(),
-        },
-    );
-
-    let router = router.route(
-        "/inactive-regions/clear",
-        inactive_regions::ClearInactiveRegionsHandler {
-            store: meta_srv.in_memory().clone(),
-        },
-    );
 
     let router = Router::nest("/admin", router);
 

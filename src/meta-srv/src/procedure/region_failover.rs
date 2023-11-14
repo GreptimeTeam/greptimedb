@@ -270,8 +270,6 @@ trait State: Sync + Send + Debug {
     fn status(&self) -> Status {
         Status::executing(true)
     }
-
-    fn remark_inactive_region_if_needed(&mut self) {}
 }
 
 /// The states transition of region failover procedure:
@@ -341,11 +339,7 @@ impl RegionFailoverProcedure {
     }
 
     fn from_json(json: &str, context: RegionFailoverContext) -> ProcedureResult<Self> {
-        let mut node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
-        // If the meta leader node dies during the execution of the procedure,
-        // the new leader node needs to remark the failed region as "inactive"
-        // to prevent it from renewing the lease.
-        node.state.remark_inactive_region_if_needed();
+        let node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(Self { node, context })
     }
 }

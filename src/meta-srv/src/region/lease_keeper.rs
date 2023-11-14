@@ -16,6 +16,7 @@ pub mod mito;
 pub mod utils;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
@@ -25,6 +26,8 @@ use store_api::storage::{RegionId, TableId};
 use self::mito::find_staled_leader_regions;
 use crate::error::{self, Result};
 use crate::region::lease_keeper::utils::find_staled_follower_regions;
+
+pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
 
 pub struct RegionLeaseKeeper {
     table_metadata_manager: TableMetadataManagerRef,
