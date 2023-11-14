@@ -489,12 +489,11 @@ impl DatanodeBuilder {
         let object_store =
             store::new_object_store(opts.storage.default_store.clone(), &opts.storage.data_home)
                 .await?;
-        let default_name = opts.storage.default_store.extract_variant_name();
+        let default_name = opts.storage.default_store.name();
         let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
         for store in &opts.storage.custom_stores {
-            let name = store.extract_variant_name();
             object_store_manager.add(
-                name,
+                store.name(),
                 store::new_object_store(store.clone(), &opts.storage.data_home).await?,
             );
         }

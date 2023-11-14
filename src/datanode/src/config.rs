@@ -49,7 +49,7 @@ pub enum ObjectStoreConfig {
 }
 
 impl ObjectStoreConfig {
-    pub fn extract_variant_name(&self) -> &'static str {
+    pub fn name(&self) -> &'static str {
         match self {
             Self::File(_) => "File",
             Self::S3(_) => "S3",
