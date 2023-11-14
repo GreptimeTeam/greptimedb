@@ -75,7 +75,7 @@ pub struct StorageConfig {
     pub data_home: String,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
-    pub custom_stores: Vec<ObjectStoreConfig>,
+    pub providers: Vec<ObjectStoreConfig>,
 }
 
 impl Default for StorageConfig {
@@ -84,8 +84,7 @@ impl Default for StorageConfig {
             global_ttl: None,
             data_home: DEFAULT_DATA_HOME.to_string(),
             store: ObjectStoreConfig::default(),
-            custom_stores: vec![],
-            default_store: ObjectStoreConfig::default(),
+            providers: vec![],
         }
     }
 }

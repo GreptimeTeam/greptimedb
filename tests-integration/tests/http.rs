@@ -711,10 +711,8 @@ read_batch_size = 128
 sync_write = false
 
 [datanode.storage]
-custom_stores = []
-
-[datanode.storage.default_store]
 type = "{}"
+providers = []
 
 [[datanode.region_engine]]
 
@@ -746,7 +744,6 @@ enable_otlp_tracing = false"#,
         num_cpus::get() / 2
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
-
     assert_eq!(body_text, expected_toml_str);
 }
 

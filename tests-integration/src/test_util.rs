@@ -302,7 +302,7 @@ pub fn create_tmp_dir_and_datanode_opts(
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
     // Excludes the default object store.
-    let mut custom_stores = Vec::with_capacity(custom_store_types.len());
+    let mut providers = Vec::with_capacity(custom_store_types.len());
     // Includes the default object store.
     let mut storage_guards = Vec::with_capacity(custom_store_types.len() + 1);
 
@@ -311,10 +311,10 @@ pub fn create_tmp_dir_and_datanode_opts(
 
     for store_type in custom_store_types {
         let (store, data_tmp_dir) = get_test_store_config(&store_type);
-        custom_stores.push(store);
+        providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, custom_stores, home_dir);
+    let opts = create_datanode_opts(default_store, providers, home_dir);
 
     (
         opts,
@@ -327,7 +327,7 @@ pub fn create_tmp_dir_and_datanode_opts(
 
 pub(crate) fn create_datanode_opts(
     default_store: ObjectStoreConfig,
-    custom_stores: Vec<ObjectStoreConfig>,
+    providers: Vec<ObjectStoreConfig>,
     home_dir: String,
 ) -> DatanodeOptions {
     DatanodeOptions {
@@ -335,7 +335,7 @@ pub(crate) fn create_datanode_opts(
         require_lease_before_startup: true,
         storage: StorageConfig {
             data_home: home_dir,
-            custom_stores,
+            providers,
             store: default_store,
             ..Default::default()
         },

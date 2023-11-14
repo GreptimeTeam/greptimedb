@@ -257,12 +257,12 @@ mod tests {
             [storage.default_store]
             type = "File"
 
-            [[storage.custom_stores]]
+            [[storage.providers]]
             type = "Gcs"
             bucket = "foo"
             endpoint = "bar"
 
-            [[storage.custom_stores]]
+            [[storage.providers]]
             type = "S3"
             bucket = "foo"
 
@@ -317,13 +317,13 @@ mod tests {
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
         ));
-        assert_eq!(options.storage.custom_stores.len(), 2);
+        assert_eq!(options.storage.providers.len(), 2);
         assert!(matches!(
-            options.storage.custom_stores[0],
+            options.storage.providers[0],
             ObjectStoreConfig::Gcs(GcsConfig { .. })
         ));
         assert!(matches!(
-            options.storage.custom_stores[1],
+            options.storage.providers[1],
             ObjectStoreConfig::S3(S3Config { .. })
         ));
 

@@ -466,12 +466,12 @@ mod tests {
             [storage.default_store]
             type = "File"
 
-            [[storage.custom_stores]]
+            [[storage.providers]]
             type = "Gcs"
             bucket = "foo"
             endpoint = "bar"
 
-            [[storage.custom_stores]]
+            [[storage.providers]]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
@@ -525,12 +525,12 @@ mod tests {
             &dn_opts.storage.store,
             datanode::config::ObjectStoreConfig::File(FileConfig { .. })
         ));
-        assert_eq!(dn_opts.storage.custom_stores.len(), 2);
+        assert_eq!(dn_opts.storage.providers.len(), 2);
         assert!(matches!(
-            dn_opts.storage.custom_stores[0],
+            dn_opts.storage.providers[0],
             datanode::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
         ));
-        match &dn_opts.storage.custom_stores[1] {
+        match &dn_opts.storage.providers[1] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),
