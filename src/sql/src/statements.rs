@@ -37,6 +37,7 @@ use common_base::bytes::Bytes;
 use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
 use datatypes::types::cast::CastOption;
 use datatypes::types::{cast, TimestampType};
@@ -270,8 +271,13 @@ fn parse_column_default_constraint(
                 ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v)?)
             }
             ColumnOption::Default(Expr::Function(func)) => {
+                let mut func = format!("{func}").to_lowercase();
+                // normalize CURRENT_TIMESTAMP to CURRENT_TIMESTAMP()
+                if func == CURRENT_TIMESTAMP {
+                    func = CURRENT_TIMESTAMP_FN.to_string();
+                }
                 // Always use lowercase for function expression
-                ColumnDefaultConstraint::Function(format!("{func}").to_lowercase())
+                ColumnDefaultConstraint::Function(func.to_lowercase())
             }
             ColumnOption::Default(expr) => {
                 return UnsupportedDefaultValueSnafu {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 mod column_schema;
-mod constraint;
+pub mod constraint;
 mod raw;
 
 use std::collections::HashMap;

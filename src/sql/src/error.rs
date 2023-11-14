@@ -63,6 +63,7 @@ pub enum Error {
     Syntax {
         #[snafu(source)]
         error: ParserError,
+        location: Location,
     },
 
     #[snafu(display("Missing time index constraint"))]
