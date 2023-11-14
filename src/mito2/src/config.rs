@@ -92,7 +92,7 @@ impl MitoConfig {
         // Sanitize worker num.
         let num_workers_before = self.num_workers;
         if self.num_workers == 0 {
-            self.num_workers = num_cpus::get() / 2;
+            self.num_workers = (num_cpus::get() / 2).max(1);
         }
         if num_workers_before != self.num_workers {
             warn!(
