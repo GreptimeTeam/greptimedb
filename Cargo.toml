@@ -98,6 +98,7 @@ opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.gi
 ] }
 parquet = "47.0"
 paste = "1.0"
+pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.12"
 raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
@@ -114,7 +115,6 @@ serde_json = "1.0"
 smallvec = "1"
 snafu = "0.7"
 # on branch v0.38.x
-pin-project = "1.0"
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd", features = [
     "visitor",
 ] }
