@@ -12,8 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod region_failover;
-pub mod region_migration;
-#[cfg(test)]
-mod tests;
-mod utils;
+use serde::{Deserialize, Serialize};
+
+use crate::error::Result;
+use crate::procedure::region_migration::{Context, PersistentContext, State, VolatileContext};
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegionMigrationStart {}
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for RegionMigrationStart {
+    async fn next(
+        &mut self,
+        _ctx: &Context,
+        _pc: &mut PersistentContext,
+        _vc: &mut VolatileContext,
+    ) -> Result<Box<dyn State>> {
+        // TODO(weny): It will be added in the following PRs.
+        todo!()
+    }
+}
