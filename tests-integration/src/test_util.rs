@@ -336,7 +336,7 @@ pub(crate) fn create_datanode_opts(
         storage: StorageConfig {
             data_home: home_dir,
             custom_stores,
-            default_store,
+            store: default_store,
             ..Default::default()
         },
         mode: Mode::Standalone,

@@ -73,7 +73,8 @@ pub struct StorageConfig {
     pub global_ttl: Option<Duration>,
     /// The working directory of database
     pub data_home: String,
-    pub default_store: ObjectStoreConfig,
+    #[serde(flatten)]
+    pub store: ObjectStoreConfig,
     pub custom_stores: Vec<ObjectStoreConfig>,
 }
 
@@ -82,6 +83,7 @@ impl Default for StorageConfig {
         Self {
             global_ttl: None,
             data_home: DEFAULT_DATA_HOME.to_string(),
+            store: ObjectStoreConfig::default(),
             custom_stores: vec![],
             default_store: ObjectStoreConfig::default(),
         }
@@ -308,7 +310,7 @@ mod tests {
             secret_access_key = "secret_access_key"
         "#;
         let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
-        match &opts.storage.default_store {
+        match &opts.storage.store {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),

@@ -314,7 +314,7 @@ mod tests {
         assert!(tcp_nodelay);
         assert_eq!("/tmp/greptimedb/", options.storage.data_home);
         assert!(matches!(
-            &options.storage.default_store,
+            &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
         ));
         assert_eq!(options.storage.custom_stores.len(), 2);

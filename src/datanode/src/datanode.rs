@@ -487,9 +487,8 @@ impl DatanodeBuilder {
     /// Builds [ObjectStoreManager]
     async fn build_object_store_manager(opts: &DatanodeOptions) -> Result<ObjectStoreManagerRef> {
         let object_store =
-            store::new_object_store(opts.storage.default_store.clone(), &opts.storage.data_home)
-                .await?;
-        let default_name = opts.storage.default_store.name();
+            store::new_object_store(opts.storage.store.clone(), &opts.storage.data_home).await?;
+        let default_name = opts.storage.store.name();
         let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
         for store in &opts.storage.custom_stores {
             object_store_manager.add(

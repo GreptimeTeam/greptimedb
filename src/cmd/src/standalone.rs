@@ -522,7 +522,7 @@ mod tests {
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
 
         assert!(matches!(
-            &dn_opts.storage.default_store,
+            &dn_opts.storage.store,
             datanode::config::ObjectStoreConfig::File(FileConfig { .. })
         ));
         assert_eq!(dn_opts.storage.custom_stores.len(), 2);
