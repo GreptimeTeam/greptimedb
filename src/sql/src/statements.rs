@@ -273,11 +273,11 @@ fn parse_column_default_constraint(
             ColumnOption::Default(Expr::Function(func)) => {
                 let mut func = format!("{func}").to_lowercase();
                 // normalize CURRENT_TIMESTAMP to CURRENT_TIMESTAMP()
-                if &func == CURRENT_TIMESTAMP {
+                if func == CURRENT_TIMESTAMP {
                     func = CURRENT_TIMESTAMP_FN.to_string();
                 }
                 // Always use lowercase for function expression
-                ColumnDefaultConstraint::Function(format!("{func}").to_lowercase())
+                ColumnDefaultConstraint::Function(func.to_lowercase())
             }
             ColumnOption::Default(expr) => {
                 return UnsupportedDefaultValueSnafu {
