@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 pub use tracing::{event, span, Level};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_bunyan_formatter::{BunyanFormattingLayer, JsonStorageLayer};
 use tracing_log::LogTracer;
 use tracing_subscriber::fmt::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -140,7 +139,7 @@ pub fn init_global_logging(
     // JSON log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
     let (rolling_writer, rolling_writer_guard) = tracing_appender::non_blocking(rolling_appender);
-    let file_logging_layer = BunyanFormattingLayer::new(app_name.to_string(), rolling_writer);
+    let file_logging_layer = Layer::new().with_writer(rolling_writer);
     guards.push(rolling_writer_guard);
 
     // error JSON log layer.
@@ -148,8 +147,7 @@ pub fn init_global_logging(
         RollingFileAppender::new(Rotation::HOURLY, dir, format!("{}-{}", app_name, "err"));
     let (err_rolling_writer, err_rolling_writer_guard) =
         tracing_appender::non_blocking(err_rolling_appender);
-    let err_file_logging_layer =
-        BunyanFormattingLayer::new(app_name.to_string(), err_rolling_writer);
+    let err_file_logging_layer = Layer::new().with_writer(err_rolling_writer);
     guards.push(err_rolling_writer_guard);
 
     // resolve log level settings from:
@@ -203,7 +201,6 @@ pub fn init_global_logging(
     #[cfg(not(feature = "tokio-console"))]
     let subscriber = Registry::default()
         .with(filter)
-        .with(JsonStorageLayer)
         .with(stdout_logging_layer)
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));

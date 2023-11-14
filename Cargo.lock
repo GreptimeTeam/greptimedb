@@ -1951,7 +1951,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
- "tracing-bunyan-formatter",
  "tracing-futures",
  "tracing-log",
  "tracing-opentelemetry",
@@ -9893,24 +9892,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.38",
-]
-
-[[package]]
-name = "tracing-bunyan-formatter"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5c266b9ac83dedf0e0385ad78514949e6d89491269e7065bee51d2bb8ec7373"
-dependencies = [
- "ahash 0.8.6",
- "gethostname",
- "log",
- "serde",
- "serde_json",
- "time",
- "tracing",
- "tracing-core",
- "tracing-log",
- "tracing-subscriber",
 ]
 
 [[package]]
