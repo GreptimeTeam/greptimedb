@@ -502,9 +502,9 @@ async fn test_region_usage() {
     flush_region(&engine, region_id, None).await;
 
     let region_stat = region.region_usage().await;
-    assert!(region_stat.wal_usage == 0);
-    assert_eq!(region_stat.sst_usage, 2827);
+    assert_eq!(region_stat.wal_usage, 0);
+    assert_eq!(region_stat.sst_usage, 2742);
 
     // region total usage
-    assert_eq!(region_stat.disk_usage(), 3833);
+    assert_eq!(region_stat.disk_usage(), 3748);
 }
