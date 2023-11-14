@@ -14,3 +14,4 @@
 
 pub mod blob_metadata;
 pub mod file_metadata;
+pub mod partial_reader;
