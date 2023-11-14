@@ -314,7 +314,7 @@ impl MetricEngineInner {
             .into();
         let (data_region_id, metadata_region_id) = Self::transform_region_id(physical_region_id);
 
-        // check if the logical table already exist
+        // check if the logical region already exist
         if self
             .metadata_region
             .is_logical_region_exist(metadata_region_id, logical_region_id)

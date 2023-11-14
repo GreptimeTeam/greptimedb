@@ -106,7 +106,7 @@ impl MetadataRegion {
     }
 
     /// Check if the given logical region exists.
-    pub async fn is_logical_region_exist(
+    pub async fn is_logical_region_exists(
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
