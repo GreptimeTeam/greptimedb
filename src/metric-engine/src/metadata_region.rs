@@ -67,10 +67,10 @@ impl MetadataRegion {
         logical_region_id: RegionId,
     ) -> Result<()> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
-        let table_key = Self::concat_region_key(logical_region_id);
+        let region_key = Self::concat_region_key(logical_region_id);
 
         let put_success = self
-            .put_conditionally(region_id, table_key, String::new())
+            .put_conditionally(region_id, region_key, String::new())
             .await?;
 
         if !put_success {
@@ -499,7 +499,7 @@ mod test {
             .await
             .unwrap();
         assert!(metadata_region
-            .is_logical_region_exist(physical_region_id, logical_region_id)
+            .is_logical_region_exists(physical_region_id, logical_region_id)
             .await
             .unwrap());
 

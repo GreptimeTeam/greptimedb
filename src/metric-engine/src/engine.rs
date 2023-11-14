@@ -317,7 +317,7 @@ impl MetricEngineInner {
         // check if the logical region already exist
         if self
             .metadata_region
-            .is_logical_region_exist(metadata_region_id, logical_region_id)
+            .is_logical_region_exists(metadata_region_id, logical_region_id)
             .await?
         {
             info!("Create a existing logical region {logical_region_id}. Skipped");
@@ -339,6 +339,7 @@ impl MetricEngineInner {
                 }
             }
         }
+        info!("Found new columns {new_columns:?} to add to physical region {data_region_id}");
 
         self.add_columns_to_physical_data_region(
             data_region_id,
