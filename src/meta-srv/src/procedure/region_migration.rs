@@ -18,7 +18,6 @@ pub(crate) mod migration_start;
 use std::fmt::Debug;
 
 use common_meta::peer::Peer;
-use common_meta::table_name::TableName;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -38,25 +37,21 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentContext {
     /// The [Peer] of migration source.
-    src_peer: Peer,
+    from_peer: Peer,
     /// The [Peer] of migration destination.
-    dst_peer: Option<Peer>,
-    /// Closes the migrated region on the `src_peer`.
+    to_peer: Option<Peer>,
+    /// Closes the migrated region on the `from_peer`.
     close_migrated_region: bool,
-    /// The [TableName] of migration region.
-    table_name: TableName,
     /// The [RegionId] of migration region.
     region_id: RegionId,
 }
 
 impl PersistentContext {
     pub fn lock_key(&self) -> String {
-        let table_name = &self.table_name;
-
-        common_catalog::format_full_table_name(
-            &table_name.catalog_name,
-            &table_name.schema_name,
-            &table_name.table_name,
+        format!(
+            "{}/{}",
+            self.region_id.table_id(),
+            self.region_id.region_number()
         )
     }
 }
@@ -187,10 +182,9 @@ mod tests {
 
     fn persistent_context_factory() -> PersistentContext {
         PersistentContext {
-            src_peer: Peer::empty(1),
-            dst_peer: None,
+            from_peer: Peer::empty(1),
+            to_peer: None,
             close_migrated_region: false,
-            table_name: TableName::new("foo", "bar", "name"),
             region_id: RegionId::new(1024, 1),
         }
     }
@@ -231,7 +225,7 @@ mod tests {
 
         let serialized = procedure.dump().unwrap();
 
-        let expected = r#"{"context":{"src_peer":{"id":1,"addr":""},"dst_peer":null,"close_migrated_region":false,"table_name":{"catalog_name":"foo","schema_name":"bar","table_name":"name"},"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"context":{"from_peer":{"id":1,"addr":""},"to_peer":null,"close_migrated_region":false,"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
