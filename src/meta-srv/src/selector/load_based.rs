@@ -30,7 +30,6 @@ use crate::selector::common::choose_peers;
 use crate::selector::weight_compute::{RegionNumsBasedWeightCompute, WeightCompute};
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedChoose};
 use crate::selector::{Namespace, Selector, SelectorOptions};
-// use crate::service::store::kv::KvBackendAdapter;
 
 pub struct LoadBasedSelector<W, C> {
     weighted_choose: RwLock<W>,
