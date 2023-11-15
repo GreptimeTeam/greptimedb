@@ -70,7 +70,7 @@ impl MetadataRegion {
         let region_key = Self::concat_region_key(logical_region_id);
 
         let put_success = self
-            .put_conditionally(region_id, region_key, String::new())
+            .put_if_absent(region_id, region_key, String::new())
             .await?;
 
         if !put_success {
@@ -97,7 +97,7 @@ impl MetadataRegion {
         let region_id = utils::to_metadata_region_id(physical_region_id);
         let column_key = Self::concat_column_key(logical_region_id, column_name);
 
-        self.put_conditionally(
+        self.put_if_absent(
             region_id,
             column_key,
             Self::serialize_semantic_type(semantic_type),
@@ -113,7 +113,7 @@ impl MetadataRegion {
     ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
         let region_key = Self::concat_region_key(logical_region_id);
-        self.exist(region_id, &region_key).await
+        self.exists(region_id, &region_key).await
     }
 
     /// Check if the given column exists. Return the semantic type if exists.
@@ -187,13 +187,13 @@ impl MetadataRegion {
 impl MetadataRegion {
     /// Put if not exist, return if this put operation is successful (error other
     /// than "key already exist" will be wrapped in [Err]).
-    pub async fn put_conditionally(
+    pub async fn put_if_absent(
         &self,
         region_id: RegionId,
         key: String,
         value: String,
     ) -> Result<bool> {
-        if self.exist(region_id, &key).await? {
+        if self.exists(region_id, &key).await? {
             return Ok(false);
         }
 
@@ -211,7 +211,7 @@ impl MetadataRegion {
     /// Check if the given key exists.
     ///
     /// Notice that due to mito doesn't support transaction, TOCTTOU is possible.
-    pub async fn exist(&self, region_id: RegionId, key: &str) -> Result<bool> {
+    pub async fn exists(&self, region_id: RegionId, key: &str) -> Result<bool> {
         let scan_req = Self::build_read_request(key);
         let record_batch_stream = self
             .mito
@@ -410,7 +410,7 @@ mod test {
         let key = "test_key".to_string();
         let value = "test_value".to_string();
         let result = metadata_region
-            .put_conditionally(region_id, key.clone(), value.clone())
+            .put_if_absent(region_id, key.clone(), value.clone())
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -427,7 +427,7 @@ mod test {
 
         // Test inserting the same key-value pair again
         let result = metadata_region
-            .put_conditionally(region_id, key.clone(), value.clone())
+            .put_if_absent(region_id, key.clone(), value.clone())
             .await;
         assert!(result.is_ok());
         assert!(!result.unwrap(),);
@@ -442,7 +442,7 @@ mod test {
 
         // Test checking for a non-existent key
         let key = "test_key".to_string();
-        let result = metadata_region.exist(region_id, &key).await;
+        let result = metadata_region.exists(region_id, &key).await;
         assert!(result.is_ok());
         assert!(!result.unwrap());
 
@@ -454,7 +454,7 @@ mod test {
             .handle_request(region_id, RegionRequest::Put(put_request))
             .await
             .unwrap();
-        let result = metadata_region.exist(region_id, &key).await;
+        let result = metadata_region.exists(region_id, &key).await;
         assert!(result.is_ok());
         assert!(result.unwrap(),);
     }
