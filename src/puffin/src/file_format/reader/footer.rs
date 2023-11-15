@@ -26,11 +26,11 @@ use crate::file_metadata::FileMetadata;
 
 /// Parser for the footer of a Puffin data file
 ///
-/// The footer has a specific structure that needs to be read and parsed to
+/// The footer has a specific layout that needs to be read and parsed to
 /// extract metadata about the file, which is encapsulated in the [`FileMetadata`] type.
 ///
-/// Footer structure: HeadMagic Payload PayloadSize Flags FootMagic
-///                   [4]       [?]     [4]         [4]   [4]
+/// Footer layout: HeadMagic Payload PayloadSize Flags FootMagic
+///                [4]       [?]     [4]         [4]   [4]
 pub struct FooterParser<R> {
     // The underlying IO source
     source: R,
