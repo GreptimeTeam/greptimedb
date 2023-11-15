@@ -40,8 +40,6 @@ pub struct PersistentContext {
     from_peer: Peer,
     /// The [Peer] of migration destination.
     to_peer: Option<Peer>,
-    /// Closes the migrated region on the `from_peer`.
-    close_migrated_region: bool,
     /// The [RegionId] of migration region.
     region_id: RegionId,
 }
@@ -184,7 +182,6 @@ mod tests {
         PersistentContext {
             from_peer: Peer::empty(1),
             to_peer: None,
-            close_migrated_region: false,
             region_id: RegionId::new(1024, 1),
         }
     }
@@ -225,7 +222,7 @@ mod tests {
 
         let serialized = procedure.dump().unwrap();
 
-        let expected = r#"{"context":{"from_peer":{"id":1,"addr":""},"to_peer":null,"close_migrated_region":false,"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"context":{"from_peer":{"id":1,"addr":""},"to_peer":null,"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
