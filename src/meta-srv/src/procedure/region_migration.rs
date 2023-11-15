@@ -28,6 +28,7 @@ use store_api::storage::RegionId;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{Error, Result};
+use crate::procedure::utils::region_lock_key;
 
 /// It's shared in each step and available even after recovering.
 ///
@@ -46,11 +47,7 @@ pub struct PersistentContext {
 
 impl PersistentContext {
     pub fn lock_key(&self) -> String {
-        format!(
-            "{}/{}",
-            self.region_id.table_id(),
-            self.region_id.region_number()
-        )
+        region_lock_key(self.region_id.table_id(), self.region_id.region_number())
     }
 }
 

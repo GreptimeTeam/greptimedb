@@ -46,6 +46,7 @@ use table::metadata::TableId;
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::procedure::utils::region_lock_key;
 use crate::service::mailbox::MailboxRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -377,10 +378,7 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let region_key = format!(
-            "{}/region-{}",
-            region_ident.table_id, region_ident.region_number
-        );
+        let region_key = region_lock_key(region_ident.table_id, region_ident.region_number);
         LockKey::single(region_key)
     }
 }
