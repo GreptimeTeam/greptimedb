@@ -12,21 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod file;
-pub mod footer;
-
-use std::io;
+mod file;
+mod footer;
 
 use async_trait::async_trait;
-use futures::{AsyncRead, AsyncSeek};
 
 use crate::blob_metadata::BlobMetadata;
 use crate::error::Result;
+pub use crate::file_format::reader::file::PuffinFileReader;
 use crate::file_metadata::FileMetadata;
 
 /// `PuffinSyncReader` defines a synchronous reader for puffin data.
 pub trait PuffinSyncReader<'a> {
-    type Reader: io::Read + io::Seek;
+    type Reader: std::io::Read + std::io::Seek;
 
     /// fetch the FileMetadata
     fn metadata(&'a mut self) -> Result<FileMetadata>;
@@ -38,7 +36,7 @@ pub trait PuffinSyncReader<'a> {
 /// `PuffinAsyncReader` defines an asynchronous reader for puffin data.
 #[async_trait]
 pub trait PuffinAsyncReader<'a> {
-    type Reader: AsyncRead + AsyncSeek;
+    type Reader: futures::AsyncRead + futures::AsyncSeek;
 
     /// fetch the FileMetadata
     async fn metadata(&'a mut self) -> Result<FileMetadata>;

@@ -26,11 +26,11 @@ use crate::file_format::MAGIC;
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 
-/// Puffin file parser
+/// Puffin file reader, implemented [`PuffinSyncReader`] and [`PuffinAsyncReader`]
 ///
 /// File structure: Magic Blob₁ Blob₂ ... Blobₙ Footer
 ///                 [4]   [?]   [?]       [?]   [?]
-pub struct PuffinParser<R> {
+pub struct PuffinFileReader<R> {
     /// The source of the puffin file
     source: R,
 
@@ -38,7 +38,7 @@ pub struct PuffinParser<R> {
     metadata: Option<FileMetadata>,
 }
 
-impl<R> PuffinParser<R> {
+impl<R> PuffinFileReader<R> {
     pub fn new(source: R) -> Self {
         Self {
             source,
@@ -47,7 +47,7 @@ impl<R> PuffinParser<R> {
     }
 }
 
-impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinParser<R> {
+impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinFileReader<R> {
     type Reader = PartialReader<&'a mut R>;
 
     fn metadata(&mut self) -> Result<FileMetadata> {
@@ -85,7 +85,9 @@ impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinParser<R> {
 }
 
 #[async_trait]
-impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a> for PuffinParser<R> {
+impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
+    for PuffinFileReader<R>
+{
     type Reader = PartialReader<&'a mut R>;
 
     async fn metadata(&'a mut self) -> Result<FileMetadata> {
