@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use api::v1::meta::Peer;
 use common_meta::key::TableMetadataManager;
 use common_meta::rpc::router::find_leaders;
+use common_telemetry::debug;
 use parking_lot::RwLock;
 use snafu::ResultExt;
 use table::metadata::TableId;
@@ -97,6 +98,11 @@ where
         // 5. choose peers by weight_array.
         let mut weighted_choose = self.weighted_choose.write();
         let selected = choose_peers(weight_array, &opts, &mut *weighted_choose)?;
+
+        debug!(
+            "LoadBasedSelector select peers: {:?}, namespace: {}, opts: {:?}.",
+            selected, ns, opts,
+        );
 
         Ok(selected)
     }

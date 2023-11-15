@@ -38,6 +38,7 @@ pub trait Selector: Send + Sync {
     ) -> Result<Self::Output>;
 }
 
+#[derive(Debug)]
 pub struct SelectorOptions {
     /// Minimum number of selected results.
     pub min_required_items: usize,
