@@ -46,6 +46,7 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
+use crate::region::lease_keeper::OpeningRegionKeeperRef;
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -241,6 +242,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    opening_region_keeper: OpeningRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 
     plugins: Plugins,
@@ -401,6 +403,10 @@ impl MetaSrv {
 
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    pub fn opening_region_keeper(&self) -> &OpeningRegionKeeperRef {
+        &self.opening_region_keeper
     }
 
     pub fn publish(&self) -> Option<PublishRef> {

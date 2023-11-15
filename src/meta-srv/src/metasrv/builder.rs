@@ -52,6 +52,7 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::pubsub::PublishRef;
+use crate::region::lease_keeper::OpeningRegionKeeper;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
@@ -197,6 +198,7 @@ impl MetaSrvBuilder {
             &table_id_sequence,
         );
         let _ = ddl_manager.try_start();
+        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -231,6 +233,7 @@ impl MetaSrvBuilder {
                 let region_lease_handler = RegionLeaseHandler::new(
                     distributed_time_constants::REGION_LEASE_SECS,
                     table_metadata_manager.clone(),
+                    opening_region_keeper.clone(),
                 );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
@@ -283,6 +286,7 @@ impl MetaSrvBuilder {
             )
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
+            opening_region_keeper,
         })
     }
 }

@@ -173,7 +173,7 @@ impl Drop for OpeningRegionGuard {
 
 pub type OpeningRegionKeeperRef = Arc<OpeningRegionKeeper>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 ///  Tracks opening regions.
 pub struct OpeningRegionKeeper {
     inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
@@ -181,9 +181,7 @@ pub struct OpeningRegionKeeper {
 
 impl OpeningRegionKeeper {
     pub fn new() -> Self {
-        Self {
-            inner: Default::default(),
-        }
+        Default::default()
     }
 
     /// Returns [OpeningRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
@@ -211,6 +209,18 @@ impl OpeningRegionKeeper {
         inner.contains(&(datanode_id, region_id))
     }
 
+    /// Returns a set of filtered out regions that are opening.
+    pub fn filter_opening_regions(
+        &self,
+        datanode_id: DatanodeId,
+        mut region_ids: HashSet<RegionId>,
+    ) -> HashSet<RegionId> {
+        let inner = self.inner.read().unwrap();
+        region_ids.retain(|region_id| !inner.contains(&(datanode_id, *region_id)));
+
+        region_ids
+    }
+
     /// Returns number of element in tracking set.
     pub fn len(&self) -> usize {
         let inner = self.inner.read().unwrap();
@@ -224,6 +234,7 @@ impl OpeningRegionKeeper {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use common_meta::key::test_utils::new_test_table_info;
@@ -507,6 +518,17 @@ mod tests {
         let guard = keeper.register(1, RegionId::from_u64(1)).unwrap();
         assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
         let guard2 = keeper.register(1, RegionId::from_u64(2)).unwrap();
+
+        let output = keeper.filter_opening_regions(
+            1,
+            HashSet::from([
+                RegionId::from_u64(1),
+                RegionId::from_u64(2),
+                RegionId::from_u64(3),
+            ]),
+        );
+        assert_eq!(output.len(), 1);
+        assert!(output.contains(&RegionId::from_u64(3)));
 
         assert_eq!(keeper.len(), 2);
         drop(guard);

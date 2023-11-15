@@ -24,21 +24,27 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::region::lease_keeper::RegionLeaseKeeperRef;
+use crate::region::lease_keeper::{OpeningRegionKeeperRef, RegionLeaseKeeperRef};
 use crate::region::RegionLeaseKeeper;
 
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
     region_lease_keeper: RegionLeaseKeeperRef,
+    opening_region_keeper: OpeningRegionKeeperRef,
 }
 
 impl RegionLeaseHandler {
-    pub fn new(region_lease_seconds: u64, table_metadata_manager: TableMetadataManagerRef) -> Self {
+    pub fn new(
+        region_lease_seconds: u64,
+        table_metadata_manager: TableMetadataManagerRef,
+        opening_region_keeper: OpeningRegionKeeperRef,
+    ) -> Self {
         let region_lease_keeper = RegionLeaseKeeper::new(table_metadata_manager);
 
         Self {
             region_lease_seconds,
             region_lease_keeper: Arc::new(region_lease_keeper),
+            opening_region_keeper,
         }
     }
 }
@@ -124,6 +130,11 @@ impl HeartbeatHandler for RegionLeaseHandler {
             .find_staled_follower_regions(cluster_id, datanode_id, &followers)
             .await?;
 
+        // If a region is opening, it will be filtered out from the closable regions set.
+        let closable = self
+            .opening_region_keeper
+            .filter_opening_regions(datanode_id, closable);
+
         grant(
             &mut granted_regions,
             &upgradeable,
@@ -161,6 +172,7 @@ mod test {
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
+    use crate::region::lease_keeper::OpeningRegionKeeper;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
@@ -230,9 +242,12 @@ mod test {
             ..Default::default()
         };
 
+        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+
         let handler = RegionLeaseHandler::new(
             distributed_time_constants::REGION_LEASE_SECS,
             table_metadata_manager.clone(),
+            opening_region_keeper.clone(),
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
@@ -261,6 +276,39 @@ mod test {
         assert_region_lease(
             acc,
             vec![GrantedRegion::new(region_id, RegionRole::Follower)],
+        );
+
+        let opening_region_id = RegionId::new(table_id, region_number + 2);
+        let _guard = opening_region_keeper
+            .register(follower_peer.id, opening_region_id)
+            .unwrap();
+
+        let acc = &mut HeartbeatAccumulator::default();
+
+        acc.stat = Some(Stat {
+            cluster_id,
+            id: follower_peer.id,
+            region_stats: vec![
+                new_empty_region_stat(region_id, RegionRole::Follower),
+                new_empty_region_stat(another_region_id, RegionRole::Follower),
+                new_empty_region_stat(opening_region_id, RegionRole::Follower),
+            ],
+            ..Default::default()
+        });
+
+        handler.handle(&req, ctx, acc).await.unwrap();
+
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().lease_seconds,
+            distributed_time_constants::REGION_LEASE_SECS
+        );
+
+        assert_region_lease(
+            acc,
+            vec![
+                GrantedRegion::new(region_id, RegionRole::Follower),
+                GrantedRegion::new(opening_region_id, RegionRole::Follower),
+            ],
         );
     }
 
@@ -325,6 +373,7 @@ mod test {
         let handler = RegionLeaseHandler::new(
             distributed_time_constants::REGION_LEASE_SECS,
             table_metadata_manager.clone(),
+            Default::default(),
         );
 
         handler.handle(&req, ctx, acc).await.unwrap();
