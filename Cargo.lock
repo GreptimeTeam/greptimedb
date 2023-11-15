@@ -6548,12 +6548,18 @@ dependencies = [
 name = "puffin"
 version = "0.4.2"
 dependencies = [
+ "async-trait",
+ "bitflags 2.4.1",
+ "common-error",
+ "common-macro",
  "derive_builder 0.12.0",
  "futures",
  "pin-project",
  "serde",
  "serde_json",
+ "snafu",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
