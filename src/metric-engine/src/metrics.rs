@@ -20,7 +20,7 @@ use prometheus::*;
 lazy_static! {
     /// Gauge for opened regions
     pub static ref PHYSICAL_REGION_COUNT: IntGauge =
-        register_int_gauge!("metric_engine_engine_physical_region_count", "metric engine physical region count").unwrap();
+        register_int_gauge!("metric_engine_physical_region_count", "metric engine physical region count").unwrap();
 
     /// Gauge of columns across all opened regions
     pub static ref PHYSICAL_COLUMN_COUNT: IntGauge =
@@ -32,7 +32,7 @@ lazy_static! {
 
     /// Histogram for opened logical regions
     pub static ref MITO_DDL_DURATION: Histogram =
-        register_histogram!("metric_engine_engine_mito_ddl", "metric engine mito ddl").unwrap();
+        register_histogram!("metric_engine_mito_ddl", "metric engine mito ddl").unwrap();
 
     /// Counter for forbidden operations
     pub static ref FORBIDDEN_OPERATION_COUNT: IntCounter =
