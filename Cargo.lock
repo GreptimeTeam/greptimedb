@@ -6549,8 +6549,11 @@ name = "puffin"
 version = "0.4.2"
 dependencies = [
  "derive_builder 0.12.0",
+ "futures",
+ "pin-project",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
