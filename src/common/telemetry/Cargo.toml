@@ -17,7 +17,7 @@ once_cell.workspace = true
 opentelemetry = { version = "0.21.0", default-features = false, features = [
     "trace",
 ] }
-opentelemetry-jaeger = { version = "0.20.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14.0", features = ["tokio"] }
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
 prometheus.workspace = true

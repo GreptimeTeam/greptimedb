@@ -17,7 +17,8 @@ use std::env;
 use std::sync::{Arc, Mutex, Once};
 
 use once_cell::sync::Lazy;
-use opentelemetry::global;
+use opentelemetry::{global, KeyValue};
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -30,12 +31,15 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, trace, warn};
 
+const DEAFULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
     pub dir: String,
     pub level: Option<String>,
-    pub enable_jaeger_tracing: bool,
+    pub enable_otlp_tracing: bool,
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Default for LoggingOptions {
@@ -43,7 +47,8 @@ impl Default for LoggingOptions {
         Self {
             dir: "/tmp/greptimedb/logs".to_string(),
             level: None,
-            enable_jaeger_tracing: false,
+            enable_otlp_tracing: false,
+            otlp_endpoint: None,
         }
     }
 }
@@ -101,7 +106,7 @@ pub fn init_global_logging(
     let mut guards = vec![];
     let dir = &opts.dir;
     let level = &opts.level;
-    let enable_jaeger_tracing = opts.enable_jaeger_tracing;
+    let enable_otlp_tracing = opts.enable_otlp_tracing;
 
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
@@ -179,17 +184,29 @@ pub fn init_global_logging(
         .with(file_logging_layer)
         .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR));
 
-    if enable_jaeger_tracing {
-        // Jaeger layer.
+    if enable_otlp_tracing {
         global::set_text_map_propagator(TraceContextPropagator::new());
-        let tracer = opentelemetry_jaeger::new_agent_pipeline()
-            .with_service_name(app_name)
-            .with_auto_split_batch(true)
-            .with_max_packet_size(9216)
+        // otlp exporter
+        let tracer = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(
+                opentelemetry_otlp::new_exporter().tonic().with_endpoint(
+                    opts.otlp_endpoint
+                        .as_ref()
+                        .map(|e| format!("http://{}", e))
+                        .unwrap_or(DEAFULT_OTLP_ENDPOINT.to_string()),
+                ),
+            )
+            .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
+                opentelemetry_sdk::Resource::new(vec![KeyValue::new(
+                    "service.name",
+                    app_name.to_string(),
+                )]),
+            ))
             .install_batch(opentelemetry_sdk::runtime::Tokio)
-            .expect("install");
-        let jaeger_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
-        let subscriber = subscriber.with(jaeger_layer);
+            .expect("otlp tracer install failed");
+        let tracing_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
+        let subscriber = subscriber.with(tracing_layer);
         tracing::subscriber::set_global_default(subscriber)
             .expect("error setting global tracing subscriber");
     } else {

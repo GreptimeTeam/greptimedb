@@ -1941,7 +1941,7 @@ dependencies = [
  "lazy_static",
  "once_cell",
  "opentelemetry 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "opentelemetry-jaeger",
+ "opentelemetry-otlp",
  "opentelemetry_sdk 0.21.0",
  "parking_lot 0.12.1",
  "prometheus",
@@ -3316,7 +3316,7 @@ dependencies = [
  "moka",
  "object-store",
  "openmetrics-parser",
- "opentelemetry-proto",
+ "opentelemetry-proto 0.3.0",
  "operator",
  "partition",
  "prometheus",
@@ -5448,19 +5448,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "opentelemetry-jaeger"
-version = "0.20.0"
+name = "opentelemetry-otlp"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e617c66fd588e40e0dbbd66932fdc87393095b125d4459b1a3a10feb1712f8a1"
+checksum = "f24cda83b20ed2433c68241f918d0f6fdec8b1d43b7a9590ab4420c5095ca930"
 dependencies = [
  "async-trait",
  "futures-core",
- "futures-util",
+ "http",
  "opentelemetry 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "opentelemetry-proto 0.4.0",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.21.0",
- "thrift",
+ "prost 0.11.9",
+ "thiserror",
  "tokio",
+ "tonic 0.9.2",
 ]
 
 [[package]]
@@ -5472,6 +5475,18 @@ dependencies = [
  "opentelemetry_sdk 0.20.0",
  "prost 0.12.1",
  "tonic 0.10.2",
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2e155ce5cc812ea3d1dffbd1539aed653de4bf4882d60e6e04dcf0901d674e1"
+dependencies = [
+ "opentelemetry 0.21.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "opentelemetry_sdk 0.21.0",
+ "prost 0.11.9",
+ "tonic 0.9.2",
 ]
 
 [[package]]
@@ -8271,7 +8286,7 @@ dependencies = [
  "once_cell",
  "openmetrics-parser",
  "opensrv-mysql",
- "opentelemetry-proto",
+ "opentelemetry-proto 0.3.0",
  "parking_lot 0.12.1",
  "pgwire",
  "pin-project",
@@ -9315,7 +9330,7 @@ dependencies = [
  "num_cpus",
  "object-store",
  "once_cell",
- "opentelemetry-proto",
+ "opentelemetry-proto 0.3.0",
  "operator",
  "partition",
  "paste",
@@ -9406,15 +9421,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threadpool"
-version = "1.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
-dependencies = [
- "num_cpus",
-]
-
-[[package]]
 name = "thrift"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9422,9 +9428,7 @@ checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
 dependencies = [
  "byteorder",
  "integer-encoding",
- "log",
  "ordered-float 2.10.1",
- "threadpool",
 ]
 
 [[package]]

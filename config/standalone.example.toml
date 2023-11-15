@@ -153,9 +153,12 @@ auto_flush_interval = "1h"
 global_write_buffer_size = "1GB"
 
 # Log options
-[logging]
+# [logging]
 # Specify logs directory.
-dir = "/tmp/greptimedb/logs"
+# dir = "/tmp/greptimedb/logs"
 # Specify the log level [info | debug | error | warn]
-level = "info"
-enable_jaeger_tracing = true
+# level = "info"
+# whether enable tracing, default is false
+# enable_otlp_tracing = false
+# tracing exporter endpoint with format `ip:port`, we use grpc oltp as exporter, default endpoint is `localhost:4317`
+# otlp_endpoint = "localhost:4317"
