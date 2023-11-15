@@ -19,7 +19,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{Location, Snafu};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -35,9 +35,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Table `{}` already exists", table_id))]
-    TableAlreadyExists {
-        table_id: TableId,
+    #[snafu(display("Region `{}` already exists", region_id))]
+    RegionAlreadyExists {
+        region_id: RegionId,
         location: Location,
     },
 
@@ -56,11 +56,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse table id from {}", raw))]
-    ParseTableId {
+    #[snafu(display("Failed to parse region id from {}", raw))]
+    ParseRegionId {
         raw: String,
         #[snafu(source)]
-        error: <TableId as std::str::FromStr>::Err,
+        error: <u64 as std::str::FromStr>::Err,
         location: Location,
     },
 
@@ -91,22 +91,15 @@ pub enum Error {
     #[snafu(display("Region options are conflicted"))]
     ConflictRegionOption { location: Location },
 
-    // TODO: remove this
-    #[snafu(display("Physical table {} not found", physical_table))]
-    PhysicalTableNotFound {
-        physical_table: String,
-        location: Location,
-    },
-
     #[snafu(display("Physical region {} not found", region_id))]
     PhysicalRegionNotFound {
         region_id: RegionId,
         location: Location,
     },
 
-    #[snafu(display("Logical table {} not found", table_id))]
-    LogicalTableNotFound {
-        table_id: TableId,
+    #[snafu(display("Logical region {} not found", region_id))]
+    LogicalRegionNotFound {
+        region_id: RegionId,
         location: Location,
     },
 
@@ -115,6 +108,9 @@ pub enum Error {
         column_type: ConcreteDataType,
         location: Location,
     },
+
+    #[snafu(display("Alter request to physical region is forbidden"))]
+    ForbiddenPhysicalAlter { location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -129,14 +125,16 @@ impl ErrorExt for Error {
             | ConflictRegionOption { .. }
             | ColumnTypeMismatch { .. } => StatusCode::InvalidArguments,
 
+            ForbiddenPhysicalAlter { .. } => StatusCode::Unsupported,
+
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
             | DecodeColumnValue { .. }
-            | ParseTableId { .. } => StatusCode::Unexpected,
+            | ParseRegionId { .. } => StatusCode::Unexpected,
 
-            PhysicalTableNotFound { .. } | LogicalTableNotFound { .. } => StatusCode::TableNotFound,
-
-            PhysicalRegionNotFound { .. } => StatusCode::RegionNotFound,
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
+                StatusCode::RegionNotFound
+            }
 
             CreateMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
@@ -144,7 +142,7 @@ impl ErrorExt for Error {
 
             CollectRecordBatchStream { source, .. } => source.status_code(),
 
-            TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            RegionAlreadyExists { .. } => StatusCode::RegionAlreadyExists,
         }
     }
 

@@ -202,7 +202,7 @@ pub struct RegionOpenRequest {
 pub struct RegionCloseRequest {}
 
 /// Alter metadata of a region.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct RegionAlterRequest {
     /// The version of the schema before applying the alteration.
     pub schema_version: u64,
@@ -255,7 +255,7 @@ impl TryFrom<AlterRequest> for RegionAlterRequest {
 }
 
 /// Kind of the alteration.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum AlterKind {
     /// Add columns to the region.
     AddColumns {
@@ -342,7 +342,7 @@ impl TryFrom<alter_request::Kind> for AlterKind {
 }
 
 /// Adds a column.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AddColumn {
     /// Metadata of the column to add.
     pub column_metadata: ColumnMetadata,
@@ -408,7 +408,7 @@ impl TryFrom<v1::region::AddColumn> for AddColumn {
 }
 
 /// Location to add a column.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum AddColumnLocation {
     /// Add the column to the first position of columns.
     First,
