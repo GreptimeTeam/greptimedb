@@ -123,8 +123,18 @@ pub enum Error {
     #[snafu(display("Failed to unpack value to given type: {}", reason))]
     TryFromValue { reason: String, location: Location },
 
-    #[snafu(display("Invalid arguments, reason: {}", error))]
-    InvalidArguments {
+    #[snafu(display("Failed to specify the precision {} and scale {}", precision, scale))]
+    InvalidPrecisionOrScale {
+        precision: u8,
+        scale: i8,
+        #[snafu(source)]
+        error: arrow::error::ArrowError,
+        location: Location,
+    },
+
+    #[snafu(display("Value exceeds the precision {} bound", precision))]
+    ValueExceedsPrecision {
+        precision: u8,
         #[snafu(source)]
         error: arrow::error::ArrowError,
         location: Location,

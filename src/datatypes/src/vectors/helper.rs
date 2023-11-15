@@ -404,8 +404,10 @@ mod tests {
     };
     use arrow::datatypes::{Field, Int32Type};
     use arrow_array::DictionaryArray;
+    use common_decimal::Decimal128;
     use common_time::time::Time;
-    use common_time::{Date, DateTime, Interval};
+    use common_time::timestamp::TimeUnit;
+    use common_time::{Date, DateTime, Duration, Interval};
 
     use super::*;
     use crate::value::Value;
@@ -454,6 +456,37 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_duration_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::DurationSecond(Some(42)), 3).unwrap();
+        assert_eq!(
+            ConcreteDataType::duration_second_datatype(),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(
+                Value::Duration(Duration::new(42, TimeUnit::Second)),
+                vector.get(i)
+            );
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_decimal128_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::Decimal128(Some(42), 3, 1), 3).unwrap();
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(3, 1),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Decimal128(Decimal128::new(42, 3, 1)), vector.get(i));
         }
     }
 

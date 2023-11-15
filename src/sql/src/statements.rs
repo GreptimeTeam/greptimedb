@@ -145,10 +145,7 @@ macro_rules! parse_number_to_value {
                 let n  = parse_sql_number::<i64>($n)?;
                 Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
             },
-            ConcreteDataType::Decimal128(_) => {
-                // TODO(QuenKar): parse decimal128 string with precision and scale
-                unimplemented!("insert Decimal128 is not supported yet")
-            }
+            // TODO(QuenKar): parse decimal128 string with precision and scale
 
             _ => ParseSqlValueSnafu {
                 msg: format!("Fail to parse number {}, invalid column type: {:?}",

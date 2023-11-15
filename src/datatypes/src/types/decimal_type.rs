@@ -25,12 +25,12 @@ use crate::vectors::{Decimal128VectorBuilder, MutableVector};
 #[derive(
     Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
 )]
-pub struct DecimalType {
+pub struct Decimal128Type {
     precision: u8,
     scale: i8,
 }
 
-impl DecimalType {
+impl Decimal128Type {
     pub fn new(precision: u8, scale: i8) -> Self {
         Self { precision, scale }
     }
@@ -44,7 +44,7 @@ impl DecimalType {
     }
 }
 
-impl DataType for DecimalType {
+impl DataType for Decimal128Type {
     fn name(&self) -> &str {
         "decimal128"
     }

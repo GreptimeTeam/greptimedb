@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{self, Error, Result};
 use crate::type_id::LogicalTypeId;
 use crate::types::{
-    BinaryType, BooleanType, DateTimeType, DateType, DecimalType, DictionaryType,
+    BinaryType, BooleanType, DateTimeType, DateType, Decimal128Type, DictionaryType,
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,
     DurationType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalType, IntervalYearMonthType, ListType,
@@ -58,8 +58,8 @@ pub enum ConcreteDataType {
     Float32(Float32Type),
     Float64(Float64Type),
 
-    // Decimal type:
-    Decimal128(DecimalType),
+    // Decimal128 type:
+    Decimal128(Decimal128Type),
 
     // String types:
     Binary(BinaryType),
@@ -248,7 +248,7 @@ impl ConcreteDataType {
         }
     }
 
-    pub fn as_decimal(&self) -> Option<DecimalType> {
+    pub fn as_decimal128(&self) -> Option<Decimal128Type> {
         match self {
             ConcreteDataType::Decimal128(d) => Some(*d),
             _ => None,
@@ -479,7 +479,7 @@ impl ConcreteDataType {
     }
 
     pub fn decimal128_datatype(precision: u8, scale: i8) -> ConcreteDataType {
-        ConcreteDataType::Decimal128(DecimalType::new(precision, scale))
+        ConcreteDataType::Decimal128(Decimal128Type::new(precision, scale))
     }
 
     pub fn decimal128_default_datatype() -> ConcreteDataType {

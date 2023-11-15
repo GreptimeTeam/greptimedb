@@ -120,7 +120,7 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{}[{}]", v.datatype.name(), items)
             }
-            Value::Decimal128(v) => write!(f, "{:?}", v),
+            Value::Decimal128(v) => write!(f, "{}", v),
         }
     }
 }
@@ -2255,9 +2255,6 @@ mod tests {
 
     #[test]
     fn test_value_ref_estimated_size() {
-        // MacOS is 48, Ubuntu is 32
-        // assert_eq!(std::mem::size_of::<ValueRef>(), 48);
-
         check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
         check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
         check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
@@ -2334,9 +2331,6 @@ mod tests {
             }),
             85,
         );
-        check_value_ref_size_eq(
-            &ValueRef::Decimal128(Decimal128::new_unchecked(1234, 3, 1)),
-            32,
-        )
+        check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
     }
 }

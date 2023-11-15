@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_decimal_scalar() {
-        let decimal = Decimal128::new_unchecked(1, 1, 1);
+        let decimal = Decimal128::new(1, 1, 1);
         assert_eq!(decimal, decimal.as_scalar_ref());
         assert_eq!(decimal, decimal.to_owned_scalar());
     }

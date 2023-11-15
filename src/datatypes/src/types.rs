@@ -33,7 +33,7 @@ pub use boolean_type::BooleanType;
 pub use cast::{cast, cast_with_opt};
 pub use date_type::DateType;
 pub use datetime_type::DateTimeType;
-pub use decimal_type::DecimalType;
+pub use decimal_type::Decimal128Type;
 pub use dictionary_type::DictionaryType;
 pub use duration_type::{
     DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType, DurationSecondType,

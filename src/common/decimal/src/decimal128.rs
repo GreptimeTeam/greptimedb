@@ -51,8 +51,8 @@ pub struct Decimal128 {
 }
 
 impl Decimal128 {
-    /// Create a new Decimal128 from i128, precision and scale.
-    pub fn new_unchecked(value: i128, precision: u8, scale: i8) -> Self {
+    /// Create a new Decimal128 from i128, precision and scale without any validation.
+    pub fn new(value: i128, precision: u8, scale: i8) -> Self {
         Self {
             value,
             precision,
@@ -60,6 +60,7 @@ impl Decimal128 {
         }
     }
 
+    /// Try new Decimal128 from i128, precision and scale with validation.
     pub fn try_new(value: i128, precision: u8, scale: i8) -> error::Result<Self> {
         // make sure the precision and scale is valid.
         valid_precision_and_scale(precision, scale)?;
@@ -70,6 +71,7 @@ impl Decimal128 {
         })
     }
 
+    /// Return underlying value without precision and scale
     pub fn val(&self) -> i128 {
         self.value
     }
@@ -281,7 +283,7 @@ mod tests {
 
     #[test]
     fn test_common_decimal128() {
-        let decimal = Decimal128::new_unchecked(123456789, 9, 3);
+        let decimal = Decimal128::new(123456789, 9, 3);
         assert_eq!(decimal.to_string(), "123456.789");
 
         let decimal = Decimal128::try_new(123456789, 9, 0);
