@@ -677,7 +677,7 @@ enable = true
 enable = true
 
 [frontend.logging]
-enable_jaeger_tracing = false
+enable_otlp_tracing = false
 
 [frontend.datanode.client]
 timeout = "10s"
@@ -750,10 +750,10 @@ sst_write_buffer_size = "8MiB"
 [datanode.region_engine.file]
 
 [datanode.logging]
-enable_jaeger_tracing = false
+enable_otlp_tracing = false
 
 [logging]
-enable_jaeger_tracing = false"#,
+enable_otlp_tracing = false"#,
         store_type,
         num_cpus::get() / 2
     );

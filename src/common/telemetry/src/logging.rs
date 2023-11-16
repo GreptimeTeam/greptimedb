@@ -31,7 +31,7 @@ use tracing_subscriber::{filter, EnvFilter, Registry};
 
 pub use crate::{debug, error, info, trace, warn};
 
-const DEAFULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
+const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -194,7 +194,7 @@ pub fn init_global_logging(
                     opts.otlp_endpoint
                         .as_ref()
                         .map(|e| format!("http://{}", e))
-                        .unwrap_or(DEAFULT_OTLP_ENDPOINT.to_string()),
+                        .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
                 ),
             )
             .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
