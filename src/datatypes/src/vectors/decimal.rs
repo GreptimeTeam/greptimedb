@@ -357,14 +357,9 @@ impl ScalarVectorBuilder for Decimal128VectorBuilder {
     }
 
     fn finish(&mut self) -> Self::VectorType {
-        // Arrow array builder will discard precision and scale information when finish.
-        // This behavior may not be reasonable.
         Decimal128Vector {
             array: self.mutable_array.finish(),
         }
-        .with_precision_and_scale(self.precision, self.scale)
-        // unwrap is safe because we have checked the precision and scale in builder.
-        .unwrap()
     }
 }
 
