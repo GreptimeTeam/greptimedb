@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -86,6 +87,7 @@ pub fn init_default_ut_logging() {
             "unittest",
             &opts,
             TracingOptions::default(),
+            None
         ));
 
         crate::info!("logs dir = {}", dir);
@@ -102,6 +104,7 @@ pub fn init_global_logging(
     app_name: &str,
     opts: &LoggingOptions,
     tracing_opts: TracingOptions,
+    node_id: Option<String>,
 ) -> Vec<WorkerGuard> {
     let mut guards = vec![];
     let dir = &opts.dir;
@@ -198,10 +201,15 @@ pub fn init_global_logging(
                 ),
             )
             .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
-                opentelemetry_sdk::Resource::new(vec![KeyValue::new(
-                    "service.name",
-                    app_name.to_string(),
-                )]),
+                opentelemetry_sdk::Resource::new(vec![
+                    KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                    KeyValue::new(
+                        resource::SERVICE_INSTANCE_ID,
+                        node_id.unwrap_or("none".to_string()),
+                    ),
+                    KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                    KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+                ]),
             ))
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("otlp tracer install failed");

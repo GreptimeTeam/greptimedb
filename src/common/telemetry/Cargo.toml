@@ -18,11 +18,10 @@ opentelemetry = { version = "0.21.0", default-features = false, features = [
     "trace",
 ] }
 opentelemetry-otlp = { version = "0.14.0", features = ["tokio"] }
+opentelemetry-semantic-conventions = "0.13.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
 prometheus.workspace = true
-rand.workspace = true
-rs-snowflake = "0.6"
 serde.workspace = true
 tokio.workspace = true
 tracing = "0.1"

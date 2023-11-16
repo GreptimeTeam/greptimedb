@@ -38,16 +38,8 @@ impl<T: std::future::Future> FutureExt for T {
 /// span as a child of the tracing context, so that the external tracing service can associate them
 /// in a single trace.
 ///
-/// The tracing context must be serialized and deserialized when passing through the network.
-/// There're two ways to do this:
-///
-/// - For RPC calls with clear caller/callee relationship, the tracing context can be serialized
-///   into the W3C trace context format and passed in HTTP headers seamlessly with a service
-///   middleware. For example, the DDL requests from the frontend to the meta service.
-/// - For RPC calls with no clear caller/callee relationship or with asynchronous semantics, the
-///   tracing context should be passed manually as a protobuf field in the request and response for
-///   better lifetime management. For example, the exchange services between streaming actors or
-///   batch stages, and the `create_task` requests from the frontend to the batch service.
+/// The tracing context must be serialized into the W3C trace context format and passed in rpc
+/// message headers when communication of frontend, datanode and meta.
 ///
 /// See [Trace Context](https://www.w3.org/TR/trace-context/) for more information.
 #[derive(Debug, Clone)]
@@ -55,7 +47,7 @@ pub struct TracingContext(opentelemetry::Context);
 
 impl Default for TracingContext {
     fn default() -> Self {
-        Self::none()
+        Self::new()
     }
 }
 
@@ -73,7 +65,7 @@ impl TracingContext {
     }
 
     /// Create a no-op tracing context.
-    pub fn none() -> Self {
+    pub fn new() -> Self {
         Self(opentelemetry::Context::new())
     }
 
