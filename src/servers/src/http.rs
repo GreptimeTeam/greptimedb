@@ -298,10 +298,7 @@ impl JsonResponse {
                         },
 
                         Err(e) => {
-                            return Self::with_error(
-                                format!("Recordbatch error: {e}"),
-                                e.status_code(),
-                            );
+                            return Self::with_error(e.output_msg(), e.status_code());
                         }
                     }
                 }
