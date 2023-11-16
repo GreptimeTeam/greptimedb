@@ -51,7 +51,7 @@ use crate::metadata_region::MetadataRegion;
 use crate::metrics::{
     FORBIDDEN_OPERATION_COUNT, LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT,
 };
-use crate::utils::{self, to_data_region_id};
+use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 /// region group value for data region inside a metric region
 pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
@@ -509,8 +509,8 @@ impl MetricEngineInner {
     /// Return value: (data_region_id, metadata_region_id)
     fn transform_region_id(region_id: RegionId) -> (RegionId, RegionId) {
         (
-            utils::to_data_region_id(region_id),
-            utils::to_metadata_region_id(region_id),
+            to_data_region_id(region_id),
+            to_metadata_region_id(region_id),
         )
     }
 
@@ -668,7 +668,7 @@ impl MetricEngineInner {
             return Ok(());
         };
 
-        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
         let mut columns_to_add = vec![];
         for col in &columns {
             if self
@@ -686,7 +686,7 @@ impl MetricEngineInner {
         }
 
         // alter data region
-        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let data_region_id = to_data_region_id(physical_region_id);
         self.add_columns_to_physical_data_region(
             data_region_id,
             metadata_region_id,
@@ -762,8 +762,7 @@ impl MetricEngineInner {
             .with_context(|| LogicalRegionNotFoundSnafu {
                 region_id: logical_region_id,
             })?;
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = to_data_region_id(physical_region_id);
 
         self.verify_put_request(logical_region_id, physical_region_id, &request)
             .await?;
@@ -786,7 +785,7 @@ impl MetricEngineInner {
         request: &RegionPutRequest,
     ) -> Result<()> {
         // check if the region exists
-        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
         if !self
             .metadata_region
             .is_logical_region_exists(metadata_region_id, logical_region_id)
