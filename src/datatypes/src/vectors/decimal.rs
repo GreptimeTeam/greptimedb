@@ -517,6 +517,7 @@ pub mod tests {
         assert!(array.is_null(4));
     }
 }
+
 #[test]
 fn test_decimal28_vector_iter_data() {
     let vector = Decimal128Vector::from_values(vec![1, 2, 3, 4])
