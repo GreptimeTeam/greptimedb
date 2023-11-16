@@ -131,3 +131,15 @@ impl From<Status> for Error {
         Self::Server { code, msg }
     }
 }
+
+impl Error {
+    pub fn should_retry(&self) -> bool {
+        !matches!(
+            self,
+            Self::RegionServer {
+                code: Code::InvalidArgument,
+                ..
+            }
+        )
+    }
+}

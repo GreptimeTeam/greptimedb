@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn test_secstr() {
         let toml_str = r#"
-            [storage.default_store]
+            [storage]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
