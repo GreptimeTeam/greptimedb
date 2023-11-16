@@ -68,7 +68,7 @@ pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInst
     let test_name = uuid::Uuid::new_v4().to_string();
     let storage_types = StorageType::build_storage_types_based_on_env();
     let instance = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_custom_store_types(storage_types)
+        .with_store_providers(storage_types)
         .build()
         .await;
     Arc::new(instance)
@@ -77,9 +77,9 @@ pub(crate) async fn standalone_with_multiple_object_stores() -> Arc<dyn MockInst
 pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockInstance> {
     let _ = dotenv::dotenv();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let custom_storage_types = StorageType::build_storage_types_based_on_env();
+    let providers = StorageType::build_storage_types_based_on_env();
     let cluster = GreptimeDbClusterBuilder::new(&test_name)
-        .with_custom_store_types(custom_storage_types)
+        .with_store_providers(providers)
         .build()
         .await;
     Arc::new(MockDistributedInstance(cluster))

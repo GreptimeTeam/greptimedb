@@ -63,7 +63,7 @@ pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,
     store_config: Option<ObjectStoreConfig>,
-    custom_store_types: Option<Vec<StorageType>>,
+    store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
 }
 
@@ -88,7 +88,7 @@ impl GreptimeDbClusterBuilder {
             cluster_name: cluster_name.to_string(),
             kv_backend,
             store_config: None,
-            custom_store_types: None,
+            store_providers: None,
             datanodes: None,
         }
     }
@@ -98,8 +98,8 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
-    pub fn with_custom_store_types(mut self, store_types: Vec<StorageType>) -> Self {
-        self.custom_store_types = Some(store_types);
+    pub fn with_store_providers(mut self, store_providers: Vec<StorageType>) -> Self {
+        self.store_providers = Some(store_providers);
         self
     }
 
@@ -182,7 +182,7 @@ impl GreptimeDbClusterBuilder {
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
                     StorageType::File,
-                    self.custom_store_types.clone().unwrap_or_default(),
+                    self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
                 );
 

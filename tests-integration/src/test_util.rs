@@ -295,26 +295,26 @@ impl TestGuard {
 
 pub fn create_tmp_dir_and_datanode_opts(
     default_store_type: StorageType,
-    custom_store_types: Vec<StorageType>,
+    store_provider_types: Vec<StorageType>,
     name: &str,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
     // Excludes the default object store.
-    let mut providers = Vec::with_capacity(custom_store_types.len());
+    let mut store_providers = Vec::with_capacity(store_provider_types.len());
     // Includes the default object store.
-    let mut storage_guards = Vec::with_capacity(custom_store_types.len() + 1);
+    let mut storage_guards = Vec::with_capacity(store_provider_types.len() + 1);
 
     let (default_store, data_tmp_dir) = get_test_store_config(&default_store_type);
     storage_guards.push(StorageGuard(data_tmp_dir));
 
-    for store_type in custom_store_types {
+    for store_type in store_provider_types {
         let (store, data_tmp_dir) = get_test_store_config(&store_type);
-        providers.push(store);
+        store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, providers, home_dir);
+    let opts = create_datanode_opts(default_store, store_providers, home_dir);
 
     (
         opts,
