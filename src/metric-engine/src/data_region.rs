@@ -13,12 +13,15 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
+use common_query::Output;
 use common_telemetry::tracing::warn;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AddColumn, AlterKind, RegionAlterRequest, RegionRequest};
+use store_api::region_request::{
+    AddColumn, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
+};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -121,6 +124,18 @@ impl DataRegion {
         }
 
         Ok(())
+    }
+
+    pub async fn write_data(
+        &self,
+        region_id: RegionId,
+        request: RegionPutRequest,
+    ) -> Result<Output> {
+        let region_id = utils::to_data_region_id(region_id);
+        self.mito
+            .handle_request(region_id, RegionRequest::Put(request))
+            .await
+            .context(MitoWriteOperationSnafu)
     }
 }
 

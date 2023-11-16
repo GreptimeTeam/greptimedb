@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 
-use api::v1::SemanticType;
+use ahash::{AHasher, RandomState};
+use api::helper::to_column_data_type;
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, SemanticType};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
@@ -31,7 +35,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionCreateRequest, RegionRequest,
+    AlterKind, RegionAlterRequest, RegionCreateRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionGroup, RegionId, ScanRequest};
@@ -39,9 +43,9 @@ use tokio::sync::RwLock;
 
 use crate::data_region::DataRegion;
 use crate::error::{
-    ConflictRegionOptionSnafu, CreateMitoRegionSnafu, ForbiddenPhysicalAlterSnafu,
-    InternalColumnOccupiedSnafu, LogicalRegionNotFoundSnafu, MissingRegionOptionSnafu,
-    ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
+    ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
+    ForbiddenPhysicalAlterSnafu, InternalColumnOccupiedSnafu, LogicalRegionNotFoundSnafu,
+    MissingRegionOptionSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::metadata_region::MetadataRegion;
 use crate::metrics::{
@@ -581,6 +585,19 @@ impl MetricEngineInner {
             });
 
         // add internal columns
+        let [metric_name_col, tsid_col] = Self::internal_column_metadata();
+        data_region_request.column_metadatas.push(metric_name_col);
+        data_region_request.column_metadatas.push(tsid_col);
+        data_region_request.primary_key =
+            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()];
+
+        data_region_request
+    }
+
+    /// Generate internal column metadata.
+    ///
+    /// Return `[metric_name_col, tsid_col]`
+    fn internal_column_metadata() -> [ColumnMetadata; 2] {
         let metric_name_col = ColumnMetadata {
             column_id: ReservedColumnId::metric_name(),
             semantic_type: SemanticType::Tag,
@@ -595,16 +612,11 @@ impl MetricEngineInner {
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
                 DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::uint64_datatype(),
                 false,
             ),
         };
-        data_region_request.column_metadatas.push(metric_name_col);
-        data_region_request.column_metadatas.push(tsid_col);
-        data_region_request.primary_key =
-            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()];
-
-        data_region_request
+        [metric_name_col, tsid_col]
     }
 }
 
@@ -684,6 +696,157 @@ impl MetricEngineInner {
         FORBIDDEN_OPERATION_COUNT.inc();
 
         ForbiddenPhysicalAlterSnafu.fail()
+    }
+}
+
+impl MetricEngineInner {
+    pub async fn put_logical_region(
+        &self,
+        logical_region_id: RegionId,
+        request: RegionPutRequest,
+    ) -> Result<Output> {
+        let physical_region_id = *self
+            .state
+            .read()
+            .await
+            .logical_regions
+            .get(&logical_region_id)
+            .with_context(|| LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            })?;
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+
+        self.verify_put_request(logical_region_id, physical_region_id, &request)
+            .await?;
+
+        // write to data region
+        self.data_region.write_data(data_region_id, request).await
+    }
+
+    /// Verifies a put request for a logical region against its corresponding metadata region.
+    ///
+    /// Includes:
+    /// - Check if the logical region exists
+    /// - Check if the columns exist
+    async fn verify_put_request(
+        &self,
+        logical_region_id: RegionId,
+        physical_region_id: RegionId,
+        request: &RegionPutRequest,
+    ) -> Result<()> {
+        // check if the region exists
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        if !self
+            .metadata_region
+            .is_logical_region_exists(metadata_region_id, logical_region_id)
+            .await?
+        {
+            error!("Trying to write to an nonexistent region {logical_region_id}");
+            return LogicalRegionNotFoundSnafu {
+                region_id: logical_region_id,
+            }
+            .fail();
+        }
+
+        // check if the columns exist
+        for col in &request.rows.schema {
+            if self
+                .metadata_region
+                .column_semantic_type(metadata_region_id, logical_region_id, &col.column_name)
+                .await?
+                .is_none()
+            {
+                return ColumnNotFoundSnafu {
+                    name: col.column_name.clone(),
+                    region_id: logical_region_id,
+                }
+                .fail();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Perform metric engine specific logic to incomming rows.
+    /// - Change the semantic type of tag columns to field
+    /// - Add table_name column
+    /// - Generate tsid
+    fn modify_rows(&self, table_name: String, mut rows: Rows) -> Result<Rows> {
+        // gather tag column indices
+        let mut tag_col_indices = rows
+            .schema
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, col)| {
+                if col.semantic_type == SemanticType::Tag as i32 {
+                    Some((idx, col.column_name.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // generate new schema
+        let mut new_schema = rows
+            .schema
+            .into_iter()
+            .map(|mut col| {
+                if col.semantic_type == SemanticType::Tag as i32 {
+                    col.semantic_type = SemanticType::Field as i32;
+                }
+                col
+            })
+            .collect::<Vec<_>>();
+        // add table_name column
+        new_schema.push(PbColumnSchema {
+            column_name: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME.to_string(),
+            datatype: to_column_data_type(&ConcreteDataType::string_datatype())
+                .unwrap()
+                .into(),
+            semantic_type: SemanticType::Tag as _,
+        });
+        // add tsid column
+        new_schema.push(PbColumnSchema {
+            column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            datatype: to_column_data_type(&ConcreteDataType::uint64_datatype())
+                .unwrap()
+                .into(),
+            semantic_type: SemanticType::Tag as _,
+        });
+        rows.schema = new_schema;
+
+        // fill internal columns
+        let mut random_state = ahash::RandomState::with_seeds(1, 2, 3, 4);
+        for row in &mut rows.rows {
+            Self::fill_internal_columns(&mut random_state, &table_name, &tag_col_indices, row);
+        }
+
+        Ok(rows)
+    }
+
+    /// Fills internal columns of a row with table name and a hash of tag values.
+    fn fill_internal_columns(
+        random_state: &mut RandomState,
+        table_name: &str,
+        tag_col_indices: &[(usize, String)],
+        row: &mut Row,
+    ) {
+        let mut hasher = random_state.build_hasher();
+        for (idx, name) in tag_col_indices {
+            let tag = row.values[*idx].clone();
+            name.hash(&mut hasher);
+            match tag.value_data {
+                Some(ValueData::StringValue(string)) => string.hash(&mut hasher),
+                _ => {}
+            }
+        }
+        let hash = hasher.finish();
+
+        // fill table name and tsid
+        row.values
+            .push(ValueData::StringValue(table_name.to_string()).into());
+        row.values.push(ValueData::U64Value(hash).into());
     }
 }
 

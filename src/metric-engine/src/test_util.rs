@@ -20,6 +20,7 @@ use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use mito2::test_util::TestEnv as MitoTestEnv;
+pub use mito2::test_util::{build_rows, rows_schema};
 use object_store::util::join_dir;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
