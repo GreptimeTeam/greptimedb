@@ -36,6 +36,7 @@ use store_api::storage::RegionId;
 use self::migration_start::RegionMigrationStart;
 use crate::error::{Error, Result};
 use crate::procedure::utils::region_lock_key;
+use crate::service::mailbox::MailboxRef;
 
 /// It's shared in each step and available even after recovering.
 ///
@@ -77,6 +78,8 @@ pub trait ContextFactory {
 pub struct ContextFactoryImpl {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
+    mailbox: MailboxRef,
+    server_addr: String,
 }
 
 impl ContextFactory for ContextFactoryImpl {
@@ -85,6 +88,8 @@ impl ContextFactory for ContextFactoryImpl {
             persistent_ctx,
             volatile_ctx: self.volatile_ctx,
             table_metadata_manager: self.table_metadata_manager,
+            mailbox: self.mailbox,
+            server_addr: self.server_addr,
         }
     }
 }
@@ -96,12 +101,14 @@ pub struct Context {
     persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
+    mailbox: MailboxRef,
+    server_addr: String,
 }
 
 impl Context {
     /// Returns address of meta server.
     pub fn server_addr(&self) -> &str {
-        todo!()
+        &self.server_addr
     }
 }
 
