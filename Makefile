@@ -157,11 +157,11 @@ sqlness-test: ## Run sqlness test.
 
 .PHONY: check
 check: ## Cargo check all the targets.
-	cargo check --workspace --all-targets
+	cargo check --workspace --all-targets --all-features
 
 .PHONY: clippy
 clippy: ## Check clippy rules.
-	cargo clippy --workspace --all-targets -F pyo3_backend -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.

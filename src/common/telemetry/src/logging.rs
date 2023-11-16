@@ -189,7 +189,6 @@ pub fn init_global_logging(
 
         Registry::default()
             .with(tokio_console_layer)
-            .with(JsonStorageLayer)
             .with(stdout_logging_layer)
             .with(file_logging_layer)
             .with(err_file_logging_layer.with_filter(filter::LevelFilter::ERROR))
