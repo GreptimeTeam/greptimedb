@@ -53,6 +53,16 @@ pub struct Decimal128 {
 impl Decimal128 {
     /// Create a new Decimal128 from i128, precision and scale without any validation.
     pub fn new(value: i128, precision: u8, scale: i8) -> Self {
+        // debug assert precision and scale is valid
+        debug_assert!(
+            precision > 0 && precision <= DECIMAL128_MAX_PRECISION,
+            "precision should be in [1, {}]",
+            DECIMAL128_MAX_PRECISION
+        );
+        debug_assert!(
+            scale >= 0 && scale <= precision as i8,
+            "scale should be in [0, precision]"
+        );
         Self {
             value,
             precision,
