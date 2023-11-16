@@ -18,7 +18,7 @@ use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::procedure::region_migration::{Context, PersistentContext, State, VolatileContext};
+use crate::procedure::region_migration::{Context, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegionMigrationEnd;
@@ -26,12 +26,7 @@ pub struct RegionMigrationEnd;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationEnd {
-    async fn next(
-        &mut self,
-        _: &Context,
-        _: &mut PersistentContext,
-        _: &mut VolatileContext,
-    ) -> Result<Box<dyn State>> {
+    async fn next(&mut self, _: &Context) -> Result<Box<dyn State>> {
         Ok(Box::new(RegionMigrationEnd))
     }
 

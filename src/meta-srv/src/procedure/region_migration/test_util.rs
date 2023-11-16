@@ -19,7 +19,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
 
-use crate::procedure::region_migration::Context;
+use super::ContextFactoryImpl;
 
 /// `TestingEnv` provides components during the tests.
 pub struct TestingEnv {
@@ -38,9 +38,10 @@ impl TestingEnv {
     }
 
     /// Returns a context of region migration procedure.
-    pub fn context(&self) -> Context {
-        Context {
+    pub fn context_factory(&self) -> ContextFactoryImpl {
+        ContextFactoryImpl {
             table_metadata_manager: self.table_metadata_manager.clone(),
+            volatile_ctx: Default::default(),
         }
     }
 

@@ -17,7 +17,7 @@ use std::any::Any;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::procedure::region_migration::{Context, PersistentContext, State, VolatileContext};
+use crate::procedure::region_migration::{Context, State};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenCandidateRegion;
@@ -25,12 +25,7 @@ pub struct OpenCandidateRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for OpenCandidateRegion {
-    async fn next(
-        &mut self,
-        _ctx: &Context,
-        _pc: &mut PersistentContext,
-        _vc: &mut VolatileContext,
-    ) -> Result<Box<dyn State>> {
+    async fn next(&mut self, _ctx: &Context) -> Result<Box<dyn State>> {
         todo!()
     }
 
