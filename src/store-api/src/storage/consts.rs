@@ -38,7 +38,7 @@ enum ReservedColumnType {
     Sequence,
     OpType,
     Tsid,
-    MetricName,
+    TableId,
 }
 
 /// Column id reserved by the engine.
@@ -76,11 +76,11 @@ impl ReservedColumnId {
         Self::BASE | ReservedColumnType::Tsid as ColumnId
     }
 
-    /// Id for storing metric name column.
+    /// Id for storing logical table id column.
     ///
     /// Used by: metric engine
-    pub const fn metric_name() -> ColumnId {
-        Self::BASE | ReservedColumnType::MetricName as ColumnId
+    pub const fn table_id() -> ColumnId {
+        Self::BASE | ReservedColumnType::TableId as ColumnId
     }
 }
 

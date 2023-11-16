@@ -38,7 +38,7 @@ use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionCreateRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionGroup, RegionId, ScanRequest};
+use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
 use tokio::sync::RwLock;
 
 use crate::data_region::DataRegion;
@@ -68,7 +68,7 @@ pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
 pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
 
 /// Column name of internal column `__metric` that stores the original metric name
-pub const DATA_SCHEMA_METRIC_NAME_COLUMN_NAME: &str = "__metric";
+pub const DATA_SCHEMA_TABLE_ID_COLUMN_NAME: &str = "__table_id";
 pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
@@ -477,9 +477,9 @@ impl MetricEngineInner {
 
         // check if internal columns are not occupied
         ensure!(
-            !name_to_index.contains_key(DATA_SCHEMA_METRIC_NAME_COLUMN_NAME),
+            !name_to_index.contains_key(DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
             InternalColumnOccupiedSnafu {
-                column: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
+                column: DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
             }
         );
         ensure!(
@@ -599,21 +599,21 @@ impl MetricEngineInner {
         data_region_request.column_metadatas.push(metric_name_col);
         data_region_request.column_metadatas.push(tsid_col);
         data_region_request.primary_key =
-            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()];
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
 
         data_region_request
     }
 
     /// Generate internal column metadata.
     ///
-    /// Return `[metric_name_col, tsid_col]`
+    /// Return `[table_id_col, tsid_col]`
     fn internal_column_metadata() -> [ColumnMetadata; 2] {
         let metric_name_col = ColumnMetadata {
-            column_id: ReservedColumnId::metric_name(),
+            column_id: ReservedColumnId::table_id(),
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
-                DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
-                ConcreteDataType::string_datatype(),
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ConcreteDataType::uint32_datatype(),
                 false,
             ),
         };
@@ -770,7 +770,7 @@ impl MetricEngineInner {
 
         // write to data region
         // TODO: retrieve table name
-        self.modify_rows("test".to_string(), &mut request.rows)?;
+        self.modify_rows(logical_region_id.table_id(), &mut request.rows)?;
         self.data_region.write_data(data_region_id, request).await
     }
 
@@ -820,9 +820,9 @@ impl MetricEngineInner {
 
     /// Perform metric engine specific logic to incomming rows.
     /// - Change the semantic type of tag columns to field
-    /// - Add table_name column
+    /// - Add table_id column
     /// - Generate tsid
-    fn modify_rows(&self, table_name: String, rows: &mut Rows) -> Result<()> {
+    fn modify_rows(&self, table_id: TableId, rows: &mut Rows) -> Result<()> {
         // gather tag column indices
         let mut tag_col_indices = rows
             .schema
@@ -851,8 +851,8 @@ impl MetricEngineInner {
             .collect::<Vec<_>>();
         // add table_name column
         rows.schema.push(PbColumnSchema {
-            column_name: DATA_SCHEMA_METRIC_NAME_COLUMN_NAME.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::string_datatype())
+            column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            datatype: to_column_data_type(&ConcreteDataType::uint32_datatype())
                 .unwrap()
                 .into(),
             semantic_type: SemanticType::Tag as _,
@@ -869,7 +869,7 @@ impl MetricEngineInner {
         // fill internal columns
         let mut random_state = ahash::RandomState::with_seeds(1, 2, 3, 4);
         for row in &mut rows.rows {
-            Self::fill_internal_columns(&mut random_state, &table_name, &tag_col_indices, row);
+            Self::fill_internal_columns(&mut random_state, table_id, &tag_col_indices, row);
         }
 
         Ok(())
@@ -878,7 +878,7 @@ impl MetricEngineInner {
     /// Fills internal columns of a row with table name and a hash of tag values.
     fn fill_internal_columns(
         random_state: &mut RandomState,
-        table_name: &str,
+        table_id: TableId,
         tag_col_indices: &[(usize, String)],
         row: &mut Row,
     ) {
@@ -894,8 +894,7 @@ impl MetricEngineInner {
         let hash = hasher.finish();
 
         // fill table name and tsid
-        row.values
-            .push(ValueData::StringValue(table_name.to_string()).into());
+        row.values.push(ValueData::U32Value(table_id).into());
         row.values.push(ValueData::U64Value(hash).into());
     }
 }
@@ -928,8 +927,8 @@ mod tests {
                     column_id: 1,
                     semantic_type: SemanticType::Tag,
                     column_schema: ColumnSchema::new(
-                        DATA_SCHEMA_METRIC_NAME_COLUMN_NAME,
-                        ConcreteDataType::string_datatype(),
+                        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ConcreteDataType::uint32_datatype(),
                         false,
                     ),
                 },
@@ -943,7 +942,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Internal column __metric is reserved".to_string()
+            "Internal column __table_id is reserved".to_string()
         );
 
         // valid request
@@ -1049,7 +1048,7 @@ mod tests {
         assert_eq!(data_region_request.column_metadatas.len(), 4);
         assert_eq!(
             data_region_request.primary_key,
-            vec![ReservedColumnId::metric_name(), ReservedColumnId::tsid()]
+            vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()]
         );
     }
 

@@ -199,7 +199,7 @@ mod test {
         let expected = vec![
             "greptime_timestamp",
             "greptime_value",
-            "__metric",
+            "__table_id",
             "__tsid",
             "job",
             "tag2",
