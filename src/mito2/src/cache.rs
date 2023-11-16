@@ -29,7 +29,15 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
 use crate::cache::cache_size::parquet_meta_size;
+use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
+
+// Metrics type key for sst meta.
+const SST_META_TYPE: &str = "sst_meta";
+// Metrics type key for vector.
+const VECTOR_TYPE: &str = "vector";
+// Metrics type key for pages.
+const PAGE_TYPE: &str = "page";
 
 /// Manages cached data for the engine.
 pub struct CacheManager {
@@ -55,9 +63,12 @@ impl CacheManager {
         } else {
             let cache = Cache::builder()
                 .max_capacity(sst_meta_cache_size)
-                .weigher(|k: &SstMetaKey, v: &Arc<ParquetMetaData>| {
-                    // We ignore the size of `Arc`.
-                    (k.estimated_size() + parquet_meta_size(v)) as u32
+                .weigher(meta_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = meta_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[SST_META_TYPE])
+                        .sub(size.into());
                 })
                 .build();
             Some(cache)
@@ -67,9 +78,12 @@ impl CacheManager {
         } else {
             let cache = Cache::builder()
                 .max_capacity(vector_cache_size)
-                .weigher(|_k, v: &VectorRef| {
-                    // We ignore the heap size of `Value`.
-                    (mem::size_of::<Value>() + v.memory_size()) as u32
+                .weigher(vector_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = vector_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[VECTOR_TYPE])
+                        .sub(size.into());
                 })
                 .build();
             Some(cache)
@@ -79,8 +93,10 @@ impl CacheManager {
         } else {
             let cache = Cache::builder()
                 .max_capacity(page_cache_size)
-                .weigher(|k: &PageKey, v: &Arc<PageValue>| {
-                    (k.estimated_size() + v.estimated_size()) as u32
+                .weigher(page_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = page_cache_weight(&k, &v);
+                    CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
                 })
                 .build();
             Some(cache)
@@ -99,9 +115,10 @@ impl CacheManager {
         region_id: RegionId,
         file_id: FileId,
     ) -> Option<Arc<ParquetMetaData>> {
-        self.sst_meta_cache
-            .as_ref()
-            .and_then(|sst_meta_cache| sst_meta_cache.get(&SstMetaKey(region_id, file_id)))
+        self.sst_meta_cache.as_ref().and_then(|sst_meta_cache| {
+            let value = sst_meta_cache.get(&SstMetaKey(region_id, file_id));
+            update_hit_miss(value, SST_META_TYPE)
+        })
     }
 
     /// Puts [ParquetMetaData] into the cache.
@@ -112,7 +129,11 @@ impl CacheManager {
         metadata: Arc<ParquetMetaData>,
     ) {
         if let Some(cache) = &self.sst_meta_cache {
-            cache.insert(SstMetaKey(region_id, file_id), metadata);
+            let key = SstMetaKey(region_id, file_id);
+            CACHE_BYTES
+                .with_label_values(&[SST_META_TYPE])
+                .add(meta_cache_weight(&key, &metadata).into());
+            cache.insert(key, metadata);
         }
     }
 
@@ -125,31 +146,63 @@ impl CacheManager {
 
     /// Gets a vector with repeated value for specific `key`.
     pub fn get_repeated_vector(&self, key: &Value) -> Option<VectorRef> {
-        self.vector_cache
-            .as_ref()
-            .and_then(|vector_cache| vector_cache.get(key))
+        self.vector_cache.as_ref().and_then(|vector_cache| {
+            let value = vector_cache.get(key);
+            update_hit_miss(value, VECTOR_TYPE)
+        })
     }
 
     /// Puts a vector with repeated value into the cache.
     pub fn put_repeated_vector(&self, key: Value, vector: VectorRef) {
         if let Some(cache) = &self.vector_cache {
+            CACHE_BYTES
+                .with_label_values(&[VECTOR_TYPE])
+                .add(vector_cache_weight(&key, &vector).into());
             cache.insert(key, vector);
         }
     }
 
     /// Gets pages for the row group.
     pub fn get_pages(&self, page_key: &PageKey) -> Option<Arc<PageValue>> {
-        self.page_cache
-            .as_ref()
-            .and_then(|page_cache| page_cache.get(page_key))
+        self.page_cache.as_ref().and_then(|page_cache| {
+            let value = page_cache.get(page_key);
+            update_hit_miss(value, PAGE_TYPE)
+        })
     }
 
     /// Puts pages of the row group into the cache.
     pub fn put_pages(&self, page_key: PageKey, pages: Arc<PageValue>) {
         if let Some(cache) = &self.page_cache {
+            CACHE_BYTES
+                .with_label_values(&[PAGE_TYPE])
+                .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
         }
     }
+}
+
+fn meta_cache_weight(k: &SstMetaKey, v: &Arc<ParquetMetaData>) -> u32 {
+    // We ignore the size of `Arc`.
+    (k.estimated_size() + parquet_meta_size(v)) as u32
+}
+
+fn vector_cache_weight(_k: &Value, v: &VectorRef) -> u32 {
+    // We ignore the heap size of `Value`.
+    (mem::size_of::<Value>() + v.memory_size()) as u32
+}
+
+fn page_cache_weight(k: &PageKey, v: &Arc<PageValue>) -> u32 {
+    (k.estimated_size() + v.estimated_size()) as u32
+}
+
+/// Updates cache hit/miss metrics.
+fn update_hit_miss<T>(value: Option<T>, cache_type: &str) -> Option<T> {
+    if value.is_some() {
+        CACHE_HIT.with_label_values(&[cache_type]).inc();
+    } else {
+        CACHE_MISS.with_label_values(&[cache_type]).inc();
+    }
+    value
 }
 
 /// Cache key (region id, file id) for SST meta.

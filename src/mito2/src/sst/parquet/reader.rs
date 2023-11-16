@@ -344,7 +344,7 @@ pub struct ParquetReader {
     read_format: ReadFormat,
     /// Builder to build row group readers.
     ///
-    /// The builder contains the file handle so don't drop the builder while using
+    /// The builder contains the file handle, so don't drop the builder while using
     /// the [ParquetReader].
     reader_builder: RowGroupReaderBuilder,
     /// Reader of current row group.
