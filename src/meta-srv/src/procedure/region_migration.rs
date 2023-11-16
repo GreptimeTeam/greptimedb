@@ -21,7 +21,6 @@ pub(crate) mod test_util;
 
 use std::any::Any;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex, MutexGuard};
 
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
@@ -71,17 +70,17 @@ pub struct VolatileContext {}
 
 /// Used to generate new [Context].
 pub trait ContextFactory {
-    fn new_context(self, persistent_ctx: Arc<Mutex<PersistentContext>>) -> Context;
+    fn new_context(self, persistent_ctx: PersistentContext) -> Context;
 }
 
 /// Default implementation.
 pub struct ContextFactoryImpl {
-    volatile_ctx: Mutex<VolatileContext>,
+    volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl ContextFactory for ContextFactoryImpl {
-    fn new_context(self, persistent_ctx: Arc<Mutex<PersistentContext>>) -> Context {
+    fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
             persistent_ctx,
             volatile_ctx: self.volatile_ctx,
@@ -90,10 +89,12 @@ impl ContextFactory for ContextFactoryImpl {
     }
 }
 
+// TODO(weny): remove it.
+#[allow(dead_code)]
 /// The context of procedure execution.
 pub struct Context {
-    persistent_ctx: Arc<Mutex<PersistentContext>>,
-    volatile_ctx: Mutex<VolatileContext>,
+    persistent_ctx: PersistentContext,
+    volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
 }
 
@@ -102,23 +103,13 @@ impl Context {
     pub fn server_addr(&self) -> &str {
         todo!()
     }
-
-    /// Returns the [MutexGuard] of [PersistentContext].
-    pub fn persistent_ctx_guard(&self) -> MutexGuard<'_, PersistentContext> {
-        self.persistent_ctx.lock().unwrap()
-    }
-
-    /// Returns the [MutexGuard] of [VolatileContext].
-    pub fn volatile_ctx_guard(&self) -> MutexGuard<'_, VolatileContext> {
-        self.volatile_ctx.lock().unwrap()
-    }
 }
 
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
 trait State: Sync + Send + Debug {
     /// Yields the next state.
-    async fn next(&mut self, ctx: &Context) -> Result<Box<dyn State>>;
+    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>>;
 
     /// Indicates the procedure execution status of the `State`.
     fn status(&self) -> Status {
@@ -131,13 +122,20 @@ trait State: Sync + Send + Debug {
 
 /// Persistent data of [RegionMigrationProcedure].
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RegionMigrationData {
-    persistent_ctx: Arc<Mutex<PersistentContext>>,
+pub struct RegionMigrationDataOwned {
+    persistent_ctx: PersistentContext,
     state: Box<dyn State>,
 }
 
+/// Persistent data of [RegionMigrationProcedure].
+#[derive(Debug, Serialize)]
+pub struct RegionMigrationData<'a> {
+    persistent_ctx: &'a PersistentContext,
+    state: &'a dyn State,
+}
+
 pub struct RegionMigrationProcedure {
-    data: RegionMigrationData,
+    state: Box<dyn State>,
     context: Context,
 }
 
@@ -159,22 +157,21 @@ impl RegionMigrationProcedure {
         persistent_context: PersistentContext,
         context_factory: impl ContextFactory,
     ) -> Self {
-        let shared_persistent_context = Arc::new(Mutex::new(persistent_context));
         Self {
-            data: RegionMigrationData {
-                persistent_ctx: shared_persistent_context.clone(),
-                state,
-            },
-            context: context_factory.new_context(shared_persistent_context),
+            state,
+            context: context_factory.new_context(persistent_context),
         }
     }
 
     fn from_json(json: &str, context_factory: impl ContextFactory) -> ProcedureResult<Self> {
-        let data: RegionMigrationData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let RegionMigrationDataOwned {
+            persistent_ctx,
+            state,
+        } = serde_json::from_str(json).context(FromJsonSnafu)?;
 
-        let context = context_factory.new_context(data.persistent_ctx.clone());
+        let context = context_factory.new_context(persistent_ctx);
 
-        Ok(Self { data, context })
+        Ok(Self { state, context })
     }
 }
 
@@ -185,10 +182,9 @@ impl Procedure for RegionMigrationProcedure {
     }
 
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
-        let data = &mut self.data;
-        let state = &mut data.state;
+        let state = &mut self.state;
 
-        *state = state.next(&self.context).await.map_err(|e| {
+        *state = state.next(&mut self.context).await.map_err(|e| {
             if matches!(e, Error::RetryLater { .. }) {
                 ProcedureError::retry_later(e)
             } else {
@@ -199,11 +195,15 @@ impl Procedure for RegionMigrationProcedure {
     }
 
     fn dump(&self) -> ProcedureResult<String> {
-        serde_json::to_string(&self.data).context(ToJsonSnafu)
+        let data = RegionMigrationData {
+            state: self.state.as_ref(),
+            persistent_ctx: &self.context.persistent_ctx,
+        };
+        serde_json::to_string(&data).context(ToJsonSnafu)
     }
 
     fn lock_key(&self) -> LockKey {
-        let key = self.data.persistent_ctx.lock().unwrap().lock_key();
+        let key = self.context.persistent_ctx.lock_key();
         LockKey::single(key)
     }
 }
@@ -262,8 +262,8 @@ mod tests {
     #[async_trait::async_trait]
     #[typetag::serde]
     impl State for MockState {
-        async fn next(&mut self, ctx: &Context) -> Result<Box<dyn State>> {
-            let mut pc = ctx.persistent_ctx_guard();
+        async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+            let pc = &mut ctx.persistent_ctx;
 
             if pc.cluster_id == 2 {
                 Ok(Box::new(RegionMigrationEnd))
@@ -311,7 +311,7 @@ mod tests {
         for _ in 1..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
         }
-        assert_eq!(procedure.context.persistent_ctx_guard().cluster_id, 2);
+        assert_eq!(procedure.context.persistent_ctx.cluster_id, 2);
         assert_matches!(status.unwrap(), Status::Done);
     }
 }

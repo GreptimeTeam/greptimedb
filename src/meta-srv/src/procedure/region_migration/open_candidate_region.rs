@@ -25,7 +25,7 @@ pub struct OpenCandidateRegion;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for OpenCandidateRegion {
-    async fn next(&mut self, _ctx: &Context) -> Result<Box<dyn State>> {
+    async fn next(&mut self, _ctx: &mut Context) -> Result<Box<dyn State>> {
         todo!()
     }
 

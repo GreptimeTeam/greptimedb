@@ -39,17 +39,15 @@ impl State for RegionMigrationStart {
     /// If the candidate region has been opened on `to_peer`, go to the DowngradeLeader state.
     ///
     /// Otherwise go to the OpenCandidateRegion state.
-    async fn next(&mut self, ctx: &Context) -> Result<Box<dyn State>> {
-        let (region_id, to_peer) = {
-            let pc = ctx.persistent_ctx_guard();
-            (pc.region_id, pc.to_peer.clone())
-        };
+    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+        let region_id = ctx.persistent_ctx.region_id;
+        let to_peer = &ctx.persistent_ctx.to_peer;
 
-        let region_route = self.retrieve_regions_route(ctx, region_id).await?;
+        let region_route = self.retrieve_region_route(ctx, region_id).await?;
 
-        if self.check_leader_region_on_peer(&region_route, &to_peer)? {
+        if self.check_leader_region_on_peer(&region_route, to_peer)? {
             Ok(Box::new(RegionMigrationEnd))
-        } else if self.check_candidate_region_on_peer(&region_route, &to_peer) {
+        } else if self.check_candidate_region_on_peer(&region_route, to_peer) {
             Ok(Box::new(DowngradeLeaderRegion))
         } else {
             Ok(Box::new(OpenCandidateRegion))
@@ -70,7 +68,7 @@ impl RegionMigrationStart {
     ///
     /// Retry:
     /// - Failed to retrieve the metadata of table.
-    async fn retrieve_regions_route(
+    async fn retrieve_region_route(
         &self,
         ctx: &Context,
         region_id: RegionId,
@@ -142,7 +140,6 @@ impl RegionMigrationStart {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-    use std::sync::{Arc, Mutex};
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -168,12 +165,10 @@ mod tests {
         let state = RegionMigrationStart;
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
-        let ctx = env
-            .context_factory()
-            .new_context(Arc::new(Mutex::new(persistent_context)));
+        let ctx = env.context_factory().new_context(persistent_context);
 
         let err = state
-            .retrieve_regions_route(&ctx, RegionId::new(1024, 1))
+            .retrieve_region_route(&ctx, RegionId::new(1024, 1))
             .await
             .unwrap_err();
 
@@ -189,9 +184,7 @@ mod tests {
         let from_peer = persistent_context.from_peer.clone();
 
         let env = TestingEnv::new();
-        let ctx = env
-            .context_factory()
-            .new_context(Arc::new(Mutex::new(persistent_context)));
+        let ctx = env.context_factory().new_context(persistent_context);
 
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_route = RegionRoute {
@@ -206,7 +199,7 @@ mod tests {
             .unwrap();
 
         let err = state
-            .retrieve_regions_route(&ctx, RegionId::new(1024, 3))
+            .retrieve_region_route(&ctx, RegionId::new(1024, 3))
             .await
             .unwrap_err();
 
@@ -224,9 +217,7 @@ mod tests {
         let region_id = persistent_context.region_id;
 
         let env = TestingEnv::new();
-        let ctx = env
-            .context_factory()
-            .new_context(Arc::new(Mutex::new(persistent_context)));
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
@@ -241,7 +232,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&ctx).await.unwrap();
+        let next = state.next(&mut ctx).await.unwrap();
 
         let _ = next
             .as_any()
@@ -260,9 +251,7 @@ mod tests {
         let region_id = persistent_context.region_id;
 
         let env = TestingEnv::new();
-        let ctx = env
-            .context_factory()
-            .new_context(Arc::new(Mutex::new(persistent_context)));
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
@@ -277,7 +266,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&ctx).await.unwrap();
+        let next = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
     }
@@ -290,9 +279,7 @@ mod tests {
         let persistent_context = new_persistent_context();
         let region_id = persistent_context.region_id;
         let env = TestingEnv::new();
-        let ctx = env
-            .context_factory()
-            .new_context(Arc::new(Mutex::new(persistent_context)));
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
@@ -306,7 +293,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&ctx).await.unwrap();
+        let next = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
     }
