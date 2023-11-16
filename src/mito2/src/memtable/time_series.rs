@@ -410,7 +410,6 @@ impl Iterator for Iter {
             self.metrics.total_series += 1;
 
             let mut series = series.write().unwrap();
-            let start = Instant::now();
             if !self.predicate.is_empty()
                 && !prune_primary_key(
                     &self.codec,
