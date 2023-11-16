@@ -818,7 +818,7 @@ impl MetricEngineInner {
         Ok(())
     }
 
-    /// Perform metric engine specific logic to incomming rows.
+    /// Perform metric engine specific logic to incoming rows.
     /// - Change the semantic type of tag columns to field
     /// - Add table_id column
     /// - Generate tsid
