@@ -252,11 +252,9 @@ impl<'a> Iterator for Decimal128Iter<'a> {
     type Item = Option<Decimal128>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(
-            self.iter
-                .next()
-                .and_then(|v| v.map(|v| Decimal128::new(v, self.precision, self.scale))),
-        )
+        self.iter
+            .next()
+            .map(|item| item.map(|v| Decimal128::new(v, self.precision, self.scale)))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -518,4 +516,22 @@ pub mod tests {
         // because 100 is out of Decimal(3, 1) range, so it will be null
         assert!(array.is_null(4));
     }
+}
+#[test]
+fn test_decimal28_vector_iter_data() {
+    let vector = Decimal128Vector::from_values(vec![1, 2, 3, 4])
+        .with_precision_and_scale(3, 1)
+        .unwrap();
+    let mut iter = vector.iter_data();
+    assert_eq!(iter.next(), Some(Some(Decimal128::new(1, 3, 1))));
+    assert_eq!(iter.next(), Some(Some(Decimal128::new(2, 3, 1))));
+    assert_eq!(iter.next(), Some(Some(Decimal128::new(3, 3, 1))));
+    assert_eq!(iter.next(), Some(Some(Decimal128::new(4, 3, 1))));
+    assert_eq!(iter.next(), None);
+
+    let values = vector
+        .iter_data()
+        .filter_map(|v| v.map(|x| x.val() * 2))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![2, 4, 6, 8]);
 }
