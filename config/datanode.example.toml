@@ -43,6 +43,8 @@ sync_write = false
 [storage]
 # The working home directory.
 data_home = "/tmp/greptimedb/"
+# Storage type.
+type = "File"
 # TTL for all tables. Disabled by default.
 # global_ttl = "7d"
 
