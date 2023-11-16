@@ -14,29 +14,24 @@
 
 use std::any::Any;
 
-use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::procedure::region_migration::{Context, PersistentContext, State, VolatileContext};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RegionMigrationEnd;
+pub struct DowngradeLeaderRegion;
 
 #[async_trait::async_trait]
 #[typetag::serde]
-impl State for RegionMigrationEnd {
+impl State for DowngradeLeaderRegion {
     async fn next(
         &mut self,
-        _: &Context,
-        _: &mut PersistentContext,
-        _: &mut VolatileContext,
+        _ctx: &Context,
+        _pc: &mut PersistentContext,
+        _vc: &mut VolatileContext,
     ) -> Result<Box<dyn State>> {
-        Ok(Box::new(RegionMigrationEnd))
-    }
-
-    fn status(&self) -> Status {
-        Status::Done
+        todo!()
     }
 
     fn as_any(&self) -> &dyn Any {

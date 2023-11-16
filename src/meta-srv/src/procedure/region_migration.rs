@@ -12,12 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod downgrade_leader_region;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
+pub(crate) mod open_candidate_region;
+#[cfg(test)]
+pub(crate) mod test_util;
 
+use std::any::Any;
 use std::fmt::Debug;
 
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::peer::Peer;
+use common_meta::ClusterId;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
@@ -37,10 +44,12 @@ use crate::procedure::utils::region_lock_key;
 /// **Notes: Stores with too large data in the context might incur replication overhead.**
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentContext {
+    /// The Id of the cluster.
+    cluster_id: ClusterId,
     /// The [Peer] of migration source.
     from_peer: Peer,
     /// The [Peer] of migration destination.
-    to_peer: Option<Peer>,
+    to_peer: Peer,
     /// The [RegionId] of migration region.
     region_id: RegionId,
 }
@@ -60,8 +69,16 @@ impl PersistentContext {
 pub struct VolatileContext {}
 
 /// The context of procedure execution.
-#[derive(Debug, Clone)]
-pub struct Context {}
+pub struct Context {
+    table_metadata_manager: TableMetadataManagerRef,
+}
+
+impl Context {
+    /// Returns address of meta server.
+    pub fn server_addr(&self) -> &str {
+        todo!()
+    }
+}
 
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
@@ -78,6 +95,9 @@ trait State: Sync + Send + Debug {
     fn status(&self) -> Status {
         Status::Executing { persist: true }
     }
+
+    /// Returns as [Any](std::any::Any).
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// Persistent data of [RegionMigrationProcedure].
@@ -87,7 +107,6 @@ pub struct RegionMigrationData {
     state: Box<dyn State>,
 }
 
-#[derive(Debug)]
 pub struct RegionMigrationProcedure {
     data: RegionMigrationData,
     context: Context,
@@ -167,39 +186,27 @@ impl Procedure for RegionMigrationProcedure {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
-    use std::sync::Arc;
-
-    use common_procedure::ProcedureId;
-    use common_procedure_test::MockContextProvider;
 
     use super::migration_end::RegionMigrationEnd;
     use super::*;
+    use crate::procedure::region_migration::test_util::TestingEnv;
 
-    fn persistent_context_factory() -> PersistentContext {
+    fn new_persistent_context() -> PersistentContext {
         PersistentContext {
             from_peer: Peer::empty(1),
-            to_peer: None,
+            to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
-        }
-    }
-
-    fn context_factory() -> Context {
-        Context {}
-    }
-
-    fn procedure_context_factory() -> ProcedureContext {
-        ProcedureContext {
-            procedure_id: ProcedureId::random(),
-            provider: Arc::new(MockContextProvider::default()),
+            cluster_id: 0,
         }
     }
 
     #[test]
     fn test_lock_key() {
-        let persistent_context = persistent_context_factory();
+        let persistent_context = new_persistent_context();
         let expected_key = persistent_context.lock_key();
 
-        let context = context_factory();
+        let env = TestingEnv::new();
+        let context = env.context();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context);
 
@@ -211,15 +218,16 @@ mod tests {
 
     #[test]
     fn test_data_serialization() {
-        let persistent_context = persistent_context_factory();
+        let persistent_context = new_persistent_context();
 
-        let context = context_factory();
+        let env = TestingEnv::new();
+        let context = env.context();
 
         let procedure = RegionMigrationProcedure::new(persistent_context, context);
 
         let serialized = procedure.dump().unwrap();
 
-        let expected = r#"{"context":{"from_peer":{"id":1,"addr":""},"to_peer":null,"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
+        let expected = r#"{"context":{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
     }
 
@@ -245,33 +253,39 @@ mod tests {
                 }))
             }
         }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
 
     #[tokio::test]
     async fn test_execution_after_deserialized() {
-        fn new_mock_procedure() -> RegionMigrationProcedure {
-            let persistent_context = persistent_context_factory();
-            let context = context_factory();
+        let env = TestingEnv::new();
+
+        fn new_mock_procedure(env: &TestingEnv) -> RegionMigrationProcedure {
+            let persistent_context = new_persistent_context();
+            let context = env.context();
             let state = Box::<MockState>::default();
             RegionMigrationProcedure::new_inner(state, persistent_context, context)
         }
 
-        let ctx = procedure_context_factory();
-        let mut procedure = new_mock_procedure();
+        let ctx = TestingEnv::procedure_context();
+        let mut procedure = new_mock_procedure(&env);
         let mut status = None;
         for _ in 0..3 {
             status = Some(procedure.execute(&ctx).await.unwrap());
         }
         assert_matches!(status.unwrap(), Status::Done);
 
-        let ctx = procedure_context_factory();
-        let mut procedure = new_mock_procedure();
+        let ctx = TestingEnv::procedure_context();
+        let mut procedure = new_mock_procedure(&env);
 
         status = Some(procedure.execute(&ctx).await.unwrap());
 
         let serialized = procedure.dump().unwrap();
 
-        let context = context_factory();
+        let context = env.context();
         let mut procedure = RegionMigrationProcedure::from_json(&serialized, context).unwrap();
 
         for _ in 1..3 {
