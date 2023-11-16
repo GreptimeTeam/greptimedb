@@ -85,7 +85,7 @@ impl GreptimeRequestHandler {
                     logging::error!(e; "Failed to handle request");
                 } else {
                     // Currently, we still print a debug log.
-                    logging::debug!("Failed to handle request, err: {}", e);
+                    logging::debug!("Failed to handle request, err: {:?}", e);
                 }
                 e
             })
