@@ -200,6 +200,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     }
                     Value::Time(v) => row_writer
                         .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
+                    Value::Decimal128(v) => row_writer.write_col(v.to_string())?,
                 }
             }
             row_writer.end_row().await?;
@@ -246,6 +247,7 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::DateTime(_) => Ok(ColumnType::MYSQL_TYPE_DATETIME),
         ConcreteDataType::Interval(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Duration(_) => Ok(ColumnType::MYSQL_TYPE_TIME),
+        ConcreteDataType::Decimal128(_) => Ok(ColumnType::MYSQL_TYPE_DECIMAL),
         _ => error::InternalSnafu {
             err_msg: format!("not implemented for column datatype {:?}", data_type),
         }

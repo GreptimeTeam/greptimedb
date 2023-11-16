@@ -30,6 +30,7 @@ mod boolean;
 mod constant;
 mod date;
 mod datetime;
+mod decimal;
 mod duration;
 mod eq;
 mod helper;
@@ -48,6 +49,7 @@ pub use boolean::{BooleanVector, BooleanVectorBuilder};
 pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
 pub use datetime::{DateTimeVector, DateTimeVectorBuilder};
+pub use decimal::{Decimal128Vector, Decimal128VectorBuilder};
 pub use duration::{
     DurationMicrosecondVector, DurationMicrosecondVectorBuilder, DurationMillisecondVector,
     DurationMillisecondVectorBuilder, DurationNanosecondVector, DurationNanosecondVectorBuilder,

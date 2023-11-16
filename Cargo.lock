@@ -1662,6 +1662,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "common-decimal"
+version = "0.4.2"
+dependencies = [
+ "arrow",
+ "bigdecimal 0.4.2",
+ "common-error",
+ "common-macro",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "snafu",
+]
+
+[[package]]
 name = "common-error"
 version = "0.4.2"
 dependencies = [
@@ -2707,6 +2721,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "common-base",
+ "common-decimal",
  "common-error",
  "common-macro",
  "common-telemetry",
@@ -2717,6 +2732,7 @@ dependencies = [
  "num-traits",
  "ordered-float 3.9.2",
  "paste",
+ "rust_decimal",
  "serde",
  "serde_json",
  "snafu",
@@ -2729,20 +2745,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
-]
-
-[[package]]
-name = "decimal"
-version = "0.4.2"
-dependencies = [
- "arrow",
- "bigdecimal 0.4.2",
- "common-error",
- "common-macro",
- "rust_decimal",
- "serde",
- "serde_json",
- "snafu",
 ]
 
 [[package]]
@@ -4843,6 +4845,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-datasource",
+ "common-decimal",
  "common-error",
  "common-macro",
  "common-procedure",
@@ -8559,6 +8562,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-datasource",
+ "common-decimal",
  "common-error",
  "common-macro",
  "common-query",

@@ -14,3 +14,5 @@
 
 pub mod decimal128;
 pub mod error;
+
+pub use decimal128::Decimal128;

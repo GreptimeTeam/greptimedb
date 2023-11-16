@@ -16,6 +16,21 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{self, Error, Result};
 use crate::types::TimeType;
 use crate::value::Value;
+use crate::vectors::Helper;
+
+/// Used to cast the value to dest ConcreteDataType temporarily.
+/// To keep the same behavior as arrow-rs.
+pub fn cast(src_value: Value, dest_type: &ConcreteDataType) -> Result<Value> {
+    if src_value == Value::Null {
+        return Ok(Value::Null);
+    }
+    let src_type = src_value.data_type();
+    let scalar_value = src_value.try_to_scalar_value(&src_type)?;
+    let new_value = Helper::try_from_scalar_value(scalar_value, 1)?
+        .cast(dest_type)?
+        .get(0);
+    Ok(new_value)
+}
 
 /// Cast options for cast functions.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]

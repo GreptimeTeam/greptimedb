@@ -25,7 +25,10 @@ use arrow_schema::IntervalUnit;
 use datafusion_common::ScalarValue;
 use snafu::{OptionExt, ResultExt};
 
-use super::{IntervalDayTimeVector, IntervalYearMonthVector};
+use super::{
+    Decimal128Vector, DurationMicrosecondVector, DurationMillisecondVector,
+    DurationNanosecondVector, DurationSecondVector, IntervalDayTimeVector, IntervalYearMonthVector,
+};
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result};
 use crate::scalars::{Scalar, ScalarVectorBuilder};
@@ -218,12 +221,23 @@ impl Helper {
             ScalarValue::IntervalMonthDayNano(v) => {
                 ConstantVector::new(Arc::new(IntervalMonthDayNanoVector::from(vec![v])), length)
             }
-            ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Decimal256(_, _, _)
-            | ScalarValue::DurationSecond(_)
-            | ScalarValue::DurationMillisecond(_)
-            | ScalarValue::DurationMicrosecond(_)
-            | ScalarValue::DurationNanosecond(_)
+            ScalarValue::DurationSecond(v) => {
+                ConstantVector::new(Arc::new(DurationSecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationMillisecond(v) => {
+                ConstantVector::new(Arc::new(DurationMillisecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationMicrosecond(v) => {
+                ConstantVector::new(Arc::new(DurationMicrosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::DurationNanosecond(v) => {
+                ConstantVector::new(Arc::new(DurationNanosecondVector::from(vec![v])), length)
+            }
+            ScalarValue::Decimal128(v, p, s) => {
+                let vector = Decimal128Vector::from(vec![v]).with_precision_and_scale(p, s)?;
+                ConstantVector::new(Arc::new(vector), length)
+            }
+            ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::ConversionSnafu {
@@ -318,14 +332,29 @@ impl Helper {
                     IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
                 ),
             },
+            ArrowDataType::Duration(unit) => match unit {
+                TimeUnit::Second => {
+                    Arc::new(DurationSecondVector::try_from_arrow_duration_array(array)?)
+                }
+                TimeUnit::Millisecond => Arc::new(
+                    DurationMillisecondVector::try_from_arrow_duration_array(array)?,
+                ),
+                TimeUnit::Microsecond => Arc::new(
+                    DurationMicrosecondVector::try_from_arrow_duration_array(array)?,
+                ),
+                TimeUnit::Nanosecond => Arc::new(
+                    DurationNanosecondVector::try_from_arrow_duration_array(array)?,
+                ),
+            },
+            ArrowDataType::Decimal128(_, _) => {
+                Arc::new(Decimal128Vector::try_from_arrow_array(array)?)
+            }
             ArrowDataType::Float16
-            | ArrowDataType::Duration(_)
             | ArrowDataType::LargeList(_)
             | ArrowDataType::FixedSizeList(_, _)
             | ArrowDataType::Struct(_)
             | ArrowDataType::Union(_, _)
             | ArrowDataType::Dictionary(_, _)
-            | ArrowDataType::Decimal128(_, _)
             | ArrowDataType::Decimal256(_, _)
             | ArrowDataType::Map(_, _)
             | ArrowDataType::RunEndEncoded(_, _) => {
@@ -375,8 +404,10 @@ mod tests {
     };
     use arrow::datatypes::{Field, Int32Type};
     use arrow_array::DictionaryArray;
+    use common_decimal::Decimal128;
     use common_time::time::Time;
-    use common_time::{Date, DateTime, Interval};
+    use common_time::timestamp::TimeUnit;
+    use common_time::{Date, DateTime, Duration, Interval};
 
     use super::*;
     use crate::value::Value;
@@ -425,6 +456,37 @@ mod tests {
         assert_eq!(3, vector.len());
         for i in 0..vector.len() {
             assert_eq!(Value::DateTime(DateTime::new(42)), vector.get(i));
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_duration_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::DurationSecond(Some(42)), 3).unwrap();
+        assert_eq!(
+            ConcreteDataType::duration_second_datatype(),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(
+                Value::Duration(Duration::new(42, TimeUnit::Second)),
+                vector.get(i)
+            );
+        }
+    }
+
+    #[test]
+    fn test_try_from_scalar_decimal128_value() {
+        let vector =
+            Helper::try_from_scalar_value(ScalarValue::Decimal128(Some(42), 3, 1), 3).unwrap();
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(3, 1),
+            vector.data_type()
+        );
+        assert_eq!(3, vector.len());
+        for i in 0..vector.len() {
+            assert_eq!(Value::Decimal128(Decimal128::new(42, 3, 1)), vector.get(i));
         }
     }
 

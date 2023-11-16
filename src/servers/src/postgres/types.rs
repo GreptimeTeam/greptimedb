@@ -103,6 +103,7 @@ pub(super) fn encode_value(value: &Value, builder: &mut DataRowEncoder) -> PgWir
             }
         }
         Value::Interval(v) => builder.encode_field(&PgInterval::from(*v)),
+        Value::Decimal128(v) => builder.encode_field(&v.to_string()),
         Value::List(_) | Value::Duration(_) => {
             Err(PgWireError::ApiError(Box::new(Error::Internal {
                 err_msg: format!(
@@ -131,6 +132,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
         &ConcreteDataType::Timestamp(_) => Ok(Type::TIMESTAMP),
         &ConcreteDataType::Time(_) => Ok(Type::TIME),
         &ConcreteDataType::Interval(_) => Ok(Type::INTERVAL),
+        &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC),
         &ConcreteDataType::Duration(_)
         | &ConcreteDataType::List(_)
         | &ConcreteDataType::Dictionary(_) => error::InternalSnafu {
