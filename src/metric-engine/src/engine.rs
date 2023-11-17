@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod alter;
+mod create;
+mod put;
+mod state;
+
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
@@ -41,6 +46,7 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
 use tokio::sync::RwLock;
 
+use self::state::MetricEngineState;
 use crate::consts::{
     DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
     LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX,
@@ -219,64 +225,6 @@ impl MetricEngine {
     }
 }
 
-/// Internal states of metric engine
-#[derive(Default)]
-struct MetricEngineState {
-    /// Mapping from physical region id to its logical region ids
-    /// `logical_regions` records a reverse mapping from logical region id to
-    /// physical region id
-    physical_regions: HashMap<RegionId, HashSet<RegionId>>,
-    /// Mapping from logical region id to physical region id.
-    logical_regions: HashMap<RegionId, RegionId>,
-    /// Cache for the columns of physical regions.
-    /// The region id in key is the data region id.
-    physical_columns: HashMap<RegionId, HashSet<String>>,
-}
-
-impl MetricEngineState {
-    pub fn add_physical_region(
-        &mut self,
-        physical_region_id: RegionId,
-        physical_columns: HashSet<String>,
-    ) {
-        let physical_region_id = to_data_region_id(physical_region_id);
-        self.physical_regions
-            .insert(physical_region_id, HashSet::new());
-        self.physical_columns
-            .insert(physical_region_id, physical_columns);
-    }
-
-    /// # Panic
-    /// if the physical region does not exist
-    pub fn add_physical_columns(
-        &mut self,
-        physical_region_id: RegionId,
-        physical_columns: impl IntoIterator<Item = String>,
-    ) {
-        let physical_region_id = to_data_region_id(physical_region_id);
-        let columns = self.physical_columns.get_mut(&physical_region_id).unwrap();
-        for col in physical_columns {
-            columns.insert(col);
-        }
-    }
-
-    /// # Panic
-    /// if the physical region does not exist
-    pub fn add_logical_region(
-        &mut self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) {
-        let physical_region_id = to_data_region_id(physical_region_id);
-        self.physical_regions
-            .get_mut(&physical_region_id)
-            .unwrap()
-            .insert(logical_region_id);
-        self.logical_regions
-            .insert(logical_region_id, physical_region_id);
-    }
-}
-
 struct MetricEngineInner {
     mito: MitoEngine,
     metadata_region: MetadataRegion,
@@ -393,12 +341,14 @@ impl MetricEngineInner {
         // find new columns to add
         let mut new_columns = vec![];
         {
-            let physical_columns = &self.state.read().await.physical_columns;
-            let physical_columns = physical_columns.get(&data_region_id).with_context(|| {
-                PhysicalRegionNotFoundSnafu {
-                    region_id: data_region_id,
-                }
-            })?;
+            let state = &self.state.read().await;
+            let physical_columns =
+                state
+                    .physical_columns()
+                    .get(&data_region_id)
+                    .with_context(|| PhysicalRegionNotFoundSnafu {
+                        region_id: data_region_id,
+                    })?;
             for col in &request.column_metadatas {
                 if !physical_columns.contains(&col.column_schema.name) {
                     new_columns.push(col.clone());
@@ -657,7 +607,7 @@ impl MetricEngineInner {
             .state
             .read()
             .await
-            .physical_regions
+            .physical_regions()
             .contains_key(&region_id);
         if is_altering_logical_region {
             self.alter_physical_region(region_id, request).await
@@ -672,8 +622,8 @@ impl MetricEngineInner {
         request: RegionAlterRequest,
     ) -> Result<()> {
         let physical_region_id = {
-            let logical_regions = &self.state.read().await.logical_regions;
-            *logical_regions.get(&region_id).with_context(|| {
+            let state = &self.state.read().await;
+            *state.logical_regions().get(&region_id).with_context(|| {
                 error!("Trying to alter an nonexistent region {region_id}");
                 LogicalRegionNotFoundSnafu { region_id }
             })?
@@ -749,7 +699,7 @@ impl MetricEngineInner {
             .state
             .read()
             .await
-            .physical_regions
+            .physical_regions()
             .contains_key(&region_id);
 
         if is_putting_physical_region {
@@ -773,7 +723,7 @@ impl MetricEngineInner {
             .state
             .read()
             .await
-            .logical_regions
+            .logical_regions()
             .get(&logical_region_id)
             .with_context(|| LogicalRegionNotFoundSnafu {
                 region_id: logical_region_id,
