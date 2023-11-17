@@ -33,7 +33,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use common_query::Output;
 use common_telemetry::tracing;
-use common_telemetry::tracing_context::FutureExt;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -90,6 +89,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn execute_stmt(
         &self,
         stmt: QueryStatement,
@@ -104,52 +104,28 @@ impl StatementExecutor {
     pub async fn execute_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
-                self.plan_exec(QueryStatement::Sql(stmt), query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::plan_exec"))
-                    .await
+                self.plan_exec(QueryStatement::Sql(stmt), query_ctx).await
             }
 
-            Statement::Insert(insert) => {
-                self.insert(insert, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::insert"))
-                    .await
-            }
+            Statement::Insert(insert) => self.insert(insert, query_ctx).await,
 
-            Statement::Tql(tql) => {
-                self.execute_tql(tql, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::execute_tql"))
-                    .await
-            }
+            Statement::Tql(tql) => self.execute_tql(tql, query_ctx).await,
 
-            Statement::DescribeTable(stmt) => {
-                self.describe_table(stmt, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::describe_table"))
-                    .await
-            }
+            Statement::DescribeTable(stmt) => self.describe_table(stmt, query_ctx).await,
 
-            Statement::ShowDatabases(stmt) => {
-                self.show_databases(stmt, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::show_databases"))
-                    .await
-            }
+            Statement::ShowDatabases(stmt) => self.show_databases(stmt, query_ctx).await,
 
-            Statement::ShowTables(stmt) => {
-                self.show_tables(stmt, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::show_tables"))
-                    .await
-            }
+            Statement::ShowTables(stmt) => self.show_tables(stmt, query_ctx).await,
 
             Statement::Copy(sql::statements::copy::Copy::CopyTable(stmt)) => {
                 let req = to_copy_table_request(stmt, query_ctx.clone())?;
                 match req.direction {
                     CopyDirection::Export => self
                         .copy_table_to(req, query_ctx)
-                        .trace(tracing::info_span!("StatementExecutor::copy_table_export"))
                         .await
                         .map(Output::AffectedRows),
                     CopyDirection::Import => self
                         .copy_table_from(req, query_ctx)
-                        .trace(tracing::info_span!("StatementExecutor::copy_table_import"))
                         .await
                         .map(Output::AffectedRows),
                 }
@@ -157,40 +133,25 @@ impl StatementExecutor {
 
             Statement::Copy(sql::statements::copy::Copy::CopyDatabase(arg)) => {
                 self.copy_database(to_copy_database_request(arg, &query_ctx)?)
-                    .trace(tracing::info_span!("StatementExecutor::copy_database"))
                     .await
             }
 
             Statement::CreateTable(stmt) => {
-                let _ = self
-                    .create_table(stmt, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::create_table"))
-                    .await?;
+                let _ = self.create_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
             Statement::CreateExternalTable(stmt) => {
-                let _ = self
-                    .create_external_table(stmt, query_ctx)
-                    .trace(tracing::info_span!(
-                        "StatementExecutor::create_external_table"
-                    ))
-                    .await?;
+                let _ = self.create_external_table(stmt, query_ctx).await?;
                 Ok(Output::AffectedRows(0))
             }
-            Statement::Alter(alter_table) => {
-                self.alter_table(alter_table, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::alter_table"))
-                    .await
-            }
+            Statement::Alter(alter_table) => self.alter_table(alter_table, query_ctx).await,
             Statement::DropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), query_ctx)
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name)
-                    .trace(tracing::info_span!("StatementExecutor::drop_table"))
-                    .await
+                self.drop_table(table_name).await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
@@ -198,9 +159,7 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.truncate_table(table_name)
-                    .trace(tracing::info_span!("StatementExecutor::truncate_table"))
-                    .await
+                self.truncate_table(table_name).await
             }
 
             Statement::CreateDatabase(stmt) => {
@@ -209,7 +168,6 @@ impl StatementExecutor {
                     &format_raw_object_name(&stmt.name),
                     stmt.if_not_exists,
                 )
-                .trace(tracing::info_span!("StatementExecutor::create_database"))
                 .await
             }
 
@@ -228,7 +186,6 @@ impl StatementExecutor {
                 let table_name = TableName::new(catalog, schema, table);
 
                 self.show_create_table(table_name, table_ref, query_ctx)
-                    .trace(tracing::info_span!("StatementExecutor::show_create_table"))
                     .await
             }
         }
@@ -242,11 +199,11 @@ impl StatementExecutor {
         self.query_engine
             .planner()
             .plan(stmt, query_ctx)
-            .trace(tracing::info_span!("StatementExecutor::plan"))
             .await
             .context(PlanStatementSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
         let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.query_engine

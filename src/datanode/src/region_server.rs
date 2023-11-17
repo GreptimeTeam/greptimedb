@@ -28,7 +28,7 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
-use common_telemetry::tracing::info_span;
+use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
@@ -101,6 +101,7 @@ impl RegionServer {
         self.inner.handle_request(region_id, request).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         self.inner.handle_read(request).await
     }

@@ -44,9 +44,8 @@ use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_query::Output;
+use common_telemetry::error;
 use common_telemetry::logging::info;
-use common_telemetry::tracing_context::FutureExt;
-use common_telemetry::{error, tracing};
 use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
@@ -414,7 +413,6 @@ impl Instance {
         let stmt = QueryStatement::Sql(stmt);
         self.statement_executor
             .execute_stmt(stmt, query_ctx)
-            .trace(tracing::info_span!("Instance::query_statement"))
             .await
             .context(TableOperationSnafu)
     }

@@ -23,7 +23,7 @@ use common_datasource::util::find_dir_and_filename;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
 use datafusion_expr::LogicalPlanBuilder;
@@ -84,6 +84,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn copy_table_to(
         &self,
         req: CopyTableRequest,

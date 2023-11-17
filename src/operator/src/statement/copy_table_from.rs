@@ -29,7 +29,7 @@ use common_datasource::object_store::{build_backend, parse_url};
 use common_datasource::util::find_dir_and_filename;
 use common_recordbatch::adapter::ParquetRecordBatchStreamAdapter;
 use common_recordbatch::DfSendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, tracing};
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileStream};
@@ -237,6 +237,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn copy_table_from(
         &self,
         req: CopyTableRequest,

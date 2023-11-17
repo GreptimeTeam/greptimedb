@@ -141,6 +141,7 @@ impl DdlManager {
             })
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_alter_table_task(
         &self,
         cluster_id: u64,
@@ -157,6 +158,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_table_task(
         &self,
         cluster_id: u64,
@@ -173,6 +175,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_drop_table_task(
         &self,
         cluster_id: u64,
@@ -195,6 +198,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_truncate_table_task(
         &self,
         cluster_id: u64,
@@ -262,9 +266,6 @@ async fn handle_truncate_table_task(
             table_info_value,
             table_route,
         )
-        .trace(tracing::info_span!(
-            "DdlManager::submit_truncate_table_task"
-        ))
         .await?;
 
     info!("Table: {table_id} is truncated via procedure_id {id:?}");
@@ -307,7 +308,6 @@ async fn handle_alter_table_task(
 
     let id = ddl_manager
         .submit_alter_table_task(cluster_id, alter_table_task, table_info_value)
-        .trace(tracing::info_span!("DdlManager::submit_alter_table_task"))
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");
@@ -345,7 +345,6 @@ async fn handle_drop_table_task(
             table_info_value,
             table_route_value,
         )
-        .trace(tracing::info_span!("DdlManager::submit_drop_table_task"))
         .await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");
@@ -372,7 +371,6 @@ async fn handle_create_table_task(
 
     let id = ddl_manager
         .submit_create_table_task(cluster_id, create_table_task, region_routes)
-        .trace(tracing::info_span!("DdlManager::submit_create_table_task"))
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");

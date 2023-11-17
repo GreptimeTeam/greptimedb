@@ -14,6 +14,7 @@
 
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::tracing;
 use partition::manager::PartitionInfo;
 use partition::partition::PartitionBound;
 use session::context::QueryContextRef;
@@ -28,6 +29,7 @@ use crate::error::{self, ExecuteStatementSnafu, Result};
 use crate::statement::StatementExecutor;
 
 impl StatementExecutor {
+    #[tracing::instrument(skip_all)]
     pub(super) async fn show_databases(
         &self,
         stmt: ShowDatabases,
@@ -38,6 +40,7 @@ impl StatementExecutor {
             .context(ExecuteStatementSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub(super) async fn show_tables(
         &self,
         stmt: ShowTables,
@@ -48,6 +51,7 @@ impl StatementExecutor {
             .context(ExecuteStatementSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn show_create_table(
         &self,
         table_name: TableName,

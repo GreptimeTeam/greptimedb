@@ -35,7 +35,6 @@ use common_recordbatch::{
     EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
 use common_telemetry::tracing;
-use common_telemetry::tracing_context::FutureExt;
 use datafusion::common::Column;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -79,6 +78,7 @@ impl DatafusionQueryEngine {
         Self { state, plugins }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_query_plan(
         &self,
         plan: LogicalPlan,
@@ -87,12 +87,7 @@ impl DatafusionQueryEngine {
         let mut ctx = QueryEngineContext::new(self.state.session_state(), query_ctx.clone());
 
         // `create_physical_plan` will optimize logical plan internally
-        let physical_plan = self
-            .create_physical_plan(&mut ctx, &plan)
-            .trace(tracing::info_span!(
-                "DatafusionQueryEngine::create_physical_plan"
-            ))
-            .await?;
+        let physical_plan = self.create_physical_plan(&mut ctx, &plan).await?;
         let optimized_physical_plan = self.optimize_physical_plan(&mut ctx, physical_plan)?;
 
         let physical_plan = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
@@ -104,6 +99,7 @@ impl DatafusionQueryEngine {
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_dml_statement(
         &self,
         dml: DmlStatement,
@@ -141,12 +137,10 @@ impl DatafusionQueryEngine {
             let rows = match dml.op {
                 WriteOp::InsertInto => {
                     self.insert(&table_name, column_vectors, query_ctx.clone())
-                        .trace(tracing::info_span!("DatafusionQueryEngine::insert"))
                         .await?
                 }
                 WriteOp::Delete => {
                     self.delete(&table_name, &table, column_vectors, query_ctx.clone())
-                        .trace(tracing::info_span!("DatafusionQueryEngine::delete"))
                         .await?
                 }
                 _ => unreachable!("guarded by the 'ensure!' at the beginning"),
@@ -156,6 +150,7 @@ impl DatafusionQueryEngine {
         Ok(Output::AffectedRows(affected_rows))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn delete<'a>(
         &self,
         table_name: &ResolvedTableReference<'a>,
@@ -198,6 +193,7 @@ impl DatafusionQueryEngine {
             .await
     }
 
+    #[tracing::instrument(skip_all)]
     async fn insert<'a>(
         &self,
         table_name: &ResolvedTableReference<'a>,
@@ -257,19 +253,9 @@ impl QueryEngine for DatafusionQueryEngine {
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output> {
         match plan {
             LogicalPlan::DfPlan(DfLogicalPlan::Dml(dml)) => {
-                self.exec_dml_statement(dml, query_ctx)
-                    .trace(tracing::info_span!(
-                        "DatafusionQueryEngine::exec_dml_statement"
-                    ))
-                    .await
+                self.exec_dml_statement(dml, query_ctx).await
             }
-            _ => {
-                self.exec_query_plan(plan, query_ctx)
-                    .trace(tracing::info_span!(
-                        "DatafusionQueryEngine::exec_query_plan"
-                    ))
-                    .await
-            }
+            _ => self.exec_query_plan(plan, query_ctx).await,
         }
     }
 
@@ -304,8 +290,8 @@ impl QueryEngine for DatafusionQueryEngine {
 }
 
 impl LogicalOptimizer for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
-        let _span = tracing::info_span!("DatafusionQueryEngine::optimize_logical_plan").entered();
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
             LogicalPlan::DfPlan(df_plan) => {
@@ -325,6 +311,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
 
 #[async_trait::async_trait]
 impl PhysicalPlanner for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     async fn create_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
@@ -358,13 +345,12 @@ impl PhysicalPlanner for DatafusionQueryEngine {
 }
 
 impl PhysicalOptimizer for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
         plan: Arc<dyn PhysicalPlan>,
     ) -> Result<Arc<dyn PhysicalPlan>> {
-        let span = tracing::info_span!("DatafusionQueryEngine::optimize_physical_plan");
-        let _enter = span.enter();
         let _timer = metrics::METRIC_OPTIMIZE_PHYSICAL_ELAPSED.start_timer();
 
         let state = ctx.state();
@@ -407,13 +393,12 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 }
 
 impl QueryExecutor for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn execute_stream(
         &self,
         ctx: &QueryEngineContext,
         plan: &Arc<dyn PhysicalPlan>,
     ) -> Result<SendableRecordBatchStream> {
-        let span = tracing::info_span!("DatafusionQueryEngine::execute_stream");
-        let _enter = span.enter();
         let _timer = metrics::METRIC_EXEC_PLAN_ELAPSED.start_timer();
         let task_ctx = ctx.build_task_ctx();
 

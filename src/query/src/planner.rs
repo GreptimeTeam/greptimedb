@@ -18,7 +18,6 @@ use async_trait::async_trait;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use common_telemetry::tracing_context::FutureExt;
 use datafusion::execution::context::SessionState;
 use datafusion_sql::planner::{ParserOptions, SqlToRel};
 use promql::planner::PromPlanner;
@@ -53,6 +52,7 @@ impl DfLogicalPlanner {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn plan_sql(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let df_stmt = (&stmt).try_into().context(SqlSnafu)?;
 
@@ -87,6 +87,7 @@ impl DfLogicalPlanner {
         Ok(LogicalPlan::DfPlan(plan))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
@@ -103,18 +104,11 @@ impl DfLogicalPlanner {
 
 #[async_trait]
 impl LogicalPlanner for DfLogicalPlanner {
+    #[tracing::instrument(skip_all)]
     async fn plan(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
-            QueryStatement::Sql(stmt) => {
-                self.plan_sql(stmt, query_ctx)
-                    .trace(tracing::info_span!("DfLogicalPlanner::plan_sql"))
-                    .await
-            }
-            QueryStatement::Promql(stmt) => {
-                self.plan_pql(stmt, query_ctx)
-                    .trace(tracing::info_span!("DfLogicalPlanner::plan_promql"))
-                    .await
-            }
+            QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
+            QueryStatement::Promql(stmt) => self.plan_pql(stmt, query_ctx).await,
         }
     }
 }

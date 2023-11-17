@@ -156,9 +156,8 @@ impl MergeScanExec {
         })
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn to_stream(&self, context: Arc<TaskContext>) -> Result<SendableRecordBatchStream> {
-        let span = tracing::info_span!("MergeScanExec::merge_scan_regions");
-        let _enter = span.enter();
         let substrait_plan = self.substrait_plan.to_vec();
         let regions = self.regions.clone();
         let region_query_handler = self.region_query_handler.clone();
@@ -167,7 +166,7 @@ impl MergeScanExec {
 
         let dbname = context.task_id().unwrap_or_default();
 
-        let tracing_context = TracingContext::from_span(&span).to_w3c();
+        let tracing_context = TracingContext::from_current_span().to_w3c();
 
         let stream = Box::pin(stream!({
             METRIC_MERGE_SCAN_REGIONS.observe(regions.len() as f64);
