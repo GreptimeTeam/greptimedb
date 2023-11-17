@@ -160,7 +160,7 @@ impl StageParser {
             },
             ParseStage::Payload => BytesToRead {
                 offset: self.payload_offset(),
-                size: self.payload_size as _,
+                size: self.payload_size,
             },
             ParseStage::HeadMagic => BytesToRead {
                 offset: self.head_magic_offset(),
