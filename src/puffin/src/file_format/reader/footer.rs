@@ -276,10 +276,12 @@ impl StageParser {
     }
 
     fn payload_offset(&self) -> u64 {
+        // `validate_payload_size` ensures that this subtraction will not overflow
         self.file_size - MAGIC_SIZE - FLAGS_SIZE - PAYLOAD_SIZE_SIZE - self.payload_size
     }
 
     fn head_magic_offset(&self) -> u64 {
+        // `validate_payload_size` ensures that this subtraction will not overflow
         self.file_size - MAGIC_SIZE * 2 - FLAGS_SIZE - PAYLOAD_SIZE_SIZE - self.payload_size
     }
 }
