@@ -104,6 +104,9 @@ pub const PHYSICAL_TABLE_METADATA_KEY: &str = "physical_metric_table";
 /// And this key will be translated to corresponding physical **REGION** id in metasrv.
 pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
 
+/// Fixed random state for generating tsid
+const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);
+
 #[derive(Clone)]
 pub struct MetricEngine {
     inner: Arc<MetricEngineInner>,
@@ -595,8 +598,8 @@ impl MetricEngineInner {
             });
 
         // add internal columns
-        let [metric_name_col, tsid_col] = Self::internal_column_metadata();
-        data_region_request.column_metadatas.push(metric_name_col);
+        let [table_id_col, tsid_col] = Self::internal_column_metadata();
+        data_region_request.column_metadatas.push(table_id_col);
         data_region_request.column_metadatas.push(tsid_col);
         data_region_request.primary_key =
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
@@ -866,7 +869,7 @@ impl MetricEngineInner {
         });
 
         // fill internal columns
-        let mut random_state = ahash::RandomState::with_seeds(1, 2, 3, 4);
+        let mut random_state = RANDOM_STATE.clone();
         for row in &mut rows.rows {
             Self::fill_internal_columns(&mut random_state, table_id, &tag_col_indices, row);
         }
@@ -892,7 +895,7 @@ impl MetricEngineInner {
         }
         let hash = hasher.finish();
 
-        // fill table name and tsid
+        // fill table id and tsid
         row.values.push(ValueData::U32Value(table_id).into());
         row.values.push(ValueData::U64Value(hash).into());
     }
