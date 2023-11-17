@@ -65,7 +65,7 @@ use crate::metadata_region::MetadataRegion;
 /// And all other things is shared with other logical region that are associated
 /// with the same physical region group.
 ///
-/// For more doucment about physical regions, please refer to [`MetadataRegion`]
+/// For more document about physical regions, please refer to [`MetadataRegion`]
 /// and [`DataRegion`].
 ///
 /// ## Operations
