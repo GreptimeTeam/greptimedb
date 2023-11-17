@@ -4774,6 +4774,7 @@ version = "0.4.3"
 dependencies = [
  "ahash 0.8.6",
  "api",
+ "aquamarine",
  "async-trait",
  "base64 0.21.5",
  "common-error",
