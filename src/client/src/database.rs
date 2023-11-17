@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use api::v1::auth_header::AuthScheme;
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_request::Request;
@@ -31,6 +29,7 @@ use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::RecordBatchStreamAdaptor;
 use common_telemetry::logging;
+use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
 use prost::Message;
 use snafu::{ensure, ResultExt};
@@ -163,7 +162,7 @@ impl Database {
                 authorization: self.ctx.auth_header.clone(),
                 dbname: self.dbname.clone(),
                 // TODO(Taylor-lagrange): add client grpc tracing
-                tracing_context: HashMap::new(),
+                tracing_context: W3cTrace::new(),
             }),
             request: Some(request),
         }

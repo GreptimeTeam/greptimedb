@@ -45,6 +45,8 @@ impl<T: std::future::Future> FutureExt for T {
 #[derive(Debug, Clone)]
 pub struct TracingContext(opentelemetry::Context);
 
+pub type W3cTrace = HashMap<String, String>;
+
 impl Default for TracingContext {
     fn default() -> Self {
         Self::new()
@@ -76,14 +78,14 @@ impl TracingContext {
     }
 
     /// Convert the tracing context to the W3C trace context format.
-    pub fn to_w3c(&self) -> HashMap<String, String> {
+    pub fn to_w3c(&self) -> W3cTrace {
         let mut fields = HashMap::new();
         Propagator::new().inject_context(&self.0, &mut fields);
         fields
     }
 
     /// Create a new tracing context from the W3C trace context format.
-    pub fn from_w3c(fields: &HashMap<String, String>) -> Self {
+    pub fn from_w3c(fields: &W3cTrace) -> Self {
         let context = Propagator::new().extract(fields);
         Self(context)
     }

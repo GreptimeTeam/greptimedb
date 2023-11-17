@@ -252,12 +252,12 @@ impl store_server::Store for MetaSrv {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use api::v1::meta::store_server::Store;
     use api::v1::meta::*;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_telemetry::tracing_context::W3cTrace;
     use tonic::IntoRequest;
 
     use crate::metasrv::builder::MetaSrvBuilder;
@@ -276,7 +276,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = RangeRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.range(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -287,7 +287,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = PutRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -298,7 +298,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchGetRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_get(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -309,7 +309,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchPutRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -320,7 +320,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = BatchDeleteRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.batch_delete(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -331,7 +331,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = CompareAndPutRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.compare_and_put(req.into_request()).await;
 
         let _ = res.unwrap();
@@ -342,7 +342,7 @@ mod tests {
         let meta_srv = new_meta_srv().await;
 
         let mut req = DeleteRangeRequest::default();
-        req.set_header((1, 1), Role::Datanode, HashMap::new());
+        req.set_header((1, 1), Role::Datanode, W3cTrace::new());
         let res = meta_srv.delete_range(req.into_request()).await;
 
         let _ = res.unwrap();
