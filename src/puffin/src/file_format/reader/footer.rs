@@ -21,6 +21,7 @@ use crate::error::{
     BytesToIntegerSnafu, DeserializeJsonSnafu, MagicNotMatchedSnafu, ParseStageNotMatchSnafu,
     ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
 };
+use crate::file_format::reader::file::MAGIC_SIZE;
 use crate::file_format::{Flags, MAGIC};
 use crate::file_metadata::FileMetadata;
 
@@ -36,20 +37,25 @@ use crate::file_metadata::FileMetadata;
 pub struct FooterParser<R> {
     // The underlying IO source
     source: R,
+
+    // The size of the file, used for calculating offsets to read from
+    file_size: u64,
 }
 
+pub const FLAGS_SIZE: u64 = 4;
+pub const PAYLOAD_SIZE_SIZE: u64 = 4;
+pub const MIN_FOOTER_SIZE: u64 = MAGIC_SIZE * 2 + FLAGS_SIZE + PAYLOAD_SIZE_SIZE;
+
 impl<R> FooterParser<R> {
-    pub fn new(source: R) -> Self {
-        Self { source }
+    pub fn new(source: R, file_size: u64) -> Self {
+        Self { source, file_size }
     }
 }
 
 impl<R: io::Read + io::Seek> FooterParser<R> {
     /// Parses the footer from the IO source in a synchronous manner.
     pub fn parse_sync(&mut self) -> Result<FileMetadata> {
-        let file_size = self.source.seek(SeekFrom::End(0)).context(SeekSnafu)?;
-
-        let mut parser = StageParser::new(file_size);
+        let mut parser = StageParser::new(self.file_size);
         while let Some(byte_to_read) = parser.next_to_read() {
             let mut buf = vec![0; byte_to_read.size as usize];
             self.source
@@ -66,13 +72,7 @@ impl<R: io::Read + io::Seek> FooterParser<R> {
 impl<R: AsyncRead + AsyncSeek + Unpin> FooterParser<R> {
     /// Parses the footer from the IO source in a asynchronous manner.
     pub async fn parse_async(&mut self) -> Result<FileMetadata> {
-        let file_size = self
-            .source
-            .seek(SeekFrom::End(0))
-            .await
-            .context(SeekSnafu)?;
-
-        let mut parser = StageParser::new(file_size);
+        let mut parser = StageParser::new(self.file_size);
         while let Some(byte_to_read) = parser.next_to_read() {
             let mut buf = vec![0; byte_to_read.size as usize];
             self.source
@@ -148,15 +148,15 @@ impl StageParser {
         let btr = match self.stage {
             ParseStage::FootMagic => BytesToRead {
                 offset: self.foot_magic_offset(),
-                size: MAGIC.len() as _,
+                size: MAGIC_SIZE,
             },
             ParseStage::Flags => BytesToRead {
                 offset: self.flags_offset(),
-                size: 4,
+                size: FLAGS_SIZE,
             },
             ParseStage::PayloadSize => BytesToRead {
                 offset: self.payload_size_offset(),
-                size: 4,
+                size: PAYLOAD_SIZE_SIZE,
             },
             ParseStage::Payload => BytesToRead {
                 offset: self.payload_offset(),
@@ -164,7 +164,7 @@ impl StageParser {
             },
             ParseStage::HeadMagic => BytesToRead {
                 offset: self.head_magic_offset(),
-                size: MAGIC.len() as _,
+                size: MAGIC_SIZE,
             },
             ParseStage::Done => unreachable!(),
         };
@@ -242,22 +242,22 @@ impl StageParser {
     }
 
     fn foot_magic_offset(&self) -> u64 {
-        self.file_size - 4
+        self.file_size - MAGIC_SIZE
     }
 
     fn flags_offset(&self) -> u64 {
-        self.file_size - 8
+        self.file_size - MAGIC_SIZE - FLAGS_SIZE
     }
 
     fn payload_size_offset(&self) -> u64 {
-        self.file_size - 12
+        self.file_size - MAGIC_SIZE - FLAGS_SIZE - PAYLOAD_SIZE_SIZE
     }
 
     fn payload_offset(&self) -> u64 {
-        self.file_size - 12 - self.payload_size
+        self.file_size - MAGIC_SIZE - FLAGS_SIZE - PAYLOAD_SIZE_SIZE - self.payload_size
     }
 
     fn head_magic_offset(&self) -> u64 {
-        self.file_size - 12 - self.payload_size - 4
+        self.file_size - MAGIC_SIZE * 2 - FLAGS_SIZE - PAYLOAD_SIZE_SIZE - self.payload_size
     }
 }

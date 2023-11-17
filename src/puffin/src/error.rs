@@ -84,6 +84,17 @@ pub enum Error {
 
     #[snafu(display("Unexpected footer payload size: {}", size))]
     UnexpectedFooterPayloadSize { size: i32, location: Location },
+
+    #[snafu(display(
+        "Unexpected puffin file size, min: {}, actual: {}",
+        min_file_size,
+        actual_file_size
+    ))]
+    UnexpectedPuffinFileSize {
+        min_file_size: u64,
+        actual_file_size: u64,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -98,7 +109,8 @@ impl ErrorExt for Error {
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }
-            | UnexpectedFooterPayloadSize { .. } => StatusCode::Unexpected,
+            | UnexpectedFooterPayloadSize { .. }
+            | UnexpectedPuffinFileSize { .. } => StatusCode::Unexpected,
 
             UnsupportedDecompression { .. } => StatusCode::Unsupported,
         }
