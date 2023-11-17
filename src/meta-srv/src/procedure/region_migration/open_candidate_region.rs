@@ -102,18 +102,32 @@ impl OpenCandidateRegion {
     /// Abort(non-retry):
     /// - The Datanode is unreachable(e.g., Candidate pusher is not found).
     /// - Unexpected instruction reply.
+    /// - Another procedure is opening the candidate region.
     ///
     /// Retry:
     /// - Exceeded deadline of open instruction.
     /// - Datanode failed to open the candidate region.
     async fn open_candidate_region(
         &self,
-        ctx: &Context,
+        ctx: &mut Context,
         open_instruction: Instruction,
     ) -> Result<()> {
         let pc = &ctx.persistent_ctx;
+        let vc = &mut ctx.volatile_ctx;
         let region_id = pc.region_id;
         let candidate = &pc.to_peer;
+
+        // Registers the opening region.
+        let guard = ctx
+            .opening_region_keeper
+            .register(candidate.id, region_id)
+            .context(error::RegionOpeningSnafu {
+                peer_id: candidate.id,
+                region_id,
+            })?;
+
+        debug_assert!(vc.opening_region_guard.is_none());
+        vc.opening_region_guard = Some(guard);
 
         let msg = MailboxMessage::json_message(
             &format!("Open candidate region: {}", region_id),
@@ -131,8 +145,6 @@ impl OpenCandidateRegion {
             .mailbox
             .send(&ch, msg, OPEN_CANDIDATE_REGION_TIMEOUT)
             .await?;
-
-        // TODO(weny): Registers the opening region.
 
         match receiver.await? {
             Ok(msg) => {
@@ -264,15 +276,41 @@ mod tests {
         let region_id = persistent_context.region_id;
         let to_peer_id = persistent_context.to_peer.id;
         let env = TestingEnv::new();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
         let err = state
-            .open_candidate_region(&ctx, open_instruction)
+            .open_candidate_region(&mut ctx, open_instruction)
             .await
             .unwrap_err();
 
         assert_matches!(err, Error::PusherNotFound { .. });
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_candidate_region_opening_error() {
+        let state = OpenCandidateRegion;
+        // from_peer: 1
+        // to_peer: 2
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_id;
+        let to_peer_id = persistent_context.to_peer.id;
+
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let opening_region_keeper = env.opening_region_keeper();
+        let _guard = opening_region_keeper
+            .register(to_peer_id, region_id)
+            .unwrap();
+
+        let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
+        let err = state
+            .open_candidate_region(&mut ctx, open_instruction)
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::RegionOpening { .. });
         assert!(!err.is_retryable());
     }
 
@@ -286,7 +324,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
 
         let mut env = TestingEnv::new();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -308,7 +346,7 @@ mod tests {
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
         let err = state
-            .open_candidate_region(&ctx, open_instruction)
+            .open_candidate_region(&mut ctx, open_instruction)
             .await
             .unwrap_err();
 
@@ -326,7 +364,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
 
         let mut env = TestingEnv::new();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -351,7 +389,7 @@ mod tests {
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
         let err = state
-            .open_candidate_region(&ctx, open_instruction)
+            .open_candidate_region(&mut ctx, open_instruction)
             .await
             .unwrap_err();
 
@@ -369,7 +407,7 @@ mod tests {
         let to_peer_id = persistent_context.to_peer.id;
         let mut env = TestingEnv::new();
 
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
@@ -397,7 +435,7 @@ mod tests {
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
         let err = state
-            .open_candidate_region(&ctx, open_instruction)
+            .open_candidate_region(&mut ctx, open_instruction)
             .await
             .unwrap_err();
 
@@ -412,6 +450,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_id;
         let to_peer_id = persistent_context.to_peer.id;
         let mut env = TestingEnv::new();
 
@@ -448,6 +487,11 @@ mod tests {
         });
 
         let next = state.next(&mut ctx).await.unwrap();
+        let vc = ctx.volatile_ctx;
+        assert_eq!(
+            vc.opening_region_guard.unwrap().info(),
+            (to_peer_id, region_id)
+        );
 
         let _ = next
             .as_any()

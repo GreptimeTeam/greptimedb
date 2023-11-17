@@ -25,10 +25,9 @@ use tokio::sync::mpsc::Sender;
 
 use super::ContextFactoryImpl;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
 
-// TODO(weny): remove it.
-#[allow(dead_code)]
 /// The context of mailbox.
 pub struct MailboxContext {
     mailbox: MailboxRef,
@@ -64,6 +63,7 @@ impl MailboxContext {
 pub struct TestingEnv {
     table_metadata_manager: TableMetadataManagerRef,
     mailbox_ctx: MailboxContext,
+    opening_region_keeper: OpeningRegionKeeperRef,
     server_addr: String,
 }
 
@@ -76,9 +76,11 @@ impl TestingEnv {
         let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 1, kv_backend.clone());
 
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
+        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
 
         Self {
             table_metadata_manager,
+            opening_region_keeper,
             mailbox_ctx,
             server_addr: "localhost".to_string(),
         }
@@ -88,6 +90,7 @@ impl TestingEnv {
     pub fn context_factory(&self) -> ContextFactoryImpl {
         ContextFactoryImpl {
             table_metadata_manager: self.table_metadata_manager.clone(),
+            opening_region_keeper: self.opening_region_keeper.clone(),
             volatile_ctx: Default::default(),
             mailbox: self.mailbox_ctx.mailbox().clone(),
             server_addr: self.server_addr.to_string(),
@@ -99,8 +102,14 @@ impl TestingEnv {
         &mut self.mailbox_ctx
     }
 
+    /// Returns the [TableMetadataManagerRef]
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
+    }
+
+    /// Returns the [OpeningRegionKeeperRef]
+    pub fn opening_region_keeper(&self) -> &OpeningRegionKeeperRef {
+        &self.opening_region_keeper
     }
 
     /// Returns a [ProcedureContext] with a random [ProcedureId] and a [MockContextProvider].

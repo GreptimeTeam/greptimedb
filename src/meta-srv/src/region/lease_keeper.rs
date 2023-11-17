@@ -171,6 +171,13 @@ impl Drop for OpeningRegionGuard {
     }
 }
 
+impl OpeningRegionGuard {
+    /// Returns opening region info.
+    pub fn info(&self) -> (DatanodeId, RegionId) {
+        (self.datanode_id, self.region_id)
+    }
+}
+
 pub type OpeningRegionKeeperRef = Arc<OpeningRegionKeeper>;
 
 #[derive(Debug, Clone, Default)]
