@@ -24,7 +24,8 @@
 //! This new engine doesn't re-implement low level components like file R/W etc. It warps the
 //! existing mito engine, with extra storage and metadata multiplexing logic. I.e., it expose
 //! multiple logical regions based on two physical mito engine regions like this:
-//! ```
+//!
+//! ```plaintext
 //! ┌───────────────┐ ┌───────────────┐ ┌───────────────┐
 //! │ Metric Engine │ │ Metric Engine │ │ Metric Engine │
 //! │   Region 1    │ │   Region 2    │ │   Region 3    │
