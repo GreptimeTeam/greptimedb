@@ -63,6 +63,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
 arrow = { version = "47.0" }
 arrow-array = "47.0"

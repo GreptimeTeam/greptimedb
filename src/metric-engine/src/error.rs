@@ -109,6 +109,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Column {} not found in logical region {}", name, region_id))]
+    ColumnNotFound {
+        name: String,
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Alter request to physical region is forbidden"))]
     ForbiddenPhysicalAlter { location: Location },
 }
@@ -135,6 +142,8 @@ impl ErrorExt for Error {
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound
             }
+
+            ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             CreateMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
