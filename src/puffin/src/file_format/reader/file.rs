@@ -74,12 +74,12 @@ impl<'a, R: io::Read + io::Seek + 'a> PuffinSyncReader<'a> for PuffinFileReader<
             return Ok(metadata.clone());
         }
 
-        let file_size = self.get_file_size_sync()?;
-
         // check the magic
         let mut magic = [0; MAGIC_SIZE as usize];
         self.source.read_exact(&mut magic).context(ReadSnafu)?;
         ensure!(magic == MAGIC, MagicNotMatchedSnafu);
+
+        let file_size = self.get_file_size_sync()?;
 
         // parse the footer
         let metadata = FooterParser::new(&mut self.source, file_size).parse_sync()?;
@@ -116,8 +116,6 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
             return Ok(metadata.clone());
         }
 
-        let file_size = self.get_file_size_async().await?;
-
         // check the magic
         let mut magic = [0; MAGIC_SIZE as usize];
         self.source
@@ -125,6 +123,8 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin + Send + 'a> PuffinAsyncReader<'a>
             .await
             .context(ReadSnafu)?;
         ensure!(magic == MAGIC, MagicNotMatchedSnafu);
+
+        let file_size = self.get_file_size_async().await?;
 
         // parse the footer
         let metadata = FooterParser::new(&mut self.source, file_size)

@@ -56,12 +56,19 @@ impl<R: io::Read + io::Seek> FooterParser<R> {
     /// Parses the footer from the IO source in a synchronous manner.
     pub fn parse_sync(&mut self) -> Result<FileMetadata> {
         let mut parser = StageParser::new(self.file_size);
+
+        let mut buf = vec![];
         while let Some(byte_to_read) = parser.next_to_read() {
-            let mut buf = vec![0; byte_to_read.size as usize];
             self.source
                 .seek(SeekFrom::Start(byte_to_read.offset))
                 .context(SeekSnafu)?;
-            self.source.read_exact(&mut buf).context(ReadSnafu)?;
+            let size = byte_to_read.size as usize;
+
+            buf.resize(size, 0);
+            let buf = &mut buf[..size];
+
+            self.source.read_exact(buf).context(ReadSnafu)?;
+
             parser.consume_bytes(buf)?;
         }
 
@@ -73,13 +80,19 @@ impl<R: AsyncRead + AsyncSeek + Unpin> FooterParser<R> {
     /// Parses the footer from the IO source in a asynchronous manner.
     pub async fn parse_async(&mut self) -> Result<FileMetadata> {
         let mut parser = StageParser::new(self.file_size);
+
+        let mut buf = vec![];
         while let Some(byte_to_read) = parser.next_to_read() {
-            let mut buf = vec![0; byte_to_read.size as usize];
             self.source
                 .seek(SeekFrom::Start(byte_to_read.offset))
                 .await
                 .context(SeekSnafu)?;
-            self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
+            let size = byte_to_read.size as usize;
+
+            buf.resize(size, 0);
+            let buf = &mut buf[..size];
+
+            self.source.read_exact(buf).await.context(ReadSnafu)?;
             parser.consume_bytes(buf)?;
         }
 
@@ -114,9 +127,8 @@ struct StageParser {
     /// Size of the footer's payload, set when the `PayloadSize` is parsed.
     payload_size: u64,
 
-    /// Raw payload data to be deserialized into file metadata,
-    /// set when the `Payload` is parsed.
-    payload: Vec<u8>,
+    /// Payload of the footer, set when the `Payload` is parsed.
+    payload: Option<FileMetadata>,
 }
 
 /// Represents a read operation that needs to be performed, including the
@@ -133,7 +145,7 @@ impl StageParser {
             file_size,
             payload_size: 0,
             flags: Flags::empty(),
-            payload: vec![],
+            payload: None,
         }
     }
 
@@ -175,22 +187,22 @@ impl StageParser {
     /// Processes the bytes that have been read according to the current parsing stage
     /// and advances the parsing stage. It ensures the correct sequence of bytes is
     /// encountered and stores the necessary information in the `StageParser`.
-    fn consume_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
+    fn consume_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         match self.stage {
             ParseStage::FootMagic => {
                 ensure!(bytes == MAGIC, MagicNotMatchedSnafu);
                 self.stage = ParseStage::Flags;
             }
             ParseStage::Flags => {
-                self.flags = Self::parse_flags(&bytes)?;
+                self.flags = Self::parse_flags(bytes)?;
                 self.stage = ParseStage::PayloadSize;
             }
             ParseStage::PayloadSize => {
-                self.payload_size = Self::parse_payload_size(&bytes)?;
+                self.payload_size = Self::parse_payload_size(bytes)?;
                 self.stage = ParseStage::Payload;
             }
             ParseStage::Payload => {
-                self.payload = self.parse_payload(bytes)?;
+                self.payload = Some(self.parse_payload(bytes)?);
                 self.stage = ParseStage::HeadMagic;
             }
             ParseStage::HeadMagic => {
@@ -214,8 +226,7 @@ impl StageParser {
             }
         );
 
-        // deserialize the footer payload
-        serde_json::from_slice(self.payload.as_slice()).context(DeserializeJsonSnafu)
+        Ok(self.payload.unwrap())
     }
 
     fn parse_flags(bytes: &[u8]) -> Result<Flags> {
@@ -229,7 +240,7 @@ impl StageParser {
         Ok(n as u64)
     }
 
-    fn parse_payload(&self, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    fn parse_payload(&self, bytes: &[u8]) -> Result<FileMetadata> {
         // TODO(zhongzc): support lz4
         ensure!(
             !self.flags.contains(Flags::FOOTER_PAYLOAD_COMPRESSED_LZ4),
@@ -238,7 +249,7 @@ impl StageParser {
             }
         );
 
-        Ok(bytes)
+        serde_json::from_slice(bytes).context(DeserializeJsonSnafu)
     }
 
     fn foot_magic_offset(&self) -> u64 {
