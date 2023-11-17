@@ -48,6 +48,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::{self, info};
+use common_telemetry::{debug, error};
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -254,11 +255,16 @@ pub struct JsonResponse {
 
 impl JsonResponse {
     pub fn with_error(error: impl ErrorExt) -> Self {
-        // todo(yingwen): log error.
+        let code = error.status_code();
+        if code.should_log_error() {
+            error!(error; "Failed to handle HTTP request");
+        } else {
+            debug!("Failed to handle HTTP request, err: {:?}", error);
+        }
 
         JsonResponse {
             error: Some(error.output_msg()),
-            code: error.status_code() as u32,
+            code: code as u32,
             output: None,
             execution_time_ms: None,
         }
