@@ -21,7 +21,7 @@ use crate::error::{
     BytesToIntegerSnafu, DeserializeJsonSnafu, MagicNotMatchedSnafu, ParseStageNotMatchSnafu,
     ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
 };
-use crate::file_format::reader::file::MAGIC_SIZE;
+use crate::file_format::reader::file::{MAGIC_SIZE, MIN_FILE_SIZE};
 use crate::file_format::{Flags, MAGIC};
 use crate::file_metadata::FileMetadata;
 
@@ -199,6 +199,7 @@ impl StageParser {
             }
             ParseStage::PayloadSize => {
                 self.payload_size = Self::parse_payload_size(bytes)?;
+                self.validate_payload_size()?;
                 self.stage = ParseStage::Payload;
             }
             ParseStage::Payload => {
@@ -238,6 +239,16 @@ impl StageParser {
         let n = i32::from_le_bytes(bytes.try_into().context(BytesToIntegerSnafu)?);
         ensure!(n >= 0, UnexpectedFooterPayloadSizeSnafu { size: n });
         Ok(n as u64)
+    }
+
+    fn validate_payload_size(&self) -> Result<()> {
+        ensure!(
+            self.payload_size <= self.file_size - MIN_FILE_SIZE,
+            UnexpectedFooterPayloadSizeSnafu {
+                size: self.payload_size as i32
+            }
+        );
+        Ok(())
     }
 
     fn parse_payload(&self, bytes: &[u8]) -> Result<FileMetadata> {
