@@ -48,6 +48,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::{self, info};
+use common_telemetry::{debug, error};
 use datatypes::data_type::DataType;
 use futures::FutureExt;
 use schemars::JsonSchema;
@@ -61,10 +62,10 @@ use tower::ServiceBuilder;
 use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
-use self::authorize::HttpAuth;
-use self::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::configurator::ConfiguratorRef;
-use crate::error::{AlreadyStartedSnafu, Result, StartHttpSnafu};
+use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::http::authorize::HttpAuth;
+use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::prometheus::{
     format_query, instant_query, label_values_query, labels_query, range_query, series_query,
 };
@@ -185,7 +186,7 @@ impl HttpRecordsOutput {
 }
 
 impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
-    type Error = String;
+    type Error = Error;
 
     // TODO(sunng87): use schema from recordstreams when #366 fixed
     fn try_from(
@@ -218,8 +219,9 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
                 for row in recordbatch.rows() {
                     let value_row = row
                         .into_iter()
-                        .map(|f| Value::try_from(f).map_err(|err| err.to_string()))
-                        .collect::<std::result::Result<Vec<Value>, _>>()?;
+                        .map(Value::try_from)
+                        .collect::<std::result::Result<Vec<Value>, _>>()
+                        .context(ToJsonSnafu)?;
 
                     rows.push(value_row);
                 }
@@ -252,9 +254,25 @@ pub struct JsonResponse {
 }
 
 impl JsonResponse {
-    pub fn with_error(error: String, error_code: StatusCode) -> Self {
+    pub fn with_error(error: impl ErrorExt) -> Self {
+        let code = error.status_code();
+        if code.should_log_error() {
+            error!(error; "Failed to handle HTTP request");
+        } else {
+            debug!("Failed to handle HTTP request, err: {:?}", error);
+        }
+
         JsonResponse {
-            error: Some(error),
+            error: Some(error.output_msg()),
+            code: code as u32,
+            output: None,
+            execution_time_ms: None,
+        }
+    }
+
+    fn with_error_message(err_msg: String, error_code: StatusCode) -> Self {
+        JsonResponse {
+            error: Some(err_msg),
             code: error_code as u32,
             output: None,
             execution_time_ms: None,
@@ -293,12 +311,12 @@ impl JsonResponse {
                                 results.push(JsonOutput::Records(rows));
                             }
                             Err(err) => {
-                                return Self::with_error(err, StatusCode::Internal);
+                                return Self::with_error(err);
                             }
                         },
 
                         Err(e) => {
-                            return Self::with_error(e.output_msg(), e.status_code());
+                            return Self::with_error(e);
                         }
                     }
                 }
@@ -307,11 +325,11 @@ impl JsonResponse {
                         results.push(JsonOutput::Records(rows));
                     }
                     Err(err) => {
-                        return Self::with_error(err, StatusCode::Internal);
+                        return Self::with_error(err);
                     }
                 },
                 Err(e) => {
-                    return Self::with_error(e.output_msg(), e.status_code());
+                    return Self::with_error(e);
                 }
             }
         }
@@ -756,7 +774,7 @@ impl Server for HttpServer {
 async fn handle_error(err: BoxError) -> Json<JsonResponse> {
     logging::error!("Unhandled internal error: {}", err);
 
-    Json(JsonResponse::with_error(
+    Json(JsonResponse::with_error_message(
         format!("Unhandled internal error: {err}"),
         StatusCode::Unexpected,
     ))
