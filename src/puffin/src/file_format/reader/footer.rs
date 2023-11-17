@@ -283,8 +283,7 @@ impl StageParser {
         let blob_area_end = metadata
             .blobs
             .last()
-            .map(|b| (b.offset + b.length) as u64)
-            .unwrap_or(MAGIC_SIZE);
+            .map_or(MAGIC_SIZE, |b| (b.offset + b.length) as u64);
         ensure!(
             blob_area_end == self.head_magic_offset(),
             InvalidBlobAreaEndSnafu {
