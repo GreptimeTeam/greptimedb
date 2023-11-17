@@ -14,7 +14,7 @@
 
 use store_api::storage::RegionId;
 
-use crate::engine::{METRIC_DATA_REGION_GROUP, METRIC_METADATA_REGION_GROUP};
+use crate::consts::{METRIC_DATA_REGION_GROUP, METRIC_METADATA_REGION_GROUP};
 
 /// Change the given [RegionId]'s region group to [METRIC_METADATA_REGION_GROUP].
 pub fn to_metadata_region_id(region_id: RegionId) -> RegionId {

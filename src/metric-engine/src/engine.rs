@@ -41,6 +41,14 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
 use tokio::sync::RwLock;
 
+use crate::consts::{
+    DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX,
+    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX,
+    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+    METADATA_SCHEMA_VALUE_COLUMN_NAME, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    RANDOM_STATE,
+};
 use crate::data_region::DataRegion;
 use crate::error::{
     ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
@@ -52,60 +60,6 @@ use crate::metrics::{
     FORBIDDEN_OPERATION_COUNT, LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT,
 };
 use crate::utils::{to_data_region_id, to_metadata_region_id};
-
-/// region group value for data region inside a metric region
-pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
-
-/// region group value for metadata region inside a metric region
-pub const METRIC_METADATA_REGION_GROUP: RegionGroup = 1;
-
-pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME: &str = "ts";
-pub const METADATA_SCHEMA_KEY_COLUMN_NAME: &str = "k";
-pub const METADATA_SCHEMA_VALUE_COLUMN_NAME: &str = "v";
-
-pub const METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX: usize = 0;
-pub const METADATA_SCHEMA_KEY_COLUMN_INDEX: usize = 1;
-pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
-
-/// Column name of internal column `__metric` that stores the original metric name
-pub const DATA_SCHEMA_TABLE_ID_COLUMN_NAME: &str = "__table_id";
-pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
-
-pub const METADATA_REGION_SUBDIR: &str = "metadata";
-pub const DATA_REGION_SUBDIR: &str = "data";
-
-pub const METRIC_ENGINE_NAME: &str = "metric";
-
-/// Metadata key present in the `CREATE TABLE ... WITH ()` clause. This key is
-/// used to identify the table is a physical metric table. E.g.:
-/// ```sql
-/// CREATE TABLE physical_table (
-///     ...
-/// )
-/// ENGINE = metric
-/// WITH (
-///     physical_metric_table,
-/// );
-/// ```
-pub const PHYSICAL_TABLE_METADATA_KEY: &str = "physical_metric_table";
-
-/// Metadata key present in the `CREATE TABLE ... WITH ()` clause. This key is
-/// used to identify a logical table and associate it with a corresponding physical
-/// table . E.g.:
-/// ```sql
-/// CREATE TABLE logical_table (
-///     ...
-/// )
-/// ENGINE = metric
-/// WITH (
-///     on_physical_table = "physical_table",
-/// );
-/// ```
-/// And this key will be translated to corresponding physical **REGION** id in metasrv.
-pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
-
-/// Fixed random state for generating tsid
-const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);
 
 #[derive(Clone)]
 pub struct MetricEngine {

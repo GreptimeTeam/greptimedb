@@ -25,7 +25,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionPutRequest, RegionReadRequest};
 use store_api::storage::{RegionId, ScanRequest, TableId};
 
-use crate::engine::{
+use crate::consts::{
     METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };

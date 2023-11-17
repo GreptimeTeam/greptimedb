@@ -12,6 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Metric Engine is a region engine to store timeseries data in metric monitoring
+//! scenario. It is something like a multiplexer over the [Mito](mito2::engine::MitoEngine)
+//! engine, which is a general purpose region engine. By leveraging a synthetic wide physical
+//! table (region) that offers storage for multiple logical tables, Metric Engine is able to
+//! provide a more efficient storage solution that is able to handle a tremendous number of
+//! small tables in scenarios like Prometheus metrics.
+//!
+//! For more details about implementation, please refer to [MetricEngine](crate::engine::MetricEngine).
+
+pub mod consts;
 mod data_region;
 #[allow(unused)]
 pub mod engine;
