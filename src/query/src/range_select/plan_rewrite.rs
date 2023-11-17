@@ -342,6 +342,12 @@ impl RangePlanRewriter {
                         .row_key_column_names()
                         .map(|key| Expr::Column(Column::new(Some(table_ref.clone()), key)))
                         .collect();
+                    // If the user does not specify a primary key when creating a table,
+                    // then by default all data will be aggregated into one time series,
+                    // which is equivalent to using `by(1)` in SQL
+                    if default_by.is_empty() {
+                        default_by = vec![Expr::Literal(ScalarValue::Int64(Some(1)))];
+                    }
                     time_index_expr = Expr::Column(Column::new(
                         Some(table_ref.clone()),
                         time_index_column.name.clone(),
