@@ -551,6 +551,13 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// Returns `true` if the error is retryable.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 define_into_tonic_status!(Error);
