@@ -28,8 +28,10 @@ use crate::partial_reader::PartialReader;
 
 /// Puffin file reader, implemented [`PuffinSyncReader`] and [`PuffinAsyncReader`]
 ///
+/// ```text
 /// File layout: Magic Blob₁ Blob₂ ... Blobₙ Footer
 ///              [4]   [?]   [?]       [?]   [?]
+/// ```
 pub struct PuffinFileReader<R> {
     /// The source of the puffin file
     source: R,
