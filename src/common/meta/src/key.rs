@@ -631,7 +631,7 @@ impl TableMetadataManager {
     pub async fn update_leader_region_status<F>(
         &self,
         table_id: TableId,
-        current_table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         next_region_route_status: F,
     ) -> Result<()>
     where
@@ -658,7 +658,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
-            .build_update_txn(table_id, &current_table_route_value, &new_table_route_value)?;
+            .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let r = self.kv_backend.txn(update_table_route_txn).await?;
 
@@ -1094,7 +1094,7 @@ mod tests {
             .unwrap();
 
         table_metadata_manager
-            .update_leader_region_status(table_id, current_table_route_value, |region_route| {
+            .update_leader_region_status(table_id, &current_table_route_value, |region_route| {
                 if region_route.leader_status.is_some() {
                     None
                 } else {

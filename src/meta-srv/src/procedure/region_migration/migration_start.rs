@@ -17,7 +17,7 @@ use std::any::Any;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use serde::{Deserialize, Serialize};
-use snafu::{location, Location, OptionExt, ResultExt};
+use snafu::OptionExt;
 use store_api::storage::RegionId;
 
 use super::downgrade_leader_region::DowngradeLeaderRegion;
@@ -41,9 +41,8 @@ impl State for RegionMigrationStart {
     /// Otherwise go to the OpenCandidateRegion state.
     async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
         let region_id = ctx.persistent_ctx.region_id;
-        let to_peer = &ctx.persistent_ctx.to_peer;
-
         let region_route = self.retrieve_region_route(ctx, region_id).await?;
+        let to_peer = &ctx.persistent_ctx.to_peer;
 
         if self.check_leader_region_on_peer(&region_route, to_peer)? {
             Ok(Box::new(RegionMigrationEnd))
@@ -70,21 +69,11 @@ impl RegionMigrationStart {
     /// - Failed to retrieve the metadata of table.
     async fn retrieve_region_route(
         &self,
-        ctx: &Context,
+        ctx: &mut Context,
         region_id: RegionId,
     ) -> Result<RegionRoute> {
         let table_id = region_id.table_id();
-        let table_route = ctx
-            .table_metadata_manager
-            .table_route_manager()
-            .get(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(|e| error::Error::RetryLater {
-                reason: e.to_string(),
-                location: location!(),
-            })?
-            .context(error::TableRouteNotFoundSnafu { table_id })?;
+        let table_route = ctx.get_table_route_value().await?;
 
         let region_route = table_route
             .region_routes
@@ -165,10 +154,10 @@ mod tests {
         let state = RegionMigrationStart;
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let err = state
-            .retrieve_region_route(&ctx, RegionId::new(1024, 1))
+            .retrieve_region_route(&mut ctx, RegionId::new(1024, 1))
             .await
             .unwrap_err();
 
@@ -184,7 +173,7 @@ mod tests {
         let from_peer = persistent_context.from_peer.clone();
 
         let env = TestingEnv::new();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_route = RegionRoute {
@@ -199,7 +188,7 @@ mod tests {
             .unwrap();
 
         let err = state
-            .retrieve_region_route(&ctx, RegionId::new(1024, 3))
+            .retrieve_region_route(&mut ctx, RegionId::new(1024, 3))
             .await
             .unwrap_err();
 
