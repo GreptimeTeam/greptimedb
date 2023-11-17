@@ -18,8 +18,9 @@ use futures::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use snafu::{ensure, ResultExt};
 
 use crate::error::{
-    BytesToIntegerSnafu, DeserializeJsonSnafu, MagicNotMatchedSnafu, ParseStageNotMatchSnafu,
-    ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
+    BytesToIntegerSnafu, DeserializeJsonSnafu, InvalidBlobAreaEndSnafu, InvalidBlobOffsetSnafu,
+    MagicNotMatchedSnafu, ParseStageNotMatchSnafu, ReadSnafu, Result, SeekSnafu,
+    UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
 };
 use crate::file_format::reader::file::{MAGIC_SIZE, MIN_FILE_SIZE};
 use crate::file_format::{Flags, MAGIC};
@@ -127,8 +128,8 @@ struct StageParser {
     /// Size of the footer's payload, set when the `PayloadSize` is parsed.
     payload_size: u64,
 
-    /// Payload of the footer, set when the `Payload` is parsed.
-    payload: Option<FileMetadata>,
+    /// Metadata from the footer's payload, set when the `Payload` is parsed.
+    metadata: Option<FileMetadata>,
 }
 
 /// Represents a read operation that needs to be performed, including the
@@ -145,7 +146,7 @@ impl StageParser {
             file_size,
             payload_size: 0,
             flags: Flags::empty(),
-            payload: None,
+            metadata: None,
         }
     }
 
@@ -203,7 +204,8 @@ impl StageParser {
                 self.stage = ParseStage::Payload;
             }
             ParseStage::Payload => {
-                self.payload = Some(self.parse_payload(bytes)?);
+                self.metadata = Some(self.parse_payload(bytes)?);
+                self.validate_metadata()?;
                 self.stage = ParseStage::HeadMagic;
             }
             ParseStage::HeadMagic => {
@@ -227,7 +229,7 @@ impl StageParser {
             }
         );
 
-        Ok(self.payload.unwrap())
+        Ok(self.metadata.unwrap())
     }
 
     fn parse_flags(bytes: &[u8]) -> Result<Flags> {
@@ -261,6 +263,36 @@ impl StageParser {
         );
 
         serde_json::from_slice(bytes).context(DeserializeJsonSnafu)
+    }
+
+    fn validate_metadata(&self) -> Result<()> {
+        let metadata = self.metadata.as_ref().expect("metadata is not set");
+
+        let mut next_blob_offset = MAGIC_SIZE;
+        // check blob offsets
+        for blob in &metadata.blobs {
+            ensure!(
+                blob.offset as u64 == next_blob_offset,
+                InvalidBlobOffsetSnafu {
+                    offset: blob.offset
+                }
+            );
+            next_blob_offset += blob.length as u64;
+        }
+
+        let blob_area_end = metadata
+            .blobs
+            .last()
+            .map(|b| (b.offset + b.length) as u64)
+            .unwrap_or(MAGIC_SIZE);
+        ensure!(
+            blob_area_end == self.head_magic_offset(),
+            InvalidBlobAreaEndSnafu {
+                offset: blob_area_end
+            }
+        );
+
+        Ok(())
     }
 
     fn foot_magic_offset(&self) -> u64 {

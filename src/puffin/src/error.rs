@@ -95,6 +95,12 @@ pub enum Error {
         actual_file_size: u64,
         location: Location,
     },
+
+    #[snafu(display("Invalid blob offset: {}, location: {:?}", offset, location))]
+    InvalidBlobOffset { offset: i64, location: Location },
+
+    #[snafu(display("Invalid blob area end: {}, location: {:?}", offset, location))]
+    InvalidBlobAreaEnd { offset: u64, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -110,7 +116,9 @@ impl ErrorExt for Error {
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }
             | UnexpectedFooterPayloadSize { .. }
-            | UnexpectedPuffinFileSize { .. } => StatusCode::Unexpected,
+            | UnexpectedPuffinFileSize { .. }
+            | InvalidBlobOffset { .. }
+            | InvalidBlobAreaEnd { .. } => StatusCode::Unexpected,
 
             UnsupportedDecompression { .. } => StatusCode::Unsupported,
         }
