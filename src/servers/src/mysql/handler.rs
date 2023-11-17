@@ -355,7 +355,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                 return w
                     .error(
                         ErrorKind::ER_DBACCESS_DENIED_ERROR,
-                        e.to_string().as_bytes(),
+                        e.output_msg().as_bytes(),
                     )
                     .await
                     .map_err(|e| e.into());
@@ -421,7 +421,7 @@ async fn validate_query(query: &str) -> Result<Statement> {
     let statement = ParserContext::create_with_dialect(query, &MySqlDialect {});
     let mut statement = statement.map_err(|e| {
         InvalidPrepareStatementSnafu {
-            err_msg: e.to_string(),
+            err_msg: e.output_msg(),
         }
         .build()
     })?;

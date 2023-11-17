@@ -70,7 +70,7 @@ impl RegionServerRequestHandler {
                     error!(e; "Failed to handle request");
                 } else {
                     // Currently, we still print a debug log.
-                    debug!("Failed to handle request, err: {}", e);
+                    debug!("Failed to handle request, err: {:?}", e);
                 }
                 e
             })

@@ -17,6 +17,7 @@ use std::ops::Deref;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_telemetry::{debug, error};
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::SchemaRef;
 use futures::StreamExt;
@@ -147,10 +148,16 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                             .await?
                         }
                         Err(e) => {
-                            let err = e.to_string();
+                            if e.status_code().should_log_error() {
+                                error!(e; "Failed to handle mysql query");
+                            } else {
+                                debug!("Failed to handle mysql query, error: {e:?}");
+                            }
+                            let err = e.output_msg();
                             row_writer
                                 .finish_error(ErrorKind::ER_INTERNAL_ERROR, &err.as_bytes())
                                 .await?;
+
                             return Ok(());
                         }
                     }
@@ -212,6 +219,12 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
         METRIC_ERROR_COUNTER
             .with_label_values(&[METRIC_ERROR_COUNTER_LABEL_MYSQL])
             .inc();
+
+        if error.status_code().should_log_error() {
+            error!(error; "Failed to handle mysql query");
+        } else {
+            debug!("Failed to handle mysql query, error: {error:?}");
+        }
 
         let kind = ErrorKind::ER_INTERNAL_ERROR;
         let error = error.output_msg();
