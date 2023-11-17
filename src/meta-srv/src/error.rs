@@ -36,7 +36,7 @@ pub enum Error {
         region_id,
         peer_id
     ))]
-    RegionOpening {
+    RegionOpeningRace {
         location: Location,
         peer_id: DatanodeId,
         region_id: RegionId,
@@ -639,7 +639,7 @@ impl ErrorExt for Error {
             | Error::Unexpected { .. }
             | Error::Txn { .. }
             | Error::TableIdChanged { .. }
-            | Error::RegionOpening { .. } => StatusCode::Unexpected,
+            | Error::RegionOpeningRace { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
