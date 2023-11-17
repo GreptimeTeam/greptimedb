@@ -166,7 +166,7 @@ impl StageParser {
                 offset: self.head_magic_offset(),
                 size: MAGIC.len() as _,
             },
-            _ => unreachable!(),
+            ParseStage::Done => unreachable!(),
         };
 
         Some(btr)
