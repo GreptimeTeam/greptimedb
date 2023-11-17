@@ -29,8 +29,10 @@ use crate::file_metadata::FileMetadata;
 /// The footer has a specific layout that needs to be read and parsed to
 /// extract metadata about the file, which is encapsulated in the [`FileMetadata`] type.
 ///
+/// ```text
 /// Footer layout: HeadMagic Payload PayloadSize Flags FootMagic
 ///                [4]       [?]     [4]         [4]   [4]
+/// ```
 pub struct FooterParser<R> {
     // The underlying IO source
     source: R,
