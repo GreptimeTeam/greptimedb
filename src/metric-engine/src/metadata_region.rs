@@ -13,17 +13,16 @@
 // limitations under the License.
 
 use api::v1::value::ValueData;
-use api::v1::{self, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine;
 use common_recordbatch::util::collect;
-use datafusion::prelude::{col, lit, Expr};
-use datatypes::vectors::StringVector;
+use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionPutRequest, RegionReadRequest};
-use store_api::storage::{RegionId, ScanRequest, TableId};
+use store_api::region_request::RegionPutRequest;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::consts::{
     METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
@@ -144,11 +143,13 @@ impl MetadataRegion {
         format!("__column_{}_{}", region_id.as_u64(), encoded_column_name)
     }
 
+    #[allow(dead_code)]
     pub fn parse_region_key(key: &str) -> Option<&str> {
         key.strip_prefix("__region_")
     }
 
     /// Parse column key to (logical_region_id, column_name)
+    #[allow(dead_code)]
     pub fn parse_column_key(key: &str) -> Result<Option<(RegionId, String)>> {
         if let Some(stripped) = key.strip_prefix("__column_") {
             let mut iter = stripped.split('_');
@@ -235,7 +236,7 @@ impl MetadataRegion {
             .handle_query(region_id, scan_req)
             .await
             .context(MitoReadOperationSnafu)?;
-        let mut scan_result = collect(record_batch_stream)
+        let scan_result = collect(record_batch_stream)
             .await
             .context(CollectRecordBatchStreamSnafu)?;
 

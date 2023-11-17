@@ -55,7 +55,6 @@ mod data_region;
 #[allow(unused)]
 pub mod engine;
 pub mod error;
-#[allow(unused)]
 mod metadata_region;
 mod metrics;
 #[cfg(test)]
