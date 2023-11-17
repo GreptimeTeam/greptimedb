@@ -17,55 +17,23 @@ mod create;
 mod put;
 mod state;
 
-use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::Arc;
 
-use ahash::{AHasher, RandomState};
-use api::helper::to_column_data_type;
-use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, SemanticType};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{error, info};
-use common_time::Timestamp;
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
-use datatypes::value::Value;
-use mito2::engine::{MitoEngine, MITO_ENGINE_NAME};
-use object_store::util::join_dir;
-use snafu::{ensure, OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
+use mito2::engine::MitoEngine;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionCreateRequest, RegionPutRequest, RegionRequest,
-};
-use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::{RegionGroup, RegionId, ScanRequest, TableId};
+use store_api::region_request::RegionRequest;
+use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::RwLock;
 
 use self::state::MetricEngineState;
-use crate::consts::{
-    DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-    LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX,
-    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX,
-    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
-    METADATA_SCHEMA_VALUE_COLUMN_NAME, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
-    RANDOM_STATE,
-};
+use crate::consts::METRIC_ENGINE_NAME;
 use crate::data_region::DataRegion;
-use crate::error::{
-    ColumnNotFoundSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
-    ForbiddenPhysicalAlterSnafu, InternalColumnOccupiedSnafu, LogicalRegionNotFoundSnafu,
-    MissingRegionOptionSnafu, ParseRegionIdSnafu, PhysicalRegionNotFoundSnafu, Result,
-};
 use crate::metadata_region::MetadataRegion;
-use crate::metrics::{
-    FORBIDDEN_OPERATION_COUNT, LOGICAL_REGION_COUNT, PHYSICAL_COLUMN_COUNT, PHYSICAL_REGION_COUNT,
-};
-use crate::utils::{to_data_region_id, to_metadata_region_id};
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine

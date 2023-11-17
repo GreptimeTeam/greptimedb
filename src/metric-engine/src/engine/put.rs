@@ -134,7 +134,7 @@ impl MetricEngineInner {
     /// - Generate tsid
     fn modify_rows(&self, table_id: TableId, rows: &mut Rows) -> Result<()> {
         // gather tag column indices
-        let mut tag_col_indices = rows
+        let tag_col_indices = rows
             .schema
             .iter()
             .enumerate()
@@ -211,11 +211,9 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod tests {
-    use std::hash::Hash;
 
-    use api::v1::region::alter_request;
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{AddColumn, RegionRequest};
+    use store_api::region_request::RegionRequest;
 
     use super::*;
     use crate::test_util::{self, TestEnv};
