@@ -219,7 +219,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
                 for row in recordbatch.rows() {
                     let value_row = row
                         .into_iter()
-                        .map(|f| Value::try_from(f))
+                        .map(Value::try_from)
                         .collect::<std::result::Result<Vec<Value>, _>>()
                         .context(ToJsonSnafu)?;
 
