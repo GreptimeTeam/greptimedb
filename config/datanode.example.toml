@@ -109,9 +109,7 @@ vector_cache_size = "512MB"
 sst_write_buffer_size = "8MB"
 
 
-# Log options
+# Log options, see `standalone.example.toml`
 # [logging]
-# Specify logs directory.
 # dir = "/tmp/greptimedb/logs"
-# Specify the log level [info | debug | error | warn]
 # level = "info"

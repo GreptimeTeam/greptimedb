@@ -32,6 +32,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::tracing;
 use common_time::range::TimestampRange;
 use common_time::Timestamp;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
@@ -88,6 +89,7 @@ impl StatementExecutor {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn execute_stmt(
         &self,
         stmt: QueryStatement,
@@ -201,6 +203,7 @@ impl StatementExecutor {
             .context(PlanStatementSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     async fn plan_exec(&self, stmt: QueryStatement, query_ctx: QueryContextRef) -> Result<Output> {
         let plan = self.plan(stmt, query_ctx.clone()).await?;
         self.query_engine

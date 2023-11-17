@@ -17,6 +17,7 @@ use std::sync::Arc;
 use api::v1::meta::ddl_task_client::DdlTaskClient;
 use api::v1::meta::{ErrorCode, ResponseHeader, Role, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_grpc::channel_manager::ChannelManager;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
 use snafu::{ensure, ResultExt};
 use tokio::sync::RwLock;
@@ -133,7 +134,11 @@ impl Inner {
             }
         );
 
-        req.set_header(self.id, self.role);
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
         let ask_leader = self.ask_leader.as_ref().unwrap();
         let mut times = 0;
 

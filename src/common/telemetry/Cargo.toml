@@ -14,20 +14,19 @@ common-error.workspace = true
 console-subscriber = { version = "0.1", optional = true }
 lazy_static.workspace = true
 once_cell.workspace = true
-opentelemetry = { version = "0.17", default-features = false, features = [
+opentelemetry = { version = "0.21.0", default-features = false, features = [
     "trace",
-    "rt-tokio",
 ] }
-opentelemetry-jaeger = { version = "0.16", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14.0", features = ["tokio"] }
+opentelemetry-semantic-conventions = "0.13.0"
+opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 parking_lot = { version = "0.12" }
 prometheus.workspace = true
-rand.workspace = true
-rs-snowflake = "0.6"
 serde.workspace = true
 tokio.workspace = true
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-futures = { version = "0.2", features = ["futures-03"] }
 tracing-log = "0.1"
-tracing-opentelemetry = "0.17"
+tracing-opentelemetry = "0.22.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

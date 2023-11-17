@@ -37,8 +37,6 @@ pub struct QueryContext {
     current_user: ArcSwap<Option<UserInfoRef>>,
     time_zone: Option<TimeZone>,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
-    trace_id: u64,
-    span_id: u64,
 }
 
 impl Display for QueryContext {
@@ -61,18 +59,6 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_user: Default::default(),
             time_zone: Default::default(),
             sql_dialect: Box::new(GreptimeDbDialect {}),
-            trace_id: value.trace_id,
-            span_id: value.span_id,
-        }
-    }
-}
-
-impl From<&QueryContext> for RegionRequestHeader {
-    fn from(value: &QueryContext) -> Self {
-        RegionRequestHeader {
-            trace_id: value.trace_id,
-            span_id: value.span_id,
-            dbname: value.get_db_string(),
         }
     }
 }
@@ -142,16 +128,6 @@ impl QueryContext {
     pub fn set_current_user(&self, user: Option<UserInfoRef>) {
         let _ = self.current_user.swap(Arc::new(user));
     }
-
-    #[inline]
-    pub fn trace_id(&self) -> u64 {
-        self.trace_id
-    }
-
-    #[inline]
-    pub fn span_id(&self) -> u64 {
-        self.span_id
-    }
 }
 
 impl QueryContextBuilder {
@@ -170,14 +146,7 @@ impl QueryContextBuilder {
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),
-            trace_id: self.trace_id.unwrap_or_else(common_telemetry::gen_trace_id),
-            span_id: self.span_id.unwrap_or_default(),
         })
-    }
-
-    pub fn try_trace_id(mut self, trace_id: Option<u64>) -> Self {
-        self.trace_id = trace_id;
-        self
     }
 }
 

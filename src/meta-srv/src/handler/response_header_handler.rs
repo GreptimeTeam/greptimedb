@@ -53,6 +53,7 @@ mod tests {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::Sequence;
+    use common_telemetry::tracing_context::W3cTrace;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
@@ -89,7 +90,7 @@ mod tests {
         };
 
         let req = HeartbeatRequest {
-            header: Some(RequestHeader::new((1, 2), Role::Datanode)),
+            header: Some(RequestHeader::new((1, 2), Role::Datanode, W3cTrace::new())),
             ..Default::default()
         };
         let mut acc = HeartbeatAccumulator::default();

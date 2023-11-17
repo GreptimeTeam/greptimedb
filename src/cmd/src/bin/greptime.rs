@@ -208,7 +208,8 @@ async fn main() -> Result<()> {
     };
 
     common_telemetry::set_panic_hook();
-    let _guard = common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts);
+    let _guard =
+        common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts, opts.node_id());
 
     // Report app version as gauge.
     APP_VERSION

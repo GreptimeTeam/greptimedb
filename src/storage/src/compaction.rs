@@ -21,7 +21,7 @@ mod writer;
 
 use std::sync::Arc;
 
-use common_telemetry::tracing::log::warn;
+use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 pub use picker::{LeveledTimeWindowPicker, Picker, PickerContext};

@@ -78,7 +78,7 @@ async fn run() {
 
     let logical = mock_logical_plan();
     event!(Level::INFO, "plan size: {:#?}", logical.len());
-    let result = db.logical_plan(logical, 0).await.unwrap();
+    let result = db.logical_plan(logical).await.unwrap();
 
     event!(Level::INFO, "result: {:#?}", result);
 }

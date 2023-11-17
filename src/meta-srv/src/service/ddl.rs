@@ -45,6 +45,7 @@ impl ddl_task_server::DdlTask for MetaSrv {
             .submit_ddl_task(
                 &ExecutorContext {
                     cluster_id: Some(cluster_id),
+                    tracing_context: Some(header.tracing_context),
                 },
                 SubmitDdlTaskRequest { task },
             )

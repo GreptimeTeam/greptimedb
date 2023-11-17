@@ -17,8 +17,7 @@ use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use common_telemetry::tracing::log::warn;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{debug, error, info, warn};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
 use common_time::Timestamp;

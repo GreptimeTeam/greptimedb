@@ -15,7 +15,8 @@
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
-use common_telemetry::info;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -140,6 +141,7 @@ impl DdlManager {
             })
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_alter_table_task(
         &self,
         cluster_id: u64,
@@ -156,6 +158,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_create_table_task(
         &self,
         cluster_id: u64,
@@ -172,6 +175,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_drop_table_task(
         &self,
         cluster_id: u64,
@@ -194,6 +198,7 @@ impl DdlManager {
         self.submit_procedure(procedure_with_id).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn submit_truncate_table_task(
         &self,
         cluster_id: u64,
@@ -383,21 +388,31 @@ impl DdlTaskExecutor for DdlManager {
         ctx: &ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let cluster_id = ctx.cluster_id.unwrap_or_default();
-        info!("Submitting Ddl task: {:?}", request.task);
-        match request.task {
-            CreateTable(create_table_task) => {
-                handle_create_table_task(self, cluster_id, create_table_task).await
-            }
-            DropTable(drop_table_task) => {
-                handle_drop_table_task(self, cluster_id, drop_table_task).await
-            }
-            AlterTable(alter_table_task) => {
-                handle_alter_table_task(self, cluster_id, alter_table_task).await
-            }
-            TruncateTable(truncate_table_task) => {
-                handle_truncate_table_task(self, cluster_id, truncate_table_task).await
+        let span = ctx
+            .tracing_context
+            .as_ref()
+            .map(TracingContext::from_w3c)
+            .unwrap_or(TracingContext::from_current_span())
+            .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
+        async move {
+            let cluster_id = ctx.cluster_id.unwrap_or_default();
+            info!("Submitting Ddl task: {:?}", request.task);
+            match request.task {
+                CreateTable(create_table_task) => {
+                    handle_create_table_task(self, cluster_id, create_table_task).await
+                }
+                DropTable(drop_table_task) => {
+                    handle_drop_table_task(self, cluster_id, drop_table_task).await
+                }
+                AlterTable(alter_table_task) => {
+                    handle_alter_table_task(self, cluster_id, alter_table_task).await
+                }
+                TruncateTable(truncate_table_task) => {
+                    handle_truncate_table_task(self, cluster_id, truncate_table_task).await
+                }
             }
         }
+        .trace(span)
+        .await
     }
 }
