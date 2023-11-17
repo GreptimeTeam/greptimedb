@@ -28,6 +28,8 @@ SELECT min(val) RANGE '5s' FROM host ALIGN 'not_time';
 
 SELECT min(val) FROM host ALIGN '5s';
 
+SELECT 1 FROM host ALIGN '5s';
+
 SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
 
 SELECT min(val) * 2 RANGE '10s' FROM host ALIGN '5s';
