@@ -197,7 +197,7 @@ impl StageParser {
                 ensure!(bytes == MAGIC, MagicNotMatchedSnafu);
                 self.stage = ParseStage::Done;
             }
-            _ => unreachable!(),
+            ParseStage::Done => unreachable!(),
         }
 
         Ok(())
