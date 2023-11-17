@@ -303,10 +303,12 @@ pub(crate) use {
 #[cfg(test)]
 pub mod tests {
     use arrow::array::{Array, Int32Array, UInt8Array};
+    use paste::paste;
     use serde_json;
 
     use super::*;
     use crate::data_type::DataType;
+    use crate::prelude::ScalarVectorBuilder;
     use crate::types::{Int32Type, LogicalPrimitiveType};
     use crate::vectors::helper::Helper;
 
@@ -338,5 +340,88 @@ pub mod tests {
             .serialize_to_json()
             .unwrap();
         assert_eq!("[1,2,3]", serde_json::to_string(&json_value).unwrap());
+    }
+
+    #[test]
+    fn test_mutable_vector_data_type() {
+        macro_rules! mutable_primitive_data_type_eq_with_lower {
+            ($($type: ident),*) => {
+                $(
+                    paste! {
+                        let mutable_vector = [<$type VectorBuilder>]::with_capacity(1024);
+                        assert_eq!(mutable_vector.data_type(), ConcreteDataType::[<$type:lower _datatype>]());
+                    }
+                )*
+            };
+        }
+
+        macro_rules! mutable_time_data_type_eq_with_snake {
+            ($($type: ident),*) => {
+                $(
+                    paste! {
+                        let mutable_vector = [<$type VectorBuilder>]::with_capacity(1024);
+                        assert_eq!(mutable_vector.data_type(), ConcreteDataType::[<$type:snake _datatype>]());
+                    }
+                )*
+            };
+        }
+        // Test Primitive types
+        mutable_primitive_data_type_eq_with_lower!(
+            Boolean, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64,
+            Date, DateTime, Binary, String
+        );
+
+        // Test types about time
+        mutable_time_data_type_eq_with_snake!(
+            TimeSecond,
+            TimeMillisecond,
+            TimeMicrosecond,
+            TimeNanosecond,
+            TimestampSecond,
+            TimestampMillisecond,
+            TimestampMicrosecond,
+            TimestampNanosecond,
+            DurationSecond,
+            DurationMillisecond,
+            DurationMicrosecond,
+            DurationNanosecond,
+            IntervalYearMonth,
+            IntervalDayTime,
+            IntervalMonthDayNano
+        );
+
+        // Null type
+        let builder = NullVectorBuilder::default();
+        assert_eq!(builder.data_type(), ConcreteDataType::null_datatype());
+
+        // Decimal128 type
+        let builder = Decimal128VectorBuilder::with_capacity(1024);
+        assert_eq!(
+            builder.data_type(),
+            ConcreteDataType::decimal128_datatype(38, 10)
+        );
+
+        let builder = Decimal128VectorBuilder::with_capacity(1024)
+            .with_precision_and_scale(3, 2)
+            .unwrap();
+        assert_eq!(
+            builder.data_type(),
+            ConcreteDataType::decimal128_datatype(3, 2)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Must use ListVectorBuilder::with_type_capacity()")]
+    fn test_mutable_vector_list_data_type() {
+        // List type
+        let builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 1024);
+        assert_eq!(
+            builder.data_type(),
+            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
+        );
+
+        // Panic with_capacity
+        let _ = ListVectorBuilder::with_capacity(1024);
     }
 }
