@@ -45,15 +45,6 @@ pub struct LeaseKey {
     pub node_id: u64,
 }
 
-impl From<&StatKey> for LeaseKey {
-    fn from(stat_key: &StatKey) -> Self {
-        LeaseKey {
-            cluster_id: stat_key.cluster_id,
-            node_id: stat_key.node_id,
-        }
-    }
-}
-
 impl FromStr for LeaseKey {
     type Err = error::Error;
 
@@ -196,7 +187,7 @@ impl TryFrom<Vec<u8>> for StatKey {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValue {
     pub stats: Vec<Stat>,
@@ -465,17 +456,5 @@ mod tests {
         let new_key: InactiveRegionKey = key_bytes.try_into().unwrap();
 
         assert_eq!(new_key, key);
-    }
-
-    #[test]
-    fn test_stat_key_to_lease_key() {
-        let stat_key = StatKey {
-            cluster_id: 1,
-            node_id: 101,
-        };
-
-        let lease_key: LeaseKey = (&stat_key).into();
-        assert_eq!(1, lease_key.cluster_id);
-        assert_eq!(101, lease_key.node_id);
     }
 }

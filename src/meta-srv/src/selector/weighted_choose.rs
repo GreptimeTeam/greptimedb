@@ -14,7 +14,7 @@
 
 use rand::distributions::WeightedIndex;
 use rand::prelude::Distribution;
-use rand::rngs::OsRng;
+use rand::thread_rng;
 use snafu::{ensure, ResultExt};
 
 use crate::error;
@@ -65,7 +65,6 @@ pub struct RandomWeightedChoose<Item> {
     items: Vec<WeightedItem<Item>>,
     weighted_index: Option<WeightedIndex<usize>>,
     reverse_weighted_index: Option<WeightedIndex<usize>>,
-    rng: OsRng,
 }
 
 impl<Item> Default for RandomWeightedChoose<Item> {
@@ -74,7 +73,6 @@ impl<Item> Default for RandomWeightedChoose<Item> {
             items: Vec::default(),
             weighted_index: None,
             reverse_weighted_index: None,
-            rng: OsRng,
         }
     }
 }
@@ -105,11 +103,12 @@ where
             error::NotSetWeightArraySnafu
         );
 
-        let rng = &mut self.rng;
         // unwrap safety: whether weighted_index is none has been checked before.
         let weighted_index = self.weighted_index.as_ref().unwrap();
 
-        Ok(self.items[weighted_index.sample(rng)].item.clone())
+        Ok(self.items[weighted_index.sample(&mut thread_rng())]
+            .item
+            .clone())
     }
 
     fn reverse_choose_one(&mut self) -> Result<Item> {
@@ -118,11 +117,12 @@ where
             error::NotSetWeightArraySnafu
         );
 
-        let rng = &mut self.rng;
         // unwrap safety: whether reverse_weighted_index is none has been checked before.
         let reverse_weighted_index = self.reverse_weighted_index.as_ref().unwrap();
 
-        Ok(self.items[reverse_weighted_index.sample(rng)].item.clone())
+        Ok(self.items[reverse_weighted_index.sample(&mut thread_rng())]
+            .item
+            .clone())
     }
 }
 

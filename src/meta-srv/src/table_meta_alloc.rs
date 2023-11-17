@@ -85,7 +85,7 @@ async fn handle_create_region_routes(
             ctx,
             SelectorOptions {
                 min_required_items: partitions.len(),
-                allow_duplication: false,
+                allow_duplication: true,
             },
         )
         .await?;

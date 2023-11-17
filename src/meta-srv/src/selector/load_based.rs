@@ -80,13 +80,16 @@ where
             &lease_kvs,
         );
 
-        // 3. make sure the regions of a table are distributed on different datanodes.
+        // 3. try to make the regions of a table distributed on different datanodes as much as possible.
         let stat_kvs = if let Some(table_id) = ctx.table_id {
             let table_metadata_manager = TableMetadataManager::new(ctx.kv_backend.clone());
-
             let leader_peer_ids = get_leader_peer_ids(&table_metadata_manager, table_id).await?;
-
-            filter_out_datanode_by_table(stat_kvs, &leader_peer_ids)
+            let filter_result = filter_out_datanode_by_table(&stat_kvs, &leader_peer_ids);
+            if filter_result.is_empty() {
+                stat_kvs
+            } else {
+                filter_result
+            }
         } else {
             stat_kvs
         };
@@ -118,12 +121,13 @@ fn filter_out_expired_datanode(
 }
 
 fn filter_out_datanode_by_table(
-    stat_kvs: HashMap<StatKey, StatValue>,
+    stat_kvs: &HashMap<StatKey, StatValue>,
     leader_peer_ids: &[u64],
 ) -> HashMap<StatKey, StatValue> {
     stat_kvs
-        .into_iter()
+        .iter()
         .filter(|(stat_k, _)| leader_peer_ids.contains(&stat_k.node_id))
+        .map(|(stat_k, stat_v)| (*stat_k, stat_v.clone()))
         .collect()
 }
 

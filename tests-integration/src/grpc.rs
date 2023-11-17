@@ -524,7 +524,7 @@ CREATE TABLE {table_name} (
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
-        assert_eq!(region_to_dn_map.len(), expected_distribution.len());
+        assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
         let stmt = QueryLanguageParser::parse_sql(&format!(
             "SELECT ts, a, b FROM {table_name} ORDER BY ts"

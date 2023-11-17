@@ -23,7 +23,7 @@ use store_api::storage::RegionId;
 use crate::error::{Error, InvalidHeartbeatRequestSnafu};
 use crate::keys::StatKey;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Stat {
     pub timestamp_millis: i64,
     pub cluster_id: u64,
@@ -42,7 +42,7 @@ pub struct Stat {
     pub node_epoch: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionStat {
     /// The region_id.
     pub id: u64,
