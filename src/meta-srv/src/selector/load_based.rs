@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use api::v1::meta::Peer;
 use common_meta::key::TableMetadataManager;
 use common_meta::rpc::router::find_leaders;
-use common_telemetry::debug;
+use common_telemetry::{debug, info};
 use parking_lot::RwLock;
 use snafu::ResultExt;
 use table::metadata::TableId;
@@ -86,6 +86,7 @@ where
             let leader_peer_ids = get_leader_peer_ids(&table_metadata_manager, table_id).await?;
             let filter_result = filter_out_datanode_by_table(&stat_kvs, &leader_peer_ids);
             if filter_result.is_empty() {
+                info!("The regions of the table cannot be allocated to completely different datanodes, table id: {}.", table_id);
                 stat_kvs
             } else {
                 filter_result
