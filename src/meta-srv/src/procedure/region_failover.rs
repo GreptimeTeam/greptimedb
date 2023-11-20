@@ -400,7 +400,7 @@ mod tests {
     use crate::cluster::MetaPeerClientBuilder;
     use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
     use crate::lock::memory::MemLock;
-    use crate::selector::{Namespace, Selector};
+    use crate::selector::{Namespace, Selector, SelectorOptions};
     use crate::service::mailbox::Channel;
     use crate::test_util;
 
@@ -413,7 +413,12 @@ mod tests {
         type Context = SelectorContext;
         type Output = Vec<Peer>;
 
-        async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> Result<Self::Output> {
+        async fn select(
+            &self,
+            _ns: Namespace,
+            _ctx: &Self::Context,
+            _opts: SelectorOptions,
+        ) -> Result<Self::Output> {
             let mut rng = rand::thread_rng();
             let mut nodes = self.nodes.clone();
             nodes.shuffle(&mut rng);
@@ -711,7 +716,12 @@ mod tests {
             type Context = SelectorContext;
             type Output = Vec<Peer>;
 
-            async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> Result<Self::Output> {
+            async fn select(
+                &self,
+                _ns: Namespace,
+                _ctx: &Self::Context,
+                _opts: SelectorOptions,
+            ) -> Result<Self::Output> {
                 let mut peers = self.peers.lock().unwrap();
                 Ok(if let Some(Some(peer)) = peers.pop() {
                     vec![peer]

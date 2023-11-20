@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use api::v1::meta::Peer;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 
 use crate::error::Result;
 use crate::lease;
 use crate::metasrv::SelectorContext;
-use crate::selector::{Namespace, Selector};
+use crate::selector::common::choose_peers;
+use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
+use crate::selector::{Namespace, Selector, SelectorOptions};
 
 pub struct LeaseBasedSelector;
 
@@ -28,24 +28,33 @@ impl Selector for LeaseBasedSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, ns: Namespace, ctx: &Self::Context) -> Result<Self::Output> {
-        // filter out the nodes out lease
-        let mut lease_kvs: Vec<_> =
-            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs)
-                .await?
-                .into_iter()
-                .collect();
+    async fn select(
+        &self,
+        ns: Namespace,
+        ctx: &Self::Context,
+        opts: SelectorOptions,
+    ) -> Result<Self::Output> {
+        // 1. get alive datanodes.
+        let lease_kvs =
+            lease::alive_datanodes(ns, &ctx.meta_peer_client, ctx.datanode_lease_secs).await?;
 
-        lease_kvs.shuffle(&mut thread_rng());
-
-        let peers = lease_kvs
+        // 2. compute weight array, but the weight of each item is the same.
+        let weight_array = lease_kvs
             .into_iter()
-            .map(|(k, v)| Peer {
-                id: k.node_id,
-                addr: v.node_addr,
+            .map(|(k, v)| WeightedItem {
+                item: Peer {
+                    id: k.node_id,
+                    addr: v.node_addr.clone(),
+                },
+                weight: 1,
+                reverse_weight: 1,
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        Ok(peers)
+        // 3. choose peers by weight_array.
+        let weighted_choose = &mut RandomWeightedChoose::default();
+        let selected = choose_peers(weight_array, &opts, weighted_choose)?;
+
+        Ok(selected)
     }
 }

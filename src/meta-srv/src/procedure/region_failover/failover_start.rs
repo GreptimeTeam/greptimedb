@@ -24,6 +24,7 @@ use snafu::ensure;
 use super::deactivate_region::DeactivateRegion;
 use super::{RegionFailoverContext, State};
 use crate::error::{RegionFailoverCandidatesNotFoundSnafu, Result, RetryLaterSnafu};
+use crate::selector::SelectorOptions;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub(super) struct RegionFailoverStart {
@@ -50,9 +51,10 @@ impl RegionFailoverStart {
         selector_ctx.table_id = Some(failed_region.table_id);
 
         let cluster_id = failed_region.cluster_id;
+        let opts = SelectorOptions::default();
         let candidates = ctx
             .selector
-            .select(cluster_id, &selector_ctx)
+            .select(cluster_id, &selector_ctx, opts)
             .await?
             .iter()
             .filter_map(|p| {

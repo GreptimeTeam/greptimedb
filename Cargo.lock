@@ -4723,6 +4723,7 @@ dependencies = [
  "h2",
  "http-body",
  "humantime-serde",
+ "itertools 0.10.5",
  "lazy_static",
  "once_cell",
  "parking_lot 0.12.1",

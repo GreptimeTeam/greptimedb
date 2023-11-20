@@ -221,7 +221,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();
-        assert_eq!(region_to_dn_map.len(), expected_distribution.len());
+        assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
         let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();
         let LogicalPlan::DfPlan(plan) = instance

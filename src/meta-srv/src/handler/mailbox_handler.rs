@@ -34,6 +34,7 @@ impl HeartbeatHandler for MailboxHandler {
     ) -> Result<()> {
         if let Some(message) = &req.mailbox_message {
             ctx.mailbox.on_recv(message.id, Ok(message.clone())).await?;
+            ctx.set_skip_all();
         }
 
         Ok(())
