@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_binary_vector_misc() {
-        let v = BinaryVector::from(BinaryArray::from_iter_values(&[
+        let v = BinaryVector::from(BinaryArray::from_iter_values([
             vec![1, 2, 3],
             vec![1, 2, 3],
         ]));
