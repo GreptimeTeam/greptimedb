@@ -152,6 +152,36 @@ auto_flush_interval = "1h"
 # Global write buffer size for all regions.
 global_write_buffer_size = "1GB"
 
+# Mito engine options
+[[region_engine]]
+[region_engine.mito]
+# Number of region workers
+num_workers = 8
+# Request channel size of each worker
+worker_channel_size = 128
+# Max batch size for a worker to handle requests
+worker_request_batch_size = 64
+# Number of meta action updated to trigger a new checkpoint for the manifest
+manifest_checkpoint_distance = 10
+# Manifest compression type
+manifest_compress_type = "Uncompressed"
+# Max number of running background jobs
+max_background_jobs = 4
+# Interval to auto flush a region if it has not flushed yet.
+auto_flush_interval = "1h"
+# Global write buffer size for all regions.
+global_write_buffer_size = "1GB"
+# Global write buffer size threshold to reject write requests (default 2G).
+global_write_buffer_reject_size = "2GB"
+# Cache size for SST metadata (default 128MB). Setting it to 0 to disable the cache.
+sst_meta_cache_size = "128MB"
+# Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
+vector_cache_size = "512MB"
+# Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
+page_cache_size = "512MB"
+# Buffer size for SST writing.
+sst_write_buffer_size = "8MB"
+
 # Log options
 # [logging]
 # Specify logs directory.

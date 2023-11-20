@@ -163,5 +163,3 @@ impl SourceStats {
         }
     }
 }
-
-// TODO(yingwen): Port tests.

@@ -37,8 +37,6 @@ lazy_static! {
         )
         .unwrap();
 
-
-
     // ------ Flush related metrics
     /// Counter of scheduled flush requests.
     /// Note that the flush scheduler may merge some flush requests.
@@ -122,4 +120,27 @@ lazy_static! {
     pub static ref MERGE_FILTER_ROWS_TOTAL: IntCounterVec =
         register_int_counter_vec!("mito_merge_filter_rows_total", "mito merge filter rows total", &[TYPE_LABEL]).unwrap();
     // ------- End of query metrics.
+
+    // Cache related metrics.
+    /// Cache hit counter.
+    pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
+        "mito_cache_hit",
+        "mito cache hit",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
+    /// Cache miss counter.
+    pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(
+        "mito_cache_miss",
+        "mito cache miss",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
+    /// Cache size in bytes.
+    pub static ref CACHE_BYTES: IntGaugeVec = register_int_gauge_vec!(
+        "mito_cache_bytes",
+        "mito cache bytes",
+        &[TYPE_LABEL]
+    )
+    .unwrap();
 }

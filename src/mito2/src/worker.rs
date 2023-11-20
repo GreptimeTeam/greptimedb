@@ -122,6 +122,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(CacheManager::new(
             config.sst_meta_cache_size.as_bytes(),
             config.vector_cache_size.as_bytes(),
+            config.page_cache_size.as_bytes(),
         ));
 
         let workers = (0..config.num_workers)
@@ -219,6 +220,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(CacheManager::new(
             config.sst_meta_cache_size.as_bytes(),
             config.vector_cache_size.as_bytes(),
+            config.page_cache_size.as_bytes(),
         ));
 
         let workers = (0..config.num_workers)
