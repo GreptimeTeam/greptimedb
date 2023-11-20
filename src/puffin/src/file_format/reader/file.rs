@@ -23,9 +23,9 @@ use crate::error::{
     MagicNotMatchedSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedPuffinFileSizeSnafu,
     UnsupportedDecompressionSnafu,
 };
-use crate::file_format::reader::footer::{FooterParser, MIN_FOOTER_SIZE};
+use crate::file_format::reader::footer::FooterParser;
 use crate::file_format::reader::{PuffinAsyncReader, PuffinSyncReader};
-use crate::file_format::MAGIC;
+use crate::file_format::{MAGIC, MAGIC_SIZE, MIN_FILE_SIZE};
 use crate::file_metadata::FileMetadata;
 use crate::partial_reader::PartialReader;
 
@@ -42,9 +42,6 @@ pub struct PuffinFileReader<R> {
     /// The metadata of the puffin file, which is parsed from the footer
     metadata: Option<FileMetadata>,
 }
-
-pub const MAGIC_SIZE: u64 = MAGIC.len() as u64;
-pub const MIN_FILE_SIZE: u64 = MAGIC_SIZE + MIN_FOOTER_SIZE;
 
 impl<R> PuffinFileReader<R> {
     pub fn new(source: R) -> Self {

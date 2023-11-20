@@ -48,6 +48,12 @@ use bitflags::bitflags;
 
 pub const MAGIC: [u8; 4] = [0x50, 0x46, 0x41, 0x31];
 
+pub const MAGIC_SIZE: u64 = MAGIC.len() as u64;
+pub const MIN_FILE_SIZE: u64 = MAGIC_SIZE + MIN_FOOTER_SIZE;
+pub const FLAGS_SIZE: u64 = 4;
+pub const PAYLOAD_SIZE_SIZE: u64 = 4;
+pub const MIN_FOOTER_SIZE: u64 = MAGIC_SIZE * 2 + FLAGS_SIZE + PAYLOAD_SIZE_SIZE;
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Flags: u32 {
