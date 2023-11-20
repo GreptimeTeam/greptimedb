@@ -5585,7 +5585,6 @@ dependencies = [
  "snafu",
  "sql",
  "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
- "storage",
  "store-api",
  "substrait 0.4.3",
  "table",
