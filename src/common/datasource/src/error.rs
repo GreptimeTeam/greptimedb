@@ -166,6 +166,14 @@ pub enum Error {
 
     #[snafu(display("Buffered writer closed"))]
     BufferedWriterClosed { location: Location },
+
+    #[snafu(display("Failed to write parquet file, path: {}", path))]
+    WriteParquet {
+        path: String,
+        location: Location,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -178,7 +186,8 @@ impl ErrorExt for Error {
             | ListObjects { .. }
             | ReadObject { .. }
             | WriteObject { .. }
-            | AsyncWrite { .. } => StatusCode::StorageUnavailable,
+            | AsyncWrite { .. }
+            | WriteParquet { .. } => StatusCode::StorageUnavailable,
 
             UnsupportedBackendProtocol { .. }
             | UnsupportedCompressionType { .. }
@@ -231,6 +240,7 @@ impl ErrorExt for Error {
             InvalidConnection { location, .. } => Some(*location),
             UnsupportedCompressionType { location, .. } => Some(*location),
             UnsupportedFormat { location, .. } => Some(*location),
+            WriteParquet { location, .. } => Some(*location),
         }
     }
 }

@@ -68,7 +68,6 @@ session.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
-storage.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true

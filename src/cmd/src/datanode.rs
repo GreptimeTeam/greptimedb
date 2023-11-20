@@ -192,7 +192,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{CompactionConfig, FileConfig, ObjectStoreConfig, RegionManifestConfig};
+    use datanode::config::{FileConfig, ObjectStoreConfig};
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
@@ -231,16 +231,6 @@ mod tests {
             [storage]
             type = "File"
             data_home = "/tmp/greptimedb/"
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
-
-            [storage.manifest]
-            checkpoint_margin = 9
-            gc_duration = '7s'
-            compress = true
 
             [logging]
             level = "debug"
@@ -293,23 +283,6 @@ mod tests {
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
         ));
-
-        assert_eq!(
-            CompactionConfig {
-                max_inflight_tasks: 3,
-                max_files_in_level0: 7,
-                max_purge_tasks: 32,
-            },
-            options.storage.compaction,
-        );
-        assert_eq!(
-            RegionManifestConfig {
-                checkpoint_margin: Some(9),
-                gc_duration: Some(Duration::from_secs(7)),
-                compress: true
-            },
-            options.storage.manifest,
-        );
 
         assert_eq!("debug", options.logging.level.unwrap());
         assert_eq!("/tmp/greptimedb/test/logs".to_string(), options.logging.dir);
@@ -387,17 +360,11 @@ mod tests {
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
-            read_batch_size = 128
             sync_write = false
 
             [storage]
             type = "File"
             data_home = "/tmp/greptimedb/"
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
 
             [logging]
             level = "debug"
@@ -409,26 +376,24 @@ mod tests {
         temp_env::with_vars(
             [
                 (
-                    // storage.manifest.gc_duration = 9s
+                    // wal.purge_interval = 1m
                     [
                         env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "gc_duration".to_uppercase(),
+                        "wal".to_uppercase(),
+                        "purge_interval".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
-                    Some("9s"),
+                    Some("1m"),
                 ),
                 (
-                    // storage.compaction.max_purge_tasks = 99
+                    // wal.read_batch_size = 100
                     [
                         env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "compaction".to_uppercase(),
-                        "max_purge_tasks".to_uppercase(),
+                        "wal".to_uppercase(),
+                        "read_batch_size".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
-                    Some("99"),
+                    Some("100"),
                 ),
                 (
                     // meta_client.metasrv_addrs = 127.0.0.1:3001,127.0.0.1:3002,127.0.0.1:3003
@@ -456,10 +421,7 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(
-                    opts.storage.manifest.gc_duration,
-                    Some(Duration::from_secs(9))
-                );
+                assert_eq!(opts.wal.read_batch_size, 100,);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -470,19 +432,13 @@ mod tests {
                 );
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.storage.compaction.max_purge_tasks, 32);
+                assert_eq!(opts.wal.purge_interval, Duration::from_secs(60 * 10));
 
                 // Should be read from cli, cli > config file > env > default values.
                 assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
-                assert_eq!(
-                    opts.storage.manifest.checkpoint_margin,
-                    DatanodeOptions::default()
-                        .storage
-                        .manifest
-                        .checkpoint_margin
-                );
+                assert_eq!(opts.http.addr, DatanodeOptions::default().http.addr);
             },
         );
     }

@@ -121,14 +121,6 @@ pub enum Error {
         source: common_datasource::error::Error,
     },
 
-    #[snafu(display("Failed to write parquet file, path: {}", path))]
-    WriteParquet {
-        path: String,
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
-    },
-
     #[snafu(display("Failed to read parquet file, path: {}", path))]
     ReadParquet {
         path: String,
@@ -428,7 +420,6 @@ impl ErrorExt for Error {
 
         match self {
             OpenDal { .. }
-            | WriteParquet { .. }
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }

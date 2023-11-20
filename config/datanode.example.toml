@@ -53,33 +53,6 @@ type = "File"
 # The local file cache capacity in bytes.
 # cache_capacity = "256MB"
 
-# Compaction options, see `standalone.example.toml`.
-[storage.compaction]
-max_inflight_tasks = 4
-max_files_in_level0 = 8
-max_purge_tasks = 32
-
-# Storage manifest options
-[storage.manifest]
-# Region checkpoint actions margin.
-# Create a checkpoint every <checkpoint_margin> actions.
-checkpoint_margin = 10
-# Region manifest logs and checkpoints gc execution duration
-gc_duration = '10m'
-
-# Storage flush options
-[storage.flush]
-# Max inflight flush tasks.
-max_flush_tasks = 8
-# Default write buffer size for a region.
-region_write_buffer_size = "32MB"
-# Interval to check whether a region needs flush.
-picker_schedule_interval = "5m"
-# Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
-# Global write buffer size for all regions.
-global_write_buffer_size = "1GB"
-
 # Mito engine options
 [[region_engine]]
 [region_engine.mito]
