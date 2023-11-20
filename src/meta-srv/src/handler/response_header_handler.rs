@@ -15,7 +15,7 @@
 use api::v1::meta::{HeartbeatRequest, ResponseHeader, Role, PROTOCOL_VERSION};
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct ResponseHeaderHandler;
@@ -31,7 +31,7 @@ impl HeartbeatHandler for ResponseHeaderHandler {
         req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let HeartbeatRequest { header, .. } = req;
         let res_header = ResponseHeader {
             protocol_version: PROTOCOL_VERSION,
@@ -40,13 +40,12 @@ impl HeartbeatHandler for ResponseHeaderHandler {
         };
         acc.header = Some(res_header);
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use api::v1::meta::{HeartbeatResponse, RequestHeader};
@@ -84,7 +83,6 @@ mod tests {
             meta_peer_client,
             mailbox,
             election: None,
-            skip_all: Arc::new(AtomicBool::new(false)),
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
         };

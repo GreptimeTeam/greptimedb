@@ -91,7 +91,16 @@ async fn handle_create_region_routes(
         .await?;
 
     if peers.len() < partitions.len() {
-        warn!("Create table failed due to no enough available datanodes, table: {}, partition number: {}, datanode number: {}", format_full_table_name(&table_info.catalog_name,&table_info.schema_name,&table_info.name), partitions.len(), peers.len());
+        warn!(
+            "Create table failed due to no enough available datanodes, table: {}, partition number: {}, datanode number: {}",
+            format_full_table_name(
+                &table_info.catalog_name,
+                &table_info.schema_name,
+                &table_info.name
+            ),
+            partitions.len(),
+            peers.len()
+        );
         return error::NoEnoughAvailableDatanodeSnafu {
             required: partitions.len(),
             available: peers.len(),

@@ -15,7 +15,7 @@
 use api::v1::meta::{HeartbeatRequest, Role};
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct MailboxHandler;
@@ -31,12 +31,13 @@ impl HeartbeatHandler for MailboxHandler {
         req: &HeartbeatRequest,
         ctx: &mut Context,
         _acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
-        if let Some(message) = &req.mailbox_message {
-            ctx.mailbox.on_recv(message.id, Ok(message.clone())).await?;
-            ctx.set_skip_all();
-        }
+    ) -> Result<HandleControl> {
+        let Some(message) = &req.mailbox_message else {
+            return Ok(HandleControl::Continue);
+        };
 
-        Ok(())
+        ctx.mailbox.on_recv(message.id, Ok(message.clone())).await?;
+
+        Ok(HandleControl::Done)
     }
 }
