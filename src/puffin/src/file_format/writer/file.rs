@@ -98,7 +98,6 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
     async fn add_blob<R: AsyncRead + Send>(&mut self, blob: Blob<R>) -> Result<()> {
         self.write_header_if_needed_async().await?;
 
-        // write the blob into the writer
         let size = futures::io::copy(blob.data, &mut self.writer)
             .await
             .context(WriteSnafu)?;
