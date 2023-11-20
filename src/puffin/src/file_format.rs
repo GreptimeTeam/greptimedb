@@ -42,6 +42,7 @@
 //! UTF-8 encoded JSON payload representing a single [`FileMetadata`] object.
 
 pub mod reader;
+pub mod writer;
 
 use bitflags::bitflags;
 
