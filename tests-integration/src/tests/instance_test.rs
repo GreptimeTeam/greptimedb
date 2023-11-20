@@ -1859,10 +1859,10 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
             let sql = if instance.is_distributed_mode() {
                 format!(
                     r#"create table test_table(
-                    host string,
+                    a int null primary key,
                     ts timestamp time index,
                 )
-                PARTITION BY RANGE COLUMNS (ts) (
+                PARTITION BY RANGE COLUMNS (a) (
                     PARTITION r0 VALUES LESS THAN (1),
                     PARTITION r1 VALUES LESS THAN (10),
                     PARTITION r2 VALUES LESS THAN (100),
@@ -1873,7 +1873,7 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
                 )
             } else {
                 format!(
-                    r#"create table test_table(host string, ts timestamp time index)with(storage='{storage_name}');"#
+                    r#"create table test_table(a int primary key, ts timestamp time index)with(storage='{storage_name}');"#
                 )
             };
 
@@ -1881,9 +1881,9 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
             assert!(matches!(output, Output::AffectedRows(0)));
             let output = execute_sql(
                 &frontend,
-                r#"insert into test_table(host, ts) values
-                            ('host1', 1655276557000),
-                            ('host2', 1655276558000)
+                r#"insert into test_table(a, ts) values
+                            (1, 1655276557000),
+                            (1000, 1655276558000)
                             "#,
             )
             .await;
@@ -1891,12 +1891,12 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
 
             let output = execute_sql(&frontend, "select * from test_table").await;
             let expected = "\
-+-------+---------------------+
-| host  | ts                  |
-+-------+---------------------+
-| host1 | 2022-06-15T07:02:37 |
-| host2 | 2022-06-15T07:02:38 |
-+-------+---------------------+";
++------+---------------------+
+| a    | ts                  |
++------+---------------------+
+| 1    | 2022-06-15T07:02:37 |
+| 1000 | 2022-06-15T07:02:38 |
++------+---------------------+";
 
             check_output_stream(output, expected).await;
             let output = execute_sql(&frontend, "show create table test_table").await;
@@ -1911,14 +1911,15 @@ async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
             let expect = if instance.is_distributed_mode() {
                 format!(
                     r#"CREATE TABLE IF NOT EXISTS "test_table" (
-  "host" STRING NULL,
+  "a" INT NULL,
   "ts" TIMESTAMP(3) NOT NULL,
-  TIME INDEX ("ts")
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("a")
 )
-PARTITION BY RANGE COLUMNS ("ts") (
-  PARTITION r0 VALUES LESS THAN ('1970-01-01 09:00:00.001+0900'),
-  PARTITION r1 VALUES LESS THAN ('1970-01-01 09:00:00.010+0900'),
-  PARTITION r2 VALUES LESS THAN ('1970-01-01 09:00:00.100+0900'),
+PARTITION BY RANGE COLUMNS ("a") (
+  PARTITION r0 VALUES LESS THAN (1),
+  PARTITION r1 VALUES LESS THAN (10),
+  PARTITION r2 VALUES LESS THAN (100),
   PARTITION r3 VALUES LESS THAN (MAXVALUE)
 )
 ENGINE=mito
@@ -1930,9 +1931,10 @@ WITH(
             } else {
                 format!(
                     r#"CREATE TABLE IF NOT EXISTS "test_table" (
-  "host" STRING NULL,
+  "a" INT NULL,
   "ts" TIMESTAMP(3) NOT NULL,
-  TIME INDEX ("ts")
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("a")
 )
 
 ENGINE=mito
@@ -1942,7 +1944,7 @@ WITH(
 )"#
                 )
             };
-            assert_eq!(actual.to_string(), expect,);
+            assert_eq!(actual.to_string(), expect);
             let output = execute_sql(&frontend, "truncate test_table").await;
             assert!(matches!(output, Output::AffectedRows(0)));
             let output = execute_sql(&frontend, "select * from test_table").await;
