@@ -1,4 +1,4 @@
-TRUNCATE TABLE not_exits_table;
+TRUNCATE TABLE not_exists_table;
 
 CREATE TABLE monitor (host STRING, ts TIMESTAMP, cpu DOUBLE DEFAULT 0, memory DOUBLE, TIME INDEX (ts), PRIMARY KEY(host));
 
