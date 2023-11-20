@@ -50,7 +50,7 @@ impl FooterWriter {
         let mut buf = Vec::with_capacity(capacity);
 
         self.write_magic(&mut buf); // HeadMagic
-        buf.extend_from_slice(&payload); // Payload
+        self.write_payload(&mut buf, &payload); // Payload
         self.write_footer_payload_size(payload_size as _, &mut buf); // PayloadSize
         self.write_flags(&mut buf); // Flags
         self.write_magic(&mut buf); // FootMagic
@@ -59,6 +59,10 @@ impl FooterWriter {
 
     fn write_magic(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&MAGIC);
+    }
+
+    fn write_payload(&self, buf: &mut Vec<u8>, payload: &[u8]) {
+        buf.extend_from_slice(payload);
     }
 
     fn write_footer_payload_size(&self, payload_size: i32, buf: &mut Vec<u8>) {
