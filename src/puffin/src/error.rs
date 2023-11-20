@@ -45,6 +45,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to flush"))]
+    Flush {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
     #[snafu(display("Magic not matched"))]
     MagicNotMatched { location: Location },
 
@@ -112,6 +119,7 @@ impl ErrorExt for Error {
             | MagicNotMatched { .. }
             | DeserializeJson { .. }
             | Write { .. }
+            | Flush { .. }
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }

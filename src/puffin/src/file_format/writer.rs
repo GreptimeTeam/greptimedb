@@ -26,7 +26,6 @@ pub use crate::file_format::writer::file::PuffinFileWriter;
 pub struct Blob<R> {
     // TODO(zhongzc): ignore `input_fields`, `snapshot_id`, `sequence_number`
     // and `compression_codec` for now to keep thing simple
-
     /// The type of the blob
     pub blob_type: String,
 
