@@ -17,8 +17,7 @@
 use std::time::Duration;
 
 use common_query::Output;
-use common_telemetry::info;
-use common_telemetry::tracing::warn;
+use common_telemetry::{info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};

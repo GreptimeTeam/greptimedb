@@ -26,6 +26,7 @@ use common_grpc_expr::util::{extract_new_columns, ColumnExpr};
 use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
@@ -152,8 +153,10 @@ impl Inserter {
         ctx: &QueryContextRef,
     ) -> Result<AffectedRows> {
         write_meter!(ctx.current_catalog(), ctx.current_schema(), requests);
-        let header: RegionRequestHeader = ctx.as_ref().into();
-        let request_factory = RegionRequestFactory::new(header);
+        let request_factory = RegionRequestFactory::new(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            dbname: ctx.get_db_string(),
+        });
 
         let tasks = self
             .group_requests_by_peer(requests)

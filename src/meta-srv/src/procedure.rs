@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod region_failover;
+pub mod region_migration;
 #[cfg(test)]
 mod tests;
 mod utils;

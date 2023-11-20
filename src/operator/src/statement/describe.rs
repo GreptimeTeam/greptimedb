@@ -14,6 +14,7 @@
 
 use common_error::ext::BoxedError;
 use common_query::Output;
+use common_telemetry::tracing;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use sql::statements::describe::DescribeTable;
@@ -26,6 +27,7 @@ use crate::statement::StatementExecutor;
 use crate::table::table_idents_to_full_name;
 
 impl StatementExecutor {
+    #[tracing::instrument(skip_all)]
     pub(super) async fn describe_table(
         &self,
         stmt: DescribeTable,

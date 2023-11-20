@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::v1::meta::lock_client::LockClient;
 use api::v1::meta::{LockRequest, LockResponse, Role, UnlockRequest, UnlockResponse};
 use common_grpc::channel_manager::ChannelManager;
+use common_telemetry::tracing_context::TracingContext;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -127,7 +128,11 @@ impl Inner {
 
     async fn lock(&self, mut req: LockRequest) -> Result<LockResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id, self.role);
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
         let res = client.lock(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())
@@ -135,7 +140,11 @@ impl Inner {
 
     async fn unlock(&self, mut req: UnlockRequest) -> Result<UnlockResponse> {
         let mut client = self.random_client()?;
-        req.set_header(self.id, self.role);
+        req.set_header(
+            self.id,
+            self.role,
+            TracingContext::from_current_span().to_w3c(),
+        );
         let res = client.unlock(req).await.map_err(error::Error::from)?;
 
         Ok(res.into_inner())

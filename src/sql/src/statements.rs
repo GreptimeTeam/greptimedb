@@ -37,12 +37,13 @@ use common_base::bytes::Bytes;
 use common_query::AddColumnLocation;
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::constraint::{CURRENT_TIMESTAMP, CURRENT_TIMESTAMP_FN};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, COMMENT_KEY};
-use datatypes::types::cast::CastOption;
 use datatypes::types::{cast, TimestampType};
 use datatypes::value::{OrderedF32, OrderedF64, Value};
 pub use option_map::OptionMap;
 use snafu::{ensure, OptionExt, ResultExt};
+use sqlparser::ast::ExactNumberInfo;
 pub use transform::{get_data_type_by_alias_name, transform_statements};
 
 use crate::ast::{
@@ -145,6 +146,7 @@ macro_rules! parse_number_to_value {
                 let n  = parse_sql_number::<i64>($n)?;
                 Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
             },
+            // TODO(QuenKar): parse decimal128 string with precision and scale
 
             _ => ParseSqlValueSnafu {
                 msg: format!("Fail to parse number {}, invalid column type: {:?}",
@@ -222,11 +224,9 @@ pub fn sql_value_to_value(
         }
     };
     if value.data_type() != *data_type {
-        cast::cast_with_opt(value, data_type, &CastOption { strict: true }).with_context(|_| {
-            InvalidCastSnafu {
-                sql_value: sql_val.clone(),
-                datatype: data_type,
-            }
+        cast(value, data_type).with_context(|_| InvalidCastSnafu {
+            sql_value: sql_val.clone(),
+            datatype: data_type,
         })
     } else {
         Ok(value)
@@ -270,8 +270,13 @@ fn parse_column_default_constraint(
                 ColumnDefaultConstraint::Value(sql_value_to_value(column_name, data_type, v)?)
             }
             ColumnOption::Default(Expr::Function(func)) => {
+                let mut func = format!("{func}").to_lowercase();
+                // normalize CURRENT_TIMESTAMP to CURRENT_TIMESTAMP()
+                if func == CURRENT_TIMESTAMP {
+                    func = CURRENT_TIMESTAMP_FN.to_string();
+                }
                 // Always use lowercase for function expression
-                ColumnDefaultConstraint::Function(format!("{func}").to_lowercase())
+                ColumnDefaultConstraint::Function(func.to_lowercase())
             }
             ColumnOption::Default(expr) => {
                 return UnsupportedDefaultValueSnafu {
@@ -406,6 +411,15 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
             .map(|t| ConcreteDataType::timestamp_datatype(t.unit()))
             .unwrap_or(ConcreteDataType::timestamp_millisecond_datatype())),
         SqlDataType::Interval => Ok(ConcreteDataType::interval_month_day_nano_datatype()),
+        SqlDataType::Decimal(exact_info) => match exact_info {
+            ExactNumberInfo::None => Ok(ConcreteDataType::decimal128_default_datatype()),
+            // refer to https://dev.mysql.com/doc/refman/8.0/en/fixed-point-types.html
+            // In standard SQL, the syntax DECIMAL(M) is equivalent to DECIMAL(M,0).
+            ExactNumberInfo::Precision(p) => Ok(ConcreteDataType::decimal128_datatype(*p as u8, 0)),
+            ExactNumberInfo::PrecisionAndScale(p, s) => {
+                Ok(ConcreteDataType::decimal128_datatype(*p as u8, *s as i8))
+            }
+        },
         _ => error::SqlTypeNotSupportedSnafu {
             t: data_type.clone(),
         }
@@ -439,6 +453,9 @@ pub fn concrete_data_type_to_sql_data_type(data_type: &ConcreteDataType) -> Resu
         )),
         ConcreteDataType::Interval(_) => Ok(SqlDataType::Interval),
         ConcreteDataType::Binary(_) => Ok(SqlDataType::Varbinary(None)),
+        ConcreteDataType::Decimal128(d) => Ok(SqlDataType::Decimal(
+            ExactNumberInfo::PrecisionAndScale(d.precision() as u64, d.scale() as u64),
+        )),
         ConcreteDataType::Duration(_)
         | ConcreteDataType::Null(_)
         | ConcreteDataType::List(_)

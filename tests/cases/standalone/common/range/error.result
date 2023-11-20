@@ -35,6 +35,10 @@ SELECT min(val) FROM host ALIGN '5s';
 
 Error: 2000(InvalidSyntax), sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
 
+SELECT 1 FROM host ALIGN '5s';
+
+Error: 2000(InvalidSyntax), sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+
 SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
 
 Error: 3001(EngineExecuteQuery), No field named "MAX(host.val)". Valid fields are "MIN(host.val) RANGE 10s FILL NULL", host.ts, host.host.

@@ -23,7 +23,7 @@ pub(crate) mod query;
 pub(crate) mod region;
 
 #[cfg(any(test, feature = "test"))]
-pub(crate) mod test_util;
+pub mod test_util;
 
 use datatypes::schema::ColumnSchema;
 use serde::{Deserialize, Serialize};

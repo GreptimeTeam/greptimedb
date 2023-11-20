@@ -69,3 +69,39 @@ DROP TABLE host;
 
 Affected Rows: 0
 
+-- Test no primary key and by keyword
+CREATE TABLE host (
+  ts timestamp(3) time index,
+  host STRING,
+  val BIGINT,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host VALUES
+    (0,     'host1', 0),
+    (5000,  'host1', null),
+    (10000, 'host1', 1),
+    (15000, 'host1', null),
+    (20000, 'host1', 2),
+    (0,     'host2', 3),
+    (5000,  'host2', null),
+    (10000, 'host2', 4),
+    (15000, 'host2', null),
+    (20000, 'host2', 5);
+
+Affected Rows: 10
+
+SELECT ts, max(val) RANGE '5s' FROM host ALIGN '20s' ORDER BY ts;
+
++---------------------+----------------------------------+
+| ts                  | MAX(host.val) RANGE 5s FILL NULL |
++---------------------+----------------------------------+
+| 1970-01-01T00:00:00 | 3                                |
+| 1970-01-01T00:00:20 | 5                                |
++---------------------+----------------------------------+
+
+DROP TABLE host;
+
+Affected Rows: 0
+

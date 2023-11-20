@@ -19,7 +19,9 @@ use api::v1::region::{region_request, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 use common_runtime::Runtime;
-use common_telemetry::{debug, error, TRACE_ID};
+use common_telemetry::tracing::info_span;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{debug, error};
 use snafu::{OptionExt, ResultExt};
 use tonic::{Request, Response};
 
@@ -45,12 +47,14 @@ impl RegionServerRequestHandler {
     }
 
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse> {
-        let trace_id = request
-            .header
-            .context(InvalidQuerySnafu {
-                reason: "Expecting non-empty region request header.",
-            })?
-            .trace_id;
+        let tracing_context = TracingContext::from_w3c(
+            &request
+                .header
+                .context(InvalidQuerySnafu {
+                    reason: "Expecting non-empty region request header.",
+                })?
+                .tracing_context,
+        );
         let query = request.body.context(InvalidQuerySnafu {
             reason: "Expecting non-empty region request body.",
         })?;
@@ -64,17 +68,21 @@ impl RegionServerRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self.runtime.spawn(TRACE_ID.scope(trace_id, async move {
-            handler.handle(query).await.map_err(|e| {
-                if e.status_code().should_log_error() {
-                    error!(e; "Failed to handle request");
-                } else {
-                    // Currently, we still print a debug log.
-                    debug!("Failed to handle request, err: {}", e);
-                }
-                e
-            })
-        }));
+        let handle = self.runtime.spawn(async move {
+            handler
+                .handle(query)
+                .trace(tracing_context.attach(info_span!("RegionServerRequestHandler::handle")))
+                .await
+                .map_err(|e| {
+                    if e.status_code().should_log_error() {
+                        error!(e; "Failed to handle request");
+                    } else {
+                        // Currently, we still print a debug log.
+                        debug!("Failed to handle request, err: {}", e);
+                    }
+                    e
+                })
+        });
 
         handle.await.context(JoinTaskSnafu)?
     }

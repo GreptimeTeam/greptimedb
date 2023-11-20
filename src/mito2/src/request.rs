@@ -25,8 +25,7 @@ use api::helper::{
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_query::Output;
 use common_query::Output::AffectedRows;
-use common_telemetry::tracing::log::info;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use datatypes::prelude::DataType;
 use prometheus::HistogramTimer;
 use prost::Message;

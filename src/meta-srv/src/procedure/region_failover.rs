@@ -46,6 +46,7 @@ use table::metadata::TableId;
 use crate::error::{Error, RegisterProcedureLoaderSnafu, Result, TableMetadataManagerSnafu};
 use crate::lock::DistLockRef;
 use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::procedure::utils::region_lock_key;
 use crate::service::mailbox::MailboxRef;
 
 const OPEN_REGION_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -270,8 +271,6 @@ trait State: Sync + Send + Debug {
     fn status(&self) -> Status {
         Status::executing(true)
     }
-
-    fn remark_inactive_region_if_needed(&mut self) {}
 }
 
 /// The states transition of region failover procedure:
@@ -341,11 +340,7 @@ impl RegionFailoverProcedure {
     }
 
     fn from_json(json: &str, context: RegionFailoverContext) -> ProcedureResult<Self> {
-        let mut node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
-        // If the meta leader node dies during the execution of the procedure,
-        // the new leader node needs to remark the failed region as "inactive"
-        // to prevent it from renewing the lease.
-        node.state.remark_inactive_region_if_needed();
+        let node: Node = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(Self { node, context })
     }
 }
@@ -377,10 +372,7 @@ impl Procedure for RegionFailoverProcedure {
 
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
-        let region_key = format!(
-            "{}/region-{}",
-            region_ident.table_id, region_ident.region_number
-        );
+        let region_key = region_lock_key(region_ident.table_id, region_ident.region_number);
         LockKey::single(region_key)
     }
 }

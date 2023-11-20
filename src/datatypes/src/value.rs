@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field};
 use common_base::bytes::{Bytes, StringBytes};
+use common_decimal::Decimal128;
 use common_telemetry::logging;
 use common_time::date::Date;
 use common_time::datetime::DateTime;
@@ -60,6 +61,9 @@ pub enum Value {
     Int64(i64),
     Float32(OrderedF32),
     Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
 
     // String types:
     String(StringBytes),
@@ -116,6 +120,7 @@ impl Display for Value {
                     .join(", ");
                 write!(f, "{}[{}]", v.datatype.name(), items)
             }
+            Value::Decimal128(v) => write!(f, "{}", v),
         }
     }
 }
@@ -148,6 +153,7 @@ impl Value {
             Value::Interval(v) => ConcreteDataType::interval_datatype(v.unit()),
             Value::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
             Value::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+            Value::Decimal128(d) => ConcreteDataType::decimal128_datatype(d.precision(), d.scale()),
         }
     }
 
@@ -192,6 +198,7 @@ impl Value {
             Value::Time(v) => ValueRef::Time(*v),
             Value::Interval(v) => ValueRef::Interval(*v),
             Value::Duration(v) => ValueRef::Duration(*v),
+            Value::Decimal128(v) => ValueRef::Decimal128(*v),
         }
     }
 
@@ -271,6 +278,7 @@ impl Value {
                 TimeUnit::Microsecond => LogicalTypeId::DurationMicrosecond,
                 TimeUnit::Nanosecond => LogicalTypeId::DurationNanosecond,
             },
+            Value::Decimal128(_) => LogicalTypeId::Decimal128,
         }
     }
 
@@ -318,6 +326,10 @@ impl Value {
                 IntervalUnit::MonthDayNano => ScalarValue::IntervalMonthDayNano(Some(v.to_i128())),
             },
             Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
+            Value::Decimal128(d) => {
+                let (v, p, s) = d.to_scalar_value();
+                ScalarValue::Decimal128(v, p, s)
+            }
         };
 
         Ok(scalar_value)
@@ -357,6 +369,7 @@ pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValu
         ),
         ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None)?,
         ConcreteDataType::Duration(d) => duration_to_scalar_value(d.unit(), None),
+        ConcreteDataType::Decimal128(d) => ScalarValue::Decimal128(None, d.precision(), d.scale()),
     })
 }
 
@@ -533,6 +546,8 @@ impl_try_from_value!(Time, Time);
 impl_try_from_value!(DateTime, DateTime);
 impl_try_from_value!(Timestamp, Timestamp);
 impl_try_from_value!(Interval, Interval);
+impl_try_from_value!(Duration, Duration);
+impl_try_from_value!(Decimal128, Decimal128);
 
 macro_rules! impl_value_from {
     ($Variant: ident, $Type: ident) => {
@@ -575,6 +590,7 @@ impl_value_from!(Timestamp, Timestamp);
 impl_value_from!(Interval, Interval);
 impl_value_from!(Duration, Duration);
 impl_value_from!(String, String);
+impl_value_from!(Decimal128, Decimal128);
 
 impl From<&str> for Value {
     fn from(string: &str) -> Value {
@@ -620,6 +636,7 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Time(v) => serde_json::to_value(v.value())?,
             Value::Interval(v) => serde_json::to_value(v.to_i128())?,
             Value::Duration(v) => serde_json::to_value(v.value())?,
+            Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
         };
 
         Ok(json_value)
@@ -840,6 +857,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Interval(v) => Value::Interval(v),
             ValueRef::Duration(v) => Value::Duration(v),
             ValueRef::List(v) => v.to_value(),
+            ValueRef::Decimal128(v) => Value::Decimal128(v),
         }
     }
 }
@@ -861,6 +879,9 @@ pub enum ValueRef<'a> {
     Int64(i64),
     Float32(OrderedF32),
     Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
 
     // String types:
     String(&'a str),
@@ -1003,6 +1024,11 @@ impl<'a> ValueRef<'a> {
     pub fn as_list(&self) -> Result<Option<ListValueRef>> {
         impl_as_for_value_ref!(self, List)
     }
+
+    /// Cast itself to [Decimal128].
+    pub fn as_decimal128(&self) -> Result<Option<Decimal128>> {
+        impl_as_for_value_ref!(self, Decimal128)
+    }
 }
 
 impl<'a> PartialOrd for ValueRef<'a> {
@@ -1053,6 +1079,7 @@ impl_value_ref_from!(Timestamp, Timestamp);
 impl_value_ref_from!(Time, Time);
 impl_value_ref_from!(Interval, Interval);
 impl_value_ref_from!(Duration, Duration);
+impl_value_ref_from!(Decimal128, Decimal128);
 
 impl<'a> From<&'a str> for ValueRef<'a> {
     fn from(string: &'a str) -> ValueRef<'a> {
@@ -1143,6 +1170,7 @@ impl<'a> ValueRef<'a> {
             ValueRef::Time(_) => 16,
             ValueRef::Duration(_) => 16,
             ValueRef::Interval(_) => 24,
+            ValueRef::Decimal128(_) => 32,
             ValueRef::List(v) => match v {
                 ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
                 ListValueRef::Ref { val } => val.estimated_size(),
@@ -2227,8 +2255,6 @@ mod tests {
 
     #[test]
     fn test_value_ref_estimated_size() {
-        assert_eq!(std::mem::size_of::<ValueRef>(), 24);
-
         check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
         check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
         check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
@@ -2304,6 +2330,7 @@ mod tests {
                 idx: 2,
             }),
             85,
-        )
+        );
+        check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32)
     }
 }

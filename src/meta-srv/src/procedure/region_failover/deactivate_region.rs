@@ -30,7 +30,6 @@ use crate::error::{
     self, Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_region_manager::InactiveRegionManager;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -91,22 +90,13 @@ impl DeactivateRegion {
         })?;
 
         let ch = Channel::Datanode(failed_region.datanode_id);
-        // Mark the region as inactive
-        InactiveRegionManager::new(&ctx.in_memory)
-            .register_inactive_region(failed_region)
-            .await?;
-        // We first marked the region as inactive, which means that the failed region cannot
-        // be successfully renewed from now on, so after the lease time is exceeded, the region
-        // will be automatically closed.
-        // If the deadline is exceeded, we can proceed to the next step with confidence,
-        // as the expiration means that the region has been closed.
         let timeout = Duration::from_secs(ctx.region_lease_secs);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
 
     async fn handle_response(
         &self,
-        ctx: &RegionFailoverContext,
+        _ctx: &RegionFailoverContext,
         mailbox_receiver: MailboxReceiver,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
@@ -123,10 +113,6 @@ impl DeactivateRegion {
                     .fail();
                 };
                 if result {
-                    InactiveRegionManager::new(&ctx.in_memory)
-                        .deregister_inactive_region(failed_region)
-                        .await?;
-
                     Ok(Box::new(ActivateRegion::new(self.candidate.clone())))
                 } else {
                     // Under rare circumstances would a Datanode fail to close a Region.

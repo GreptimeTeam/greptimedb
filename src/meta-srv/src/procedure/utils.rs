@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use store_api::storage::{RegionNumber, TableId};
+
+pub fn region_lock_key(table_id: TableId, region_number: RegionNumber) -> String {
+    format!("{}/region-{}", table_id, region_number)
+}
+
 #[cfg(test)]
 pub mod mock {
     use std::io::Error;

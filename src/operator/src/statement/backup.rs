@@ -14,7 +14,7 @@
 
 use common_datasource::file_format::Format;
 use common_query::Output;
-use common_telemetry::info;
+use common_telemetry::{info, tracing};
 use session::context::QueryContextBuilder;
 use snafu::{ensure, ResultExt};
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
@@ -27,6 +27,7 @@ pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
 pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
 
 impl StatementExecutor {
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn copy_database(&self, req: CopyDatabaseRequest) -> error::Result<Output> {
         // location must end with / so that every table is exported to a file.
         ensure!(

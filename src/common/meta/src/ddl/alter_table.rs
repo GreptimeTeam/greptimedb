@@ -26,6 +26,7 @@ use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSn
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, Status,
 };
+use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future;
 use serde::{Deserialize, Serialize};
@@ -207,7 +208,7 @@ impl AlterTableProcedure {
                 let request = self.create_alter_region_request(region_id)?;
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
-                        trace_id: common_telemetry::trace_id().unwrap_or_default(),
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
                     body: Some(region_request::Body::Alter(request)),

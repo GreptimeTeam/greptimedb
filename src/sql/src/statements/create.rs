@@ -101,7 +101,7 @@ impl CreateTable {
     }
 
     #[inline]
-    fn format_if_not_exits(&self) -> &str {
+    fn format_if_not_exists(&self) -> &str {
         if self.if_not_exists {
             "IF NOT EXISTS"
         } else {
@@ -174,7 +174,7 @@ impl Display for Partitions {
 
 impl Display for CreateTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let if_not_exists = self.format_if_not_exits();
+        let if_not_exists = self.format_if_not_exists();
         let name = &self.name;
         let columns = format_list_indent!(self.columns);
         let constraints = self.format_constraints();

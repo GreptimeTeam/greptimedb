@@ -27,6 +27,8 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::{Sequence, SequenceRef};
 use common_recordbatch::SendableRecordBatchStream;
+use common_telemetry::tracing;
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{OptionExt, ResultExt};
@@ -71,8 +73,15 @@ impl RegionInvoker {
 #[async_trait]
 impl Datanode for RegionInvoker {
     async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
+        let span = request
+            .header
+            .as_ref()
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
+            .unwrap_or_default()
+            .attach(tracing::info_span!("RegionInvoker::handle_region_request"));
         let response = self
             .handle_inner(request)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)?;
@@ -83,8 +92,15 @@ impl Datanode for RegionInvoker {
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
+        let span = request
+            .header
+            .as_ref()
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
+            .unwrap_or_default()
+            .attach(tracing::info_span!("RegionInvoker::handle_query"));
         self.region_server
             .handle_read(request)
+            .trace(span)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)

@@ -133,6 +133,15 @@ impl Options {
 
         Ok(opts)
     }
+
+    pub fn node_id(&self) -> Option<String> {
+        match self {
+            Options::Metasrv(_) | Options::Cli(_) => None,
+            Options::Datanode(opt) => opt.node_id.map(|x| x.to_string()),
+            Options::Frontend(opt) => opt.node_id.clone(),
+            Options::Standalone(opt) => opt.frontend.node_id.clone(),
+        }
+    }
 }
 
 #[cfg(test)]

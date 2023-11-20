@@ -182,7 +182,7 @@ async fn insert_script(
     )
     .await;
     assert!(!json.success(), "{json:?}");
-    assert_eq!(json.error().unwrap(), "Invalid argument: invalid schema");
+    assert_eq!(json.error().unwrap(), "invalid schema");
 
     let body = RawBody(Body::from(script.clone()));
     let exec = create_script_query();

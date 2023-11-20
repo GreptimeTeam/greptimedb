@@ -22,6 +22,7 @@ use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
+use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
@@ -410,6 +411,14 @@ impl Error {
     /// Returns true if we need to fill default value for a region.
     pub(crate) fn is_fill_default(&self) -> bool {
         matches!(self, Error::FillDefault { .. })
+    }
+
+    /// Returns true if the file is not found on the object store.
+    pub(crate) fn is_object_not_found(&self) -> bool {
+        match self {
+            Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            _ => false,
+        }
     }
 }
 

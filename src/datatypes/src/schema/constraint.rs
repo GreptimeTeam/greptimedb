@@ -24,9 +24,9 @@ use crate::value::Value;
 use crate::vectors::operations::VectorOp;
 use crate::vectors::{TimestampMillisecondVector, VectorRef};
 
-const CURRENT_TIMESTAMP: &str = "current_timestamp";
-const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
-const NOW_FN: &str = "now()";
+pub const CURRENT_TIMESTAMP: &str = "current_timestamp";
+pub const CURRENT_TIMESTAMP_FN: &str = "current_timestamp()";
+pub const NOW_FN: &str = "now()";
 
 /// Column's default constraint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -27,7 +27,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_runtime::Runtime;
-use common_telemetry::{logging, TRACE_ID};
+use common_telemetry::logging;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 
@@ -70,7 +70,6 @@ impl GreptimeRequestHandler {
         let request_type = request_type(&query).to_string();
         let db = query_ctx.get_db_string();
         let timer = RequestTimer::new(db.clone(), request_type);
-        let trace_id = query_ctx.trace_id();
 
         // Executes requests in another runtime to
         // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
@@ -79,17 +78,17 @@ impl GreptimeRequestHandler {
         //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
         //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
         // 2. avoid the handler blocks the gRPC runtime incidentally.
-        let handle = self.runtime.spawn(TRACE_ID.scope(trace_id, async move {
+        let handle = self.runtime.spawn(async move {
             handler.do_query(query, query_ctx).await.map_err(|e| {
                 if e.status_code().should_log_error() {
                     logging::error!(e; "Failed to handle request");
                 } else {
                     // Currently, we still print a debug log.
-                    logging::debug!("Failed to handle request, err: {}", e);
+                    logging::debug!("Failed to handle request, err: {:?}", e);
                 }
                 e
             })
-        }));
+        });
 
         handle.await.context(JoinTaskSnafu).map_err(|e| {
             timer.record(e.status_code());
@@ -166,7 +165,6 @@ pub(crate) fn create_query_context(header: Option<&RequestHeader>) -> QueryConte
     QueryContextBuilder::default()
         .current_catalog(catalog.to_string())
         .current_schema(schema.to_string())
-        .try_trace_id(header.map(|h| h.trace_id))
         .build()
 }
 

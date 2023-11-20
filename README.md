@@ -27,14 +27,6 @@
     <a href="https://greptime.com/slack"><img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack" alt="slack" /></a>
 </p>
 
-## Upcoming Event
-Come and meet us in **KubeCon + CloudNativeCon North America 2023!**
-<p align="center">
-  <picture>
-    <img alt="KubeCon + CloudNativeCon North Logo" src="./docs/banner/KCCNC_NA_2023_1000x200_Email Banner.png" width="800px">
-  </picture>
-</p>
-
 ## What is GreptimeDB
 
 GreptimeDB is an open-source time-series database with a special focus on
@@ -117,7 +109,7 @@ To write and query data, GreptimeDB is compatible with multiple [protocols and c
 ### Installation
 
 - [Pre-built Binaries](https://greptime.com/download):
-  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use. 
+  For Linux and macOS, you can easily download pre-built binaries including official releases and nightly builds that are ready to use.
   In most cases, downloading the version without PyO3 is sufficient. However, if you plan to run scripts in CPython (and use Python packages like NumPy and Pandas), you will need to download the version with PyO3 and install a Python with the same version as the Python in the PyO3 version.
   We recommend using virtualenv for the installation process to manage multiple Python versions.
 - [Docker Images](https://hub.docker.com/r/greptime/greptimedb)(**recommended**): pre-built
