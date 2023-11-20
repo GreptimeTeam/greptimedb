@@ -49,7 +49,6 @@ members = [
     "src/servers",
     "src/session",
     "src/sql",
-    "src/storage",
     "src/store-api",
     "src/table",
     "tests-integration",
@@ -176,7 +175,6 @@ script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
-storage = { path = "src/storage" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }

@@ -642,12 +642,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c59bdb34bc650a32731b31bd8f0829cc15d24a708ee31559e0bb34f2bc320cba"
 
 [[package]]
-name = "atomic_float"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62af46d040ba9df09edc6528dae9d8e49f5f3e82f55b7d2ec31a733c38dbc49d"
-
-[[package]]
 name = "atty"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1741,7 +1735,7 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-time",
- "criterion 0.4.0",
+ "criterion",
  "dashmap",
  "datafusion",
  "datatypes",
@@ -2163,32 +2157,6 @@ dependencies = [
 
 [[package]]
 name = "criterion"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b01d6de93b2b6c65e17c634a26653a29d107b3c98c607c765bf38d041531cd8f"
-dependencies = [
- "atty",
- "cast",
- "clap 2.34.0",
- "criterion-plot 0.4.5",
- "csv",
- "itertools 0.10.5",
- "lazy_static",
- "num-traits",
- "oorandom",
- "plotters",
- "rayon",
- "regex",
- "serde",
- "serde_cbor",
- "serde_derive",
- "serde_json",
- "tinytemplate",
- "walkdir",
-]
-
-[[package]]
-name = "criterion"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c76e09c1aae2bc52b3d2f29e13c6572553b30c4aa1b8a49fd70de6412654cb"
@@ -2198,7 +2166,7 @@ dependencies = [
  "cast",
  "ciborium",
  "clap 3.2.25",
- "criterion-plot 0.5.0",
+ "criterion-plot",
  "futures",
  "itertools 0.10.5",
  "lazy_static",
@@ -2213,16 +2181,6 @@ dependencies = [
  "tinytemplate",
  "tokio",
  "walkdir",
-]
-
-[[package]]
-name = "criterion-plot"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2673cc8207403546f45f5fd319a974b1e6983ad1a3ee7e6041650013be041876"
-dependencies = [
- "cast",
- "itertools 0.10.5",
 ]
 
 [[package]]
@@ -7981,7 +7939,7 @@ dependencies = [
  "common-test-util",
  "common-time",
  "console",
- "criterion 0.4.0",
+ "criterion",
  "crossbeam-utils",
  "datafusion",
  "datafusion-common",
@@ -8090,16 +8048,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91d3c334ca1ee894a2c6f6ad698fe8c435b76d504b13d436f0685d648d6d96f7"
 dependencies = [
  "serde_derive",
-]
-
-[[package]]
-name = "serde_cbor"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
-dependencies = [
- "half 1.8.2",
- "serde",
 ]
 
 [[package]]
@@ -8841,60 +8789,6 @@ checksum = "c8786c4fc8a91bc4fcd90aed33413f79e4dc9811f24ba14d1d59adf57cf1c871"
 dependencies = [
  "clap 2.34.0",
  "num-traits",
-]
-
-[[package]]
-name = "storage"
-version = "0.4.3"
-dependencies = [
- "api",
- "arc-swap",
- "arrow",
- "arrow-array",
- "async-compat",
- "async-stream",
- "async-trait",
- "atomic_float",
- "bytes",
- "common-base",
- "common-config",
- "common-datasource",
- "common-error",
- "common-macro",
- "common-query",
- "common-recordbatch",
- "common-runtime",
- "common-telemetry",
- "common-test-util",
- "common-time",
- "criterion 0.3.6",
- "datafusion",
- "datafusion-common",
- "datafusion-expr",
- "datafusion-physical-expr",
- "datatypes",
- "futures",
- "futures-util",
- "itertools 0.10.5",
- "lazy_static",
- "log-store",
- "object-store",
- "parquet",
- "paste",
- "prometheus",
- "prost 0.12.1",
- "rand",
- "regex",
- "serde",
- "serde_json",
- "snafu",
- "store-api",
- "table",
- "tokio",
- "tokio-util",
- "tonic 0.10.2",
- "tonic-build 0.9.2",
- "uuid",
 ]
 
 [[package]]
