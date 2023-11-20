@@ -42,6 +42,10 @@ use crate::error::{
 };
 use crate::statement::StatementExecutor;
 
+// The buffer size should be greater than 5MB (minimum multipart upload size).
+/// Buffer size to flush data to object stores.
+const WRITE_BUFFER_THRESHOLD: ReadableSize = ReadableSize::mb(8);
+
 impl StatementExecutor {
     async fn stream_to_file(
         &self,
@@ -50,7 +54,7 @@ impl StatementExecutor {
         object_store: ObjectStore,
         path: &str,
     ) -> Result<usize> {
-        let threshold = ReadableSize::mb(4).as_bytes() as usize;
+        let threshold = WRITE_BUFFER_THRESHOLD.as_bytes() as usize;
 
         match format {
             Format::Csv(_) => stream_to_csv(
