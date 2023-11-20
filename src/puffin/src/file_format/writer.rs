@@ -22,18 +22,18 @@ use async_trait::async_trait;
 use crate::error::Result;
 pub use crate::file_format::writer::file::PuffinFileWriter;
 
-// Blob ready to be written
+/// Blob ready to be written
 pub struct Blob<R> {
     // TODO(zhongzc): ignore `input_fields`, `snapshot_id`, `sequence_number`
     // and `compression_codec` for now to keep thing simple
 
-    // The type of the blob
+    /// The type of the blob
     pub blob_type: String,
 
-    // The data of the blob
+    /// The data of the blob
     pub data: R,
 
-    // The properties of the blob
+    /// The properties of the blob
     pub properties: HashMap<String, String>,
 }
 
