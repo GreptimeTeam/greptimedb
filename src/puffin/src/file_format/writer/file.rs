@@ -74,7 +74,6 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
     fn add_blob<R: io::Read>(&mut self, mut blob: Blob<R>) -> Result<()> {
         self.write_header_if_needed_sync()?;
 
-        // write the blob into the writer
         let size = io::copy(&mut blob.data, &mut self.writer).context(WriteSnafu)?;
 
         let blob_metadata = self.create_blob_metadata(blob.blob_type, blob.properties, size);
