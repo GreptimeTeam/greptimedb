@@ -36,6 +36,8 @@ use store_api::storage::RegionId;
 use self::migration_start::RegionMigrationStart;
 use crate::error::{Error, Result};
 use crate::procedure::utils::region_lock_key;
+use crate::region::lease_keeper::{OpeningRegionGuard, OpeningRegionKeeperRef};
+use crate::service::mailbox::MailboxRef;
 
 /// It's shared in each step and available even after recovering.
 ///
@@ -66,7 +68,15 @@ impl PersistentContext {
 ///
 /// The additional remote fetches are only required in the worst cases.
 #[derive(Debug, Clone, Default)]
-pub struct VolatileContext {}
+pub struct VolatileContext {
+    /// `opening_region_guard` will be set after the
+    /// [OpenCandidateRegion](crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion) step.
+    ///
+    /// `opening_region_guard` should be consumed after
+    /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
+    /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue) .
+    opening_region_guard: Option<OpeningRegionGuard>,
+}
 
 /// Used to generate new [Context].
 pub trait ContextFactory {
@@ -77,6 +87,9 @@ pub trait ContextFactory {
 pub struct ContextFactoryImpl {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
+    opening_region_keeper: OpeningRegionKeeperRef,
+    mailbox: MailboxRef,
+    server_addr: String,
 }
 
 impl ContextFactory for ContextFactoryImpl {
@@ -85,6 +98,9 @@ impl ContextFactory for ContextFactoryImpl {
             persistent_ctx,
             volatile_ctx: self.volatile_ctx,
             table_metadata_manager: self.table_metadata_manager,
+            opening_region_keeper: self.opening_region_keeper,
+            mailbox: self.mailbox,
+            server_addr: self.server_addr,
         }
     }
 }
@@ -96,12 +112,15 @@ pub struct Context {
     persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
+    opening_region_keeper: OpeningRegionKeeperRef,
+    mailbox: MailboxRef,
+    server_addr: String,
 }
 
 impl Context {
     /// Returns address of meta server.
     pub fn server_addr(&self) -> &str {
-        todo!()
+        &self.server_addr
     }
 }
 
