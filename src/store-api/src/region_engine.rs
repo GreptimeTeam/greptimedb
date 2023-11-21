@@ -27,6 +27,15 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
 
+/// The result of setting readonly for the region.
+#[derive(Debug)]
+pub struct SetReadonlyResult {
+    /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
+    pub last_entry_id: Option<u64>,
+    /// Returns true if the region exist.
+    pub exist: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrantedRegion {
     pub region_id: RegionId,
@@ -127,6 +136,14 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+
+    /// Sets readonly for a region gracefully.
+    ///
+    /// After the call returns, the engine ensures no more write operations will succeed in the region.
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResult, BoxedError>;
 
     /// Indicates region role.
     ///

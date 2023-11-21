@@ -28,6 +28,8 @@ mod create_test;
 mod drop_test;
 #[cfg(test)]
 mod flush_test;
+#[cfg(test)]
+mod internal_command_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -38,7 +40,6 @@ mod projection_test;
 mod prune_test;
 #[cfg(test)]
 mod truncate_test;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,7 +50,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResult};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -188,6 +189,29 @@ impl EngineInner {
         Ok(())
     }
 
+    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResult> {
+        if let Some(region) = self.workers.get_region(region_id) {
+            if !region.is_writable() {
+                let last_entry_id = region.version_control.current().last_entry_id;
+
+                Ok(SetReadonlyResult {
+                    last_entry_id: Some(last_entry_id),
+                    exist: true,
+                })
+            } else {
+                let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
+                self.workers.submit_to_worker(region_id, request).await?;
+
+                receiver.await.context(RecvSnafu)
+            }
+        } else {
+            Ok(SetReadonlyResult {
+                last_entry_id: None,
+                exist: false,
+            })
+        }
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_writable() {
@@ -258,6 +282,16 @@ impl RegionEngine for MitoEngine {
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         self.inner
             .set_writable(region_id, writable)
+            .map_err(BoxedError::new)
+    }
+
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResult, BoxedError> {
+        self.inner
+            .set_readonly_gracefully(region_id)
+            .await
             .map_err(BoxedError::new)
     }
 

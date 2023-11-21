@@ -25,7 +25,7 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResult};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::RwLock;
@@ -171,6 +171,13 @@ impl RegionEngine for MetricEngine {
         writable: bool,
     ) -> std::result::Result<(), BoxedError> {
         todo!()
+    }
+
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> std::result::Result<SetReadonlyResult, BoxedError> {
+        self.inner.mito.set_readonly_gracefully(region_id).await
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

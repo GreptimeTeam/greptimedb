@@ -36,6 +36,7 @@ use futures::future::try_join_all;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{ensure, ResultExt};
 use store_api::logstore::LogStore;
+use store_api::region_engine::SetReadonlyResult;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
@@ -49,7 +50,7 @@ use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::{MitoRegionRef, RegionMap, RegionMapRef};
 use crate::request::{
-    BackgroundNotify, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
+    BackgroundNotify, Command, DdlRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::wal::Wal;
@@ -501,6 +502,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     // For background notify, we handle it directly.
                     self.handle_background_notify(region_id, notify).await;
                 }
+                WorkerRequest::Internal { region_id, command } => {
+                    self.handle_inter_command(region_id, command).await;
+                }
                 // We receive a stop signal, but we still want to process remaining
                 // requests. The worker thread will then check the running flag and
                 // then exit.
@@ -561,6 +565,30 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 self.handle_compaction_finished(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
+        }
+    }
+
+    /// Handles internal command.
+    async fn handle_inter_command(&mut self, region_id: RegionId, command: Command) {
+        match command {
+            Command::SetReadonlyGracefully(req) => {
+                if let Some(region) = self.regions.get_region(region_id) {
+                    if region.is_writable() {
+                        region.set_writable(false);
+                    }
+
+                    let last_entry_id = region.version_control.current().last_entry_id;
+                    let _ = req.sender.send(SetReadonlyResult {
+                        last_entry_id: Some(last_entry_id),
+                        exist: true,
+                    });
+                } else {
+                    let _ = req.sender.send(SetReadonlyResult {
+                        last_entry_id: None,
+                        exist: false,
+                    });
+                }
+            }
         }
     }
 }

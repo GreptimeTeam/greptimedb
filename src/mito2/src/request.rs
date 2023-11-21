@@ -32,6 +32,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::SetReadonlyResult;
 use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
@@ -467,6 +468,14 @@ pub(crate) enum WorkerRequest {
         notify: BackgroundNotify,
     },
 
+    /// The internal commands.
+    Internal {
+        /// Id of the region to send.
+        region_id: RegionId,
+
+        command: Command,
+    },
+
     /// Notify a worker to stop.
     Stop,
 }
@@ -537,6 +546,20 @@ impl WorkerRequest {
 
         Ok((worker_request, receiver))
     }
+
+    pub(crate) fn new_set_readonly_gracefully(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<SetReadonlyResult>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::Internal {
+                region_id,
+                command: Command::SetReadonlyGracefully(SetReadonlyGracefully { sender }),
+            },
+            receiver,
+        )
+    }
 }
 
 /// DDL request to a region.
@@ -561,6 +584,16 @@ pub(crate) struct SenderDdlRequest {
     pub(crate) sender: OptionOutputTx,
     /// Ddl request.
     pub(crate) request: DdlRequest,
+}
+
+#[derive(Debug)]
+pub(crate) enum Command {
+    SetReadonlyGracefully(SetReadonlyGracefully),
+}
+
+#[derive(Debug)]
+pub(crate) struct SetReadonlyGracefully {
+    pub(crate) sender: Sender<SetReadonlyResult>,
 }
 
 /// Notification from a background job.
