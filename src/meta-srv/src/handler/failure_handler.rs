@@ -20,7 +20,6 @@ use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 use common_catalog::consts::default_engine;
 use common_meta::RegionIdent;
-use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
@@ -86,7 +85,7 @@ impl HeartbeatHandler for RegionFailureHandler {
                 .region_stats
                 .iter()
                 .map(|x| {
-                    let region_id = RegionId::from(x.id);
+                    let region_id = x.id;
                     RegionIdent {
                         cluster_id: stat.cluster_id,
                         datanode_id: stat.id,
@@ -108,6 +107,7 @@ impl HeartbeatHandler for RegionFailureHandler {
 #[cfg(test)]
 mod tests {
     use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
@@ -133,7 +133,7 @@ mod tests {
         let acc = &mut HeartbeatAccumulator::default();
         fn new_region_stat(region_id: u64) -> RegionStat {
             RegionStat {
-                id: region_id,
+                id: RegionId::from_u64(region_id),
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: 0,
