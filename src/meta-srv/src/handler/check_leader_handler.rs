@@ -16,7 +16,7 @@ use api::v1::meta::{Error, HeartbeatRequest, Role};
 use common_telemetry::warn;
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct CheckLeaderHandler;
@@ -32,17 +32,25 @@ impl HeartbeatHandler for CheckLeaderHandler {
         req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
-        if let Some(election) = &ctx.election {
-            if election.is_leader() {
-                return Ok(());
-            }
-            if let Some(header) = &mut acc.header {
-                header.error = Some(Error::is_not_leader());
-                ctx.set_skip_all();
-                warn!("Received a heartbeat {:?}, but the current node is not the leader, so the heartbeat will be ignored.", req.header);
-            }
+    ) -> Result<HandleControl> {
+        let Some(election) = &ctx.election else {
+            return Ok(HandleControl::Continue);
+        };
+
+        if election.is_leader() {
+            return Ok(HandleControl::Continue);
         }
-        Ok(())
+
+        warn!(
+            "A heartbeat was received {:?}, however, since the current node is not the leader,\
+            this heartbeat will be disregarded.",
+            req.header
+        );
+
+        if let Some(header) = &mut acc.header {
+            header.error = Some(Error::is_not_leader());
+        }
+
+        return Ok(HandleControl::Done);
     }
 }

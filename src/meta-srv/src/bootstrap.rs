@@ -188,7 +188,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
     let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 

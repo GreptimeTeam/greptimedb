@@ -100,7 +100,7 @@ pub struct StartCommand {
     config_file: Option<String>,
     #[clap(short, long)]
     influxdb_enable: Option<bool>,
-    #[clap(long, multiple = true, value_delimiter = ',')]
+    #[clap(long, value_delimiter = ',', num_args = 1..)]
     metasrv_addr: Option<Vec<String>>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,

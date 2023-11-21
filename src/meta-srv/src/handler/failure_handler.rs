@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::{Context, ElectionRef};
 use crate::procedure::region_failover::RegionFailoverManager;
 
@@ -70,7 +70,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         _: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         if ctx.is_infancy {
             self.failure_detect_runner
                 .send_control(FailureDetectControl::Purge)
@@ -78,7 +78,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         }
 
         let Some(stat) = acc.stat.as_ref() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let heartbeat = DatanodeHeartbeat {
@@ -101,7 +101,8 @@ impl HeartbeatHandler for RegionFailureHandler {
         };
 
         self.failure_detect_runner.send_heartbeat(heartbeat).await;
-        Ok(())
+
+        Ok(HandleControl::Continue)
     }
 }
 

@@ -187,7 +187,7 @@ impl TryFrom<Vec<u8>> for StatKey {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StatValue {
     pub stats: Vec<Stat>,
@@ -197,6 +197,11 @@ impl StatValue {
     /// Get the latest number of regions.
     pub fn region_num(&self) -> Option<u64> {
         self.stats.last().map(|x| x.region_num)
+    }
+
+    /// Get the latest node addr.
+    pub fn node_addr(&self) -> Option<String> {
+        self.stats.last().map(|x| x.addr.clone())
     }
 }
 
@@ -363,6 +368,32 @@ mod tests {
         let new_value: LeaseValue = value_bytes.try_into().unwrap();
 
         assert_eq!(new_value, value);
+    }
+
+    #[test]
+    fn test_get_addr_from_stat_val() {
+        let empty = StatValue { stats: vec![] };
+        let addr = empty.node_addr();
+        assert!(addr.is_none());
+
+        let stat_val = StatValue {
+            stats: vec![
+                Stat {
+                    addr: "1".to_string(),
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "2".to_string(),
+                    ..Default::default()
+                },
+                Stat {
+                    addr: "3".to_string(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let addr = stat_val.node_addr().unwrap();
+        assert_eq!("3", addr);
     }
 
     #[test]

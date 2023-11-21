@@ -14,6 +14,7 @@
 
 //! Parquet writer.
 
+use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use object_store::ObjectStore;
@@ -25,11 +26,10 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use crate::error::{InvalidMetadataSnafu, Result};
+use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
-use crate::sst::stream_writer::BufferedWriter;
 
 /// Parquet SST writer.
 pub struct ParquetWriter {
@@ -83,14 +83,18 @@ impl ParquetWriter {
             Some(writer_props),
             opts.write_buffer_size.as_bytes() as usize,
         )
-        .await?;
+        .await
+        .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
         while let Some(batch) = self.source.next_batch().await? {
             stats.update(&batch);
             let arrow_batch = write_format.convert_batch(&batch)?;
 
-            buffered_writer.write(&arrow_batch).await?;
+            buffered_writer
+                .write(&arrow_batch)
+                .await
+                .context(WriteBufferSnafu)?;
         }
 
         if stats.num_rows == 0 {
@@ -99,11 +103,11 @@ impl ParquetWriter {
                 self.file_path
             );
 
-            buffered_writer.close().await?;
+            buffered_writer.close().await.context(WriteBufferSnafu)?;
             return Ok(None);
         }
 
-        let (_file_meta, file_size) = buffered_writer.close().await?;
+        let (_file_meta, file_size) = buffered_writer.close().await.context(WriteBufferSnafu)?;
         // Safety: num rows > 0 so we must have min/max.
         let time_range = stats.time_range.unwrap();
 

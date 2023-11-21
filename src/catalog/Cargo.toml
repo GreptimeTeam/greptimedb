@@ -49,5 +49,4 @@ chrono.workspace = true
 common-test-util.workspace = true
 log-store.workspace = true
 object-store.workspace = true
-storage.workspace = true
 tokio.workspace = true

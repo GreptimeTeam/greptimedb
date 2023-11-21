@@ -30,10 +30,9 @@ use store_api::region_request::{
 };
 use store_api::storage::RegionId;
 
+use crate::consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use crate::data_region::DataRegion;
-use crate::engine::{
-    MetricEngine, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
-};
+use crate::engine::MetricEngine;
 use crate::metadata_region::MetadataRegion;
 
 /// Env to test metric engine.
@@ -270,7 +269,7 @@ pub fn build_rows(num_tags: usize, num_rows: usize) -> Vec<Row> {
 mod test {
 
     use super::*;
-    use crate::engine::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
+    use crate::consts::{DATA_REGION_SUBDIR, METADATA_REGION_SUBDIR};
     use crate::utils::{self, to_metadata_region_id};
 
     #[tokio::test]

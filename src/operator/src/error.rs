@@ -378,12 +378,6 @@ pub enum Error {
         error: datafusion::error::DataFusionError,
     },
 
-    #[snafu(display("Failed to write parquet file"))]
-    WriteParquet {
-        location: Location,
-        source: storage::error::Error,
-    },
-
     #[snafu(display(
         "Schema datatypes not match at index {}, expected table schema: {}, actual file schema: {}",
         index,
@@ -594,7 +588,6 @@ impl ErrorExt for Error {
             | Error::ParseUrl { source, .. }
             | Error::BuildBackend { source, .. } => source.status_code(),
 
-            Error::WriteParquet { source, .. } => source.status_code(),
             Error::ExecuteDdl { source, .. } => source.status_code(),
             Error::InvalidCopyParameter { .. } => StatusCode::InvalidArguments,
 

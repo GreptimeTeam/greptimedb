@@ -85,7 +85,6 @@ rayon = "1.0"
 ron = "0.7"
 serde = { version = "1.0", features = ["derive"] }
 session = { workspace = true, features = ["testing"] }
-storage.workspace = true
 tokio-test = "0.4"
 
 [[bench]]
