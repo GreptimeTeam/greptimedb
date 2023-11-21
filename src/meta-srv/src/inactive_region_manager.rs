@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
-
 use common_meta::kv_backend::ResettableKvBackendRef;
-use common_meta::rpc::store::{BatchGetRequest, DeleteRangeRequest, PutRequest, RangeRequest};
+use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
 use common_meta::RegionIdent;
 use snafu::ResultExt;
 
@@ -67,58 +65,6 @@ impl<'a> InactiveRegionManager<'a> {
         METRIC_META_INACTIVE_REGIONS.dec();
 
         Ok(())
-    }
-
-    /// The input is a list of regions on a specific node. If one or more regions have been
-    /// set to inactive state by metasrv, the corresponding regions will be removed(update the
-    /// `region_ids`), then returns the removed regions.
-    pub async fn retain_active_regions(
-        &self,
-        cluster_id: u64,
-        node_id: u64,
-        region_ids: &mut Vec<u64>,
-    ) -> Result<HashSet<u64>> {
-        let key_region_ids = region_ids
-            .iter()
-            .map(|region_id| {
-                (
-                    InactiveRegionKey {
-                        cluster_id,
-                        node_id,
-                        region_id: *region_id,
-                    }
-                    .into(),
-                    *region_id,
-                )
-            })
-            .collect::<Vec<(Vec<u8>, _)>>();
-        let keys = key_region_ids.iter().map(|(key, _)| key.clone()).collect();
-        let resp = self
-            .store
-            .batch_get(BatchGetRequest { keys })
-            .await
-            .context(error::KvBackendSnafu)?;
-        let kvs = resp.kvs;
-        if kvs.is_empty() {
-            return Ok(HashSet::new());
-        }
-
-        let inactive_keys = kvs.into_iter().map(|kv| kv.key).collect::<HashSet<_>>();
-        let (active_region_ids, inactive_region_ids): (Vec<Option<u64>>, Vec<Option<u64>>) =
-            key_region_ids
-                .into_iter()
-                .map(|(key, region_id)| {
-                    let is_active = !inactive_keys.contains(&key);
-                    if is_active {
-                        (Some(region_id), None)
-                    } else {
-                        (None, Some(region_id))
-                    }
-                })
-                .unzip();
-        *region_ids = active_region_ids.into_iter().flatten().collect();
-
-        Ok(inactive_region_ids.into_iter().flatten().collect())
     }
 
     /// Scan all inactive regions in the cluster.
