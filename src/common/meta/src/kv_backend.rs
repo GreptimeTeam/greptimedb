@@ -137,3 +137,24 @@ where
 }
 
 pub type ResettableKvBackendRef = Arc<dyn ResettableKvBackend<Error = Error> + Send + Sync>;
+
+fn chroot_key_value_with<'a>(root: &'a [u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
+    |kv: etcd_client::KeyValue| {
+        let (key, value) = kv.into_key_value();
+        KeyValue {
+            key: key_strip_root(root, key),
+            value,
+        }
+    }
+}
+
+fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    debug_assert!(key.starts_with(root));
+    key.split_off(root.len())
+}
+
+fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    let mut new_key = root.to_vec();
+    new_key.append(&mut key);
+    new_key
+}

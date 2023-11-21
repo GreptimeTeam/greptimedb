@@ -21,7 +21,7 @@ use etcd_client::{
 };
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::KvBackendRef;
+use super::{chroot_key_value_with, key_prepend_root, KvBackendRef};
 use crate::error::{self, Error, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
@@ -33,31 +33,6 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-fn chroot_key_value<'a>() -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
-    chroot_key_value_with("".as_bytes())
-}
-
-fn chroot_key_value_with<'a>(root: &'a [u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
-    |kv: etcd_client::KeyValue| {
-        let (key, value) = kv.into_key_value();
-        KeyValue {
-            key: key_strip_root(root, key),
-            value,
-        }
-    }
-}
-
-fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
-    debug_assert!(key.starts_with(root));
-    key.split_off(root.len())
-}
-
-fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
-    let mut new_key = root.to_vec();
-    new_key.append(&mut key);
-    new_key
-}
-
 // Maximum number of operations permitted in a transaction.
 // The etcd default configuration's `--max-txn-ops` is 128.
 //
@@ -65,11 +40,12 @@ fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
 const MAX_TXN_SIZE: usize = 128;
 
 pub struct EtcdStore {
+    root: Vec<u8>,
     client: Client,
 }
 
 impl EtcdStore {
-    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<KvBackendRef>
+    pub async fn with_endpoints<E, S>(root: String, endpoints: S) -> Result<KvBackendRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -78,11 +54,14 @@ impl EtcdStore {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Ok(Self::with_etcd_client(client))
+        Ok(Self::with_etcd_client(root, client))
     }
 
-    pub fn with_etcd_client(client: Client) -> KvBackendRef {
-        Arc::new(Self { client })
+    pub fn with_etcd_client(root: String, client: Client) -> KvBackendRef {
+        Arc::new(Self {
+            root: root.into_bytes(),
+            client,
+        })
     }
 
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
@@ -124,6 +103,7 @@ impl KvBackend for EtcdStore {
 
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let Get { key, options } = req.try_into()?;
+        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -135,7 +115,7 @@ impl KvBackend for EtcdStore {
         let kvs = res
             .take_kvs()
             .into_iter()
-            .map(chroot_key_value())
+            .map(chroot_key_value_with(&self.root))
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
@@ -150,6 +130,7 @@ impl KvBackend for EtcdStore {
             value,
             options,
         } = req.try_into()?;
+        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -158,7 +139,7 @@ impl KvBackend for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.take_prev_key().map(chroot_key_value());
+        let prev_kv = res.take_prev_key().map(chroot_key_value_with(&self.root));
         Ok(PutResponse { prev_kv })
     }
 
@@ -167,7 +148,13 @@ impl KvBackend for EtcdStore {
 
         let put_ops = kvs
             .into_iter()
-            .map(|kv| (TxnOp::put(kv.key, kv.value, options.clone())))
+            .map(|kv| {
+                TxnOp::put(
+                    key_prepend_root(&self.root, kv.key),
+                    kv.value,
+                    options.clone(),
+                )
+            })
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(put_ops).await?;
@@ -178,7 +165,7 @@ impl KvBackend for EtcdStore {
                 match op_res {
                     TxnOpResponse::Put(mut put_res) => {
                         if let Some(prev_kv) = put_res.take_prev_key() {
-                            prev_kvs.push(chroot_key_value()(prev_kv));
+                            prev_kvs.push(chroot_key_value_with(&self.root)(prev_kv));
                         }
                     }
                     _ => unreachable!(),
@@ -194,7 +181,7 @@ impl KvBackend for EtcdStore {
 
         let get_ops: Vec<_> = keys
             .into_iter()
-            .map(|k| TxnOp::get(k, options.clone()))
+            .map(|key| TxnOp::get(key_prepend_root(&self.root, key), options.clone()))
             .collect();
 
         let txn_responses = self.do_multi_txn(get_ops).await?;
@@ -207,7 +194,12 @@ impl KvBackend for EtcdStore {
                     _ => unreachable!(),
                 };
 
-                kvs.extend(get_res.take_kvs().into_iter().map(chroot_key_value()));
+                kvs.extend(
+                    get_res
+                        .take_kvs()
+                        .into_iter()
+                        .map(chroot_key_value_with(&self.root)),
+                );
             }
         }
 
@@ -221,6 +213,7 @@ impl KvBackend for EtcdStore {
             value,
             put_options,
         } = req.try_into()?;
+        let key = key_prepend_root(&self.root, key);
 
         let compare = if expect.is_empty() {
             // create if absent
@@ -253,10 +246,14 @@ impl KvBackend for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(mut res) => res.take_prev_key().map(chroot_key_value()),
-            TxnOpResponse::Get(mut res) => {
-                res.take_kvs().into_iter().next().map(chroot_key_value())
+            TxnOpResponse::Put(mut res) => {
+                res.take_prev_key().map(chroot_key_value_with(&self.root))
             }
+            TxnOpResponse::Get(mut res) => res
+                .take_kvs()
+                .into_iter()
+                .next()
+                .map(chroot_key_value_with(&self.root)),
             _ => unreachable!(),
         };
 
@@ -265,6 +262,7 @@ impl KvBackend for EtcdStore {
 
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let Delete { key, options } = req.try_into()?;
+        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -276,7 +274,7 @@ impl KvBackend for EtcdStore {
         let prev_kvs = res
             .take_prev_kvs()
             .into_iter()
-            .map(chroot_key_value())
+            .map(chroot_key_value_with(&self.root))
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
@@ -292,7 +290,7 @@ impl KvBackend for EtcdStore {
 
         let delete_ops = keys
             .into_iter()
-            .map(|k| TxnOp::delete(k, options.clone()))
+            .map(|key| TxnOp::delete(key_prepend_root(&self.root, key), options.clone()))
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(delete_ops).await?;
@@ -302,7 +300,7 @@ impl KvBackend for EtcdStore {
                 match op_res {
                     TxnOpResponse::Delete(mut delete_res) => {
                         delete_res.take_prev_kvs().into_iter().for_each(|kv| {
-                            prev_kvs.push(chroot_key_value()(kv));
+                            prev_kvs.push(chroot_key_value_with(&self.root)(kv));
                         });
                     }
                     _ => unreachable!(),
@@ -323,7 +321,7 @@ impl TxnService for EtcdStore {
             .with_label_values(&["etcd", "txn"])
             .start_timer();
 
-        let etcd_txn: Txn = txn.into();
+        let etcd_txn: Txn = txn.prepend_root(&self.root).into();
         let txn_res = self
             .client
             .kv_client()
