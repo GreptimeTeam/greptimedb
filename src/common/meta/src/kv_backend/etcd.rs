@@ -45,8 +45,9 @@ pub struct EtcdStore {
 }
 
 impl EtcdStore {
-    pub async fn with_endpoints<E, S>(root: String, endpoints: S) -> Result<KvBackendRef>
+    pub async fn with_endpoints<R, E, S>(root: R, endpoints: S) -> Result<KvBackendRef>
     where
+        R: Into<Vec<u8>>,
         E: AsRef<str>,
         S: AsRef<[E]>,
     {
@@ -57,9 +58,12 @@ impl EtcdStore {
         Ok(Self::with_etcd_client(root, client))
     }
 
-    pub fn with_etcd_client(root: String, client: Client) -> KvBackendRef {
+    pub fn with_etcd_client<R>(root: R, client: Client) -> KvBackendRef
+    where
+        R: Into<Vec<u8>>,
+    {
         Arc::new(Self {
-            root: root.into_bytes(),
+            root: root.into(),
             client,
         })
     }
