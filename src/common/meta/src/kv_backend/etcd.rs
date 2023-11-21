@@ -33,23 +33,23 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-pub struct KvPair<'a>(&'a etcd_client::KeyValue);
+pub struct KvPair(etcd_client::KeyValue);
 
-impl<'a> KvPair<'a> {
+impl KvPair {
     /// Creates a `KvPair` from etcd KeyValue
     #[inline]
-    pub fn new(kv: &'a etcd_client::KeyValue) -> Self {
+    pub fn new(kv: etcd_client::KeyValue) -> Self {
         Self(kv)
     }
 
     #[inline]
-    pub fn from_etcd_kv(kv: &etcd_client::KeyValue) -> KeyValue {
+    pub fn from_etcd_kv(kv: etcd_client::KeyValue) -> KeyValue {
         KeyValue::from(KvPair::new(kv))
     }
 }
 
-impl<'a> From<KvPair<'a>> for KeyValue {
-    fn from(kv: KvPair<'a>) -> Self {
+impl From<KvPair> for KeyValue {
+    fn from(kv: KvPair) -> Self {
         Self {
             key: kv.0.key().to_vec(),
             value: kv.0.value().to_vec(),
@@ -134,6 +134,7 @@ impl KvBackend for EtcdStore {
         let kvs = res
             .kvs()
             .iter()
+            .cloned()
             .map(KvPair::from_etcd_kv)
             .collect::<Vec<_>>();
 
@@ -150,14 +151,14 @@ impl KvBackend for EtcdStore {
             options,
         } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .put(key, value, options)
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.prev_key().map(KvPair::from_etcd_kv);
+        let prev_kv = res.take_prev_key().map(KvPair::from_etcd_kv);
         Ok(PutResponse { prev_kv })
     }
 
@@ -175,8 +176,8 @@ impl KvBackend for EtcdStore {
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
                 match op_res {
-                    TxnOpResponse::Put(put_res) => {
-                        if let Some(prev_kv) = put_res.prev_key() {
+                    TxnOpResponse::Put(mut put_res) => {
+                        if let Some(prev_kv) = put_res.take_prev_key() {
                             prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
                         }
                     }
@@ -206,7 +207,7 @@ impl KvBackend for EtcdStore {
                     _ => unreachable!(),
                 };
 
-                kvs.extend(get_res.kvs().iter().map(KvPair::from_etcd_kv));
+                kvs.extend(get_res.kvs().iter().cloned().map(KvPair::from_etcd_kv));
             }
         }
 
@@ -252,8 +253,8 @@ impl KvBackend for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(res) => res.prev_key().map(KvPair::from_etcd_kv),
-            TxnOpResponse::Get(res) => res.kvs().first().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Put(mut res) => res.take_prev_key().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Get(res) => res.kvs().first().cloned().map(KvPair::from_etcd_kv),
             _ => unreachable!(),
         };
 
@@ -263,7 +264,7 @@ impl KvBackend for EtcdStore {
     async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         let Delete { key, options } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .delete(key, options)
@@ -271,8 +272,8 @@ impl KvBackend for EtcdStore {
             .context(error::EtcdFailedSnafu)?;
 
         let prev_kvs = res
-            .prev_kvs()
-            .iter()
+            .take_prev_kvs()
+            .into_iter()
             .map(KvPair::from_etcd_kv)
             .collect::<Vec<_>>();
 
@@ -297,8 +298,8 @@ impl KvBackend for EtcdStore {
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
                 match op_res {
-                    TxnOpResponse::Delete(delete_res) => {
-                        delete_res.prev_kvs().iter().for_each(|kv| {
+                    TxnOpResponse::Delete(mut delete_res) => {
+                        delete_res.take_prev_kvs().into_iter().for_each(|kv| {
                             prev_kvs.push(KvPair::from_etcd_kv(kv));
                         });
                     }
