@@ -99,6 +99,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let cluster_id = stat.cluster_id;
         let datanode_id = stat.id;
         let mut granted_regions = Vec::with_capacity(regions.len());
+        let mut inactive_regions = HashSet::new();
 
         let (leaders, followers): (Vec<_>, Vec<_>) = regions
             .into_iter()
@@ -122,6 +123,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
             &leaders,
             RegionRole::Leader,
         );
+        inactive_regions.extend(closable);
 
         let followers = followers.into_iter().flatten().collect::<Vec<_>>();
 
@@ -142,7 +144,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
             &followers,
             RegionRole::Follower,
         );
+        inactive_regions.extend(closable);
 
+        acc.inactive_region_ids = inactive_regions;
         acc.region_lease = Some(RegionLease {
             regions: granted_regions
                 .into_iter()
@@ -184,7 +188,7 @@ mod test {
 
     fn new_empty_region_stat(region_id: RegionId, role: RegionRole) -> RegionStat {
         RegionStat {
-            id: region_id.as_u64(),
+            id: region_id,
             role,
             rcus: 0,
             wcus: 0,
@@ -253,6 +257,7 @@ mod test {
         handler.handle(&req, ctx, acc).await.unwrap();
 
         assert_region_lease(acc, vec![GrantedRegion::new(region_id, RegionRole::Leader)]);
+        assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -277,6 +282,7 @@ mod test {
             acc,
             vec![GrantedRegion::new(region_id, RegionRole::Follower)],
         );
+        assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
 
         let opening_region_id = RegionId::new(table_id, region_number + 2);
         let _guard = opening_region_keeper
@@ -310,6 +316,7 @@ mod test {
                 GrantedRegion::new(opening_region_id, RegionRole::Follower),
             ],
         );
+        assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
     }
 
     #[tokio::test]
@@ -385,6 +392,7 @@ mod test {
                 GrantedRegion::new(another_region_id, RegionRole::Leader),
             ],
         );
+        assert_eq!(acc.inactive_region_ids, HashSet::from([no_exist_region_id]));
     }
 
     fn assert_region_lease(acc: &HeartbeatAccumulator, expected: Vec<GrantedRegion>) {

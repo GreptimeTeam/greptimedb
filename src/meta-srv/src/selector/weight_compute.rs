@@ -94,6 +94,7 @@ mod tests {
 
     use api::v1::meta::Peer;
     use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
 
     use super::{RegionNumsBasedWeightCompute, WeightCompute};
     use crate::handler::node_stat::{RegionStat, Stat};
@@ -189,7 +190,7 @@ mod tests {
             addr: "127.0.0.1:3001".to_string(),
             region_num: 11,
             region_stats: vec![RegionStat {
-                id: 111,
+                id: RegionId::from_u64(111),
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,
@@ -206,7 +207,7 @@ mod tests {
             addr: "127.0.0.1:3002".to_string(),
             region_num: 12,
             region_stats: vec![RegionStat {
-                id: 112,
+                id: RegionId::from_u64(112),
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,
@@ -223,7 +224,7 @@ mod tests {
             addr: "127.0.0.1:3003".to_string(),
             region_num: 13,
             region_stats: vec![RegionStat {
-                id: 113,
+                id: RegionId::from_u64(113),
                 rcus: 1,
                 wcus: 1,
                 approximate_bytes: 1,

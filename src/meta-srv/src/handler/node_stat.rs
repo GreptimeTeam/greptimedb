@@ -45,7 +45,7 @@ pub struct Stat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionStat {
     /// The region_id.
-    pub id: u64,
+    pub id: RegionId,
     /// The read capacity units during this period
     pub rcus: i64,
     /// The write capacity units during this period
@@ -75,13 +75,10 @@ impl Stat {
 
     /// Returns a tuple array containing [RegionId] and [RegionRole].
     pub fn regions(&self) -> Vec<(RegionId, RegionRole)> {
-        self.region_stats
-            .iter()
-            .map(|s| (RegionId::from(s.id), s.role))
-            .collect()
+        self.region_stats.iter().map(|s| (s.id, s.role)).collect()
     }
 
-    pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<u64>) {
+    pub fn retain_active_region_stats(&mut self, inactive_region_ids: &HashSet<RegionId>) {
         if inactive_region_ids.is_empty() {
             return;
         }
@@ -140,7 +137,7 @@ impl TryFrom<api::v1::meta::RegionStat> for RegionStat {
 
     fn try_from(value: api::v1::meta::RegionStat) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: value.region_id,
+            id: RegionId::from_u64(value.region_id),
             rcus: value.rcus,
             wcus: value.wcus,
             approximate_bytes: value.approximate_bytes,
