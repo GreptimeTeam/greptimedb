@@ -58,7 +58,7 @@ impl DeactivateRegion {
             .context(error::TableRouteNotFoundSnafu { table_id })?;
 
         ctx.table_metadata_manager
-            .update_leader_region_status(table_id, table_route_value, |region| {
+            .update_leader_region_status(table_id, &table_route_value, |region| {
                 if region.region.id.region_number() == failed_region.region_number {
                     Some(Some(RegionStatus::Downgraded))
                 } else {

@@ -18,11 +18,13 @@ pub(crate) mod migration_start;
 pub(crate) mod open_candidate_region;
 #[cfg(test)]
 pub(crate) mod test_util;
+pub(crate) mod update_metadata;
 
 use std::any::Any;
 use std::fmt::Debug;
 
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::peer::Peer;
 use common_meta::ClusterId;
 use common_procedure::error::{
@@ -30,11 +32,11 @@ use common_procedure::error::{
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{location, Location, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use self::migration_start::RegionMigrationStart;
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::procedure::utils::region_lock_key;
 use crate::region::lease_keeper::{OpeningRegionGuard, OpeningRegionKeeperRef};
 use crate::service::mailbox::MailboxRef;
@@ -74,8 +76,10 @@ pub struct VolatileContext {
     ///
     /// `opening_region_guard` should be consumed after
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
-    /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue) .
+    /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
     opening_region_guard: Option<OpeningRegionGuard>,
+    /// `table_route_info` is stored via previous steps for future use.
+    table_route_info: Option<DeserializedValueWithBytes<TableRouteValue>>,
 }
 
 /// Used to generate new [Context].
@@ -121,6 +125,47 @@ impl Context {
     /// Returns address of meta server.
     pub fn server_addr(&self) -> &str {
         &self.server_addr
+    }
+
+    /// Returns the `table_route_value` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of table.
+    pub async fn get_table_route_value(
+        &mut self,
+    ) -> Result<&DeserializedValueWithBytes<TableRouteValue>> {
+        let table_route_value = &mut self.volatile_ctx.table_route_info;
+
+        if table_route_value.is_none() {
+            let table_id = self.persistent_ctx.region_id.table_id();
+            let table_route = self
+                .table_metadata_manager
+                .table_route_manager()
+                .get(table_id)
+                .await
+                .context(error::TableMetadataManagerSnafu)
+                .map_err(|e| error::Error::RetryLater {
+                    reason: e.to_string(),
+                    location: location!(),
+                })?
+                .context(error::TableRouteNotFoundSnafu { table_id })?;
+
+            *table_route_value = Some(table_route);
+        }
+
+        Ok(table_route_value.as_ref().unwrap())
+    }
+
+    /// Removes the `table_route_value` of [VolatileContext], returns true if any.
+    pub fn remove_table_route_value(&mut self) -> bool {
+        let value = self.volatile_ctx.table_route_info.take();
+        value.is_some()
+    }
+
+    /// Returns the [RegionId].
+    pub fn region_id(&self) -> RegionId {
+        self.persistent_ctx.region_id
     }
 }
 
