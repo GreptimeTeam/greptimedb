@@ -8538,7 +8538,6 @@ dependencies = [
  "common-error",
  "common-macro",
  "common-query",
- "common-telemetry",
  "common-time",
  "datafusion-sql",
  "datatypes",

@@ -1220,6 +1220,10 @@ mod tests {
         let values = values_with_capacity(ColumnDataType::DurationMillisecond, 2);
         let values = values.duration_millisecond_values;
         assert_eq!(2, values.capacity());
+
+        let values = values_with_capacity(ColumnDataType::Decimal128, 2);
+        let values = values.decimal128_values;
+        assert_eq!(2, values.capacity());
     }
 
     #[test]
@@ -1307,6 +1311,10 @@ mod tests {
         assert_eq!(
             ConcreteDataType::duration_millisecond_datatype(),
             ColumnDataTypeWrapper::duration_millisecond_datatype().into()
+        );
+        assert_eq!(
+            ConcreteDataType::decimal128_datatype(10, 2),
+            ColumnDataTypeWrapper::decimal128_datatype(10, 2).into()
         )
     }
 
@@ -1399,6 +1407,13 @@ mod tests {
         assert_eq!(
             ColumnDataTypeWrapper::duration_millisecond_datatype(),
             ConcreteDataType::duration_millisecond_datatype()
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            ColumnDataTypeWrapper::decimal128_datatype(10, 2),
+            ConcreteDataType::decimal128_datatype(10, 2)
                 .try_into()
                 .unwrap()
         );
