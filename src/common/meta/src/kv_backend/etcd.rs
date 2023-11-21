@@ -124,7 +124,7 @@ impl KvBackend for EtcdStore {
     async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
         let Get { key, options } = req.try_into()?;
 
-        let res = self
+        let mut res = self
             .client
             .kv_client()
             .get(key, options)
@@ -132,9 +132,8 @@ impl KvBackend for EtcdStore {
             .context(error::EtcdFailedSnafu)?;
 
         let kvs = res
-            .kvs()
-            .iter()
-            .cloned()
+            .take_kvs()
+            .into_iter()
             .map(KvPair::from_etcd_kv)
             .collect::<Vec<_>>();
 
@@ -202,12 +201,12 @@ impl KvBackend for EtcdStore {
         let mut kvs = vec![];
         for txn_res in txn_responses {
             for op_res in txn_res.op_responses() {
-                let get_res = match op_res {
+                let mut get_res = match op_res {
                     TxnOpResponse::Get(get_res) => get_res,
                     _ => unreachable!(),
                 };
 
-                kvs.extend(get_res.kvs().iter().cloned().map(KvPair::from_etcd_kv));
+                kvs.extend(get_res.take_kvs().into_iter().map(KvPair::from_etcd_kv));
             }
         }
 
@@ -254,7 +253,7 @@ impl KvBackend for EtcdStore {
 
         let prev_kv = match op_res {
             TxnOpResponse::Put(mut res) => res.take_prev_key().map(KvPair::from_etcd_kv),
-            TxnOpResponse::Get(res) => res.kvs().first().cloned().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Get(mut res) => res.take_kvs().first().map(KvPair::from_etcd_kv),
             _ => unreachable!(),
         };
 
