@@ -100,6 +100,23 @@ impl Decimal128 {
     pub fn to_scalar_value(&self) -> (Option<i128>, u8, i8) {
         (Some(self.value), self.precision, self.scale)
     }
+
+    /// Convert to PbDecimal128, the PbDecimal128 is represented as (high-64 bit, low-64 bit, precision, scale)
+    /// Return (high-64 bit, low-64 bit, precision, scale)
+    pub fn to_pb_decimal128(&self) -> (i64, i64, i32, i32) {
+        (
+            (self.value >> 64) as i64,
+            self.value as i64,
+            self.precision as i32,
+            self.scale as i32,
+        )
+    }
+
+    /// Convert from PbDecimal128
+    pub fn from_pb_decimal128(hi: i64, lo: i64, precision: i32, scale: i32) -> Self {
+        let value = (hi as i128) << 64 | lo as i128;
+        Self::new(value, precision as u8, scale as i8)
+    }
 }
 
 /// The default value of Decimal128 is 0, and its precision is 1 and scale is 0.

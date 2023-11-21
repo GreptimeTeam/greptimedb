@@ -1,0 +1,121 @@
+-- Basic tests for decimal type
+-- TODO(QuenKar): port more decimal tests from DuckDB
+create table decimals(
+    ts timestamp time index,
+    d decimal(10, 2),
+);
+
+Affected Rows: 0
+
+insert into decimals values (1000, 1.23);
+
+Affected Rows: 1
+
+insert into decimals values
+    (2000, 3.14),
+    (3000, '123.45'),
+    (4000, '1234.56');
+
+Affected Rows: 3
+
+select * from decimals;
+
++---------------------+---------+
+| ts                  | d       |
++---------------------+---------+
+| 1970-01-01T00:00:01 | 1.23    |
+| 1970-01-01T00:00:02 | 3.14    |
+| 1970-01-01T00:00:03 | 123.45  |
+| 1970-01-01T00:00:04 | 1234.56 |
++---------------------+---------+
+
+-- math operations
+select d + 1 from decimals;
+
++-----------------------+
+| decimals.d + Int64(1) |
++-----------------------+
+| 2.23                  |
+| 4.14                  |
+| 124.45                |
+| 1235.56               |
++-----------------------+
+
+select d - 1 from decimals;
+
++-----------------------+
+| decimals.d - Int64(1) |
++-----------------------+
+| 0.23                  |
+| 2.14                  |
+| 122.45                |
+| 1233.56               |
++-----------------------+
+
+select d * 2 from decimals;
+
++-----------------------+
+| decimals.d * Int64(2) |
++-----------------------+
+| 2.46                  |
+| 6.28                  |
+| 246.90                |
+| 2469.12               |
++-----------------------+
+
+select d / 2 from decimals;
+
++-----------------------+
+| decimals.d / Int64(2) |
++-----------------------+
+| 0.615000              |
+| 1.570000              |
+| 61.725000             |
+| 617.280000            |
++-----------------------+
+
+-- aggregate functions
+select sum(d) from decimals;
+
++-----------------+
+| SUM(decimals.d) |
++-----------------+
+| 1362.38         |
++-----------------+
+
+select avg(d) from decimals;
+
++-----------------+
+| AVG(decimals.d) |
++-----------------+
+| 340.595000      |
++-----------------+
+
+select max(d) from decimals;
+
++-----------------+
+| MAX(decimals.d) |
++-----------------+
+| 1234.56         |
++-----------------+
+
+select min(d) from decimals;
+
++-----------------+
+| MIN(decimals.d) |
++-----------------+
+| 1.23            |
++-----------------+
+
+select count(d) from decimals;
+
++-------------------+
+| COUNT(decimals.d) |
++-------------------+
+| 4                 |
++-------------------+
+
+drop table decimals;
+
+Affected Rows: 0
+

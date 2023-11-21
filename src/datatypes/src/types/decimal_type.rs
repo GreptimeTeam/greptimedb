@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use arrow_schema::DataType as ArrowDataType;
+use common_decimal::decimal128::DECIMAL128_MAX_PRECISION;
 use common_decimal::Decimal128;
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +33,17 @@ pub struct Decimal128Type {
 
 impl Decimal128Type {
     pub fn new(precision: u8, scale: i8) -> Self {
-        Self { precision, scale }
+        // debug assert precision and scale is valid
+        debug_assert!(
+            precision > 0 && precision <= DECIMAL128_MAX_PRECISION,
+            "precision should be in [1, {}]",
+            DECIMAL128_MAX_PRECISION
+        );
+        debug_assert!(
+            scale >= 0 && scale <= precision as i8,
+            "scale should be in [0, precision]"
+        );
+        Decimal128Type { precision, scale }
     }
 
     pub fn precision(&self) -> u8 {
@@ -46,7 +57,7 @@ impl Decimal128Type {
 
 impl DataType for Decimal128Type {
     fn name(&self) -> &str {
-        "decimal128"
+        "decimal"
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
@@ -62,7 +73,12 @@ impl DataType for Decimal128Type {
     }
 
     fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
-        Box::new(Decimal128VectorBuilder::with_capacity(capacity))
+        Box::new(
+            Decimal128VectorBuilder::with_capacity(capacity)
+                .with_precision_and_scale(self.precision, self.scale)
+                // safe to unwrap because we have validated the precision and scale in new()
+                .unwrap(),
+        )
     }
 
     fn try_cast(&self, val: Value) -> Option<Value> {

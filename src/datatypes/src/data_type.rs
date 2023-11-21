@@ -142,6 +142,7 @@ impl ConcreteDataType {
                 | ConcreteDataType::Time(_)
                 | ConcreteDataType::Interval(_)
                 | ConcreteDataType::Duration(_)
+                | ConcreteDataType::Decimal128(_)
         )
     }
 
@@ -676,6 +677,7 @@ mod tests {
         assert!(ConcreteDataType::duration_millisecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::duration_microsecond_datatype().is_stringifiable());
         assert!(ConcreteDataType::duration_nanosecond_datatype().is_stringifiable());
+        assert!(ConcreteDataType::decimal128_datatype(10, 2).is_stringifiable());
     }
 
     #[test]
