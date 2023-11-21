@@ -17,3 +17,6 @@ pub mod error;
 pub mod file_format;
 pub mod file_metadata;
 pub mod partial_reader;
+
+#[cfg(test)]
+mod tests;
