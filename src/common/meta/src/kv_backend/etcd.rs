@@ -33,28 +33,29 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-pub struct KvPair(etcd_client::KeyValue);
+fn chroot_key_value<'a>() -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
+    chroot_key_value_with("".as_bytes())
+}
 
-impl KvPair {
-    /// Creates a `KvPair` from etcd KeyValue
-    #[inline]
-    pub fn new(kv: etcd_client::KeyValue) -> Self {
-        Self(kv)
-    }
-
-    #[inline]
-    pub fn from_etcd_kv(kv: etcd_client::KeyValue) -> KeyValue {
-        KeyValue::from(KvPair::new(kv))
+fn chroot_key_value_with<'a>(root: &'a [u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
+    |kv: etcd_client::KeyValue| {
+        let (key, value) = kv.into_key_value();
+        KeyValue {
+            key: key_strip_root(root, key),
+            value,
+        }
     }
 }
 
-impl From<KvPair> for KeyValue {
-    fn from(kv: KvPair) -> Self {
-        Self {
-            key: kv.0.key().to_vec(),
-            value: kv.0.value().to_vec(),
-        }
-    }
+fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    debug_assert!(key.starts_with(root));
+    key.split_off(root.len())
+}
+
+fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    let mut new_key = root.to_vec();
+    new_key.append(&mut key);
+    new_key
 }
 
 // Maximum number of operations permitted in a transaction.
@@ -134,7 +135,7 @@ impl KvBackend for EtcdStore {
         let kvs = res
             .take_kvs()
             .into_iter()
-            .map(KvPair::from_etcd_kv)
+            .map(chroot_key_value())
             .collect::<Vec<_>>();
 
         Ok(RangeResponse {
@@ -157,7 +158,7 @@ impl KvBackend for EtcdStore {
             .await
             .context(error::EtcdFailedSnafu)?;
 
-        let prev_kv = res.take_prev_key().map(KvPair::from_etcd_kv);
+        let prev_kv = res.take_prev_key().map(chroot_key_value());
         Ok(PutResponse { prev_kv })
     }
 
@@ -177,7 +178,7 @@ impl KvBackend for EtcdStore {
                 match op_res {
                     TxnOpResponse::Put(mut put_res) => {
                         if let Some(prev_kv) = put_res.take_prev_key() {
-                            prev_kvs.push(KvPair::from_etcd_kv(prev_kv));
+                            prev_kvs.push(chroot_key_value()(prev_kv));
                         }
                     }
                     _ => unreachable!(),
@@ -206,7 +207,7 @@ impl KvBackend for EtcdStore {
                     _ => unreachable!(),
                 };
 
-                kvs.extend(get_res.take_kvs().into_iter().map(KvPair::from_etcd_kv));
+                kvs.extend(get_res.take_kvs().into_iter().map(chroot_key_value()));
             }
         }
 
@@ -252,8 +253,10 @@ impl KvBackend for EtcdStore {
             })?;
 
         let prev_kv = match op_res {
-            TxnOpResponse::Put(mut res) => res.take_prev_key().map(KvPair::from_etcd_kv),
-            TxnOpResponse::Get(mut res) => res.take_kvs().first().map(KvPair::from_etcd_kv),
+            TxnOpResponse::Put(mut res) => res.take_prev_key().map(chroot_key_value()),
+            TxnOpResponse::Get(mut res) => {
+                res.take_kvs().into_iter().next().map(chroot_key_value())
+            }
             _ => unreachable!(),
         };
 
@@ -273,7 +276,7 @@ impl KvBackend for EtcdStore {
         let prev_kvs = res
             .take_prev_kvs()
             .into_iter()
-            .map(KvPair::from_etcd_kv)
+            .map(chroot_key_value())
             .collect::<Vec<_>>();
 
         Ok(DeleteRangeResponse {
@@ -299,7 +302,7 @@ impl KvBackend for EtcdStore {
                 match op_res {
                     TxnOpResponse::Delete(mut delete_res) => {
                         delete_res.take_prev_kvs().into_iter().for_each(|kv| {
-                            prev_kvs.push(KvPair::from_etcd_kv(kv));
+                            prev_kvs.push(chroot_key_value()(kv));
                         });
                     }
                     _ => unreachable!(),
