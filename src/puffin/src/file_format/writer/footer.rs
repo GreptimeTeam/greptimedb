@@ -19,7 +19,7 @@ use snafu::ResultExt;
 
 use crate::blob_metadata::BlobMetadata;
 use crate::error::{Result, SerializeJsonSnafu};
-use crate::file_format::{MAGIC, MIN_FOOTER_SIZE};
+use crate::file_format::{Flags, MAGIC, MIN_FOOTER_SIZE};
 use crate::file_metadata::FileMetadataBuilder;
 
 /// Writer for the footer of a Puffin file.
@@ -73,7 +73,7 @@ impl FooterWriter {
     ///
     /// TODO(zhongzc): support compression
     fn write_flags(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&[0; 4]);
+        buf.extend_from_slice(&Flags::DEFAULT.bits().to_le_bytes());
     }
 
     fn footer_payload(&mut self) -> Result<Vec<u8>> {

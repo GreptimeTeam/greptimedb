@@ -57,6 +57,8 @@ pub const MIN_FOOTER_SIZE: u64 = MAGIC_SIZE * 2 + FLAGS_SIZE + PAYLOAD_SIZE_SIZE
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Flags: u32 {
+        const DEFAULT = 0b00000000;
+
         const FOOTER_PAYLOAD_COMPRESSED_LZ4 = 0b00000001;
     }
 }
