@@ -23,7 +23,6 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use crate::file_format::reader::{PuffinAsyncReader, PuffinFileReader, PuffinSyncReader};
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter, PuffinSyncWriter};
 
-
 #[test]
 fn test_read_empty_puffin_sync() {
     let path = "src/tests/resources/empty-puffin-uncompressed.puffin";
