@@ -262,7 +262,6 @@ impl MetadataRegion {
         let filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
 
         ScanRequest {
-            sequence: None,
             projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
             filters: vec![filter_expr.into()],
             output_ordering: None,
@@ -390,7 +389,6 @@ mod test {
         let key = "test_key";
         let expected_filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
         let expected_scan_request = ScanRequest {
-            sequence: None,
             projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
             filters: vec![expected_filter_expr.into()],
             output_ordering: None,

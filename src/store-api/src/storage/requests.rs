@@ -26,7 +26,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::error::{
     BuildColumnDescriptorSnafu, Error, InvalidDefaultConstraintSnafu, InvalidRawRegionRequestSnafu,
 };
-use crate::storage::{ColumnDescriptor, ColumnDescriptorBuilder, RegionDescriptor, SequenceNumber};
+use crate::storage::{ColumnDescriptor, ColumnDescriptorBuilder, RegionDescriptor};
 
 /// Write request holds a collection of updates to apply to a region.
 ///
@@ -48,11 +48,6 @@ pub trait WriteRequest: Send {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
-    /// Max sequence number to read, None for latest sequence.
-    ///
-    /// Default is None. Only returns data whose sequence number is less than or
-    /// equal to the `sequence`.
-    pub sequence: Option<SequenceNumber>,
     /// Indices of columns to read, `None` to read all columns.
     pub projection: Option<Vec<usize>>,
     /// Filters pushed down
