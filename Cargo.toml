@@ -82,8 +82,7 @@ datafusion-physical-expr = { git = "https://github.com/apache/arrow-datafusion.g
 datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
-# TODO(@tisonkun) https://github.com/etcdv3/etcd-client/pull/70
-etcd-client = { git = "https://github.com/tisonkun/etcd-client.git", rev = "b586a35097593bc0fba98275cc10b495e8dd4624"}
+etcd-client = "0.12"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "25429306d0379ad29211a062a81da2554a0208ab" }
