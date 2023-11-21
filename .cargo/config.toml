@@ -12,9 +12,4 @@ rustflags = [
     "-Wclippy::print_stdout",
     "-Wclippy::print_stderr",
     "-Wclippy::implicit_clone",
-
-    # It seems clippy has made a false positive decision here when upgrading rust toolchain to
-    # nightly-2023-08-07, we do need it to be borrowed mutably.
-    # Allow it for now; try disallow it when the toolchain is upgraded in the future.
-    "-Aclippy::needless_pass_by_ref_mut",
 ]

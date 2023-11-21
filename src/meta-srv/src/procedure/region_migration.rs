@@ -161,7 +161,7 @@ pub struct RegionMigrationProcedure {
 // TODO(weny): remove it.
 #[allow(dead_code)]
 impl RegionMigrationProcedure {
-    const TYPE_NAME: &str = "metasrv-procedure::RegionMigration";
+    const TYPE_NAME: &'static str = "metasrv-procedure::RegionMigration";
 
     pub fn new(
         persistent_context: PersistentContext,
