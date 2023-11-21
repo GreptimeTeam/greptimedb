@@ -52,6 +52,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to close"))]
+    Close {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
     #[snafu(display("Magic not matched"))]
     MagicNotMatched { location: Location },
 
@@ -120,6 +127,7 @@ impl ErrorExt for Error {
             | DeserializeJson { .. }
             | Write { .. }
             | Flush { .. }
+            | Close { .. }
             | SerializeJson { .. }
             | BytesToInteger { .. }
             | ParseStageNotMatch { .. }

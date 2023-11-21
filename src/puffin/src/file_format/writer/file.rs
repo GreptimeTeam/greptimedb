@@ -20,7 +20,7 @@ use futures::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use snafu::ResultExt;
 
 use crate::blob_metadata::{BlobMetadata, BlobMetadataBuilder};
-use crate::error::{FlushSnafu, Result, WriteSnafu};
+use crate::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
 use crate::file_format::writer::footer::FooterWriter;
 use crate::file_format::writer::{Blob, PuffinAsyncWriter, PuffinSyncWriter};
 use crate::file_format::MAGIC;
@@ -113,7 +113,8 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
     async fn finish(&mut self) -> Result<()> {
         self.write_header_if_needed_async().await?;
         self.write_footer_async().await?;
-        self.writer.flush().await.context(FlushSnafu)
+        self.writer.flush().await.context(FlushSnafu)?;
+        self.writer.close().await.context(CloseSnafu)
     }
 }
 
