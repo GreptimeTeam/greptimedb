@@ -25,5 +25,5 @@ pub mod lock;
 pub mod mailbox;
 pub mod store;
 
-pub type GrpcResult<T> = std::result::Result<Response<T>, Status>;
+pub type GrpcResult<T> = Result<Response<T>, Status>;
 pub type GrpcStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + Sync + 'static>>;

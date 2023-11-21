@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::handler::node_stat::Stat;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::keys::{StatKey, StatValue};
 use crate::metasrv::Context;
 
@@ -82,9 +82,9 @@ impl HeartbeatHandler for PersistStatsHandler {
         _req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let Some(current_stat) = acc.stat.take() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let key = current_stat.stat_key();
@@ -118,7 +118,7 @@ impl HeartbeatHandler for PersistStatsHandler {
         epoch_stats.push(current_stat);
 
         if !refresh && epoch_stats.len() < MAX_CACHED_STATS_PER_KEY {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         }
 
         let value: Vec<u8> = StatValue {
@@ -137,13 +137,12 @@ impl HeartbeatHandler for PersistStatsHandler {
             .await
             .context(error::KvBackendSnafu)?;
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
     use common_meta::key::TableMetadataManager;
@@ -180,7 +179,6 @@ mod tests {
             meta_peer_client,
             mailbox,
             election: None,
-            skip_all: Arc::new(AtomicBool::new(false)),
             is_infancy: false,
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend.clone())),
         };

@@ -22,7 +22,7 @@ use store_api::region_engine::{GrantedRegion, RegionRole};
 use store_api::storage::RegionId;
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 use crate::region::lease_keeper::{OpeningRegionKeeperRef, RegionLeaseKeeperRef};
 use crate::region::RegionLeaseKeeper;
@@ -90,9 +90,9 @@ impl HeartbeatHandler for RegionLeaseHandler {
         req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let Some(stat) = acc.stat.as_ref() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let regions = stat.regions();
@@ -152,7 +152,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
             lease_seconds: self.region_lease_seconds,
         });
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }
 

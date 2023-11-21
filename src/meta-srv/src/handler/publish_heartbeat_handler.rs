@@ -16,7 +16,7 @@ use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 use crate::pubsub::{Message, PublishRef};
 
@@ -41,10 +41,10 @@ impl HeartbeatHandler for PublishHeartbeatHandler {
         req: &HeartbeatRequest,
         _: &mut Context,
         _: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         let msg = Message::Heartbeat(Box::new(req.clone()));
         self.publish.send_msg(msg).await;
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }
