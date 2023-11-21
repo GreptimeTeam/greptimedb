@@ -138,7 +138,7 @@ where
 
 pub type ResettableKvBackendRef = Arc<dyn ResettableKvBackend<Error = Error> + Send + Sync>;
 
-fn chroot_key_value_with<'a>(root: &'a [u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + 'a {
+fn chroot_key_value_with(root: &[u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + '_ {
     |kv: etcd_client::KeyValue| {
         let (key, value) = kv.into_key_value();
         KeyValue {
