@@ -36,14 +36,16 @@ pub fn to_table_delete_request(
         values,
         null_mask,
         datatype,
+        datatype_extension,
         ..
     } in request.key_columns
     {
         let Some(values) = values else { continue };
 
-        let datatype: ConcreteDataType = ColumnDataTypeWrapper::try_new(datatype)
-            .context(ColumnDataTypeSnafu)?
-            .into();
+        let datatype: ConcreteDataType =
+            ColumnDataTypeWrapper::try_new(datatype, datatype_extension)
+                .context(ColumnDataTypeSnafu)?
+                .into();
         let vector = add_values_to_builder(datatype, values, row_count, null_mask)?;
 
         ensure!(

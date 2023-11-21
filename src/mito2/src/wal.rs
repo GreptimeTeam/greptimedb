@@ -214,11 +214,13 @@ mod tests {
                 column_name: "tag".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "ts".to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as i32,
                 semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
             },
         ];
 

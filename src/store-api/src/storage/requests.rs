@@ -154,7 +154,8 @@ impl TryFrom<PbAddColumn> for AddColumn {
             })?;
 
         let data_type = column_def.data_type;
-        let data_type = ColumnDataTypeWrapper::try_new(data_type)
+        let data_type_ext = column_def.datatype_extension.clone();
+        let data_type = ColumnDataTypeWrapper::try_new(data_type, data_type_ext)
             .map_err(|_| {
                 InvalidRawRegionRequestSnafu {
                     err: format!("unknown raw column datatype: {data_type}"),
@@ -317,6 +318,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Tag as _,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 1,
                     }),
@@ -333,6 +335,7 @@ mod tests {
                                 .unwrap(),
                             semantic_type: SemanticType::Field as _,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 2,
                     }),

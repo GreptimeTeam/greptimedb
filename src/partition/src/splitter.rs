@@ -144,16 +144,19 @@ mod tests {
                 column_name: "id".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "name".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "age".to_string(),
                 datatype: ColumnDataType::Uint32 as i32,
                 semantic_type: SemanticType::Field as i32,
+                ..Default::default()
             },
         ];
         let rows = vec![

@@ -46,6 +46,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "key".to_string(),
@@ -54,6 +55,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             ColumnDef {
                 name: "value".to_string(),
@@ -62,6 +64,7 @@ async fn run() {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
         ],
         time_index: "timestamp".to_string(),

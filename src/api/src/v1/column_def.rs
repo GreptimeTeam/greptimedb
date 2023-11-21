@@ -22,7 +22,10 @@ use crate::helper::ColumnDataTypeWrapper;
 use crate::v1::ColumnDef;
 
 pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
-    let data_type = ColumnDataTypeWrapper::try_new(column_def.data_type)?;
+    let data_type = ColumnDataTypeWrapper::try_new(
+        column_def.data_type,
+        column_def.datatype_extension.clone(),
+    )?;
 
     let constraint = if column_def.default_constraint.is_empty() {
         None

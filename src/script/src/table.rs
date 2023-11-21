@@ -302,31 +302,37 @@ fn build_insert_column_schemas() -> Vec<PbColumnSchema> {
             column_name: "schema".to_string(),
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
         },
         PbColumnSchema {
             column_name: "name".to_string(),
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
         },
         PbColumnSchema {
             column_name: "engine".to_string(),
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Tag.into(),
+            ..Default::default()
         },
         PbColumnSchema {
             column_name: "script".to_string(),
             datatype: ColumnDataType::String.into(),
             semantic_type: SemanticType::Field.into(),
+            ..Default::default()
         },
         PbColumnSchema {
             column_name: "greptime_timestamp".to_string(),
             datatype: ColumnDataType::TimestampMillisecond.into(),
             semantic_type: SemanticType::Timestamp.into(),
+            ..Default::default()
         },
         PbColumnSchema {
             column_name: "gmt_modified".to_string(),
             datatype: ColumnDataType::TimestampMillisecond.into(),
             semantic_type: SemanticType::Field.into(),
+            ..Default::default()
         },
     ]
 }
@@ -358,7 +364,9 @@ pub fn build_scripts_schema() -> RawSchema {
             let cs = ColumnSchema::new(
                 c.column_name,
                 // Safety: the type always exists
-                ColumnDataTypeWrapper::try_new(c.datatype).unwrap().into(),
+                ColumnDataTypeWrapper::try_new(c.datatype, c.datatype_extension)
+                    .unwrap()
+                    .into(),
                 false,
             );
             if c.semantic_type == SemanticType::Timestamp as i32 {

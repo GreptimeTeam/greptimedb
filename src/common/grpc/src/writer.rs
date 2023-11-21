@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use api::helper::values_with_capacity;
-use api::v1::{Column, ColumnDataType, SemanticType};
+use api::v1::{Column, ColumnDataType, ColumnDataTypeExtension, SemanticType};
 use common_base::BitVec;
 use common_time::timestamp::TimeUnit;
 use snafu::ensure;
@@ -50,6 +50,7 @@ impl LinesWriter {
             column_name,
             ColumnDataType::TimestampMillisecond,
             SemanticType::Timestamp,
+            None,
         );
         ensure!(
             column.datatype == ColumnDataType::TimestampMillisecond as i32,
@@ -69,7 +70,8 @@ impl LinesWriter {
     }
 
     pub fn write_tag(&mut self, column_name: &str, value: &str) -> Result<()> {
-        let (idx, column) = self.mut_column(column_name, ColumnDataType::String, SemanticType::Tag);
+        let (idx, column) =
+            self.mut_column(column_name, ColumnDataType::String, SemanticType::Tag, None);
         ensure!(
             column.datatype == ColumnDataType::String as i32,
             TypeMismatchSnafu {
@@ -86,8 +88,12 @@ impl LinesWriter {
     }
 
     pub fn write_u64(&mut self, column_name: &str, value: u64) -> Result<()> {
-        let (idx, column) =
-            self.mut_column(column_name, ColumnDataType::Uint64, SemanticType::Field);
+        let (idx, column) = self.mut_column(
+            column_name,
+            ColumnDataType::Uint64,
+            SemanticType::Field,
+            None,
+        );
         ensure!(
             column.datatype == ColumnDataType::Uint64 as i32,
             TypeMismatchSnafu {
@@ -104,8 +110,12 @@ impl LinesWriter {
     }
 
     pub fn write_i64(&mut self, column_name: &str, value: i64) -> Result<()> {
-        let (idx, column) =
-            self.mut_column(column_name, ColumnDataType::Int64, SemanticType::Field);
+        let (idx, column) = self.mut_column(
+            column_name,
+            ColumnDataType::Int64,
+            SemanticType::Field,
+            None,
+        );
         ensure!(
             column.datatype == ColumnDataType::Int64 as i32,
             TypeMismatchSnafu {
@@ -122,8 +132,12 @@ impl LinesWriter {
     }
 
     pub fn write_f64(&mut self, column_name: &str, value: f64) -> Result<()> {
-        let (idx, column) =
-            self.mut_column(column_name, ColumnDataType::Float64, SemanticType::Field);
+        let (idx, column) = self.mut_column(
+            column_name,
+            ColumnDataType::Float64,
+            SemanticType::Field,
+            None,
+        );
         ensure!(
             column.datatype == ColumnDataType::Float64 as i32,
             TypeMismatchSnafu {
@@ -140,8 +154,12 @@ impl LinesWriter {
     }
 
     pub fn write_string(&mut self, column_name: &str, value: &str) -> Result<()> {
-        let (idx, column) =
-            self.mut_column(column_name, ColumnDataType::String, SemanticType::Field);
+        let (idx, column) = self.mut_column(
+            column_name,
+            ColumnDataType::String,
+            SemanticType::Field,
+            None,
+        );
         ensure!(
             column.datatype == ColumnDataType::String as i32,
             TypeMismatchSnafu {
@@ -158,8 +176,12 @@ impl LinesWriter {
     }
 
     pub fn write_bool(&mut self, column_name: &str, value: bool) -> Result<()> {
-        let (idx, column) =
-            self.mut_column(column_name, ColumnDataType::Boolean, SemanticType::Field);
+        let (idx, column) = self.mut_column(
+            column_name,
+            ColumnDataType::Boolean,
+            SemanticType::Field,
+            None,
+        );
         ensure!(
             column.datatype == ColumnDataType::Boolean as i32,
             TypeMismatchSnafu {
@@ -201,6 +223,7 @@ impl LinesWriter {
         column_name: &str,
         datatype: ColumnDataType,
         semantic_type: SemanticType,
+        datatype_extension: Option<ColumnDataTypeExtension>,
     ) -> (usize, &mut Column) {
         let column_names = &mut self.column_name_index;
         let column_idx = match column_names.get(column_name) {
@@ -218,6 +241,7 @@ impl LinesWriter {
                     values: Some(values_with_capacity(datatype, to_insert)),
                     datatype: datatype as i32,
                     null_mask: Vec::default(),
+                    datatype_extension,
                 });
                 let _ = column_names.insert(column_name.to_string(), new_idx);
                 new_idx

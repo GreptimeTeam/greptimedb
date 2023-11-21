@@ -155,6 +155,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to convert ConcreteDataType to ColumnDataType, reason: {}",
+        reason
+    ))]
+    ConvertColumnDataType {
+        reason: String,
+        source: api::error::Error,
+        location: Location,
+    },
+
     /// An error type to indicate that schema is changed and we need
     /// to fill default values again.
     #[snafu(display("Need to fill default value for region {}", region_id))]
@@ -438,6 +448,7 @@ impl ErrorExt for Error {
             | InvalidMeta { .. }
             | InvalidRequest { .. }
             | FillDefault { .. }
+            | ConvertColumnDataType { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. }
             | Join { .. }

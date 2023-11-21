@@ -267,6 +267,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
         null_mask: vec![2],
         semantic_type: SemanticType::Field as i32,
         datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
     };
     let expected_mem_col = Column {
         column_name: "memory".to_string(),
@@ -277,6 +278,7 @@ fn expect_data() -> (Column, Column, Column, Column) {
         null_mask: vec![4],
         semantic_type: SemanticType::Field as i32,
         datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
     };
     let expected_ts_col = Column {
         column_name: "ts".to_string(),

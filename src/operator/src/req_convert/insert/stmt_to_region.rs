@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::value_to_grpc_value;
+use api::helper::{value_to_grpc_value, ColumnDataTypeWrapper};
 use api::v1::region::InsertRequests as RegionInsertRequests;
 use api::v1::{ColumnSchema as GrpcColumnSchema, Row, Rows, Value as GrpcValue};
 use catalog::CatalogManager;
@@ -25,10 +25,11 @@ use sql::statements::insert::Insert;
 use sqlparser::ast::{ObjectName, Value as SqlValue};
 use table::TableRef;
 
-use super::{data_type, semantic_type};
+use super::semantic_type;
 use crate::error::{
-    CatalogSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu, ColumnNotFoundSnafu,
-    InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
+    ColumnNotFoundSnafu, InvalidSqlSnafu, MissingInsertBodySnafu, ParseSqlSnafu, Result,
+    TableNotFoundSnafu,
 };
 use crate::req_convert::common::partitioner::Partitioner;
 
@@ -94,13 +95,17 @@ impl<'a> StatementToRegion<'a> {
                     msg: format!("Column {} not found in table {}", column_name, &table_name),
                 })?;
 
-            let datatype = data_type(column_schema.data_type.clone())?;
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
+                    .context(ColumnDataTypeSnafu)?
+                    .datatype();
             let semantic_type = semantic_type(&table_info, column_name)?;
 
             let grpc_column_schema = GrpcColumnSchema {
                 column_name: column_name.clone(),
                 datatype: datatype.into(),
                 semantic_type: semantic_type.into(),
+                datatype_extension,
             };
             schema.push(grpc_column_schema);
 

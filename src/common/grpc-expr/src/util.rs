@@ -121,6 +121,7 @@ pub fn build_create_table_expr(
             default_constraint: vec![],
             semantic_type,
             comment: String::new(),
+            ..Default::default()
         };
         column_defs.push(column_def);
     }
@@ -161,6 +162,7 @@ pub fn extract_new_columns(
                 default_constraint: vec![],
                 semantic_type: expr.semantic_type,
                 comment: String::new(),
+                ..Default::default()
             });
             AddColumn {
                 column_def,

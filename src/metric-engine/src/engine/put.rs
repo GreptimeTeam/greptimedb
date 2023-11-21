@@ -15,9 +15,8 @@
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use ahash::RandomState;
-use api::helper::to_column_data_type;
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema, Row, Rows, SemanticType};
+use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
 use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::data_type::ConcreteDataType;
@@ -162,18 +161,16 @@ impl MetricEngineInner {
         // add table_name column
         rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::uint32_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Uint32 as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
         // add tsid column
         rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::uint64_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Uint64 as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
 
         // fill internal columns

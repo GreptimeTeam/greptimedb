@@ -156,6 +156,7 @@ mod tests {
                     column_name: "a".to_string(),
                     datatype: ColumnDataType::Int32 as i32,
                     semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
                 }],
                 rows: rows
                     .into_iter()

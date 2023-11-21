@@ -543,7 +543,8 @@ fn find_partition_entries(
         for column in column_defs {
             let column_name = &column.name;
             let data_type = ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(column.data_type).context(ColumnDataTypeSnafu)?,
+                ColumnDataTypeWrapper::try_new(column.data_type, column.datatype_extension.clone())
+                    .context(ColumnDataTypeSnafu)?,
             );
             column_name_and_type.push((column_name, data_type));
         }

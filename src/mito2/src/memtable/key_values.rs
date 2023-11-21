@@ -233,6 +233,7 @@ mod tests {
                     column_name: column_name.to_string(),
                     datatype,
                     semantic_type,
+                    ..Default::default()
                 }
             })
             .collect();
