@@ -74,7 +74,6 @@ async fn test_scan_projection() {
 
     // Scans tag_1, field_1, ts
     let request = ScanRequest {
-        sequence: None,
         projection: Some(vec![1, 3, 4]),
         filters: Vec::new(),
         output_ordering: None,

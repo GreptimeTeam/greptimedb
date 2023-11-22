@@ -22,8 +22,7 @@ use crate::error::{
     MagicNotMatchedSnafu, ParseStageNotMatchSnafu, ReadSnafu, Result, SeekSnafu,
     UnexpectedFooterPayloadSizeSnafu, UnsupportedDecompressionSnafu,
 };
-use crate::file_format::reader::file::{MAGIC_SIZE, MIN_FILE_SIZE};
-use crate::file_format::{Flags, MAGIC};
+use crate::file_format::{Flags, FLAGS_SIZE, MAGIC, MAGIC_SIZE, MIN_FILE_SIZE, PAYLOAD_SIZE_SIZE};
 use crate::file_metadata::FileMetadata;
 
 /// Parser for the footer of a Puffin data file
@@ -42,10 +41,6 @@ pub struct FooterParser<R> {
     // The size of the file, used for calculating offsets to read from
     file_size: u64,
 }
-
-pub const FLAGS_SIZE: u64 = 4;
-pub const PAYLOAD_SIZE_SIZE: u64 = 4;
-pub const MIN_FOOTER_SIZE: u64 = MAGIC_SIZE * 2 + FLAGS_SIZE + PAYLOAD_SIZE_SIZE;
 
 impl<R> FooterParser<R> {
     pub fn new(source: R, file_size: u64) -> Self {
