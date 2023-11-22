@@ -149,7 +149,12 @@ fn chroot_key_value_with(root: &[u8]) -> impl FnMut(etcd_client::KeyValue) -> Ke
 }
 
 fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
-    debug_assert!(key.starts_with(root));
+    debug_assert!(
+        key.starts_with(root),
+        "key={}, root={}",
+        String::from_utf8_lossy(&key),
+        String::from_utf8_lossy(root),
+    );
     key.split_off(root.len())
 }
 
