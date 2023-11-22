@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod chroot;
 pub mod etcd;
 pub mod memory;
 pub mod test;
