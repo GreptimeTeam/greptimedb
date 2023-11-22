@@ -290,7 +290,6 @@ impl MetadataRegion {
     /// Load all metadata from a given region.
     pub async fn get_all(&self, region_id: RegionId) -> Result<HashMap<String, String>> {
         let scan_req = ScanRequest {
-            sequence: None,
             projection: Some(vec![
                 METADATA_SCHEMA_KEY_COLUMN_INDEX,
                 METADATA_SCHEMA_VALUE_COLUMN_INDEX,
