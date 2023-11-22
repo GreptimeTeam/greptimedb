@@ -16,7 +16,7 @@ Affected Rows: 2
 
 select * from system_Metric;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.upper_case_table_name.system_metric
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.upper_case_table_name.system_metric
 
 select * from "system_Metric";
 

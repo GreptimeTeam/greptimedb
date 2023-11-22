@@ -41,15 +41,15 @@ SELECT INTERVAL '1 year 2 months 3 days 4 hours' - INTERVAL '1 year';
 
 SELECT INTERVAL '6 years' * 2;
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported interval operator: Multiply
+Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Multiply
 
 SELECT INTERVAL '6 years' / 2;
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported interval operator: Divide
+Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Divide
 
 SELECT INTERVAL '6 years' = INTERVAL '72 months';
 
-Error: 3000(PlanQuery), This feature is not implemented: Unsupported interval operator: Eq
+Error: 3000(PlanQuery), Failed to plan SQL: This feature is not implemented: Unsupported interval operator: Eq
 
 SELECT arrow_typeof(INTERVAL '1 month');
 
@@ -62,7 +62,7 @@ SELECT arrow_typeof(INTERVAL '1 month');
 -- INTERVAL + TIME CONSTANT
 SELECT current_time() + INTERVAL '1 hour';
 
-Error: 3000(PlanQuery), Error during planning: Cannot coerce arithmetic expression Time64(Nanosecond) + Interval(MonthDayNano) to valid types
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Time64(Nanosecond) + Interval(MonthDayNano) to valid types
 
 -- table with interval type test
 CREATE TABLE IF NOT EXISTS intervals(
@@ -259,13 +259,13 @@ This was likely caused by a bug in DataFusion's code and we would welcome that y
 
 SELECT SUM(interval_value) from intervals;
 
-Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'SUM(Interval(MonthDayNano))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'SUM(Interval(MonthDayNano))'. You might need to add explicit type casts.
 	Candidate functions:
 	SUM(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT AVG(interval_value) from intervals;
 
-Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'AVG(Interval(MonthDayNano))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'AVG(Interval(MonthDayNano))'. You might need to add explicit type casts.
 	Candidate functions:
 	AVG(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 

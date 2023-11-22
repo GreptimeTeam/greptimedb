@@ -49,7 +49,7 @@ Affected Rows: 1
 
 select '90000-01-19 03:14:07.999999'::TIMESTAMP_US::TIMESTAMP_NS;
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '90000-01-19 03:14:07.999999': error parsing date
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '90000-01-19 03:14:07.999999': error parsing date
 
 select sec::DATE from timestamp;
 

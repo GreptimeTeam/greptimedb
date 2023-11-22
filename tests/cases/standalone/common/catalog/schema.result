@@ -118,7 +118,7 @@ Error: 1001(Unsupported), SQL statement is not supported: DROP SCHEMA test_publi
 
 SELECT * FROM test_public_schema.hello;
 
-Error: 3000(PlanQuery), Error during planning: Table not found: greptime.test_public_schema.hello
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Table not found: greptime.test_public_schema.hello
 
 USE public;
 

@@ -32,15 +32,15 @@ SELECT timestamp '    2017-07-23     13:10:11    ';
 
 SELECT timestamp '    2017-07-23     13:10:11    AA';
 
-Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": 'AA' is not a valid timezone
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Invalid timezone "AA": 'AA' is not a valid timezone
 
 SELECT timestamp 'AA2017-07-23 13:10:11';
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from 'AA2017-07-23 13:10:11': error parsing date
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from 'AA2017-07-23 13:10:11': error parsing date
 
 SELECT timestamp '2017-07-23A13:10:11';
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '2017-07-23A13:10:11': invalid timestamp separator
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '2017-07-23A13:10:11': invalid timestamp separator
 
 SELECT t FROM timestamp ORDER BY t;
 
@@ -75,31 +75,31 @@ SELECT MAX(t) FROM timestamp;
 
 SELECT SUM(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'SUM(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
 	SUM(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT AVG(t) FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: No function matches the given name and argument types 'AVG(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: No function matches the given name and argument types 'AVG(Timestamp(Millisecond, None))'. You might need to add explicit type casts.
 	Candidate functions:
 	AVG(Int8/Int16/Int32/Int64/UInt8/UInt16/UInt32/UInt64/Float32/Float64)
 
 SELECT t+t FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) + Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) + Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) + Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) + Timestamp(Millisecond, None)
 
 SELECT t*t FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) * Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) * Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) * Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) * Timestamp(Millisecond, None)
 
 SELECT t/t FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) / Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) / Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) / Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) / Timestamp(Millisecond, None)
 
 SELECT t%t FROM timestamp;
 
-Error: 3000(PlanQuery), Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) % Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) % Timestamp(Millisecond, None)
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(Millisecond, None) % Timestamp(Millisecond, None): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(Millisecond, None) % Timestamp(Millisecond, None)
 
 -- TODO(dennis): It can't run on distributed mode, uncomment it when the issue is fixed: https://github.com/GreptimeTeam/greptimedb/issues/2071 --
 -- SELECT t-t FROM timestamp; --
@@ -169,11 +169,11 @@ SELECT TIMESTAMP '2008-01-01 00:00:01.5'::VARCHAR;
 
 SELECT TIMESTAMP '-8-01-01 00:00:01.5'::VARCHAR;
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '-8-01-01 00:00:01.5': error parsing date
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '-8-01-01 00:00:01.5': error parsing date
 
 SELECT TIMESTAMP '100000-01-01 00:00:01.5'::VARCHAR;
 
-Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '100000-01-01 00:00:01.5': error parsing date
+Error: 3001(EngineExecuteQuery), DataFusion error: Parser error: Error parsing timestamp from '100000-01-01 00:00:01.5': error parsing date
 
 DROP TABLE timestamp;
 

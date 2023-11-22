@@ -24,15 +24,15 @@ select 4 + 0.5;
 
 select "a";
 
-Error: 3000(PlanQuery), No field named a.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named a.
 
 select "A";
 
-Error: 3000(PlanQuery), No field named "A".
+Error: 3000(PlanQuery), Failed to plan SQL: No field named "A".
 
 select * where "a" = "A";
 
-Error: 3000(PlanQuery), No field named a.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named a.
 
 select TO_UNIXTIME('2023-03-01T06:35:02Z');
 
