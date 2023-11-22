@@ -115,7 +115,7 @@ fn range_end_prepend_root(root: &[u8], mut range_end: Vec<u8>) -> Vec<u8> {
             new_end = vec![0];
         }
         new_end
-    } else if range_end.len() >= 1 {
+    } else if !range_end.is_empty() {
         let mut new_end = root.to_vec();
         new_end.append(&mut range_end);
         new_end
