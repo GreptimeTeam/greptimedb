@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::sync::Arc;
 
+use crate::error::Error;
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnResponse};
 use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::rpc::store::{
@@ -24,21 +24,21 @@ use crate::rpc::store::{
 };
 use crate::rpc::KeyValue;
 
-pub struct ChrootKvBackend<B> {
+pub struct ChrootKvBackend {
     root: Vec<u8>,
-    inner: B,
+    inner: KvBackendRef,
 }
 
-impl<B: KvBackend> ChrootKvBackend<B> {
-    pub fn new<R>(root: Vec<u8>, inner: B) -> KvBackendRef {
+impl ChrootKvBackend {
+    pub fn new(root: Vec<u8>, inner: KvBackendRef) -> ChrootKvBackend {
         debug_assert!(!root.is_empty());
-        Arc::new(ChrootKvBackend { root, inner })
+        ChrootKvBackend { root, inner }
     }
 }
 
 #[async_trait::async_trait]
-impl<B: KvBackend> TxnService for ChrootKvBackend<B> {
-    type Error = B::Error;
+impl TxnService for ChrootKvBackend {
+    type Error = Error;
 
     async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
         let txn = txn_prepend_root(&self.root, txn);
@@ -48,13 +48,13 @@ impl<B: KvBackend> TxnService for ChrootKvBackend<B> {
 }
 
 #[async_trait::async_trait]
-impl<B: KvBackend> KvBackend for ChrootKvBackend<B> {
+impl KvBackend for ChrootKvBackend {
     fn name(&self) -> &str {
         self.inner.name()
     }
 
     fn as_any(&self) -> &dyn Any {
-        self.inner.as_any()
+        self
     }
 
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse, Self::Error> {

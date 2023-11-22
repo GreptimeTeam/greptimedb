@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod chroot;
-pub mod etcd;
-pub mod memory;
-pub mod test;
-pub mod txn;
-
 use std::any::Any;
 use std::sync::Arc;
 
@@ -32,6 +26,12 @@ use crate::rpc::store::{
     DeleteRangeResponse, PutRequest, PutResponse, RangeRequest, RangeResponse,
 };
 use crate::rpc::KeyValue;
+
+pub mod chroot;
+pub mod etcd;
+pub mod memory;
+pub mod test;
+pub mod txn;
 
 pub type KvBackendRef = Arc<dyn KvBackend<Error = Error> + Send + Sync>;
 
