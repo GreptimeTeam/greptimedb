@@ -75,7 +75,7 @@ impl GreptimeDbClusterBuilder {
                 .split(',')
                 .map(|s| s.to_string())
                 .collect::<Vec<String>>();
-            EtcdStore::with_endpoints(endpoints)
+            EtcdStore::with_endpoints(cluster_name, endpoints)
                 .await
                 .expect("malformed endpoints")
         };
