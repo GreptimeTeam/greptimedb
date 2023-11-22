@@ -122,7 +122,7 @@ pub struct TxnResponse {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Txn {
-    // HACK - etcd chroot would modify this field
+    // HACK - chroot would modify this field
     pub(super) req: TxnRequest,
     c_when: bool,
     c_then: bool,
