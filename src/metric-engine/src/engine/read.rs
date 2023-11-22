@@ -97,7 +97,7 @@ impl MetricEngineInner {
     ) -> Result<ScanRequest> {
         // transform projection
         let physical_projection = if let Some(projection) = &request.projection {
-            self.transform_projection(physical_region_id, logical_region_id, &projection)
+            self.transform_projection(physical_region_id, logical_region_id, projection)
                 .await?
         } else {
             self.default_projection(physical_region_id, logical_region_id)
@@ -215,6 +215,7 @@ mod test {
             .await
             .unwrap();
 
+        // check explicit projection
         let mut scan_req = ScanRequest::default();
         scan_req.projection = Some(vec![0, 1, 2, 3, 4, 5, 6]);
         scan_req.filters = vec![];
@@ -234,5 +235,15 @@ mod test {
                 .eq(logical_expr::lit(logical_region_id.table_id()))
                 .into()
         );
+
+        // check default projection
+        let mut scan_req = ScanRequest::default();
+        let scan_req = env
+            .metric()
+            .inner
+            .transform_request(physical_region_id, logical_region_id, scan_req)
+            .await
+            .unwrap();
+        assert_eq!(scan_req.projection.unwrap(), vec![0, 1, 4, 7, 8, 9, 10]);
     }
 }

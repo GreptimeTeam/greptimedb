@@ -50,7 +50,7 @@ impl MetricEngineInner {
             .filter_map(|mut col| {
                 // recover the semantic type of logical columns
                 if logical_column_set.contains_key(&col.column_schema.name) {
-                    col.semantic_type = logical_column_set[&col.column_schema.name].clone();
+                    col.semantic_type = logical_column_set[&col.column_schema.name];
                     Some(col)
                 } else {
                     None
