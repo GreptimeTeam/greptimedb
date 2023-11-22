@@ -20,7 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use clap::Parser;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::etcd::{EtcdStore, NO_CHROOT};
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
@@ -61,9 +61,7 @@ pub struct BenchTableMetadataCommand {
 
 impl BenchTableMetadataCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let etcd_store = EtcdStore::with_endpoints(NO_CHROOT, [&self.etcd_addr])
-            .await
-            .unwrap();
+        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr]).await.unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
 

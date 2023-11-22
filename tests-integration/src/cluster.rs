@@ -22,6 +22,7 @@ use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -68,16 +69,17 @@ impl GreptimeDbClusterBuilder {
     pub async fn new(cluster_name: &str) -> Self {
         let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
 
-        let kv_backend = if endpoints.is_empty() {
+        let kv_backend: KvBackendRef = if endpoints.is_empty() {
             Arc::new(MemoryKvBackend::new())
         } else {
             let endpoints = endpoints
                 .split(',')
                 .map(|s| s.to_string())
                 .collect::<Vec<String>>();
-            EtcdStore::with_endpoints(cluster_name, endpoints)
+            let backend = EtcdStore::with_endpoints(endpoints)
                 .await
-                .expect("malformed endpoints")
+                .expect("malformed endpoints");
+            Arc::new(ChrootKvBackend::new(cluster_name.into(), backend))
         };
 
         Self {

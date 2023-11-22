@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use crate::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnResponse};
-use crate::kv_backend::{KvBackend, TxnService};
+use crate::kv_backend::{KvBackend, KvBackendRef, TxnService};
 use crate::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
     BatchPutResponse, CompareAndPutRequest, CompareAndPutResponse, DeleteRangeRequest,
@@ -28,11 +29,10 @@ pub struct ChrootKvBackend<B> {
     inner: B,
 }
 
-impl<B> ChrootKvBackend<B> {
-    pub fn new<R>(root: Vec<u8>, inner: B) -> Self {
-        let root = root.into();
+impl<B: KvBackend> ChrootKvBackend<B> {
+    pub fn new<R>(root: Vec<u8>, inner: B) -> KvBackendRef {
         debug_assert!(!root.is_empty());
-        ChrootKvBackend { root, inner }
+        Arc::new(ChrootKvBackend { root, inner })
     }
 }
 
