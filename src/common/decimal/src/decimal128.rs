@@ -96,26 +96,23 @@ impl Decimal128 {
         self.scale
     }
 
-    /// Convert to ScalarValue
+    /// Convert to ScalarValue(value,precision,scale)
     pub fn to_scalar_value(&self) -> (Option<i128>, u8, i8) {
         (Some(self.value), self.precision, self.scale)
     }
 
-    /// Convert to PbDecimal128, the PbDecimal128 is represented as (high-64 bit, low-64 bit, precision, scale)
-    /// Return (high-64 bit, low-64 bit, precision, scale)
-    pub fn to_pb_decimal128(&self) -> (i64, i64, i32, i32) {
-        (
-            (self.value >> 64) as i64,
-            self.value as i64,
-            self.precision as i32,
-            self.scale as i32,
-        )
+    /// Convert to PbDecimal128, the PbDecimal128 is represented as (high-64 bit, low-64 bit),
+    /// and the precision and scale is not stored in PbDecimal128.
+    ///
+    /// Return (high-64 bit, low-64 bit)
+    pub fn to_pb_decimal128(&self) -> (i64, i64) {
+        ((self.value >> 64) as i64, self.value as i64)
     }
 
     /// Convert from PbDecimal128
-    pub fn from_pb_decimal128(hi: i64, lo: i64, precision: i32, scale: i32) -> Self {
+    pub fn from_pb_decimal128(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
         let value = (hi as i128) << 64 | lo as i128;
-        Self::new(value, precision as u8, scale as i8)
+        Self::new(value, precision, scale)
     }
 }
 

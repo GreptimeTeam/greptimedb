@@ -358,8 +358,7 @@ pub(crate) fn validate_proto_value(
     value: &Value,
     column_schema: &ColumnSchema,
 ) -> Result<()> {
-    if let Some(column_type) = proto_value_type(value) {
-        let (value_type, value_type_ext) = column_type.datatype();
+    if let Some(value_type) = proto_value_type(value) {
         ensure!(
             value_type as i32 == column_schema.datatype,
             InvalidRequestSnafu {
@@ -370,16 +369,6 @@ pub(crate) fn validate_proto_value(
                     column_schema.column_name,
                     ColumnDataType::try_from(column_schema.datatype),
                     column_schema.datatype,
-                ),
-            }
-        );
-        ensure!(
-            value_type_ext == column_schema.datatype_extension,
-            InvalidRequestSnafu {
-                region_id,
-                reason: format!(
-                    "value has type extension {:?}, but column {} has type extension {:?}",
-                    value_type_ext, column_schema.column_name, column_schema.datatype_extension,
                 ),
             }
         );

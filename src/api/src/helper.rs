@@ -35,14 +35,14 @@ use datatypes::vectors::{
     TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, VectorRef,
 };
+use greptime_proto::v1;
 use greptime_proto::v1::column_data_type_extension::Ext;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{
-    self, ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, QueryRequest, Row,
-    SemanticType,
+    ColumnDataTypeExtension, DdlRequest, DecimalTypeExtension, QueryRequest, Row, SemanticType,
 };
 use paste::paste;
 use snafu::prelude::*;
@@ -50,6 +50,7 @@ use snafu::prelude::*;
 use crate::error::{self, Result};
 use crate::v1::column::Values;
 use crate::v1::{Column, ColumnDataType, Value as GrpcValue};
+
 #[derive(Debug, PartialEq)]
 pub struct ColumnDataTypeWrapper {
     datatype: ColumnDataType,
@@ -506,14 +507,12 @@ pub fn convert_i128_to_interval(v: i128) -> v1::IntervalMonthDayNano {
     }
 }
 
-/// Convert common decimal128 to grpc decimal128.
+/// Convert common decimal128 to grpc decimal128 without precision and scale.
 pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
-    let (hi, lo, precision, scale) = v.to_pb_decimal128();
+    let value = v.val();
     v1::Decimal128 {
-        hi,
-        lo,
-        precision,
-        scale,
+        hi: (value >> 64) as i64,
+        lo: value as i64,
     }
 }
 
@@ -562,12 +561,10 @@ pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
         ValueData::DurationMillisecondValue(v) => ValueRef::Duration(Duration::new_millisecond(*v)),
         ValueData::DurationMicrosecondValue(v) => ValueRef::Duration(Duration::new_microsecond(*v)),
         ValueData::DurationNanosecondValue(v) => ValueRef::Duration(Duration::new_nanosecond(*v)),
-        ValueData::Decimal128Value(v) => ValueRef::Decimal128(Decimal128::from_pb_decimal128(
-            v.hi,
-            v.lo,
-            v.precision,
-            v.scale,
-        )),
+        ValueData::Decimal128Value(v) => {
+            // Although the precision and scale are not used here, we still need to pass them in.
+            ValueRef::Decimal128(Decimal128::from_pb_decimal128(v.hi, v.lo, 38, 10))
+        }
     }
 }
 
@@ -655,11 +652,10 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
             )),
         },
         // When should I check precision and scale?
-        ConcreteDataType::Decimal128(_) => Arc::new(Decimal128Vector::from_values(
-            values
-                .decimal128_values
-                .iter()
-                .map(|x| Decimal128::from_pb_decimal128(x.hi, x.lo, x.precision, x.scale).into()),
+        ConcreteDataType::Decimal128(d) => Arc::new(Decimal128Vector::from_values(
+            values.decimal128_values.iter().map(|x| {
+                Decimal128::from_pb_decimal128(x.hi, x.lo, d.precision(), d.scale()).into()
+            }),
         )),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
             unreachable!()
@@ -831,15 +827,15 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             .into_iter()
             .map(|v| Value::Duration(Duration::new_nanosecond(v)))
             .collect(),
-        ConcreteDataType::Decimal128(_) => values
+        ConcreteDataType::Decimal128(d) => values
             .decimal128_values
             .into_iter()
             .map(|v| {
                 Value::Decimal128(Decimal128::from_pb_decimal128(
                     v.hi,
                     v.lo,
-                    v.precision,
-                    v.scale,
+                    d.precision(),
+                    d.scale(),
                 ))
             })
             .collect(),
@@ -972,14 +968,9 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
             },
         },
         Value::Decimal128(v) => {
-            let (hi, lo, precision, scale) = v.to_pb_decimal128();
+            let (hi, lo) = v.to_pb_decimal128();
             v1::Value {
-                value_data: Some(ValueData::Decimal128Value(v1::Decimal128 {
-                    hi,
-                    lo,
-                    precision,
-                    scale,
-                })),
+                value_data: Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo })),
             }
         }
         Value::List(_) => return None,
@@ -988,60 +979,42 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
     Some(proto_value)
 }
 
-/// Returns the [ColumnDataType] of the value.
+/// Returns the [ColumnDataTypeWrapper] of the value.
 ///
 /// If value is null, returns `None`.
-pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataTypeWrapper> {
+pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
     let value_type = match value.value_data.as_ref()? {
-        ValueData::I8Value(_) => ColumnDataTypeWrapper::int8_datatype(),
-        ValueData::I16Value(_) => ColumnDataTypeWrapper::int16_datatype(),
-        ValueData::I32Value(_) => ColumnDataTypeWrapper::int32_datatype(),
-        ValueData::I64Value(_) => ColumnDataTypeWrapper::int64_datatype(),
-        ValueData::U8Value(_) => ColumnDataTypeWrapper::uint8_datatype(),
-        ValueData::U16Value(_) => ColumnDataTypeWrapper::uint16_datatype(),
-        ValueData::U32Value(_) => ColumnDataTypeWrapper::uint32_datatype(),
-        ValueData::U64Value(_) => ColumnDataTypeWrapper::uint64_datatype(),
-        ValueData::F32Value(_) => ColumnDataTypeWrapper::float32_datatype(),
-        ValueData::F64Value(_) => ColumnDataTypeWrapper::float64_datatype(),
-        ValueData::BoolValue(_) => ColumnDataTypeWrapper::boolean_datatype(),
-        ValueData::BinaryValue(_) => ColumnDataTypeWrapper::binary_datatype(),
-        ValueData::StringValue(_) => ColumnDataTypeWrapper::string_datatype(),
-        ValueData::DateValue(_) => ColumnDataTypeWrapper::date_datatype(),
-        ValueData::DatetimeValue(_) => ColumnDataTypeWrapper::datetime_datatype(),
-        ValueData::TimestampSecondValue(_) => ColumnDataTypeWrapper::timestamp_second_datatype(),
-        ValueData::TimestampMillisecondValue(_) => {
-            ColumnDataTypeWrapper::timestamp_millisecond_datatype()
-        }
-        ValueData::TimestampMicrosecondValue(_) => {
-            ColumnDataTypeWrapper::timestamp_microsecond_datatype()
-        }
-        ValueData::TimestampNanosecondValue(_) => {
-            ColumnDataTypeWrapper::timestamp_nanosecond_datatype()
-        }
-        ValueData::TimeSecondValue(_) => ColumnDataTypeWrapper::time_second_datatype(),
-        ValueData::TimeMillisecondValue(_) => ColumnDataTypeWrapper::time_millisecond_datatype(),
-        ValueData::TimeMicrosecondValue(_) => ColumnDataTypeWrapper::time_microsecond_datatype(),
-        ValueData::TimeNanosecondValue(_) => ColumnDataTypeWrapper::time_nanosecond_datatype(),
-        ValueData::IntervalYearMonthValues(_) => {
-            ColumnDataTypeWrapper::interval_year_month_datatype()
-        }
-        ValueData::IntervalDayTimeValues(_) => ColumnDataTypeWrapper::interval_day_time_datatype(),
-        ValueData::IntervalMonthDayNanoValues(_) => {
-            ColumnDataTypeWrapper::interval_month_day_nano_datatype()
-        }
-        ValueData::DurationSecondValue(_) => ColumnDataTypeWrapper::duration_second_datatype(),
-        ValueData::DurationMillisecondValue(_) => {
-            ColumnDataTypeWrapper::duration_millisecond_datatype()
-        }
-        ValueData::DurationMicrosecondValue(_) => {
-            ColumnDataTypeWrapper::duration_microsecond_datatype()
-        }
-        ValueData::DurationNanosecondValue(_) => {
-            ColumnDataTypeWrapper::duration_nanosecond_datatype()
-        }
-        ValueData::Decimal128Value(v) => {
-            ColumnDataTypeWrapper::decimal128_datatype(v.precision, v.scale)
-        }
+        ValueData::I8Value(_) => ColumnDataType::Int8,
+        ValueData::I16Value(_) => ColumnDataType::Int16,
+        ValueData::I32Value(_) => ColumnDataType::Int32,
+        ValueData::I64Value(_) => ColumnDataType::Int64,
+        ValueData::U8Value(_) => ColumnDataType::Uint8,
+        ValueData::U16Value(_) => ColumnDataType::Uint16,
+        ValueData::U32Value(_) => ColumnDataType::Uint32,
+        ValueData::U64Value(_) => ColumnDataType::Uint64,
+        ValueData::F32Value(_) => ColumnDataType::Float32,
+        ValueData::F64Value(_) => ColumnDataType::Float64,
+        ValueData::BoolValue(_) => ColumnDataType::Boolean,
+        ValueData::BinaryValue(_) => ColumnDataType::Binary,
+        ValueData::StringValue(_) => ColumnDataType::String,
+        ValueData::DateValue(_) => ColumnDataType::Date,
+        ValueData::DatetimeValue(_) => ColumnDataType::Datetime,
+        ValueData::TimestampSecondValue(_) => ColumnDataType::TimestampSecond,
+        ValueData::TimestampMillisecondValue(_) => ColumnDataType::TimestampMillisecond,
+        ValueData::TimestampMicrosecondValue(_) => ColumnDataType::TimestampMicrosecond,
+        ValueData::TimestampNanosecondValue(_) => ColumnDataType::TimestampNanosecond,
+        ValueData::TimeSecondValue(_) => ColumnDataType::TimeSecond,
+        ValueData::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
+        ValueData::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
+        ValueData::TimeNanosecondValue(_) => ColumnDataType::TimeNanosecond,
+        ValueData::IntervalYearMonthValues(_) => ColumnDataType::IntervalYearMonth,
+        ValueData::IntervalDayTimeValues(_) => ColumnDataType::IntervalDayTime,
+        ValueData::IntervalMonthDayNanoValues(_) => ColumnDataType::IntervalMonthDayNano,
+        ValueData::DurationSecondValue(_) => ColumnDataType::DurationSecond,
+        ValueData::DurationMillisecondValue(_) => ColumnDataType::DurationMillisecond,
+        ValueData::DurationMicrosecondValue(_) => ColumnDataType::DurationMicrosecond,
+        ValueData::DurationNanosecondValue(_) => ColumnDataType::DurationNanosecond,
+        ValueData::Decimal128Value(_) => ColumnDataType::Decimal128,
     };
     Some(value_type)
 }
@@ -1105,13 +1078,8 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Nanosecond => ValueData::DurationNanosecondValue(v.value()),
             }),
             Value::Decimal128(v) => {
-                let (hi, lo, precision, scale) = v.to_pb_decimal128();
-                Some(ValueData::Decimal128Value(v1::Decimal128 {
-                    hi,
-                    lo,
-                    precision,
-                    scale,
-                }))
+                let (hi, lo) = v.to_pb_decimal128();
+                Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo }))
             }
             Value::List(_) => unreachable!(),
         },

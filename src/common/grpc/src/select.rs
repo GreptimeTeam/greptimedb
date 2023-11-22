@@ -329,8 +329,6 @@ mod tests {
         (0..3).for_each(|i| {
             assert_eq!(vals.decimal128_values[i].hi, 0);
             assert_eq!(vals.decimal128_values[i].lo, i as i64 + 1);
-            assert_eq!(vals.decimal128_values[i].precision, 38,);
-            assert_eq!(vals.decimal128_values[i].scale, 10,);
         });
     }
 
