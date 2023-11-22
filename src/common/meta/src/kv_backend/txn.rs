@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod etcd;
-
 use common_error::ext::ErrorExt;
 
-use crate::kv_backend::key_prepend_root;
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
+
+mod etcd;
 
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
@@ -123,7 +122,8 @@ pub struct TxnResponse {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Txn {
-    req: TxnRequest,
+    // HACK - etcd chroot would modify this field
+    pub(super) req: TxnRequest,
     c_when: bool,
     c_then: bool,
     c_else: bool,
@@ -143,43 +143,6 @@ impl Txn {
         self.c_else |= other.c_else;
 
         self.req.extend(other.req);
-
-        self
-    }
-
-    pub fn prepend_root(mut self, root: &[u8]) -> Self {
-        fn op_prepend_root(root: &[u8], op: TxnOp) -> TxnOp {
-            match op {
-                TxnOp::Put(k, v) => TxnOp::Put(key_prepend_root(root, k), v),
-                TxnOp::Get(k) => TxnOp::Get(key_prepend_root(root, k)),
-                TxnOp::Delete(k) => TxnOp::Delete(key_prepend_root(root, k)),
-            }
-        }
-
-        self.req.success = self
-            .req
-            .success
-            .drain(..)
-            .map(|op| op_prepend_root(root, op))
-            .collect();
-
-        self.req.failure = self
-            .req
-            .failure
-            .drain(..)
-            .map(|op| op_prepend_root(root, op))
-            .collect();
-
-        self.req.compare = self
-            .req
-            .compare
-            .drain(..)
-            .map(|cmp| Compare {
-                key: key_prepend_root(root, cmp.key),
-                cmp: cmp.cmp,
-                target: cmp.target,
-            })
-            .collect();
 
         self
     }

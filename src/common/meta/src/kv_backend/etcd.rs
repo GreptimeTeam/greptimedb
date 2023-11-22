@@ -21,7 +21,7 @@ use etcd_client::{
 };
 use snafu::{ensure, OptionExt, ResultExt};
 
-use super::{chroot_key_value_with, key_prepend_root, KvBackendRef};
+use super::KvBackendRef;
 use crate::error::{self, Error, Result};
 use crate::kv_backend::txn::{Txn as KvTxn, TxnResponse as KvTxnResponse};
 use crate::kv_backend::{KvBackend, TxnService};
@@ -40,6 +40,76 @@ use crate::rpc::KeyValue;
 const MAX_TXN_SIZE: usize = 128;
 
 pub const NO_CHROOT: &str = "";
+
+fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    debug_assert!(
+        key.starts_with(root),
+        "key={}, root={}",
+        String::from_utf8_lossy(&key),
+        String::from_utf8_lossy(root),
+    );
+    key.split_off(root.len())
+}
+
+fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    if key.is_empty() || key == [0] {
+        // special encoded key or range_end
+        key
+    } else {
+        let mut new_key = root.to_vec();
+        new_key.append(&mut key);
+        new_key
+    }
+}
+
+fn chroot_key_value_with(root: &[u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + '_ {
+    |kv: etcd_client::KeyValue| {
+        let (key, value) = kv.into_key_value();
+        KeyValue {
+            key: key_strip_root(root, key),
+            value,
+        }
+    }
+}
+
+fn txn_prepend_root(root: &[u8], mut txn: KvTxn) -> KvTxn {
+    use super::txn::TxnOp as KvTxnOp;
+
+    fn op_prepend_root(root: &[u8], op: KvTxnOp) -> KvTxnOp {
+        match op {
+            KvTxnOp::Put(k, v) => KvTxnOp::Put(key_prepend_root(root, k), v),
+            KvTxnOp::Get(k) => KvTxnOp::Get(key_prepend_root(root, k)),
+            KvTxnOp::Delete(k) => KvTxnOp::Delete(key_prepend_root(root, k)),
+        }
+    }
+
+    txn.req.success = txn
+        .req
+        .success
+        .drain(..)
+        .map(|op| op_prepend_root(root, op))
+        .collect();
+
+    txn.req.failure = txn
+        .req
+        .failure
+        .drain(..)
+        .map(|op| op_prepend_root(root, op))
+        .collect();
+
+    txn.req.compare = txn
+        .req
+        .compare
+        .drain(..)
+        .map(|cmp| super::txn::Compare {
+            key: key_prepend_root(root, cmp.key),
+            cmp: cmp.cmp,
+            target: cmp.target,
+        })
+        .collect();
+
+    txn
+}
 
 pub struct EtcdStore {
     root: Vec<u8>,
@@ -339,7 +409,7 @@ impl TxnService for EtcdStore {
             .with_label_values(&["etcd", "txn"])
             .start_timer();
 
-        let etcd_txn: Txn = txn.prepend_root(&self.root).into();
+        let etcd_txn: Txn = txn_prepend_root(&self.root, txn).into();
         let txn_res = self
             .client
             .kv_client()
