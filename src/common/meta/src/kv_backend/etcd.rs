@@ -107,9 +107,10 @@ impl KvBackend for EtcdStore {
         self
     }
 
-    async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+    async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
+        req.key = key_prepend_root(&self.root, req.key);
+        req.range_end = key_prepend_root(&self.root, req.range_end);
         let Get { key, options } = req.try_into()?;
-        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -130,13 +131,13 @@ impl KvBackend for EtcdStore {
         })
     }
 
-    async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+    async fn put(&self, mut req: PutRequest) -> Result<PutResponse> {
+        req.key = key_prepend_root(&self.root, req.key);
         let Put {
             key,
             value,
             options,
         } = req.try_into()?;
-        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -149,18 +150,15 @@ impl KvBackend for EtcdStore {
         Ok(PutResponse { prev_kv })
     }
 
-    async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+    async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse> {
+        for kv in req.kvs.iter_mut() {
+            kv.key = key_prepend_root(&self.root, kv.key.drain(..).collect());
+        }
         let BatchPut { kvs, options } = req.try_into()?;
 
         let put_ops = kvs
             .into_iter()
-            .map(|kv| {
-                TxnOp::put(
-                    key_prepend_root(&self.root, kv.key),
-                    kv.value,
-                    options.clone(),
-                )
-            })
+            .map(|kv| TxnOp::put(kv.key, kv.value, options.clone()))
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(put_ops).await?;
@@ -182,12 +180,17 @@ impl KvBackend for EtcdStore {
         Ok(BatchPutResponse { prev_kvs })
     }
 
-    async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+    async fn batch_get(&self, mut req: BatchGetRequest) -> Result<BatchGetResponse> {
+        req.keys = req
+            .keys
+            .drain(..)
+            .map(|key| key_prepend_root(&self.root, key))
+            .collect();
         let BatchGet { keys, options } = req.try_into()?;
 
         let get_ops: Vec<_> = keys
             .into_iter()
-            .map(|key| TxnOp::get(key_prepend_root(&self.root, key), options.clone()))
+            .map(|key| TxnOp::get(key, options.clone()))
             .collect();
 
         let txn_responses = self.do_multi_txn(get_ops).await?;
@@ -212,14 +215,17 @@ impl KvBackend for EtcdStore {
         Ok(BatchGetResponse { kvs })
     }
 
-    async fn compare_and_put(&self, req: CompareAndPutRequest) -> Result<CompareAndPutResponse> {
+    async fn compare_and_put(
+        &self,
+        mut req: CompareAndPutRequest,
+    ) -> Result<CompareAndPutResponse> {
+        req.key = key_prepend_root(&self.root, req.key);
         let CompareAndPut {
             key,
             expect,
             value,
             put_options,
         } = req.try_into()?;
-        let key = key_prepend_root(&self.root, key);
 
         let compare = if expect.is_empty() {
             // create if absent
@@ -266,9 +272,10 @@ impl KvBackend for EtcdStore {
         Ok(CompareAndPutResponse { success, prev_kv })
     }
 
-    async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+    async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+        req.key = key_prepend_root(&self.root, req.key);
+        req.range_end = key_prepend_root(&self.root, req.range_end);
         let Delete { key, options } = req.try_into()?;
-        let key = key_prepend_root(&self.root, key);
 
         let mut res = self
             .client
@@ -289,14 +296,19 @@ impl KvBackend for EtcdStore {
         })
     }
 
-    async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+    async fn batch_delete(&self, mut req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+        req.keys = req
+            .keys
+            .drain(..)
+            .map(|key| key_prepend_root(&self.root, key))
+            .collect();
         let BatchDelete { keys, options } = req.try_into()?;
 
         let mut prev_kvs = Vec::with_capacity(keys.len());
 
         let delete_ops = keys
             .into_iter()
-            .map(|key| TxnOp::delete(key_prepend_root(&self.root, key), options.clone()))
+            .map(|key| TxnOp::delete(key, options.clone()))
             .collect::<Vec<_>>();
 
         let txn_responses = self.do_multi_txn(delete_ops).await?;
