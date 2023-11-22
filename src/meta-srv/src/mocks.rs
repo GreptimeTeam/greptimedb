@@ -42,7 +42,7 @@ pub async fn mock_with_memstore() -> MockInfo {
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
-    let kv_backend = EtcdStore::with_endpoints([addr]).await.unwrap();
+    let kv_backend = EtcdStore::with_endpoints("", [addr]).await.unwrap();
     mock(Default::default(), kv_backend, None, None).await
 }
 

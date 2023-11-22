@@ -17,6 +17,7 @@
 pub mod memtable_util;
 pub mod meta_util;
 pub mod scheduler_util;
+pub mod sst_util;
 pub mod version_util;
 
 use std::collections::HashMap;
@@ -195,6 +196,12 @@ impl TestEnv {
         )
     }
 
+    /// Only initializes the object store manager, returns the default object store.
+    pub fn init_object_store_manager(&mut self) -> ObjectStore {
+        self.object_store_manager = Some(Arc::new(self.create_object_store_manager()));
+        self.get_object_store().unwrap()
+    }
+
     /// Creates a new [WorkerGroup] with specific config under this env.
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
@@ -207,14 +214,19 @@ impl TestEnv {
     ) -> (RaftEngineLogStore, ObjectStoreManager) {
         let data_home = self.data_home.path();
         let wal_path = data_home.join("wal");
-        let data_path = data_home.join("data").as_path().display().to_string();
-
         let log_store = log_store_util::create_tmp_local_file_log_store(&wal_path).await;
+
+        let object_store_manager = self.create_object_store_manager();
+        (log_store, object_store_manager)
+    }
+
+    fn create_object_store_manager(&self) -> ObjectStoreManager {
+        let data_home = self.data_home.path();
+        let data_path = data_home.join("data").as_path().display().to_string();
         let mut builder = Fs::default();
         builder.root(&data_path);
         let object_store = ObjectStore::new(builder).unwrap().finish();
-        let object_store_manager = ObjectStoreManager::new("default", object_store);
-        (log_store, object_store_manager)
+        ObjectStoreManager::new("default", object_store)
     }
 
     /// If `initial_metadata` is `Some`, creates a new manifest. If `initial_metadata`
@@ -414,6 +426,7 @@ pub fn new_batch_builder(
     timestamps: &[i64],
     sequences: &[u64],
     op_types: &[OpType],
+    field_column_id: ColumnId,
     field: &[u64],
 ) -> BatchBuilder {
     let mut builder = BatchBuilder::new(primary_key.to_vec());
@@ -431,13 +444,14 @@ pub fn new_batch_builder(
         )))
         .unwrap()
         .push_field_array(
-            1,
+            field_column_id,
             Arc::new(UInt64Array::from_iter_values(field.iter().copied())),
         )
         .unwrap();
     builder
 }
 
+/// Returns a new [Batch] whose field has column id 1.
 pub fn new_batch(
     primary_key: &[u8],
     timestamps: &[i64],
@@ -445,7 +459,7 @@ pub fn new_batch(
     op_types: &[OpType],
     field: &[u64],
 ) -> Batch {
-    new_batch_builder(primary_key, timestamps, sequences, op_types, field)
+    new_batch_builder(primary_key, timestamps, sequences, op_types, 1, field)
         .build()
         .unwrap()
 }

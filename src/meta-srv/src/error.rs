@@ -16,9 +16,12 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::peer::Peer;
+use common_meta::DatanodeId;
 use common_runtime::JoinError;
+use rand::distributions::WeightedError;
 use servers::define_into_tonic_status;
 use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 use tokio::sync::mpsc::error::SendError;
 use tonic::codegen::http;
@@ -29,6 +32,17 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+        "Another procedure is opening the region: {} on peer: {}",
+        region_id,
+        peer_id
+    ))]
+    RegionOpeningRace {
+        location: Location,
+        peer_id: DatanodeId,
+        region_id: RegionId,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         location: Location,
@@ -101,13 +115,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to request Datanode, expected: {}, but only {} available",
-        expected,
+        "Failed to request Datanode, required: {}, but only {} available",
+        required,
         available
     ))]
     NoEnoughAvailableDatanode {
         location: Location,
-        expected: usize,
+        required: usize,
         available: usize,
     },
 
@@ -549,6 +563,23 @@ pub enum Error {
         operation: String,
         location: Location,
     },
+
+    #[snafu(display("Failed to set weight array"))]
+    WeightArray {
+        #[snafu(source)]
+        error: WeightedError,
+        location: Location,
+    },
+
+    #[snafu(display("Weight array is not set"))]
+    NotSetWeightArray { location: Location },
+}
+
+impl Error {
+    /// Returns `true` if the error is retryable.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Error::RetryLater { .. })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -591,6 +622,8 @@ impl ErrorExt for Error {
             | Error::NoEnoughAvailableDatanode { .. }
             | Error::PublishMessage { .. }
             | Error::Join { .. }
+            | Error::WeightArray { .. }
+            | Error::NotSetWeightArray { .. }
             | Error::Unsupported { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
@@ -618,7 +651,8 @@ impl ErrorExt for Error {
             | Error::UnexpectedInstructionReply { .. }
             | Error::Unexpected { .. }
             | Error::Txn { .. }
-            | Error::TableIdChanged { .. } => StatusCode::Unexpected,
+            | Error::TableIdChanged { .. }
+            | Error::RegionOpeningRace { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),

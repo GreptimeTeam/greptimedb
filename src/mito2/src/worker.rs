@@ -114,7 +114,6 @@ impl WorkerGroup {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> WorkerGroup {
-        assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
@@ -123,6 +122,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(CacheManager::new(
             config.sst_meta_cache_size.as_bytes(),
             config.vector_cache_size.as_bytes(),
+            config.page_cache_size.as_bytes(),
         ));
 
         let workers = (0..config.num_workers)
@@ -210,7 +210,6 @@ impl WorkerGroup {
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerGroup {
-        assert!(config.num_workers.is_power_of_two());
         let config = Arc::new(config);
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(WriteBufferManagerImpl::new(
@@ -221,6 +220,7 @@ impl WorkerGroup {
         let cache_manager = Arc::new(CacheManager::new(
             config.sst_meta_cache_size.as_bytes(),
             config.vector_cache_size.as_bytes(),
+            config.page_cache_size.as_bytes(),
         ));
 
         let workers = (0..config.num_workers)
@@ -248,7 +248,7 @@ impl WorkerGroup {
 }
 
 fn value_to_index(value: usize, num_workers: usize) -> usize {
-    value & (num_workers - 1)
+    value % num_workers
 }
 
 /// Worker start config.

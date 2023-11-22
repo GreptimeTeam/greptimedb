@@ -28,6 +28,8 @@ use common_query::physical_plan::DfPhysicalPlanAdapter;
 use common_query::{DfPhysicalPlan, Output};
 use common_recordbatch::SendableRecordBatchStream;
 use common_runtime::Runtime;
+use common_telemetry::tracing::{self, info_span};
+use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, warn};
 use dashmap::DashMap;
 use datafusion::catalog::schema::SchemaProvider;
@@ -99,6 +101,7 @@ impl RegionServer {
         self.inner.handle_request(region_id, request).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         self.inner.handle_read(request).await
     }
@@ -154,9 +157,19 @@ impl RegionServerHandler for RegionServer {
             .context(BuildRegionRequestsSnafu)
             .map_err(BoxedError::new)
             .context(ExecuteGrpcRequestSnafu)?;
+        let tracing_context = TracingContext::from_current_span();
         let join_tasks = requests.into_iter().map(|(region_id, req)| {
             let self_to_move = self.clone();
-            async move { self_to_move.handle_request(region_id, req).await }
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = region_id.to_string()
+            ));
+            async move {
+                self_to_move
+                    .handle_request(region_id, req)
+                    .trace(span)
+                    .await
+            }
         });
 
         let results = try_join_all(join_tasks)
@@ -198,15 +211,18 @@ impl FlightCraft for RegionServer {
         let ticket = request.into_inner().ticket;
         let request = QueryRequest::decode(ticket.as_ref())
             .context(servers_error::InvalidFlightTicketSnafu)?;
-        let trace_id = request
+        let tracing_context = request
             .header
             .as_ref()
-            .map(|h| h.trace_id)
+            .map(|h| TracingContext::from_w3c(&h.tracing_context))
             .unwrap_or_default();
 
-        let result = self.handle_read(request).await?;
+        let result = self
+            .handle_read(request)
+            .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
+            .await?;
 
-        let stream = Box::pin(FlightRecordBatchStream::new(result, trace_id));
+        let stream = Box::pin(FlightRecordBatchStream::new(result, tracing_context));
         Ok(Response::new(stream))
     }
 }
@@ -283,6 +299,10 @@ impl RegionServerInner {
 
         let result = engine
             .handle_request(region_id, request)
+            .trace(info_span!(
+                "RegionEngine::handle_region_request",
+                engine_type
+            ))
             .await
             .with_context(|_| HandleRegionRequestSnafu { region_id })?;
 

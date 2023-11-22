@@ -18,22 +18,22 @@ use std::time::Instant;
 use axum::extract::{Json, Query, RawBody, State};
 use common_catalog::consts::DEFAULT_CATALOG_NAME;
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContext;
+use snafu::ResultExt;
 
+use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
 use crate::http::{ApiState, JsonResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return Json(JsonResponse::with_error(
-            format!("Invalid argument: {}", $e),
-            common_error::status_code::StatusCode::InvalidArguments,
-        ));
+        return Json(JsonResponse::with_error($e));
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(JsonResponse::with_error($msg.to_string(), $code));
+        return Json(JsonResponse::with_error_message($msg.to_string(), $code));
     }};
 }
 
@@ -60,18 +60,19 @@ pub async fn scripts(
         let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
-            json_err!("invalid schema")
+            json_err!("invalid schema", StatusCode::InvalidArguments)
         }
 
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
-            json_err!("invalid name");
+            json_err!("invalid name", StatusCode::InvalidArguments);
         }
 
-        let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await);
+        let bytes = unwrap_or_json_err!(hyper::body::to_bytes(body).await.context(HyperSnafu));
 
-        let script = unwrap_or_json_err!(String::from_utf8(bytes.to_vec()));
+        let script =
+            unwrap_or_json_err!(String::from_utf8(bytes.to_vec()).context(InvalidUtf8ValueSnafu));
 
         // Safety: schema and name are already checked above.
         let query_ctx = QueryContext::with(&catalog, schema.unwrap());
@@ -80,12 +81,18 @@ pub async fn scripts(
             .await
         {
             Ok(()) => JsonResponse::with_output(None),
-            Err(e) => json_err!(format!("Insert script error: {e}"), e.status_code()),
+            Err(e) => json_err!(
+                format!("Insert script error: {}", e.output_msg()),
+                e.status_code()
+            ),
         };
 
         Json(body)
     } else {
-        json_err!("Script execution not supported, missing script handler");
+        json_err!(
+            "Script execution not supported, missing script handler",
+            StatusCode::Unsupported
+        );
     }
 }
 
@@ -112,13 +119,13 @@ pub async fn run_script(
         let schema = params.db.as_ref();
 
         if schema.is_none() || schema.unwrap().is_empty() {
-            json_err!("invalid schema")
+            json_err!("invalid schema", StatusCode::InvalidArguments)
         }
 
         let name = params.name.as_ref();
 
         if name.is_none() || name.unwrap().is_empty() {
-            json_err!("invalid name");
+            json_err!("invalid name", StatusCode::InvalidArguments);
         }
 
         // Safety: schema and name are already checked above.
@@ -130,6 +137,9 @@ pub async fn run_script(
 
         Json(resp.with_execution_time(start.elapsed().as_millis()))
     } else {
-        json_err!("Script execution not supported, missing script handler");
+        json_err!(
+            "Script execution not supported, missing script handler",
+            StatusCode::Unsupported
+        );
     }
 }

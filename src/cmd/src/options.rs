@@ -133,12 +133,20 @@ impl Options {
 
         Ok(opts)
     }
+
+    pub fn node_id(&self) -> Option<String> {
+        match self {
+            Options::Metasrv(_) | Options::Cli(_) => None,
+            Options::Datanode(opt) => opt.node_id.map(|x| x.to_string()),
+            Options::Frontend(opt) => opt.node_id.clone(),
+            Options::Standalone(opt) => opt.frontend.node_id.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{DatanodeOptions, ObjectStoreConfig};
@@ -170,11 +178,6 @@ mod tests {
             read_batch_size = 128
             sync_write = false
 
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
-
             [logging]
             level = "debug"
             dir = "/tmp/greptimedb/test/logs"
@@ -185,17 +188,6 @@ mod tests {
         temp_env::with_vars(
             // The following environment variables will be used to override the values in the config file.
             [
-                (
-                    // storage.manifest.checkpoint_margin = 99
-                    [
-                        env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "checkpoint_margin".to_uppercase(),
-                    ]
-                    .join(ENV_VAR_SEP),
-                    Some("99"),
-                ),
                 (
                     // storage.type = S3
                     [
@@ -215,17 +207,6 @@ mod tests {
                     ]
                     .join(ENV_VAR_SEP),
                     Some("mybucket"),
-                ),
-                (
-                    // storage.manifest.gc_duration = 42s
-                    [
-                        env_prefix.to_string(),
-                        "storage".to_uppercase(),
-                        "manifest".to_uppercase(),
-                        "gc_duration".to_uppercase(),
-                    ]
-                    .join(ENV_VAR_SEP),
-                    Some("42s"),
                 ),
                 (
                     // wal.dir = /other/wal/dir
@@ -257,17 +238,12 @@ mod tests {
                 .unwrap();
 
                 // Check the configs from environment variables.
-                assert_eq!(opts.storage.manifest.checkpoint_margin, Some(99));
                 match opts.storage.store {
                     ObjectStoreConfig::S3(s3_config) => {
                         assert_eq!(s3_config.bucket, "mybucket".to_string());
                     }
                     _ => panic!("unexpected store type"),
                 }
-                assert_eq!(
-                    opts.storage.manifest.gc_duration,
-                    Some(Duration::from_secs(42))
-                );
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![

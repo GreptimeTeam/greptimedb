@@ -31,7 +31,6 @@ use crate::error::{
     self, Error, Result, RetryLaterSnafu, SerializeToJsonSnafu, UnexpectedInstructionReplySnafu,
 };
 use crate::handler::HeartbeatMailbox;
-use crate::inactive_region_manager::InactiveRegionManager;
 use crate::procedure::region_failover::OPEN_REGION_MESSAGE_TIMEOUT;
 use crate::service::mailbox::{Channel, MailboxReceiver};
 
@@ -104,17 +103,6 @@ impl ActivateRegion {
             input: instruction.to_string(),
         })?;
 
-        // Ensure that metasrv will renew the lease for this candidate node.
-        //
-        // This operation may not be redundant, imagine the following scenario:
-        // This candidate once had the current region, and because it did not respond to the `close`
-        // command in time, it was considered an inactive node by metasrv, then it replied, and the
-        // current region failed over again, and the node was selected as a candidate, so it needs
-        // to clear its previous state first.
-        InactiveRegionManager::new(&ctx.in_memory)
-            .deregister_inactive_region(&candidate_ident)
-            .await?;
-
         let ch = Channel::Datanode(self.candidate.id);
         ctx.mailbox.send(&ch, msg, timeout).await
     }
@@ -182,22 +170,11 @@ impl State for ActivateRegion {
         ctx: &RegionFailoverContext,
         failed_region: &RegionIdent,
     ) -> Result<Box<dyn State>> {
-        if self.remark_inactive_region {
-            // Remark the fail region as inactive to prevent it from renewing the lease.
-            InactiveRegionManager::new(&ctx.in_memory)
-                .register_inactive_region(failed_region)
-                .await?;
-        }
-
         let mailbox_receiver = self
             .send_open_region_message(ctx, failed_region, OPEN_REGION_MESSAGE_TIMEOUT)
             .await?;
 
         self.handle_response(mailbox_receiver, failed_region).await
-    }
-
-    fn remark_inactive_region_if_needed(&mut self) {
-        self.remark_inactive_region = true;
     }
 }
 

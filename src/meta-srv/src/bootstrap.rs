@@ -179,7 +179,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
             .await
             .context(error::ConnectEtcdSnafu)?;
         (
-            EtcdStore::with_etcd_client(etcd_client.clone()),
+            EtcdStore::with_etcd_client("", etcd_client.clone()),
             Some(EtcdElection::with_etcd_client(&opts.server_addr, etcd_client.clone()).await?),
             Some(EtcdLock::with_etcd_client(etcd_client)?),
         )
@@ -188,7 +188,7 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
 
     let selector = match opts.selector {
-        SelectorType::LoadBased => Arc::new(LoadBasedSelector) as SelectorRef,
+        SelectorType::LoadBased => Arc::new(LoadBasedSelector::default()) as SelectorRef,
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 

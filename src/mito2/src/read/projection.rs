@@ -342,7 +342,7 @@ mod tests {
         assert_eq!([0, 1, 2, 3, 4], mapper.column_ids());
         assert_eq!([3, 4], mapper.batch_fields());
 
-        let cache = CacheManager::new(0, 1024);
+        let cache = CacheManager::new(0, 1024, 0);
         let batch = new_batch(0, &[1, 2], &[(3, 3), (4, 4)], 3);
         let record_batch = mapper.convert(&batch, Some(&cache)).unwrap();
         let expect = "\

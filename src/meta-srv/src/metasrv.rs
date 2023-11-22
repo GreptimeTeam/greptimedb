@@ -46,6 +46,7 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
+use crate::region::lease_keeper::OpeningRegionKeeperRef;
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -141,20 +142,11 @@ pub struct Context {
     pub meta_peer_client: MetaPeerClientRef,
     pub mailbox: MailboxRef,
     pub election: Option<ElectionRef>,
-    pub skip_all: Arc<AtomicBool>,
     pub is_infancy: bool,
     pub table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl Context {
-    pub fn is_skip_all(&self) -> bool {
-        self.skip_all.load(Ordering::Relaxed)
-    }
-
-    pub fn set_skip_all(&self) {
-        self.skip_all.store(true, Ordering::Relaxed);
-    }
-
     pub fn reset_in_memory(&self) {
         self.in_memory.reset();
     }
@@ -241,6 +233,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
+    opening_region_keeper: OpeningRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 
     plugins: Plugins,
@@ -403,6 +396,10 @@ impl MetaSrv {
         &self.table_metadata_manager
     }
 
+    pub fn opening_region_keeper(&self) -> &OpeningRegionKeeperRef {
+        &self.opening_region_keeper
+    }
+
     pub fn publish(&self) -> Option<PublishRef> {
         self.plugins.get::<PublishRef>()
     }
@@ -424,7 +421,6 @@ impl MetaSrv {
         let meta_peer_client = self.meta_peer_client.clone();
         let mailbox = self.mailbox.clone();
         let election = self.election.clone();
-        let skip_all = Arc::new(AtomicBool::new(false));
         let table_metadata_manager = self.table_metadata_manager.clone();
 
         Context {
@@ -435,7 +431,6 @@ impl MetaSrv {
             meta_peer_client,
             mailbox,
             election,
-            skip_all,
             is_infancy: false,
             table_metadata_manager,
         }

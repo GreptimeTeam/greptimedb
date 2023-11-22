@@ -20,12 +20,11 @@ use api::v1::meta::{HeartbeatRequest, Role};
 use async_trait::async_trait;
 use common_catalog::consts::default_engine;
 use common_meta::RegionIdent;
-use store_api::storage::RegionId;
 
 use crate::error::Result;
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::failure_handler::runner::{FailureDetectControl, FailureDetectRunner};
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::{Context, ElectionRef};
 use crate::procedure::region_failover::RegionFailoverManager;
 
@@ -70,7 +69,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         _: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         if ctx.is_infancy {
             self.failure_detect_runner
                 .send_control(FailureDetectControl::Purge)
@@ -78,7 +77,7 @@ impl HeartbeatHandler for RegionFailureHandler {
         }
 
         let Some(stat) = acc.stat.as_ref() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         let heartbeat = DatanodeHeartbeat {
@@ -86,7 +85,7 @@ impl HeartbeatHandler for RegionFailureHandler {
                 .region_stats
                 .iter()
                 .map(|x| {
-                    let region_id = RegionId::from(x.id);
+                    let region_id = x.id;
                     RegionIdent {
                         cluster_id: stat.cluster_id,
                         datanode_id: stat.id,
@@ -101,13 +100,15 @@ impl HeartbeatHandler for RegionFailureHandler {
         };
 
         self.failure_detect_runner.send_heartbeat(heartbeat).await;
-        Ok(())
+
+        Ok(HandleControl::Continue)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use store_api::region_engine::RegionRole;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
@@ -133,7 +134,7 @@ mod tests {
         let acc = &mut HeartbeatAccumulator::default();
         fn new_region_stat(region_id: u64) -> RegionStat {
             RegionStat {
-                id: region_id,
+                id: RegionId::from_u64(region_id),
                 rcus: 0,
                 wcus: 0,
                 approximate_bytes: 0,

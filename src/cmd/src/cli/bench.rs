@@ -61,7 +61,9 @@ pub struct BenchTableMetadataCommand {
 
 impl BenchTableMetadataCommand {
     pub async fn build(&self) -> Result<Instance> {
-        let etcd_store = EtcdStore::with_endpoints([&self.etcd_addr]).await.unwrap();
+        let etcd_store = EtcdStore::with_endpoints("", [&self.etcd_addr])
+            .await
+            .unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(etcd_store));
 

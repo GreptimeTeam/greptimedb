@@ -207,8 +207,6 @@ impl Instance {
             Arc::new(handlers_executor),
         ));
 
-        common_telemetry::init_node_id(opts.node_id.clone());
-
         Ok(Instance {
             catalog_manager,
             script_executor,

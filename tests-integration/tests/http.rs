@@ -677,7 +677,7 @@ enable = true
 enable = true
 
 [frontend.logging]
-enable_jaeger_tracing = false
+enable_otlp_tracing = false
 
 [frontend.datanode.client]
 timeout = "10s"
@@ -713,36 +713,21 @@ sync_write = false
 [datanode.storage]
 type = "{}"
 
-[datanode.storage.compaction]
-max_inflight_tasks = 4
-max_files_in_level0 = 8
-max_purge_tasks = 32
-
-[datanode.storage.manifest]
-checkpoint_margin = 10
-gc_duration = "10m"
-compress = false
-
-[datanode.storage.flush]
-max_flush_tasks = 8
-region_write_buffer_size = "32MiB"
-picker_schedule_interval = "5m"
-auto_flush_interval = "1h"
-
 [[datanode.region_engine]]
 
 [datanode.region_engine.mito]
-num_workers = 1
+num_workers = {}
 worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
-manifest_compress_type = "Uncompressed"
+manifest_compress_type = "uncompressed"
 max_background_jobs = 4
 auto_flush_interval = "30m"
 global_write_buffer_size = "1GiB"
 global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
+page_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 
 [[datanode.region_engine]]
@@ -750,11 +735,12 @@ sst_write_buffer_size = "8MiB"
 [datanode.region_engine.file]
 
 [datanode.logging]
-enable_jaeger_tracing = false
+enable_otlp_tracing = false
 
 [logging]
-enable_jaeger_tracing = false"#,
-        store_type
+enable_otlp_tracing = false"#,
+        store_type,
+        num_cpus::get() / 2
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);

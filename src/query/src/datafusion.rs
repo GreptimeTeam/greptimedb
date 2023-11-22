@@ -34,6 +34,7 @@ use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{
     EmptyRecordBatchStream, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
+use common_telemetry::tracing;
 use datafusion::common::Column;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -77,6 +78,7 @@ impl DatafusionQueryEngine {
         Self { state, plugins }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_query_plan(
         &self,
         plan: LogicalPlan,
@@ -97,6 +99,7 @@ impl DatafusionQueryEngine {
         Ok(Output::Stream(self.execute_stream(&ctx, &physical_plan)?))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_dml_statement(
         &self,
         dml: DmlStatement,
@@ -147,6 +150,7 @@ impl DatafusionQueryEngine {
         Ok(Output::AffectedRows(affected_rows))
     }
 
+    #[tracing::instrument(skip_all)]
     async fn delete<'a>(
         &self,
         table_name: &ResolvedTableReference<'a>,
@@ -189,6 +193,7 @@ impl DatafusionQueryEngine {
             .await
     }
 
+    #[tracing::instrument(skip_all)]
     async fn insert<'a>(
         &self,
         table_name: &ResolvedTableReference<'a>,
@@ -285,6 +290,7 @@ impl QueryEngine for DatafusionQueryEngine {
 }
 
 impl LogicalOptimizer for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn optimize(&self, plan: &LogicalPlan) -> Result<LogicalPlan> {
         let _timer = metrics::METRIC_OPTIMIZE_LOGICAL_ELAPSED.start_timer();
         match plan {
@@ -305,6 +311,7 @@ impl LogicalOptimizer for DatafusionQueryEngine {
 
 #[async_trait::async_trait]
 impl PhysicalPlanner for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     async fn create_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
@@ -338,6 +345,7 @@ impl PhysicalPlanner for DatafusionQueryEngine {
 }
 
 impl PhysicalOptimizer for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn optimize_physical_plan(
         &self,
         ctx: &mut QueryEngineContext,
@@ -385,6 +393,7 @@ impl PhysicalOptimizer for DatafusionQueryEngine {
 }
 
 impl QueryExecutor for DatafusionQueryEngine {
+    #[tracing::instrument(skip_all)]
     fn execute_stream(
         &self,
         ctx: &QueryEngineContext,

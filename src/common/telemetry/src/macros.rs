@@ -17,14 +17,12 @@
 macro_rules! log {
     // log!(target: "my_target", Level::INFO, "a {} event", "log");
     (target: $target:expr, $lvl:expr, $($arg:tt)+) => {{
-        let _trace_id = $crate::trace_id();
-        $crate::logging::event!(target: $target, $lvl, trace_id = _trace_id, $($arg)+)
+        $crate::tracing::event!(target: $target, $lvl, $($arg)+)
     }};
 
     // log!(Level::INFO, "a log event")
     ($lvl:expr, $($arg:tt)+) => {{
-        let _trace_id = $crate::trace_id();
-        $crate::logging::event!($lvl, trace_id = _trace_id, $($arg)+)
+        $crate::tracing::event!($lvl, $($arg)+)
     }};
 }
 
@@ -33,14 +31,14 @@ macro_rules! log {
 macro_rules! error {
     // error!(target: "my_target", "a {} event", "log")
     (target: $target:expr, $($arg:tt)+) => ({
-        $crate::log!(target: $target, $crate::logging::Level::ERROR, $($arg)+)
+        $crate::log!(target: $target, $crate::tracing::Level::ERROR, $($arg)+)
     });
 
     // error!(e; target: "my_target", "a {} event", "log")
     ($e:expr; target: $target:expr, $($arg:tt)+) => ({
         $crate::log!(
             target: $target,
-            $crate::logging::Level::ERROR,
+            $crate::tracing::Level::ERROR,
             err = ?$e,
             $($arg)+
         )
@@ -50,7 +48,7 @@ macro_rules! error {
     (%$e:expr; target: $target:expr, $($arg:tt)+) => ({
         $crate::log!(
             target: $target,
-            $crate::logging::Level::ERROR,
+            $crate::tracing::Level::ERROR,
             err = %$e,
             $($arg)+
         )
@@ -59,7 +57,7 @@ macro_rules! error {
     // error!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
         $crate::log!(
-            $crate::logging::Level::ERROR,
+            $crate::tracing::Level::ERROR,
             err = ?$e,
             $($arg)+
         )
@@ -68,7 +66,7 @@ macro_rules! error {
     // error!(%e; "a {} event", "log")
     (%$e:expr; $($arg:tt)+) => ({
         $crate::log!(
-            $crate::logging::Level::ERROR,
+            $crate::tracing::Level::ERROR,
             err = %$e,
             $($arg)+
         )
@@ -76,7 +74,7 @@ macro_rules! error {
 
     // error!("a {} event", "log")
     ($($arg:tt)+) => ({
-        $crate::log!($crate::logging::Level::ERROR, $($arg)+)
+        $crate::log!($crate::tracing::Level::ERROR, $($arg)+)
     });
 }
 
@@ -85,13 +83,13 @@ macro_rules! error {
 macro_rules! warn {
     // warn!(target: "my_target", "a {} event", "log")
     (target: $target:expr, $($arg:tt)+) => {
-        $crate::log!(target: $target, $crate::logging::Level::WARN, $($arg)+)
+        $crate::log!(target: $target, $crate::tracing::Level::WARN, $($arg)+)
     };
 
     // warn!(e; "a {} event", "log")
     ($e:expr; $($arg:tt)+) => ({
         $crate::log!(
-            $crate::logging::Level::WARN,
+            $crate::tracing::Level::WARN,
             err = ?$e,
             $($arg)+
         )
@@ -100,7 +98,7 @@ macro_rules! warn {
     // warn!(%e; "a {} event", "log")
     (%$e:expr; $($arg:tt)+) => ({
         $crate::log!(
-            $crate::logging::Level::WARN,
+            $crate::tracing::Level::WARN,
             err = %$e,
             $($arg)+
         )
@@ -108,7 +106,7 @@ macro_rules! warn {
 
     // warn!("a {} event", "log")
     ($($arg:tt)+) => {
-        $crate::log!($crate::logging::Level::WARN, $($arg)+)
+        $crate::log!($crate::tracing::Level::WARN, $($arg)+)
     };
 }
 
@@ -117,12 +115,12 @@ macro_rules! warn {
 macro_rules! info {
     // info!(target: "my_target", "a {} event", "log")
     (target: $target:expr, $($arg:tt)+) => {
-        $crate::log!(target: $target, $crate::logging::Level::INFO, $($arg)+)
+        $crate::log!(target: $target, $crate::tracing::Level::INFO, $($arg)+)
     };
 
     // info!("a {} event", "log")
     ($($arg:tt)+) => {
-        $crate::log!($crate::logging::Level::INFO, $($arg)+)
+        $crate::log!($crate::tracing::Level::INFO, $($arg)+)
     };
 }
 
@@ -131,12 +129,12 @@ macro_rules! info {
 macro_rules! debug {
     // debug!(target: "my_target", "a {} event", "log")
     (target: $target:expr, $($arg:tt)+) => {
-        $crate::log!(target: $target, $crate::logging::Level::DEBUG, $($arg)+)
+        $crate::log!(target: $target, $crate::tracing::Level::DEBUG, $($arg)+)
     };
 
     // debug!("a {} event", "log")
     ($($arg:tt)+) => {
-        $crate::log!($crate::logging::Level::DEBUG, $($arg)+)
+        $crate::log!($crate::tracing::Level::DEBUG, $($arg)+)
     };
 }
 
@@ -145,12 +143,12 @@ macro_rules! debug {
 macro_rules! trace {
     // trace!(target: "my_target", "a {} event", "log")
     (target: $target:expr, $($arg:tt)+) => {
-        $crate::log!(target: $target, $crate::logging::Level::TRACE, $($arg)+)
+        $crate::log!(target: $target, $crate::tracing::Level::TRACE, $($arg)+)
     };
 
     // trace!("a {} event", "log")
     ($($arg:tt)+) => {
-        $crate::log!($crate::logging::Level::TRACE, $($arg)+)
+        $crate::log!($crate::tracing::Level::TRACE, $($arg)+)
     };
 }
 
@@ -158,8 +156,7 @@ macro_rules! trace {
 mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
-
-    use crate::logging::Level;
+    use tracing::Level;
 
     macro_rules! all_log_macros {
         ($($arg:tt)*) => {

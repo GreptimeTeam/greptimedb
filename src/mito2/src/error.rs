@@ -22,6 +22,7 @@ use common_macro::stack_trace_debug;
 use common_runtime::JoinError;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
+use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
 use store_api::manifest::ManifestVersion;
@@ -118,14 +119,6 @@ pub enum Error {
     WriteBuffer {
         location: Location,
         source: common_datasource::error::Error,
-    },
-
-    #[snafu(display("Failed to write parquet file, path: {}", path))]
-    WriteParquet {
-        path: String,
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
     },
 
     #[snafu(display("Failed to read parquet file, path: {}", path))]
@@ -411,6 +404,14 @@ impl Error {
     pub(crate) fn is_fill_default(&self) -> bool {
         matches!(self, Error::FillDefault { .. })
     }
+
+    /// Returns true if the file is not found on the object store.
+    pub(crate) fn is_object_not_found(&self) -> bool {
+        match self {
+            Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            _ => false,
+        }
+    }
 }
 
 impl ErrorExt for Error {
@@ -419,7 +420,6 @@ impl ErrorExt for Error {
 
         match self {
             OpenDal { .. }
-            | WriteParquet { .. }
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }

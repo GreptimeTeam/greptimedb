@@ -30,7 +30,7 @@ use futures::TryStreamExt;
 use meta_srv::error::Result as MetaResult;
 use meta_srv::metasrv::{SelectorContext, SelectorRef};
 use meta_srv::procedure::region_failover::{RegionFailoverContext, RegionFailoverProcedure};
-use meta_srv::selector::{Namespace, Selector};
+use meta_srv::selector::{Namespace, Selector, SelectorOptions};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use table::metadata::TableId;
@@ -326,7 +326,12 @@ impl Selector for ForeignNodeSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, _ns: Namespace, _ctx: &Self::Context) -> MetaResult<Self::Output> {
+    async fn select(
+        &self,
+        _ns: Namespace,
+        _ctx: &Self::Context,
+        _opts: SelectorOptions,
+    ) -> MetaResult<Self::Output> {
         Ok(vec![self.foreign.clone()])
     }
 }

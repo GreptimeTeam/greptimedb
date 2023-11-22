@@ -34,6 +34,7 @@ futures.workspace = true
 h2 = "0.3"
 http-body = "0.4"
 humantime-serde.workspace = true
+itertools.workspace = true
 lazy_static.workspace = true
 once_cell.workspace = true
 parking_lot = "0.12"

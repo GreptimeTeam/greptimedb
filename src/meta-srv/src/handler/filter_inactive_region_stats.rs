@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use common_telemetry::warn;
 
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct FilterInactiveRegionStatsHandler;
@@ -33,9 +33,9 @@ impl HeartbeatHandler for FilterInactiveRegionStatsHandler {
         req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         if acc.inactive_region_ids.is_empty() {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         }
 
         warn!(
@@ -44,11 +44,11 @@ impl HeartbeatHandler for FilterInactiveRegionStatsHandler {
         );
 
         let Some(stat) = acc.stat.as_mut() else {
-            return Ok(());
+            return Ok(HandleControl::Continue);
         };
 
         stat.retain_active_region_stats(&acc.inactive_region_ids);
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }

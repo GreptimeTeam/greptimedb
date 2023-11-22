@@ -52,6 +52,7 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::pubsub::PublishRef;
+use crate::region::lease_keeper::OpeningRegionKeeper;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
@@ -168,7 +169,6 @@ impl MetaSrvBuilder {
             state.clone(),
             kv_backend.clone(),
         ));
-        let kv_backend = leader_cached_kv_backend.clone() as _;
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
@@ -177,7 +177,9 @@ impl MetaSrvBuilder {
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
         let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(
+            leader_cached_kv_backend.clone() as _,
+        ));
         let lock = lock.unwrap_or_else(|| Arc::new(MemLock::default()));
         let selector_ctx = SelectorContext {
             server_addr: options.server_addr.clone(),
@@ -196,6 +198,7 @@ impl MetaSrvBuilder {
             &table_id_sequence,
         );
         let _ = ddl_manager.try_start();
+        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -227,8 +230,11 @@ impl MetaSrvBuilder {
                     .and_then(|plugins| plugins.get::<PublishRef>())
                     .map(|publish| PublishHeartbeatHandler::new(publish.clone()));
 
-                let region_lease_handler =
-                    RegionLeaseHandler::new(distributed_time_constants::REGION_LEASE_SECS);
+                let region_lease_handler = RegionLeaseHandler::new(
+                    distributed_time_constants::REGION_LEASE_SECS,
+                    table_metadata_manager.clone(),
+                    opening_region_keeper.clone(),
+                );
 
                 let group = HeartbeatHandlerGroup::new(pushers);
                 group.add_handler(ResponseHeaderHandler).await;
@@ -280,6 +286,7 @@ impl MetaSrvBuilder {
             )
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
+            opening_region_keeper,
         })
     }
 }

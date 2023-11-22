@@ -168,6 +168,7 @@ mod tests {
     use api::v1::meta::heartbeat_server::Heartbeat;
     use api::v1::meta::*;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_telemetry::tracing_context::W3cTrace;
     use tonic::IntoRequest;
 
     use super::get_node_id;
@@ -184,7 +185,7 @@ mod tests {
             .unwrap();
 
         let req = AskLeaderRequest {
-            header: Some(RequestHeader::new((1, 1), Role::Datanode)),
+            header: Some(RequestHeader::new((1, 1), Role::Datanode, W3cTrace::new())),
         };
 
         let res = meta_srv.ask_leader(req.into_request()).await.unwrap();

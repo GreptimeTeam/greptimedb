@@ -13,6 +13,7 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 arrow.workspace = true
 common-base.workspace = true
+common-decimal.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-telemetry.workspace = true
@@ -23,6 +24,7 @@ num = "0.4"
 num-traits = "0.2"
 ordered-float = { version = "3.0", features = ["serde"] }
 paste = "1.0"
+rust_decimal = "1.32.0"
 serde.workspace = true
 serde_json = "1.0"
 snafu.workspace = true

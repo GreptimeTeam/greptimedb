@@ -20,6 +20,7 @@ use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
@@ -60,7 +61,7 @@ pub async fn sql(
 
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
     } else {
-        JsonResponse::with_error(
+        JsonResponse::with_error_message(
             "sql parameter is required.".to_string(),
             StatusCode::InvalidArguments,
         )
@@ -191,14 +192,15 @@ async fn validate_schema(
         .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
         .await
     {
-        Ok(false) => Some(JsonResponse::with_error(
+        Ok(false) => Some(JsonResponse::with_error_message(
             format!("Database not found: {}", query_ctx.get_db_string()),
             StatusCode::DatabaseNotFound,
         )),
-        Err(e) => Some(JsonResponse::with_error(
+        Err(e) => Some(JsonResponse::with_error_message(
             format!(
-                "Error checking database: {}, {e}",
-                query_ctx.get_db_string()
+                "Error checking database: {}, {}",
+                query_ctx.get_db_string(),
+                e.output_msg(),
             ),
             StatusCode::Internal,
         )),

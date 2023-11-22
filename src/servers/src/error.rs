@@ -382,6 +382,13 @@ pub enum Error {
         actual: i32,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert to json"))]
+    ToJson {
+        #[snafu(source)]
+        error: serde_json::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -475,6 +482,8 @@ impl ErrorExt for Error {
             Metrics { source } => source.status_code(),
 
             ConvertScalarValue { source, .. } => source.status_code(),
+
+            ToJson { .. } => StatusCode::Internal,
         }
     }
 

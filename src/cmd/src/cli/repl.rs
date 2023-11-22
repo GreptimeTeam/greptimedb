@@ -176,7 +176,7 @@ impl Repl {
                 .encode(&plan)
                 .context(SubstraitEncodeLogicalPlanSnafu)?;
 
-            self.database.logical_plan(plan.to_vec(), 0).await
+            self.database.logical_plan(plan.to_vec()).await
         } else {
             self.database.sql(&sql).await
         }

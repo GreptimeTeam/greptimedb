@@ -69,7 +69,7 @@ impl UpgradeCommand {
                 etcd_addr: &self.etcd_addr,
             })?;
         let tool = MigrateTableMetadata {
-            etcd_store: EtcdStore::with_etcd_client(client),
+            etcd_store: EtcdStore::with_etcd_client("", client),
             dryrun: self.dryrun,
             skip_catalog_keys: self.skip_catalog_keys,
             skip_table_global_keys: self.skip_table_global_keys,

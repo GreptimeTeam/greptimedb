@@ -40,8 +40,6 @@ pub mod table_meta_alloc;
 
 pub use crate::error::Result;
 
-mod inactive_region_manager;
-
 mod greptimedb_telemetry;
 
 #[cfg(test)]

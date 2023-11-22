@@ -13,7 +13,7 @@ on:
 name: Build API docs
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-08-07
+  RUST_TOOLCHAIN: nightly-2023-10-21
 
 jobs:
   apidoc:

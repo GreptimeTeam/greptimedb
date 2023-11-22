@@ -28,7 +28,7 @@ use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
 use common_query::Output;
-use common_telemetry::info;
+use common_telemetry::{info, tracing};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
 use partition::partition::{PartitionBound, PartitionDef};
@@ -58,11 +58,13 @@ impl StatementExecutor {
         self.catalog_manager.clone()
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
         let create_expr = &mut expr_factory::create_to_expr(&stmt, ctx)?;
         self.create_table_inner(create_expr, stmt.partitions).await
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn create_external_table(
         &self,
         create_expr: CreateExternalTable,
@@ -151,6 +153,7 @@ impl StatementExecutor {
         Ok(table)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn drop_table(&self, table_name: TableName) -> Result<Output> {
         let table = self
             .catalog_manager
@@ -181,6 +184,7 @@ impl StatementExecutor {
         Ok(Output::AffectedRows(0))
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn truncate_table(&self, table_name: TableName) -> Result<Output> {
         let table = self
             .catalog_manager
@@ -221,6 +225,7 @@ impl StatementExecutor {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn alter_table(
         &self,
         alter_table: AlterTable,
@@ -347,6 +352,7 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn create_database(
         &self,
         catalog: &str,

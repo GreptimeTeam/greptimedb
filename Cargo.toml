@@ -43,12 +43,12 @@ members = [
     "src/partition",
     "src/plugins",
     "src/promql",
+    "src/puffin",
     "src/query",
     "src/script",
     "src/servers",
     "src/session",
     "src/sql",
-    "src/storage",
     "src/store-api",
     "src/table",
     "tests-integration",
@@ -57,11 +57,12 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
+ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.3"
 arrow = { version = "47.0" }
 arrow-array = "47.0"
@@ -71,6 +72,7 @@ async-stream = "0.3"
 async-trait = "0.1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
+bitflags = "2.4.1"
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
@@ -83,7 +85,7 @@ derive_builder = "0.12"
 etcd-client = "0.12"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "7eb2e78be7a104d2582fbea0bcb1e019407da702" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "25429306d0379ad29211a062a81da2554a0208ab" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -97,6 +99,7 @@ opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.gi
 ] }
 parquet = "47.0"
 paste = "1.0"
+pin-project = "1.0"
 prometheus = { version = "0.13.3", features = ["process"] }
 prost = "0.12"
 raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
@@ -107,7 +110,7 @@ reqwest = { version = "0.11", default-features = false, features = [
     "rustls-tls-native-roots",
     "stream",
 ] }
-rust_decimal = "1.32.0"
+rust_decimal = "1.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 smallvec = "1"
@@ -134,6 +137,7 @@ common-base = { path = "src/common/base" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
+common-decimal = { path = "src/common/decimal" }
 common-error = { path = "src/common/error" }
 common-function = { path = "src/common/function" }
 common-greptimedb-telemetry = { path = "src/common/greptimedb-telemetry" }
@@ -171,7 +175,6 @@ script = { path = "src/script" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }
-storage = { path = "src/storage" }
 store-api = { path = "src/store-api" }
 substrait = { path = "src/common/substrait" }
 table = { path = "src/table" }

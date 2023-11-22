@@ -28,6 +28,7 @@ use common_telemetry::{debug, info, warn};
 use dashmap::DashMap;
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{oneshot, Notify, RwLock};
 
@@ -67,7 +68,16 @@ pub trait HeartbeatHandler: Send + Sync {
         req: &HeartbeatRequest,
         ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()>;
+    ) -> Result<HandleControl>;
+}
+
+/// HandleControl
+///
+/// Controls process of handling heartbeat request.
+#[derive(PartialEq)]
+pub enum HandleControl {
+    Continue,
+    Done,
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +85,7 @@ pub struct HeartbeatAccumulator {
     pub header: Option<ResponseHeader>,
     pub instructions: Vec<Instruction>,
     pub stat: Option<Stat>,
-    pub inactive_region_ids: HashSet<u64>,
+    pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
 }
 
@@ -246,15 +256,16 @@ impl HeartbeatHandlerGroup {
             })?;
 
         for NameCachedHandler { name, handler } in handlers.iter() {
-            if ctx.is_skip_all() {
-                break;
+            if !handler.is_acceptable(role) {
+                continue;
             }
 
-            if handler.is_acceptable(role) {
-                let _timer = METRIC_META_HANDLER_EXECUTE
-                    .with_label_values(&[*name])
-                    .start_timer();
-                handler.handle(&req, &mut ctx, &mut acc).await?;
+            let _timer = METRIC_META_HANDLER_EXECUTE
+                .with_label_values(&[*name])
+                .start_timer();
+
+            if handler.handle(&req, &mut ctx, &mut acc).await? == HandleControl::Done {
+                break;
             }
         }
         let header = std::mem::take(&mut acc.header);

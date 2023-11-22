@@ -14,6 +14,7 @@
 
 use bytes::Buf;
 use common_base::bytes::Bytes;
+use common_decimal::Decimal128;
 use common_time::time::Time;
 use common_time::{Date, Duration, Interval};
 use datatypes::data_type::ConcreteDataType;
@@ -74,6 +75,7 @@ impl SortField {
             ConcreteDataType::Time(_) => 10,
             ConcreteDataType::Duration(_) => 10,
             ConcreteDataType::Interval(_) => 18,
+            ConcreteDataType::Decimal128(_) => 19,
             ConcreteDataType::Null(_)
             | ConcreteDataType::List(_)
             | ConcreteDataType::Dictionary(_) => 0,
@@ -138,7 +140,8 @@ impl SortField {
             DateTime, datetime,
             Time, time,
             Interval, interval,
-            Duration, duration
+            Duration, duration,
+            Decimal128, decimal128
         );
 
         Ok(())
@@ -204,7 +207,8 @@ impl SortField {
             Time, Time,
             DateTime, DateTime,
             Interval, Interval,
-            Duration, Duration
+            Duration, Duration,
+            Decimal128, Decimal128
         )
     }
 }

@@ -26,6 +26,7 @@ use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::selector::SelectorOptions;
 
 pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
@@ -78,12 +79,30 @@ async fn handle_create_region_routes(
     selector: &SelectorRef,
     table_id_sequence: &SequenceRef,
 ) -> Result<(TableId, Vec<RegionRoute>)> {
-    let mut peers = selector.select(cluster_id, ctx).await?;
+    let mut peers = selector
+        .select(
+            cluster_id,
+            ctx,
+            SelectorOptions {
+                min_required_items: partitions.len(),
+                allow_duplication: true,
+            },
+        )
+        .await?;
 
     if peers.len() < partitions.len() {
-        warn!("Create table failed due to no enough available datanodes, table: {}, partition number: {}, datanode number: {}", format_full_table_name(&table_info.catalog_name,&table_info.schema_name,&table_info.name), partitions.len(), peers.len());
+        warn!(
+            "Create table failed due to no enough available datanodes, table: {}, partition number: {}, datanode number: {}",
+            format_full_table_name(
+                &table_info.catalog_name,
+                &table_info.schema_name,
+                &table_info.name
+            ),
+            partitions.len(),
+            peers.len()
+        );
         return error::NoEnoughAvailableDatanodeSnafu {
-            expected: partitions.len(),
+            required: partitions.len(),
             available: peers.len(),
         }
         .fail();

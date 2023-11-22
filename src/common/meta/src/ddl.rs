@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
+use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::TableId;
 use table::metadata::RawTableInfo;
 
@@ -34,6 +35,7 @@ pub mod utils;
 #[derive(Debug, Default)]
 pub struct ExecutorContext {
     pub cluster_id: Option<u64>,
+    pub tracing_context: Option<W3cTrace>,
 }
 
 #[async_trait::async_trait]

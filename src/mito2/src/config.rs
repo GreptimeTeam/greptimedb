@@ -21,8 +21,6 @@ use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
-/// Default region worker num.
-const DEFAULT_NUM_WORKERS: usize = 1;
 /// Default max running background job.
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
@@ -65,6 +63,10 @@ pub struct MitoConfig {
     pub sst_meta_cache_size: ReadableSize,
     /// Cache size for vectors and arrow arrays (default 512MB). Setting it to 0 to disable the cache.
     pub vector_cache_size: ReadableSize,
+    /// Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
+    pub page_cache_size: ReadableSize,
+
+    // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
 }
@@ -72,7 +74,7 @@ pub struct MitoConfig {
 impl Default for MitoConfig {
     fn default() -> Self {
         MitoConfig {
-            num_workers: DEFAULT_NUM_WORKERS,
+            num_workers: num_cpus::get() / 2,
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
@@ -83,6 +85,7 @@ impl Default for MitoConfig {
             global_write_buffer_reject_size: ReadableSize::gb(2),
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
+            page_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
         }
     }
@@ -94,9 +97,8 @@ impl MitoConfig {
         // Sanitize worker num.
         let num_workers_before = self.num_workers;
         if self.num_workers == 0 {
-            self.num_workers = DEFAULT_NUM_WORKERS;
+            self.num_workers = (num_cpus::get() / 2).max(1);
         }
-        self.num_workers = self.num_workers.next_power_of_two();
         if num_workers_before != self.num_workers {
             warn!(
                 "Sanitize worker num {} to {}",

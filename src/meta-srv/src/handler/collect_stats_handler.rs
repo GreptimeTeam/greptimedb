@@ -17,7 +17,7 @@ use common_telemetry::warn;
 
 use super::node_stat::Stat;
 use crate::error::Result;
-use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 pub struct CollectStatsHandler;
@@ -33,25 +33,22 @@ impl HeartbeatHandler for CollectStatsHandler {
         req: &HeartbeatRequest,
         _ctx: &mut Context,
         acc: &mut HeartbeatAccumulator,
-    ) -> Result<()> {
+    ) -> Result<HandleControl> {
         if req.mailbox_message.is_some() {
             // If the heartbeat is a mailbox message, it may have no other valid information,
             // so we don't need to collect stats.
-            return Ok(());
+            return Ok(HandleControl::Continue);
         }
 
         match Stat::try_from(req.clone()) {
             Ok(stat) => {
-                // If stat is empty, it means the request is a mailbox response
-                if !stat.is_empty() {
-                    let _ = acc.stat.insert(stat);
-                }
+                let _ = acc.stat.insert(stat);
             }
             Err(err) => {
                 warn!("Incomplete heartbeat data: {:?}, err: {:?}", req, err);
             }
         };
 
-        Ok(())
+        Ok(HandleControl::Continue)
     }
 }

@@ -24,7 +24,9 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let kv_backend = EtcdStore::with_endpoints(["127.0.0.1:2380"]).await.unwrap();
+    let kv_backend = EtcdStore::with_endpoints("", ["127.0.0.1:2380"])
+        .await
+        .unwrap();
 
     // put
     let put_req = PutRequest {
