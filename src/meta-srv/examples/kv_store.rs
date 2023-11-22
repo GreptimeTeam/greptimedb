@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::etcd::{EtcdStore, NO_CHROOT};
 use common_meta::rpc::store::{DeleteRangeRequest, PutRequest, RangeRequest};
 use tracing::{event, subscriber, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -24,7 +24,7 @@ fn main() {
 
 #[tokio::main]
 async fn run() {
-    let kv_backend = EtcdStore::with_endpoints("", ["127.0.0.1:2380"])
+    let kv_backend = EtcdStore::with_endpoints(NO_CHROOT, ["127.0.0.1:2380"])
         .await
         .unwrap();
 

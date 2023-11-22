@@ -39,6 +39,8 @@ use crate::rpc::KeyValue;
 // For more detail, see: https://etcd.io/docs/v3.5/op-guide/configuration/
 const MAX_TXN_SIZE: usize = 128;
 
+pub const NO_CHROOT: &str = "";
+
 pub struct EtcdStore {
     root: Vec<u8>,
     client: Client,

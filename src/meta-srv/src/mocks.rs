@@ -21,7 +21,7 @@ use api::v1::meta::store_server::StoreServer;
 use client::client_manager::DatanodeClients;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
-use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::etcd::{EtcdStore, NO_CHROOT};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use tower::service_fn;
@@ -42,7 +42,7 @@ pub async fn mock_with_memstore() -> MockInfo {
 }
 
 pub async fn mock_with_etcdstore(addr: &str) -> MockInfo {
-    let kv_backend = EtcdStore::with_endpoints("", [addr]).await.unwrap();
+    let kv_backend = EtcdStore::with_endpoints(NO_CHROOT, [addr]).await.unwrap();
     mock(Default::default(), kv_backend, None, None).await
 }
 
