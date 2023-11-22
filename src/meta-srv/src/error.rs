@@ -579,6 +579,12 @@ pub enum Error {
         source: common_meta::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to build a wal meta allocator"))]
+    BuildWalMetaAllocator {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 }
 
 impl Error {
@@ -693,7 +699,8 @@ impl ErrorExt for Error {
 
             Error::InitMetadata { source, .. } => source.status_code(),
 
-            Error::BuildKafkaTopicManager { source, .. } => source.status_code(),
+            Error::BuildKafkaTopicManager { source, .. }
+            | Error::BuildWalMetaAllocator { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }

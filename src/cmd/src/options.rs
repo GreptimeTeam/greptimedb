@@ -209,7 +209,7 @@ mod tests {
                     Some("mybucket"),
                 ),
                 (
-                    // wal.dir = /other/wal/dir
+                    // wal.raft_engine_opts.dir = /other/wal/dir
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),

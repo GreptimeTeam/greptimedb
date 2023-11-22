@@ -27,15 +27,14 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
-use common_meta::wal::WalProvider;
+use common_meta::wal::meta::WalMetaAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::{BuildKafkaTopicManagerSnafu, Result};
+use crate::error::{BuildWalMetaAllocatorSnafu, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -193,20 +192,14 @@ impl MetaSrvBuilder {
             table_id: None,
         };
 
-        let kafka_topic_manager = match options.wal.provider {
-            WalProvider::Kafka => Some(
-                KafkaTopicManager::try_new(options.wal.kafka_opts.as_ref(), &kv_backend)
-                    .await
-                    .context(BuildKafkaTopicManagerSnafu)?,
-            ),
-            WalProvider::RaftEngine => None,
-        };
-
+        let wal_meta_allocator = WalMetaAllocator::try_new(&options.wal, &kv_backend)
+            .await
+            .context(BuildWalMetaAllocatorSnafu)?;
         let table_meta_allocator = Arc::new(MetaSrvTableMetadataAllocator::new(
             selector_ctx.clone(),
             selector.clone(),
             table_id_sequence.clone(),
-            kafka_topic_manager,
+            wal_meta_allocator,
         ));
 
         let ddl_manager = build_ddl_manager(

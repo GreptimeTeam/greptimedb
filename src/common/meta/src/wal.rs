@@ -13,13 +13,15 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod meta;
 
 use serde::{Deserialize, Serialize};
 
 use crate::wal::kafka::KafkaOptions;
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
 pub enum WalProvider {
+    #[default]
     RaftEngine,
     Kafka,
 }

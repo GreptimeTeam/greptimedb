@@ -19,7 +19,7 @@ use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAlloc
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
+use common_meta::wal::meta::{WalMetaAllocator, WalMetaDemandBuilder};
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
@@ -33,7 +33,7 @@ pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
-    kafka_topic_manager: Option<KafkaTopicManager>,
+    wal_meta_allocator: WalMetaAllocator,
 }
 
 impl MetaSrvTableMetadataAllocator {
@@ -41,13 +41,13 @@ impl MetaSrvTableMetadataAllocator {
         ctx: SelectorContext,
         selector: SelectorRef,
         table_id_sequence: SequenceRef,
-        kafka_topic_manager: Option<KafkaTopicManager>,
+        wal_meta_allocator: WalMetaAllocator,
     ) -> Self {
         Self {
             ctx,
             selector,
             table_id_sequence,
-            kafka_topic_manager,
+            wal_meta_allocator,
         }
     }
 }
@@ -72,15 +72,16 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         .map_err(BoxedError::new)
         .context(meta_error::ExternalSnafu)?;
 
-        let region_topics = self
-            .kafka_topic_manager
-            .as_ref()
-            .map(|kafka_topic_manager| kafka_topic_manager.select_topics(region_routes.len()));
+        // Each region gets assigned one topic.
+        let demand = WalMetaDemandBuilder::new()
+            .with_num_topics(region_routes.len())
+            .build();
+        let wal_meta = self.wal_meta_allocator.try_alloc(demand).await?;
 
         Ok(TableMetadata {
             table_id,
             region_routes,
-            region_topics,
+            wal_meta,
         })
     }
 }

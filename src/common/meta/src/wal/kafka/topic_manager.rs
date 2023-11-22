@@ -59,8 +59,8 @@ impl TopicManager {
         })
     }
 
-    pub fn select_topics(&self, num_regions: usize) -> Vec<Topic> {
-        (0..num_regions)
+    pub fn select_topics(&self, num_topics: usize) -> Vec<Topic> {
+        (0..num_topics)
             .map(|_| self.topic_selector.select(&self.topic_pool))
             .collect()
     }
