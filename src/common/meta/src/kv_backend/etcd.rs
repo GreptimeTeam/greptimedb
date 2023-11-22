@@ -51,17 +51,6 @@ fn key_strip_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
     key.split_off(root.len())
 }
 
-fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
-    if key.is_empty() || key == [0] {
-        // special encoded key or range_end
-        key
-    } else {
-        let mut new_key = root.to_vec();
-        new_key.append(&mut key);
-        new_key
-    }
-}
-
 fn chroot_key_value_with(root: &[u8]) -> impl FnMut(etcd_client::KeyValue) -> KeyValue + '_ {
     |kv: etcd_client::KeyValue| {
         let (key, value) = kv.into_key_value();
@@ -69,6 +58,69 @@ fn chroot_key_value_with(root: &[u8]) -> impl FnMut(etcd_client::KeyValue) -> Ke
             key: key_strip_root(root, key),
             value,
         }
+    }
+}
+
+fn chroot_txn_response(root: &[u8], mut txn_res: KvTxnResponse) -> KvTxnResponse {
+    use super::txn::TxnOpResponse as KvTxnOpResponse;
+
+    fn chroot_key_value_with(root: &[u8]) -> impl FnMut(KeyValue) -> KeyValue + '_ {
+        |kv| KeyValue {
+            key: key_strip_root(root, kv.key),
+            value: kv.value,
+        }
+    }
+
+    for resp in txn_res.responses.iter_mut() {
+        match resp {
+            KvTxnOpResponse::ResponsePut(r) => {
+                r.prev_kv = r.prev_kv.take().map(chroot_key_value_with(root));
+            }
+            KvTxnOpResponse::ResponseGet(r) => {
+                r.kvs = r.kvs.drain(..).map(chroot_key_value_with(root)).collect();
+            }
+            KvTxnOpResponse::ResponseDelete(r) => {
+                r.prev_kvs = r
+                    .prev_kvs
+                    .drain(..)
+                    .map(chroot_key_value_with(root))
+                    .collect();
+            }
+        }
+    }
+    txn_res
+}
+
+fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
+    let mut new_key = root.to_vec();
+    new_key.append(&mut key);
+    new_key
+}
+
+// see namespace.prefixInterval - https://github.com/etcd-io/etcd/blob/v3.5.10/client/v3/namespace/util.go
+fn range_end_prepend_root(root: &[u8], mut range_end: Vec<u8>) -> Vec<u8> {
+    if range_end == [0] {
+        // the edge of the keyspace
+        let mut new_end = root.to_vec();
+        let mut ok = false;
+        for i in (0..new_end.len()).rev() {
+            new_end[i] = new_end[i].wrapping_add(1);
+            if new_end[i] != 0 {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            // 0xff..ff => 0x00
+            new_end = vec![0];
+        }
+        new_end
+    } else if range_end.len() >= 1 {
+        let mut new_end = root.to_vec();
+        new_end.append(&mut range_end);
+        new_end
+    } else {
+        vec![]
     }
 }
 
@@ -179,7 +231,7 @@ impl KvBackend for EtcdStore {
 
     async fn range(&self, mut req: RangeRequest) -> Result<RangeResponse> {
         req.key = key_prepend_root(&self.root, req.key);
-        req.range_end = key_prepend_root(&self.root, req.range_end);
+        req.range_end = range_end_prepend_root(&self.root, req.range_end);
         let Get { key, options } = req.try_into()?;
 
         let mut res = self
@@ -344,7 +396,7 @@ impl KvBackend for EtcdStore {
 
     async fn delete_range(&self, mut req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
         req.key = key_prepend_root(&self.root, req.key);
-        req.range_end = key_prepend_root(&self.root, req.range_end);
+        req.range_end = range_end_prepend_root(&self.root, req.range_end);
         let Delete { key, options } = req.try_into()?;
 
         let mut res = self
@@ -416,7 +468,7 @@ impl TxnService for EtcdStore {
             .txn(etcd_txn)
             .await
             .context(error::EtcdFailedSnafu)?;
-        txn_res.try_into()
+        Ok(chroot_txn_response(&self.root, txn_res.try_into()?))
     }
 }
 
