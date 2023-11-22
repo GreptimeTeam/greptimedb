@@ -137,6 +137,19 @@ impl DataRegion {
             .await
             .context(MitoWriteOperationSnafu)
     }
+
+    pub async fn physical_columns(
+        &self,
+        physical_region_id: RegionId,
+    ) -> Result<Vec<ColumnMetadata>> {
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        Ok(metadata.column_metadatas.clone())
+    }
 }
 
 #[cfg(test)]

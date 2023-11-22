@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Internal states of metric engine
+
 use std::collections::{HashMap, HashSet};
 
 use store_api::storage::RegionId;
@@ -73,6 +75,10 @@ impl MetricEngineState {
             .insert(logical_region_id);
         self.logical_regions
             .insert(logical_region_id, physical_region_id);
+    }
+
+    pub fn get_physical_region_id(&self, logical_region_id: RegionId) -> Option<RegionId> {
+        self.logical_regions.get(&logical_region_id).copied()
     }
 
     pub fn physical_columns(&self) -> &HashMap<RegionId, HashSet<String>> {

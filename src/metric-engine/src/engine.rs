@@ -15,6 +15,8 @@
 mod alter;
 mod create;
 mod put;
+mod read;
+mod region_metadata;
 mod state;
 
 use std::sync::Arc;

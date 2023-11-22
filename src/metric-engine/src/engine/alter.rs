@@ -49,7 +49,7 @@ impl MetricEngineInner {
     ) -> Result<()> {
         let physical_region_id = {
             let state = &self.state.read().await;
-            *state.logical_regions().get(&region_id).with_context(|| {
+            state.get_physical_region_id(region_id).with_context(|| {
                 error!("Trying to alter an nonexistent region {region_id}");
                 LogicalRegionNotFoundSnafu { region_id }
             })?
