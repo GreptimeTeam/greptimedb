@@ -48,6 +48,24 @@ impl Display for RegionIdent {
     }
 }
 
+/// The result of downgrade leader region.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct DowngradeRegionReply {
+    pub last_entry_id: Option<u64>,
+    pub exist: bool,
+    pub error: Option<String>,
+}
+
+impl Display for DowngradeRegionReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(last_entry_id={:?}, exist={}, error={:?})",
+            self.last_entry_id, self.exist, self.error
+        )
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SimpleReply {
     pub result: bool,
@@ -87,10 +105,23 @@ impl OpenRegion {
     }
 }
 
+/// The instruction of downgrading leader region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DowngradeRegion {
+    pub region_id: RegionId,
+}
+
+impl Display for DowngradeRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DowngradeRegion(region_id={})", self.region_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display)]
 pub enum Instruction {
     OpenRegion(OpenRegion),
     CloseRegion(RegionIdent),
+    DowngradeRegion(DowngradeRegion),
     InvalidateTableIdCache(TableId),
     InvalidateTableNameCache(TableName),
 }
@@ -101,6 +132,7 @@ pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
     InvalidateTableCache(SimpleReply),
+    DowngradeRegion(DowngradeRegionReply),
 }
 
 impl Display for InstructionReply {
@@ -110,6 +142,9 @@ impl Display for InstructionReply {
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
             Self::InvalidateTableCache(reply) => {
                 write!(f, "InstructionReply::Invalidate({})", reply)
+            }
+            Self::DowngradeRegion(reply) => {
+                write!(f, "InstructionReply::DowngradeRegion({})", reply)
             }
         }
     }

@@ -47,7 +47,7 @@ impl State for RegionMigrationStart {
         if self.check_leader_region_on_peer(&region_route, to_peer)? {
             Ok(Box::new(RegionMigrationEnd))
         } else if self.check_candidate_region_on_peer(&region_route, to_peer) {
-            Ok(Box::new(DowngradeLeaderRegion))
+            Ok(Box::<DowngradeLeaderRegion>::default())
         } else {
             Ok(Box::new(OpenCandidateRegion))
         }

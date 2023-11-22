@@ -14,19 +14,25 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatResponse, RequestHeader};
+use api::v1::meta::mailbox_message::Payload;
+use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::sequence::Sequence;
 use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
-use tokio::sync::mpsc::Sender;
+use common_time::util::current_time_millis;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::ContextFactoryImpl;
+use crate::error::Result;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
+
+pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
 /// The context of mailbox.
 pub struct MailboxContext {
@@ -119,4 +125,33 @@ impl TestingEnv {
             provider: Arc::new(MockContextProvider::default()),
         }
     }
+}
+
+pub fn new_close_region_reply(id: u64) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::CloseRegion(SimpleReply {
+                result: false,
+                error: None,
+            }))
+            .unwrap(),
+        )),
+    }
+}
+
+pub fn send_mock_reply(
+    mailbox: MailboxRef,
+    mut rx: MockHeartbeatReceiver,
+    msg: impl FnOnce(u64) -> Result<MailboxMessage> + Send + 'static,
+) {
+    common_runtime::spawn_bg(async move {
+        let resp = rx.recv().await.unwrap().unwrap();
+        let reply_id = resp.mailbox_message.unwrap().id;
+        mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+    });
 }
