@@ -27,7 +27,7 @@ use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
 use common_meta::key::{RegionDistribution, TableMetaKey};
-use common_meta::kv_backend::etcd::EtcdStore;
+use common_meta::kv_backend::etcd::{EtcdStore, NO_CHROOT};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::router::TableRoute;
@@ -69,7 +69,7 @@ impl UpgradeCommand {
                 etcd_addr: &self.etcd_addr,
             })?;
         let tool = MigrateTableMetadata {
-            etcd_store: EtcdStore::with_etcd_client("", client),
+            etcd_store: EtcdStore::with_etcd_client(NO_CHROOT, client),
             dryrun: self.dryrun,
             skip_catalog_keys: self.skip_catalog_keys,
             skip_table_global_keys: self.skip_table_global_keys,
