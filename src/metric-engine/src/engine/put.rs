@@ -212,14 +212,82 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
 
+    use common_recordbatch::RecordBatches;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
+    use store_api::storage::ScanRequest;
 
     use super::*;
     use crate::test_util::{self, TestEnv};
 
     #[tokio::test]
     async fn test_write_logical_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        // prepare data
+        let schema = test_util::row_schema_with_tags(&["job"]);
+        let rows = test_util::build_rows(1, 5);
+        let request = RegionRequest::Put(RegionPutRequest {
+            rows: Rows { schema, rows },
+        });
+
+        // write data
+        let logical_region_id = env.default_logical_region_id();
+        let Output::AffectedRows(count) = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(count, 5);
+
+        // read data from physical region
+        let physical_region_id = env.default_physical_region_id();
+        let request = ScanRequest::default();
+        let stream = env
+            .metric()
+            .handle_query(physical_region_id, request)
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++-------------------------+----------------+------------+---------------------+-------+
+| greptime_timestamp      | greptime_value | __table_id | __tsid              | job   |
++-------------------------+----------------+------------+---------------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | 3          | 4844750677434873907 | tag_0 |
++-------------------------+----------------+------------+---------------------+-------+";
+        assert_eq!(expected, batches.pretty_print().unwrap(), "physical region");
+
+        // read data from logical region
+        let request = ScanRequest::default();
+        let stream = env
+            .metric()
+            .handle_query(logical_region_id, request)
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++-------------------------+----------------+-------+
+| greptime_timestamp      | greptime_value | job   |
++-------------------------+----------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | tag_0 |
++-------------------------+----------------+-------+";
+        assert_eq!(expected, batches.pretty_print().unwrap(), "logical region");
+    }
+
+    #[tokio::test]
+    async fn test_write_logical_region_row_count() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let engine = env.metric();

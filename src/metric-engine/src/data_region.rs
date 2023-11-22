@@ -22,6 +22,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -73,7 +74,13 @@ impl DataRegion {
         let new_column_id_start = 1 + region_metadata
             .column_metadatas
             .iter()
-            .map(|c| c.column_id)
+            .filter_map(|c| {
+                if ReservedColumnId::is_reserved(c.column_id) {
+                    None
+                } else {
+                    Some(c.column_id)
+                }
+            })
             .max()
             .unwrap_or(0);
 

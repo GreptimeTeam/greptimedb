@@ -146,7 +146,10 @@ impl RegionEngine for MetricEngine {
         region_id: RegionId,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        todo!()
+        self.inner
+            .read_region(region_id, request)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's metadata.

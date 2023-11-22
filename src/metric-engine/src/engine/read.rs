@@ -18,6 +18,7 @@ use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::RegionEngine;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -64,7 +65,7 @@ impl MetricEngineInner {
     async fn read_logical_region(
         &self,
         logical_region_id: RegionId,
-        mut request: ScanRequest,
+        request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
         let physical_region_id = {
             let state = &self.state.read().await;
@@ -78,7 +79,9 @@ impl MetricEngineInner {
                 })?
         };
         let data_region_id = utils::to_data_region_id(physical_region_id);
-        self.transform_request(physical_region_id, logical_region_id, &mut request);
+        let request = self
+            .transform_request(physical_region_id, logical_region_id, request)
+            .await?;
         self.mito
             .handle_query(data_region_id, request)
             .await
@@ -90,22 +93,24 @@ impl MetricEngineInner {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        request: &mut ScanRequest,
-    ) -> Result<()> {
+        mut request: ScanRequest,
+    ) -> Result<ScanRequest> {
         // transform projection
-        if let Some(projection) = &request.projection {
-            let physical_projection = self
-                .transform_projection(physical_region_id, logical_region_id, &projection)
-                .await?;
-            request.projection = Some(physical_projection);
-        }
+        let physical_projection = if let Some(projection) = &request.projection {
+            self.transform_projection(physical_region_id, logical_region_id, &projection)
+                .await?
+        } else {
+            self.default_projection(physical_region_id, logical_region_id)
+                .await?
+        };
+        request.projection = Some(physical_projection);
 
         // add table filter
         request
             .filters
             .push(self.table_id_filter(logical_region_id));
 
-        Ok(())
+        Ok(request)
     }
 
     /// Generate a filter on the table id column.
@@ -116,6 +121,8 @@ impl MetricEngineInner {
     }
 
     /// Transform the projection from logical region to physical region.
+    ///
+    /// This method will not preserve internal columns.
     pub async fn transform_projection(
         &self,
         physical_region_id: RegionId,
@@ -137,10 +144,95 @@ impl MetricEngineInner {
             .context(MitoReadOperationSnafu)?;
         for logical_proj in origin_projection {
             let column_id = logical_columns[*logical_proj].column_id;
+            // filter out internal columns
+            if ReservedColumnId::is_reserved(column_id) {
+                continue;
+            }
             // Safety: logical columns is a strict subset of physical columns
             physical_projection.push(physical_metadata.column_index_by_id(column_id).unwrap());
         }
 
         Ok(physical_projection)
+    }
+
+    /// Default projection for a logical region. Includes non-internal columns
+    pub async fn default_projection(
+        &self,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+    ) -> Result<Vec<usize>> {
+        let logical_columns = self
+            .load_logical_columns(physical_region_id, logical_region_id)
+            .await?;
+        let mut projection = Vec::with_capacity(logical_columns.len());
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let physical_metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        for logical_col in logical_columns {
+            let column_id = logical_col.column_id;
+            // Safety: logical columns is a strict subset of physical columns
+            projection.push(physical_metadata.column_index_by_id(column_id).unwrap());
+        }
+        Ok(projection)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use store_api::region_request::RegionRequest;
+
+    use super::*;
+    use crate::engine::alter;
+    use crate::test_util::{
+        alter_logical_region_add_tag_columns, create_logical_region_request, TestEnv,
+    };
+
+    #[tokio::test]
+    async fn test_transform_scan_req() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+
+        // create another logical region
+        let logical_region_id2 = RegionId::new(1112345678, 999);
+        let create_request =
+            create_logical_region_request(&["123", "456", "789"], physical_region_id, "blabla");
+        env.metric()
+            .handle_request(logical_region_id2, RegionRequest::Create(create_request))
+            .await
+            .unwrap();
+
+        // add columns to the first logical region
+        let alter_request = alter_logical_region_add_tag_columns(&["987", "789", "654", "321"]);
+        env.metric()
+            .handle_request(logical_region_id, RegionRequest::Alter(alter_request))
+            .await
+            .unwrap();
+
+        let mut scan_req = ScanRequest::default();
+        scan_req.projection = Some(vec![0, 1, 2, 3, 4, 5, 6]);
+        scan_req.filters = vec![];
+
+        let scan_req = env
+            .metric()
+            .inner
+            .transform_request(physical_region_id, logical_region_id, scan_req)
+            .await
+            .unwrap();
+
+        assert_eq!(scan_req.projection.unwrap(), vec![0, 1, 4, 7, 8, 9, 10]);
+        assert_eq!(scan_req.filters.len(), 1);
+        assert_eq!(
+            scan_req.filters[0],
+            logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                .eq(logical_expr::lit(logical_region_id.table_id()))
+                .into()
+        );
     }
 }

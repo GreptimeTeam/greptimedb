@@ -119,46 +119,11 @@ impl TestEnv {
 
         // create logical region
         let region_id = self.default_logical_region_id();
-        let region_create_request = RegionCreateRequest {
-            engine: METRIC_ENGINE_NAME.to_string(),
-            column_metadatas: vec![
-                ColumnMetadata {
-                    column_id: 0,
-                    semantic_type: SemanticType::Timestamp,
-                    column_schema: ColumnSchema::new(
-                        "greptime_timestamp",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 1,
-                    semantic_type: SemanticType::Field,
-                    column_schema: ColumnSchema::new(
-                        "greptime_value",
-                        ConcreteDataType::float64_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 2,
-                    semantic_type: SemanticType::Tag,
-                    column_schema: ColumnSchema::new(
-                        "job",
-                        ConcreteDataType::string_datatype(),
-                        false,
-                    ),
-                },
-            ],
-            primary_key: vec![2],
-            options: [(
-                LOGICAL_TABLE_METADATA_KEY.to_string(),
-                self.default_physical_region_id().as_u64().to_string(),
-            )]
-            .into_iter()
-            .collect(),
-            region_dir: "test_metric_region_logical".to_string(),
-        };
+        let region_create_request = create_logical_region_request(
+            &["job"],
+            self.default_physical_region_id(),
+            "test_metric_logical_region",
+        );
         self.metric()
             .handle_request(region_id, RegionRequest::Create(region_create_request))
             .await
@@ -206,6 +171,58 @@ pub fn alter_logical_region_add_tag_columns(new_tags: &[&str]) -> RegionAlterReq
         kind: AlterKind::AddColumns {
             columns: new_columns,
         },
+    }
+}
+
+/// Generate a [RegionCreateRequest] for logical region.
+/// Only need to specify tag column's name
+pub fn create_logical_region_request(
+    tags: &[&str],
+    physical_region_id: RegionId,
+    region_dir: &str,
+) -> RegionCreateRequest {
+    let mut column_metadatas = vec![
+        ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Timestamp,
+            column_schema: ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        },
+        ColumnMetadata {
+            column_id: 1,
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                "greptime_value",
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        },
+    ];
+    for (i, tag) in tags.iter().enumerate() {
+        column_metadatas.push(ColumnMetadata {
+            column_id: i as u32,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(
+                tag.to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+        });
+    }
+    RegionCreateRequest {
+        engine: METRIC_ENGINE_NAME.to_string(),
+        column_metadatas,
+        primary_key: vec![],
+        options: [(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_region_id.as_u64().to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        region_dir: region_dir.to_string(),
     }
 }
 
