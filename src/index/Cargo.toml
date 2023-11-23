@@ -5,15 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-fst.workspace = true
-greptime-proto.workspace = true
-snafu.workspace = true
-common-error.workspace = true
-common-macro.workspace = true
 async-trait.workspace = true
 common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+fst.workspace = true
 futures.workspace = true
+greptime-proto.workspace = true
 prost.workspace = true
+snafu.workspace = true
 
 [dev-dependencies]
 tokio-util.workspace = true
