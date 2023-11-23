@@ -25,7 +25,7 @@ use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
-use crate::wal::meta::WalMeta;
+use crate::wal::kafka::KafkaTopic;
 
 pub mod alter_table;
 pub mod create_table;
@@ -57,7 +57,7 @@ pub struct TableMetadataAllocatorContext {
 pub struct TableMetadata {
     pub table_id: TableId,
     pub region_routes: Vec<RegionRoute>,
-    pub wal_meta: WalMeta,
+    pub region_topics: Vec<KafkaTopic>,
 }
 
 #[async_trait::async_trait]

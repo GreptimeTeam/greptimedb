@@ -19,7 +19,8 @@ use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAlloc
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::meta::{WalMetaAllocator, WalMetaDemandBuilder};
+use common_meta::wal::meta::WalMetaAllocator;
+use common_meta::wal::WalProvider;
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
@@ -73,15 +74,19 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         .context(meta_error::ExternalSnafu)?;
 
         // Each region gets assigned one topic.
-        let demand = WalMetaDemandBuilder::new()
-            .with_num_topics(region_routes.len())
-            .build();
-        let wal_meta = self.wal_meta_allocator.try_alloc(demand).await?;
+        let region_topics = match self.wal_meta_allocator.wal_provider() {
+            WalProvider::RaftEngine => vec![],
+            WalProvider::Kafka => {
+                self.wal_meta_allocator
+                    .try_alloc_topics(region_routes.len())
+                    .await?
+            }
+        };
 
         Ok(TableMetadata {
             table_id,
             region_routes,
-            wal_meta,
+            region_topics,
         })
     }
 }

@@ -37,7 +37,7 @@ use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
-use crate::wal::meta::WalMeta;
+use crate::wal::kafka::KafkaTopic;
 
 pub const TOPIC_KEY: &str = "kafka_topic";
 
@@ -53,12 +53,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_meta: WalMeta,
+        region_topics: Vec<KafkaTopic>,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes, wal_meta),
+            creator: TableCreator::new(cluster_id, task, region_routes, region_topics),
         }
     }
 
@@ -174,7 +174,7 @@ impl CreateTableProcedure {
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
-        let region_topics = &create_table_data.wal_meta.region_topics;
+        let region_topics = &create_table_data.region_topics;
 
         // The following checking is redundant as the wal meta allocator ensures the allocated topics
         // are of the same length as the region routes. The checking only makes sense in distributed mode.
@@ -316,7 +316,7 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_meta: WalMeta,
+        region_topics: Vec<KafkaTopic>,
     ) -> Self {
         Self {
             data: CreateTableData {
@@ -324,7 +324,7 @@ impl TableCreator {
                 cluster_id,
                 task,
                 region_routes,
-                wal_meta,
+                region_topics,
             },
         }
     }
@@ -346,7 +346,7 @@ pub struct CreateTableData {
     pub task: CreateTableTask,
     pub cluster_id: u64,
     pub region_routes: Vec<RegionRoute>,
-    pub wal_meta: WalMeta,
+    pub region_topics: Vec<KafkaTopic>,
 }
 
 impl CreateTableData {

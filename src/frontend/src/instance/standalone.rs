@@ -26,7 +26,6 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::{Sequence, SequenceRef};
-use common_meta::wal::meta::WalMeta;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -153,7 +152,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
         Ok(TableMetadata {
             table_id,
             region_routes,
-            wal_meta: WalMeta::default(),
+            region_topics: vec![],
         })
     }
 }

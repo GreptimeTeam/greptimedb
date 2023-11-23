@@ -12,27 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod demand_builder;
-
-pub use demand_builder::WalMetaDemandBuilder;
-use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{MissingKafkaTopicManagerSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::{KafkaTopic as Topic, KafkaTopicManager as TopicManager};
 use crate::wal::{WalOptions, WalProvider};
-
-/// Wal metadata allocated to a table.
-#[derive(Debug, Serialize, Deserialize, Default)]
-pub struct WalMeta {
-    pub region_topics: Vec<Topic>,
-}
-
-/// The allocator user shall state what wal meta it demands.
-pub struct WalMetaDemand {
-    pub num_topics: Option<usize>,
-}
 
 /// The allocator responsible for allocating wal metadata for a table.
 #[derive(Default)]
@@ -60,15 +45,8 @@ impl WalMetaAllocator {
         Ok(this)
     }
 
-    /// Allocate wal meta according to the wal provider.
-    pub async fn try_alloc(&self, demand: WalMetaDemand) -> Result<WalMeta> {
-        let mut allocated = WalMeta::default();
-
-        if let Some(num_topics) = demand.num_topics.as_ref() {
-            allocated.region_topics = self.try_alloc_topics(*num_topics).await?;
-        }
-
-        Ok(allocated)
+    pub fn wal_provider(&self) -> &WalProvider {
+        &self.wal_provider
     }
 
     pub async fn try_alloc_topics(&self, num_topics: usize) -> Result<Vec<Topic>> {

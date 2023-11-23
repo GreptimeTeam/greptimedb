@@ -43,7 +43,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
-use crate::wal::meta::WalMeta;
+use crate::wal::kafka::KafkaTopic;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
@@ -165,7 +165,7 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_meta: WalMeta,
+        region_topics: Vec<KafkaTopic>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -173,7 +173,7 @@ impl DdlManager {
             cluster_id,
             create_table_task,
             region_routes,
-            wal_meta,
+            region_topics,
             context,
         );
 
@@ -379,11 +379,11 @@ async fn handle_create_table_task(
     let TableMetadata {
         table_id,
         region_routes,
-        wal_meta,
+        region_topics,
     } = table_metadata;
 
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, region_routes, wal_meta)
+        .submit_create_table_task(cluster_id, create_table_task, region_routes, region_topics)
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");
