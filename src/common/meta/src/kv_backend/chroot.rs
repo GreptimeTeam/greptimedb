@@ -188,7 +188,7 @@ impl ChrootKvBackend {
     }
 
     fn key_prepend_root(&self, mut key: Vec<u8>) -> Vec<u8> {
-        let mut new_key = self.root.to_vec();
+        let mut new_key = self.root.clone();
         new_key.append(&mut key);
         new_key
     }
@@ -198,7 +198,7 @@ impl ChrootKvBackend {
         let root = &self.root;
         if range_end == [0] {
             // the edge of the keyspace
-            let mut new_end = root.to_vec();
+            let mut new_end = root.clone();
             let mut ok = false;
             for i in (0..new_end.len()).rev() {
                 new_end[i] = new_end[i].wrapping_add(1);
@@ -213,7 +213,7 @@ impl ChrootKvBackend {
             }
             new_end
         } else if !range_end.is_empty() {
-            let mut new_end = root.to_vec();
+            let mut new_end = root.clone();
             new_end.append(&mut range_end);
             new_end
         } else {
