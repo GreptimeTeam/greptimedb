@@ -39,8 +39,6 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::wal::meta::WalMeta;
 
-// TODO(niebayes): remove `WAL_PROVIDER_KEY` since there's no need to store wal provider in the region options any more.
-pub const WAL_PROVIDER_KEY: &str = "wal_provider";
 pub const TOPIC_KEY: &str = "kafka_topic";
 
 pub struct CreateTableProcedure {
@@ -192,10 +190,11 @@ impl CreateTableProcedure {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
-            // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
-            // Besides, `find_leader_regions` may filter out some regions. Therefore, the following condition must be met
-            // and the indexing on `region_topics` is safe definitely.
-            assert!(regions.len() <= region_topics.len());
+
+            // The following condition may be true in standalone mode where there's no leader.
+            if regions.len() > region_topics.len() {
+                continue;
+            }
 
             let requests = regions
                 .iter()
