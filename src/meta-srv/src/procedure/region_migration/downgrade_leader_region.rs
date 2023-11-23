@@ -81,11 +81,13 @@ impl DowngradeLeaderRegion {
 
     /// Tries to downgrade a leader region.
     ///
-    /// Possible errors:
-    /// - [PusherNotFound](error::Error::PusherNotFound), The datanode is unreachable.
-    /// - [PushMessage](error::Error::PushMessage), The receiver is dropped.
+    /// Retry:
     /// - [MailboxTimeout](error::Error::MailboxTimeout), Timeout.
     /// - Failed to downgrade region on the Datanode.
+    ///
+    /// Abort:
+    /// - [PusherNotFound](error::Error::PusherNotFound), The datanode is unreachable.
+    /// - [PushMessage](error::Error::PushMessage), The receiver is dropped.
     /// - [MailboxReceiver](error::Error::MailboxReceiver), The sender is dropped without sending (impossible).
     /// - [UnexpectedInstructionReply](error::Error::UnexpectedInstructionReply).
     /// - Invalid JSON.
@@ -115,43 +117,54 @@ impl DowngradeLeaderRegion {
             .send(&ch, msg, DOWNGRADE_LEADER_REGION_TIMEOUT)
             .await?;
 
-        let msg = receiver.await??;
-        let reply = HeartbeatMailbox::json_reply(&msg)?;
-        let InstructionReply::DowngradeRegion(DowngradeRegionReply {
-            last_entry_id,
-            exist,
-            error,
-        }) = reply
-        else {
-            return error::UnexpectedInstructionReplySnafu {
-                mailbox_message: msg.to_string(),
-                reason: "expect downgrade region reply",
+        match receiver.await? {
+            Ok(msg) => {
+                let reply = HeartbeatMailbox::json_reply(&msg)?;
+                let InstructionReply::DowngradeRegion(DowngradeRegionReply {
+                    last_entry_id,
+                    exist,
+                    error,
+                }) = reply
+                else {
+                    return error::UnexpectedInstructionReplySnafu {
+                        mailbox_message: msg.to_string(),
+                        reason: "expect downgrade region reply",
+                    }
+                    .fail();
+                };
+
+                if error.is_some() {
+                    return error::RetryLaterSnafu {
+                        reason: format!(
+                            "Failed to downgrade the region {} on Datanode {:?}, error: {:?}",
+                            region_id, leader, error
+                        ),
+                    }
+                    .fail();
+                }
+
+                if !exist {
+                    warn!(
+                        "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
+                        region_id, leader
+                    );
+                }
+
+                if let Some(last_entry_id) = last_entry_id {
+                    ctx.volatile_ctx.set_last_entry_id(last_entry_id);
+                }
+
+                Ok(())
             }
-            .fail();
-        };
-
-        if error.is_some() {
-            return error::UnexpectedSnafu {
-                violated: format!(
-                    "Failed to downgrade the region {} on Datanode {:?}, error: {:?}",
-                    region_id, leader, error
-                ),
+            Err(error::Error::MailboxTimeout { .. }) => {
+                let reason = format!(
+                    "Mailbox received timeout for downgrade leader region {region_id} on Datanode {:?}", 
+                    leader,
+                );
+                error::RetryLaterSnafu { reason }.fail()
             }
-            .fail();
+            Err(err) => Err(err),
         }
-
-        if !exist {
-            warn!(
-                "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
-                region_id, leader
-            );
-        }
-
-        if let Some(last_entry_id) = last_entry_id {
-            ctx.volatile_ctx.set_last_entry_id(last_entry_id);
-        }
-
-        Ok(())
     }
 
     /// Downgrades a leader region.
@@ -168,9 +181,13 @@ impl DowngradeLeaderRegion {
 
         while retry < self.optimistic_retry {
             if let Err(err) = self.downgrade_region(ctx, &instruction).await {
-                warn!("Failed to downgrade region, error: {err:?}, retry later.");
-                sleep(self.retry_initial_interval).await;
-                retry += 1;
+                if err.is_retryable() {
+                    warn!("Failed to downgrade region, error: {err:?}, retry later.");
+                    sleep(self.retry_initial_interval).await;
+                    retry += 1;
+                } else {
+                    break;
+                }
             } else {
                 // Sets the deadline to now.
                 ctx.volatile_ctx
@@ -248,6 +265,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pusher_dropped() {
+        let state = DowngradeLeaderRegion::default();
+        let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
+
+        let mut env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .await;
+
+        drop(rx);
+
+        let instruction = &state.build_downgrade_region_instruction(&ctx);
+        let err = state
+            .downgrade_region(&mut ctx, instruction)
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::PushMessage { .. });
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
     async fn test_unexpected_instruction_reply() {
         let state = DowngradeLeaderRegion::default();
         let persistent_context = new_persistent_context();
@@ -304,8 +349,8 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_matches!(err, Error::MailboxTimeout { .. });
-        assert!(!err.is_retryable());
+        assert_matches!(err, Error::RetryLater { .. });
+        assert!(err.is_retryable());
     }
 
     #[tokio::test]
@@ -340,8 +385,8 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_matches!(err, Error::Unexpected { .. });
-        assert!(!err.is_retryable());
+        assert_matches!(err, Error::RetryLater { .. });
+        assert!(err.is_retryable());
         assert!(err.to_string().contains("test mocked"));
     }
 
