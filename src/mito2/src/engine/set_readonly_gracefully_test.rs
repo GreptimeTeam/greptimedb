@@ -12,16 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::assert_matches::assert_matches;
-
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
-use store_api::region_engine::RegionEngine;
+use common_error::status_code::StatusCode;
+use store_api::region_engine::{RegionEngine, SetReadonlyResponse};
 use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::error::Error;
 use crate::request::WorkerRequest;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
@@ -39,21 +37,22 @@ async fn test_set_readonly_gracefully() {
         .await
         .unwrap();
 
-    let (set_readonly_request, recv) = WorkerRequest::new_set_readonly_gracefully(region_id);
-    engine
-        .inner
-        .workers
-        .submit_to_worker(region_id, set_readonly_request)
-        .await
-        .unwrap();
-    let result = recv.await.unwrap();
-    assert!(result.exist);
-    assert_eq!(result.last_entry_id.unwrap(), 0);
-
-    // For fast-path.
     let result = engine.set_readonly_gracefully(region_id).await.unwrap();
-    assert!(result.exist);
-    assert_eq!(result.last_entry_id.unwrap(), 0);
+    assert_eq!(
+        SetReadonlyResponse::Success {
+            last_entry_id: Some(0)
+        },
+        result
+    );
+
+    // set readonly again.
+    let result = engine.set_readonly_gracefully(region_id).await.unwrap();
+    assert_eq!(
+        SetReadonlyResponse::Success {
+            last_entry_id: Some(0)
+        },
+        result
+    );
 
     let rows = Rows {
         schema: column_schemas,
@@ -68,17 +67,20 @@ async fn test_set_readonly_gracefully() {
         .await
         .unwrap_err();
 
-    let error = error.as_any().downcast_ref::<Error>().unwrap();
-
-    assert_matches!(error, Error::RegionReadonly { .. });
+    assert_eq!(error.status_code(), StatusCode::RegionReadonly);
 
     engine.set_writable(region_id, true).unwrap();
 
     put_rows(&engine, region_id, rows).await;
 
     let result = engine.set_readonly_gracefully(region_id).await.unwrap();
-    assert!(result.exist);
-    assert_eq!(result.last_entry_id.unwrap(), 1);
+
+    assert_eq!(
+        SetReadonlyResponse::Success {
+            last_entry_id: Some(1)
+        },
+        result
+    );
 }
 
 #[tokio::test]
@@ -98,14 +100,12 @@ async fn test_set_readonly_gracefully_not_exist() {
         .await
         .unwrap();
     let result = recv.await.unwrap();
-    assert!(!result.exist);
-    assert!(result.last_entry_id.is_none());
+    assert_eq!(SetReadonlyResponse::NotFound, result);
 
     // For fast-path.
     let result = engine
         .set_readonly_gracefully(non_exist_region_id)
         .await
         .unwrap();
-    assert!(!result.exist);
-    assert!(result.last_entry_id.is_none());
+    assert_eq!(SetReadonlyResponse::NotFound, result);
 }

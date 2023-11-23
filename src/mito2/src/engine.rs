@@ -28,8 +28,6 @@ mod create_test;
 mod drop_test;
 #[cfg(test)]
 mod flush_test;
-#[cfg(test)]
-mod internal_command_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -38,6 +36,8 @@ mod open_test;
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
+#[cfg(test)]
+mod set_readonly_gracefully_test;
 #[cfg(test)]
 mod truncate_test;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResult};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -189,27 +189,14 @@ impl EngineInner {
         Ok(())
     }
 
-    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResult> {
-        if let Some(region) = self.workers.get_region(region_id) {
-            if !region.is_writable() {
-                let last_entry_id = region.version_control.current().last_entry_id;
+    /// Sets read-only for a region and ensures no more writes in the region after it returns.
+    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResponse> {
+        // Notes: It acquires the mutable ownership to ensure no other threads,
+        // Therefore, we submit it to the worker.
+        let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
+        self.workers.submit_to_worker(region_id, request).await?;
 
-                Ok(SetReadonlyResult {
-                    last_entry_id: Some(last_entry_id),
-                    exist: true,
-                })
-            } else {
-                let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
-                self.workers.submit_to_worker(region_id, request).await?;
-
-                receiver.await.context(RecvSnafu)
-            }
-        } else {
-            Ok(SetReadonlyResult {
-                last_entry_id: None,
-                exist: false,
-            })
-        }
+        receiver.await.context(RecvSnafu)
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
@@ -288,7 +275,7 @@ impl RegionEngine for MitoEngine {
     async fn set_readonly_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResult, BoxedError> {
+    ) -> Result<SetReadonlyResponse, BoxedError> {
         self.inner
             .set_readonly_gracefully(region_id)
             .await

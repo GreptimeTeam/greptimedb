@@ -23,17 +23,26 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use serde::{Deserialize, Serialize};
 
+use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
-#[derive(Debug)]
-pub struct SetReadonlyResult {
-    /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
-    pub last_entry_id: Option<u64>,
-    /// Returns true if the region exist.
-    pub exist: bool,
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetReadonlyResponse {
+    Success {
+        /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
+        last_entry_id: Option<entry::Id>,
+    },
+    NotFound,
+}
+
+impl SetReadonlyResponse {
+    /// Returns a [SetReadonlyResponse::Success] with the `last_entry_id`.
+    pub fn success(last_entry_id: Option<entry::Id>) -> Self {
+        Self::Success { last_entry_id }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +152,7 @@ pub trait RegionEngine: Send + Sync {
     async fn set_readonly_gracefully(
         &self,
         region_id: RegionId,
-    ) -> Result<SetReadonlyResult, BoxedError>;
+    ) -> Result<SetReadonlyResponse, BoxedError>;
 
     /// Indicates region role.
     ///

@@ -37,7 +37,7 @@ use query::query_engine::DescribeResult;
 use query::QueryEngine;
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResult};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
@@ -194,7 +194,7 @@ impl RegionEngine for MockRegionEngine {
     async fn set_readonly_gracefully(
         &self,
         _region_id: RegionId,
-    ) -> Result<SetReadonlyResult, BoxedError> {
+    ) -> Result<SetReadonlyResponse, BoxedError> {
         unimplemented!()
     }
 
