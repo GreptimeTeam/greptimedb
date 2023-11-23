@@ -54,11 +54,15 @@ provider = "Kafka"
 [wal.kafka]
 # The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
 broker_endpoints = ["127.0.0.1:9090"]
+# Number of topics to be created upon start.
 num_topics = 64
 # Topic selector type.
 # Available selector types: 
 # - "RoundRobin" (default)
 selector_type = "RoundRobin"
+# A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
 topic_name_prefix = "greptime_wal"
+# Number of partitions per topic.
 num_partitions = 1
+# Expected number of replicas of each partition.
 replication_factor = 3
