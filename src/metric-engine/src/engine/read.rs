@@ -216,9 +216,11 @@ mod test {
             .unwrap();
 
         // check explicit projection
-        let mut scan_req = ScanRequest::default();
-        scan_req.projection = Some(vec![0, 1, 2, 3, 4, 5, 6]);
-        scan_req.filters = vec![];
+        let mut scan_req = ScanRequest {
+            projection: Some(vec![0, 1, 2, 3, 4, 5, 6]),
+            filters: vec![],
+            ..Default::default()
+        };
 
         let scan_req = env
             .metric()
