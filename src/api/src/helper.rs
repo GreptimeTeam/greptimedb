@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use common_base::BitVec;
+use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECISION};
 use common_decimal::Decimal128;
 use common_time::interval::IntervalUnit;
 use common_time::time::Time;
@@ -51,6 +52,8 @@ use crate::error::{self, Result};
 use crate::v1::column::Values;
 use crate::v1::{Column, ColumnDataType, Value as GrpcValue};
 
+/// ColumnDataTypeWrapper is a wrapper of ColumnDataType and ColumnDataTypeExtension.
+/// It could be used to convert with ConcreteDataType.
 #[derive(Debug, PartialEq)]
 pub struct ColumnDataTypeWrapper {
     datatype: ColumnDataType,
@@ -58,6 +61,7 @@ pub struct ColumnDataTypeWrapper {
 }
 
 impl ColumnDataTypeWrapper {
+    /// Try to create a ColumnDataTypeWrapper from i32(ColumnDataType) and ColumnDataTypeExtension.
     pub fn try_new(datatype: i32, datatype_ext: Option<ColumnDataTypeExtension>) -> Result<Self> {
         let datatype = ColumnDataType::try_from(datatype)
             .context(error::UnknownColumnDataTypeSnafu { datatype })?;
@@ -67,6 +71,7 @@ impl ColumnDataTypeWrapper {
         })
     }
 
+    /// Create a ColumnDataTypeWrapper from ColumnDataType and ColumnDataTypeExtension.
     pub fn new(datatype: ColumnDataType, datatype_ext: Option<ColumnDataTypeExtension>) -> Self {
         Self {
             datatype,
@@ -74,6 +79,7 @@ impl ColumnDataTypeWrapper {
         }
     }
 
+    /// Get a tuple of ColumnDataType and ColumnDataTypeExtension.
     pub fn datatype(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
         (self.datatype, self.datatype_ext.clone())
     }
@@ -516,7 +522,10 @@ pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
     }
 }
 
-pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
+pub fn pb_value_to_value_ref<'a>(
+    value: &'a v1::Value,
+    datatype_ext: &'a Option<ColumnDataTypeExtension>,
+) -> ValueRef<'a> {
     let Some(value) = &value.value_data else {
         return ValueRef::Null;
     };
@@ -562,8 +571,25 @@ pub fn pb_value_to_value_ref(value: &v1::Value) -> ValueRef {
         ValueData::DurationMicrosecondValue(v) => ValueRef::Duration(Duration::new_microsecond(*v)),
         ValueData::DurationNanosecondValue(v) => ValueRef::Duration(Duration::new_nanosecond(*v)),
         ValueData::Decimal128Value(v) => {
-            // Although the precision and scale are not used here, we still need to pass them in.
-            ValueRef::Decimal128(Decimal128::from_pb_decimal128(v.hi, v.lo, 38, 10))
+            // get precision and scale from datatype_extension
+            if let Some(Ext::DecimalType(d)) =
+                datatype_ext.as_ref().and_then(|ext| ext.ext.as_ref())
+            {
+                ValueRef::Decimal128(Decimal128::from_pb_decimal128(
+                    v.hi,
+                    v.lo,
+                    d.precision as u8,
+                    d.scale as i8,
+                ))
+            } else {
+                // If the precision and scale are not set, use the default value.
+                ValueRef::Decimal128(Decimal128::from_pb_decimal128(
+                    v.hi,
+                    v.lo,
+                    DECIMAL128_MAX_PRECISION,
+                    DECIMAL128_DEFAULT_SCALE,
+                ))
+            }
         }
     }
 }
@@ -651,7 +677,6 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
                 values.duration_nanosecond_values,
             )),
         },
-        // When should I check precision and scale?
         ConcreteDataType::Decimal128(d) => Arc::new(Decimal128Vector::from_values(
             values.decimal128_values.iter().map(|x| {
                 Decimal128::from_pb_decimal128(x.hi, x.lo, d.precision(), d.scale()).into()
