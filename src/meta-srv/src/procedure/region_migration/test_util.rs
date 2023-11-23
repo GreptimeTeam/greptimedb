@@ -19,16 +19,19 @@ use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
 use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::peer::Peer;
 use common_meta::sequence::Sequence;
 use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
 use common_time::util::current_time_millis;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::ContextFactoryImpl;
 use crate::error::Result;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::procedure::region_migration::PersistentContext;
 use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
 
@@ -127,6 +130,7 @@ impl TestingEnv {
     }
 }
 
+/// Generates a [InstructionReply::CloseRegion] reply.
 pub fn new_close_region_reply(id: u64) -> MailboxMessage {
     MailboxMessage {
         id,
@@ -144,6 +148,7 @@ pub fn new_close_region_reply(id: u64) -> MailboxMessage {
     }
 }
 
+/// Sends a mock reply.
 pub fn send_mock_reply(
     mailbox: MailboxRef,
     mut rx: MockHeartbeatReceiver,
@@ -154,4 +159,14 @@ pub fn send_mock_reply(
         let reply_id = resp.mailbox_message.unwrap().id;
         mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
     });
+}
+
+/// Generates a [PersistentContext].
+pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
+    PersistentContext {
+        from_peer: Peer::empty(from),
+        to_peer: Peer::empty(to),
+        region_id,
+        cluster_id: 0,
+    }
 }

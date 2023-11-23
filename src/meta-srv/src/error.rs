@@ -298,6 +298,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to find table route for {region_id}"))]
+    RegionRouteNotFound {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Table info not found: {}", table_id))]
     TableInfoNotFound {
         table_id: TableId,
@@ -658,7 +664,8 @@ impl ErrorExt for Error {
             | Error::Unexpected { .. }
             | Error::Txn { .. }
             | Error::TableIdChanged { .. }
-            | Error::RegionOpeningRace { .. } => StatusCode::Unexpected,
+            | Error::RegionOpeningRace { .. }
+            | Error::RegionRouteNotFound { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
