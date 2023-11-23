@@ -1,7 +1,7 @@
 version: '3.8'
 services:
   etcd:
-    image: bitnami/etcd:latest
+    image: public.ecr.aws/bitnami/etcd:3.5
     ports:
       - "2379:2379"
       - "2380:2380"
