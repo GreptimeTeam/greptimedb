@@ -76,7 +76,7 @@ pub enum Error {
         error: ArrowError,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("DataFusion error"))]
     DataFusion {
         location: SnafuLocation,
         #[snafu(source)]

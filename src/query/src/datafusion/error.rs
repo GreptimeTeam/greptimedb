@@ -25,7 +25,7 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum InnerError {
-    #[snafu(display(""))]
+    #[snafu(display("DataFusion error"))]
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,

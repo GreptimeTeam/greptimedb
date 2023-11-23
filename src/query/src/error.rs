@@ -121,7 +121,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("DataFusion error"))]
     DataFusion {
         #[snafu(source)]
         error: DataFusionError,
@@ -140,7 +140,7 @@ pub enum Error {
         source: sql::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("Failed to plan SQL"))]
     PlanSql {
         #[snafu(source)]
         error: DataFusionError,

@@ -180,7 +180,7 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("Internal error"))]
     Internal {
         location: Location,
         source: BoxedError,
@@ -216,7 +216,7 @@ pub enum Error {
     #[snafu(display("Illegal access to catalog: {} and schema: {}", catalog, schema))]
     QueryAccessDenied { catalog: String, schema: String },
 
-    #[snafu(display(""))]
+    #[snafu(display("DataFusion error"))]
     Datafusion {
         #[snafu(source)]
         error: DataFusionError,
