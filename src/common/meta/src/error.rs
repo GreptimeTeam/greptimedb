@@ -327,6 +327,17 @@ pub enum Error {
 
     #[snafu(display("Missing required Kafka topic manager"))]
     MissingKafkaTopicManager { location: Location },
+
+    #[snafu(display(
+        "Unexpected number of region topics, num_region_topics: {}, num_region_routes: {}",
+        num_region_topics,
+        num_region_routes
+    ))]
+    UnexpectedNumRegionTopics {
+        num_region_topics: usize,
+        num_region_routes: usize,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -393,7 +404,8 @@ impl ErrorExt for Error {
             | Error::TooManyCreatedKafkaTopics { .. }
             | Error::CreateKafkaTopic { .. }
             | Error::MissingKafkaOpts { .. }
-            | Error::MissingKafkaTopicManager { .. } => StatusCode::Unexpected,
+            | Error::MissingKafkaTopicManager { .. }
+            | Error::UnexpectedNumRegionTopics { .. } => StatusCode::Unexpected,
         }
     }
 

@@ -32,7 +32,7 @@ use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnexpectedNumRegionTopicsSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
@@ -176,6 +176,20 @@ impl CreateTableProcedure {
         let region_routes = &create_table_data.region_routes;
         let region_topics = &create_table_data.wal_meta.region_topics;
 
+        // The following checking is redundant as the wal meta allocator ensures the allocated topics
+        // are of the same length as the region routes. The checking only makes sense in distributed mode.
+        if !region_topics.is_empty() {
+            let num_region_topics = region_topics.len();
+            let num_region_routes = region_routes.len();
+            ensure!(
+                num_region_topics != num_region_routes,
+                UnexpectedNumRegionTopicsSnafu {
+                    num_region_topics,
+                    num_region_routes,
+                }
+            );
+        }
+
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
         let schema = &create_table_expr.schema_name;
@@ -190,12 +204,6 @@ impl CreateTableProcedure {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
-
-            // The following condition may be true in standalone mode where there's no leader.
-            if regions.len() > region_topics.len() {
-                continue;
-            }
-
             let requests = regions
                 .iter()
                 .enumerate()
