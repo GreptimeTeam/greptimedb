@@ -54,7 +54,7 @@ lazy_static.workspace = true
 mime_guess = "2.0"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-opensrv-mysql = "0.4"
+opensrv-mysql = "0.5"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.16"
@@ -103,7 +103,7 @@ catalog = { workspace = true, features = ["testing"] }
 client.workspace = true
 common-base.workspace = true
 common-test-util.workspace = true
-mysql_async = { git = "https://github.com/blackbeam/mysql_async.git", rev = "32c6f2a986789f97108502c2d0c755a089411b66", default-features = false, features = [
+mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true

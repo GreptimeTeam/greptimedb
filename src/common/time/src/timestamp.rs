@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone,
+    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -250,6 +250,15 @@ impl Timestamp {
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         let (sec, nsec) = self.split();
         NaiveDateTime::from_timestamp_opt(sec, nsec)
+    }
+
+    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<TimeZone>) -> Option<NaiveDateTime> {
+        let datetime = self.to_chrono_datetime();
+        datetime.map(|v| match tz {
+            Some(TimeZone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
+            Some(TimeZone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
+            None => Utc.from_utc_datetime(&v).naive_local(),
+        })
     }
 
     /// Convert timestamp to chrono date.
