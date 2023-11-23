@@ -193,8 +193,7 @@ impl<'a, W: AsyncWrite + Unpin> MysqlResultWriter<'a, W> {
                     Value::Binary(v) => row_writer.write_col(v.deref())?,
                     Value::Date(v) => row_writer.write_col(v.to_chrono_date())?,
                     Value::DateTime(v) => row_writer.write_col(v.to_chrono_datetime())?,
-                    Value::Timestamp(v) => row_writer
-                        .write_col(v.to_timezone_aware_string(query_context.time_zone()))?,
+                    Value::Timestamp(v) => row_writer.write_col(v.to_chrono_datetime())?,
                     Value::Interval(v) => row_writer.write_col(v.to_iso8601_string())?,
                     Value::Duration(v) => row_writer.write_col(v.to_std_duration())?,
                     Value::List(_) => {
