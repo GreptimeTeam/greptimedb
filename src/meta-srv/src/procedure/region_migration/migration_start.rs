@@ -137,16 +137,11 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
-        }
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
     #[tokio::test]

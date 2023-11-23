@@ -17,14 +17,16 @@ use std::sync::Arc;
 use api::v1::meta::{HeartbeatResponse, RequestHeader};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::peer::Peer;
 use common_meta::sequence::Sequence;
 use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
+use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 
-use super::ContextFactoryImpl;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::procedure::region_migration::{ContextFactoryImpl, PersistentContext};
 use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
 
@@ -118,5 +120,14 @@ impl TestingEnv {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
         }
+    }
+}
+
+pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
+    PersistentContext {
+        from_peer: Peer::empty(from),
+        to_peer: Peer::empty(to),
+        region_id,
+        cluster_id: 0,
     }
 }

@@ -584,7 +584,7 @@ impl TableMetadataManager {
         &self,
         table_id: TableId,
         region_info: RegionInfo,
-        current_table_route_value: DeserializedValueWithBytes<TableRouteValue>,
+        current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
     ) -> Result<()> {
@@ -606,7 +606,7 @@ impl TableMetadataManager {
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
-            .build_update_txn(table_id, &current_table_route_value, &new_table_route_value)?;
+            .build_update_txn(table_id, current_table_route_value, &new_table_route_value)?;
 
         let txn = Txn::merge_all(vec![update_datanode_table_txn, update_table_route_txn]);
 
@@ -1173,7 +1173,7 @@ mod tests {
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
                 },
-                current_table_route_value.clone(),
+                &current_table_route_value,
                 new_region_routes.clone(),
                 &HashMap::new(),
             )
@@ -1190,7 +1190,7 @@ mod tests {
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
                 },
-                current_table_route_value.clone(),
+                &current_table_route_value,
                 new_region_routes.clone(),
                 &HashMap::new(),
             )
@@ -1212,7 +1212,7 @@ mod tests {
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
                 },
-                current_table_route_value.clone(),
+                &current_table_route_value,
                 new_region_routes.clone(),
                 &HashMap::new(),
             )
@@ -1237,7 +1237,7 @@ mod tests {
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
                 },
-                wrong_table_route_value,
+                &wrong_table_route_value,
                 new_region_routes,
                 &HashMap::new(),
             )

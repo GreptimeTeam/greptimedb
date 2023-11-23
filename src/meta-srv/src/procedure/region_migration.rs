@@ -23,6 +23,7 @@ pub(crate) mod update_metadata;
 use std::any::Any;
 use std::fmt::Debug;
 
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::peer::Peer;
@@ -78,8 +79,13 @@ pub struct VolatileContext {
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
     opening_region_guard: Option<OpeningRegionGuard>,
-    /// `table_route_info` is stored via previous steps for future use.
-    table_route_info: Option<DeserializedValueWithBytes<TableRouteValue>>,
+    /// `table_route` is stored via previous steps for future use.
+    table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
+    /// `table_info` is stored via previous steps for future use.
+    ///
+    /// `table_info` should remain unchanged during the procedure;
+    /// no other DDL procedure executed concurrently for the current table.
+    table_info: Option<DeserializedValueWithBytes<TableInfoValue>>,
 }
 
 /// Used to generate new [Context].
@@ -127,7 +133,7 @@ impl Context {
         &self.server_addr
     }
 
-    /// Returns the `table_route_value` of [VolatileContext] if any.
+    /// Returns the `table_route` of [VolatileContext] if any.
     /// Otherwise, returns the value retrieved from remote.
     ///
     /// Retry:
@@ -135,7 +141,7 @@ impl Context {
     pub async fn get_table_route_value(
         &mut self,
     ) -> Result<&DeserializedValueWithBytes<TableRouteValue>> {
-        let table_route_value = &mut self.volatile_ctx.table_route_info;
+        let table_route_value = &mut self.volatile_ctx.table_route;
 
         if table_route_value.is_none() {
             let table_id = self.persistent_ctx.region_id.table_id();
@@ -157,9 +163,45 @@ impl Context {
         Ok(table_route_value.as_ref().unwrap())
     }
 
-    /// Removes the `table_route_value` of [VolatileContext], returns true if any.
+    /// Removes the `table_route` of [VolatileContext], returns true if any.
     pub fn remove_table_route_value(&mut self) -> bool {
-        let value = self.volatile_ctx.table_route_info.take();
+        let value = self.volatile_ctx.table_route.take();
+        value.is_some()
+    }
+
+    /// Returns the `table_info` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of table.
+    pub async fn get_table_info_value(
+        &mut self,
+    ) -> Result<&DeserializedValueWithBytes<TableInfoValue>> {
+        let table_info_value = &mut self.volatile_ctx.table_info;
+
+        if table_info_value.is_none() {
+            let table_id = self.persistent_ctx.region_id.table_id();
+            let table_info = self
+                .table_metadata_manager
+                .table_info_manager()
+                .get(table_id)
+                .await
+                .context(error::TableMetadataManagerSnafu)
+                .map_err(|e| error::Error::RetryLater {
+                    reason: e.to_string(),
+                    location: location!(),
+                })?
+                .context(error::TableInfoNotFoundSnafu { table_id })?;
+
+            *table_info_value = Some(table_info);
+        }
+
+        Ok(table_info_value.as_ref().unwrap())
+    }
+
+    /// Removes the `table_info` of [VolatileContext], returns true if any.
+    pub fn remove_table_info_value(&mut self) -> bool {
+        let value = self.volatile_ctx.table_info.take();
         value.is_some()
     }
 

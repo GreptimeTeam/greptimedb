@@ -21,7 +21,7 @@ use common_meta::ddl::utils::region_storage_path;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::RegionIdent;
 use serde::{Deserialize, Serialize};
-use snafu::{location, Location, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
@@ -54,38 +54,28 @@ impl OpenCandidateRegion {
     ///
     /// Abort(non-retry):
     /// - Table Info is not found.
-    async fn build_open_region_instruction(&self, ctx: &Context) -> Result<Instruction> {
+    async fn build_open_region_instruction(&self, ctx: &mut Context) -> Result<Instruction> {
         let pc = &ctx.persistent_ctx;
         let cluster_id = pc.cluster_id;
         let table_id = pc.region_id.table_id();
         let region_number = pc.region_id.region_number();
-        let candidate = &pc.to_peer;
-        let table_info = ctx
-            .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)
-            .map_err(|e| error::Error::RetryLater {
-                reason: e.to_string(),
-                location: location!(),
-            })?
-            .context(error::TableInfoNotFoundSnafu { table_id })?
-            .into_inner()
-            .table_info;
+        let candidate_id = pc.to_peer.id;
+
+        let table_info_value = ctx.get_table_info_value().await?;
+        let table_info = &table_info_value.table_info;
 
         // The region storage path is immutable after the region is created.
         // Therefore, it's safe to store it in `VolatileContext` for future use.
         let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
 
-        let engine = table_info.meta.engine;
+        let engine = table_info.meta.engine.clone();
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
 
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
                 cluster_id,
-                datanode_id: candidate.id,
+                datanode_id: candidate_id,
                 table_id,
                 region_number,
                 engine,
@@ -197,16 +187,11 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
-        }
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
     fn new_mock_open_instruction(datanode_id: DatanodeId, region_id: RegionId) -> Instruction {
@@ -259,9 +244,12 @@ mod tests {
         let state = OpenCandidateRegion;
         let persistent_context = new_persistent_context();
         let env = TestingEnv::new();
-        let ctx = env.context_factory().new_context(persistent_context);
+        let mut ctx = env.context_factory().new_context(persistent_context);
 
-        let err = state.build_open_region_instruction(&ctx).await.unwrap_err();
+        let err = state
+            .build_open_region_instruction(&mut ctx)
+            .await
+            .unwrap_err();
 
         assert_matches!(err, Error::TableInfoNotFound { .. });
         assert!(!err.is_retryable());
