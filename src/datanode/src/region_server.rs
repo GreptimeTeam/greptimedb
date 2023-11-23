@@ -80,11 +80,26 @@ impl RegionServer {
         runtime: Arc<Runtime>,
         event_listener: RegionServerEventListenerRef,
     ) -> Self {
+        Self::with_table_provider(
+            query_engine,
+            runtime,
+            event_listener,
+            Arc::new(DummyTableProviderFactory),
+        )
+    }
+
+    pub fn with_table_provider(
+        query_engine: QueryEngineRef,
+        runtime: Arc<Runtime>,
+        event_listener: RegionServerEventListenerRef,
+        table_provider_factory: Arc<dyn TableProviderFactory>,
+    ) -> Self {
         Self {
             inner: Arc::new(RegionServerInner::new(
                 query_engine,
                 runtime,
                 event_listener,
+                table_provider_factory,
             )),
         }
     }
@@ -233,6 +248,7 @@ struct RegionServerInner {
     query_engine: QueryEngineRef,
     runtime: Arc<Runtime>,
     event_listener: RegionServerEventListenerRef,
+    table_provider_factory: Arc<dyn TableProviderFactory>,
 }
 
 impl RegionServerInner {
@@ -240,6 +256,7 @@ impl RegionServerInner {
         query_engine: QueryEngineRef,
         runtime: Arc<Runtime>,
         event_listener: RegionServerEventListenerRef,
+        table_provider_factory: Arc<dyn TableProviderFactory>,
     ) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
@@ -247,6 +264,7 @@ impl RegionServerInner {
             query_engine,
             runtime,
             event_listener,
+            table_provider_factory,
         }
     }
 
@@ -346,7 +364,13 @@ impl RegionServerInner {
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?
             .clone();
-        let catalog_list = Arc::new(DummyCatalogList::new(region_id, engine).await?);
+
+        let table_provider = self
+            .table_provider_factory
+            .create(region_id, engine)
+            .await?;
+
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
 
         // decode substrait plan to logical plan and execute it
         let logical_plan = DFLogicalSubstraitConvertor
@@ -407,31 +431,16 @@ struct DummyCatalogList {
 }
 
 impl DummyCatalogList {
-    pub async fn new(region_id: RegionId, engine: RegionEngineRef) -> Result<Self> {
-        let metadata =
-            engine
-                .get_metadata(region_id)
-                .await
-                .with_context(|_| GetRegionMetadataSnafu {
-                    engine: engine.name(),
-                    region_id,
-                })?;
-        let table_provider = DummyTableProvider {
-            region_id,
-            engine,
-            metadata,
-            scan_request: Default::default(),
-        };
+    fn with_table_provider(table_provider: Arc<dyn TableProvider>) -> Self {
         let schema_provider = DummySchemaProvider {
             table: table_provider,
         };
         let catalog_provider = DummyCatalogProvider {
             schema: schema_provider,
         };
-        let catalog_list = Self {
+        Self {
             catalog: catalog_provider,
-        };
-        Ok(catalog_list)
+        }
     }
 }
 
@@ -480,7 +489,7 @@ impl CatalogProvider for DummyCatalogProvider {
 /// For [DummyCatalogList].
 #[derive(Clone)]
 struct DummySchemaProvider {
-    table: DummyTableProvider,
+    table: Arc<dyn TableProvider>,
 }
 
 #[async_trait]
@@ -494,7 +503,7 @@ impl SchemaProvider for DummySchemaProvider {
     }
 
     async fn table(&self, _name: &str) -> Option<Arc<dyn TableProvider>> {
-        Some(Arc::new(self.table.clone()))
+        Some(self.table.clone())
     }
 
     fn table_exist(&self, _name: &str) -> bool {
@@ -554,4 +563,39 @@ impl TableProvider for DummyTableProvider {
     ) -> DfResult<Vec<TableProviderFilterPushDown>> {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
+}
+
+pub struct DummyTableProviderFactory;
+
+#[async_trait]
+impl TableProviderFactory for DummyTableProviderFactory {
+    async fn create(
+        &self,
+        region_id: RegionId,
+        engine: RegionEngineRef,
+    ) -> Result<Arc<dyn TableProvider>> {
+        let metadata =
+            engine
+                .get_metadata(region_id)
+                .await
+                .with_context(|_| GetRegionMetadataSnafu {
+                    engine: engine.name(),
+                    region_id,
+                })?;
+        Ok(Arc::new(DummyTableProvider {
+            region_id,
+            engine,
+            metadata,
+            scan_request: Default::default(),
+        }))
+    }
+}
+
+#[async_trait]
+pub trait TableProviderFactory: Send + Sync {
+    async fn create(
+        &self,
+        region_id: RegionId,
+        engine: RegionEngineRef,
+    ) -> Result<Arc<dyn TableProvider>>;
 }

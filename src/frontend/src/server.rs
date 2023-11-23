@@ -12,14 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use auth::UserProviderRef;
 use common_base::Plugins;
 use common_runtime::Builder as RuntimeBuilder;
-use common_telemetry::info;
 use servers::error::InternalIoSnafu;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
@@ -29,7 +27,7 @@ use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
 use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
 use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
-use servers::server::Server;
+use servers::server::{Server, ServerHandler, ServerHandlers};
 use snafu::ResultExt;
 
 use crate::error::{self, Result, StartServerSnafu};
@@ -37,10 +35,6 @@ use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::instance::FrontendInstance;
 
 pub(crate) struct Services;
-
-pub type ServerHandlers = HashMap<String, ServerHandler>;
-
-pub type ServerHandler = (Box<dyn Server>, SocketAddr);
 
 impl Services {
     pub(crate) async fn build<T, U>(
@@ -209,12 +203,4 @@ impl Services {
 
 fn parse_addr(addr: &str) -> Result<SocketAddr> {
     addr.parse().context(error::ParseAddrSnafu { addr })
-}
-
-pub async fn start_server(
-    server_and_addr: &(Box<dyn Server>, SocketAddr),
-) -> servers::error::Result<Option<SocketAddr>> {
-    let (server, addr) = server_and_addr;
-    info!("Starting {} at {}", server.name(), addr);
-    server.start(*addr).await.map(Some)
 }

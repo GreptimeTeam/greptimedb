@@ -19,7 +19,8 @@ mod otlp;
 mod prom_store;
 mod region_query;
 mod script;
-mod standalone;
+pub mod standalone;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -72,6 +73,7 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
+use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -93,7 +95,7 @@ use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandl
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics;
 use crate::script::ScriptExecutor;
-use crate::server::{start_server, ServerHandlers, Services};
+use crate::server::Services;
 
 #[async_trait]
 pub trait FrontendInstance:

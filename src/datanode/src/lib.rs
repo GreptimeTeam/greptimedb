@@ -24,7 +24,6 @@ mod greptimedb_telemetry;
 pub mod heartbeat;
 pub mod metrics;
 pub mod region_server;
-pub mod server;
 mod store;
 #[cfg(test)]
 #[allow(dead_code)]

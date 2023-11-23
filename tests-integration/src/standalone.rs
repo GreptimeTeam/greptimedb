@@ -82,11 +82,11 @@ impl GreptimeDbStandaloneBuilder {
 
         let plugins = self.plugin.unwrap_or_default();
 
-        let datanode =
-            DatanodeBuilder::new(opts.clone(), Some(kv_backend.clone()), plugins.clone())
-                .build()
-                .await
-                .unwrap();
+        let datanode = DatanodeBuilder::new(opts.clone(), plugins.clone())
+            .with_kv_backend(kv_backend.clone())
+            .build()
+            .await
+            .unwrap();
 
         let catalog_manager = KvBackendCatalogManager::new(
             kv_backend.clone(),
