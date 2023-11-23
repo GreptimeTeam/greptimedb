@@ -34,5 +34,10 @@ pub trait InvertedIndexReader {
     async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap>;
 
     /// Retrieve the bitmap for a given inverted index metadata entry at the specified offset and size.
-    async fn bitmap(&mut self, meta: &InvertedIndexMeta, offset: u32, size: u32) -> Result<BitVec>;
+    async fn bitmap(
+        &mut self,
+        meta: &InvertedIndexMeta,
+        relative_offset: u32,
+        size: u32,
+    ) -> Result<BitVec>;
 }

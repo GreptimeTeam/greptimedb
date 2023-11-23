@@ -66,8 +66,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
         FstMap::new(buf).context(DecodeFstSnafu)
     }
 
-    async fn bitmap(&mut self, meta: &InvertedIndexMeta, offset: u32, size: u32) -> Result<BitVec> {
-        let offset = SeekFrom::Start(meta.base_offset + offset as u64);
+    async fn bitmap(
+        &mut self,
+        meta: &InvertedIndexMeta,
+        relative_offset: u32,
+        size: u32,
+    ) -> Result<BitVec> {
+        let offset = SeekFrom::Start(meta.base_offset + relative_offset as u64);
         self.source.seek(offset).await.context(SeekSnafu)?;
         let mut buf = vec![0u8; size as usize];
         self.source.read_exact(&mut buf).await.context(ReadSnafu)?;
