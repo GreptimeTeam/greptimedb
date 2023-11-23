@@ -842,17 +842,6 @@ dependencies = [
 
 [[package]]
 name = "bigdecimal"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6773ddc0eafc0e509fb60e48dff7f450f8e674a0686ae8605e8d9901bd5eefa"
-dependencies = [
- "num-bigint",
- "num-integer",
- "num-traits",
-]
-
-[[package]]
-name = "bigdecimal"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c06619be423ea5bb86c95f087d5707942791a08a85530df0db2209a3ecfb8bc9"
@@ -1017,6 +1006,15 @@ dependencies = [
  "lazy_static",
  "memchr",
  "regex-automata 0.1.10",
+]
+
+[[package]]
+name = "btoi"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd6407f73a9b8b6162d8a2ef999fe6afd7cc15902ebf42c5cd296addf17e0ad"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1643,7 +1641,7 @@ name = "common-decimal"
 version = "0.4.3"
 dependencies = [
  "arrow",
- "bigdecimal 0.4.2",
+ "bigdecimal",
  "common-error",
  "common-macro",
  "rust_decimal",
@@ -4121,6 +4119,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyed_priority_queue"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ee7893dab2e44ae5f9d0173f26ff4aa327c10b01b06a72b52dd9405b628640d"
+dependencies = [
+ "indexmap 2.1.0",
+]
+
+[[package]]
 name = "lalrpop"
 version = "0.19.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4165,15 +4172,6 @@ name = "lazycell"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
-
-[[package]]
-name = "lexical"
-version = "6.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7aefb36fd43fef7003334742cbf77b243fcd36418a1d1bdd480d613a67968f6"
-dependencies = [
- "lexical-core",
-]
 
 [[package]]
 name = "lexical-core"
@@ -4424,11 +4422,11 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.10.1"
+version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "718e8fae447df0c7e1ba7f5189829e63fd536945c8988d61444c19039f16b670"
+checksum = "2994eeba8ed550fd9b47a0b38f0242bc3344e496483c6180b69139cc2fa5d1d7"
 dependencies = [
- "hashbrown 0.13.2",
+ "hashbrown 0.14.2",
 ]
 
 [[package]]
@@ -4908,8 +4906,9 @@ dependencies = [
 
 [[package]]
 name = "mysql_async"
-version = "0.32.1"
-source = "git+https://github.com/blackbeam/mysql_async.git?rev=32c6f2a986789f97108502c2d0c755a089411b66#32c6f2a986789f97108502c2d0c755a089411b66"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6750b17ce50f8f112ef1a8394121090d47c596b56a6a17569ca680a9626e2ef2"
 dependencies = [
  "bytes",
  "crossbeam",
@@ -4917,15 +4916,16 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
+ "keyed_priority_queue",
  "lazy_static",
  "lru",
  "mio",
  "mysql_common",
  "once_cell",
- "pem 2.0.1",
+ "pem 3.0.2",
  "percent-encoding",
  "pin-project",
- "priority-queue",
+ "rand",
  "rustls 0.21.9",
  "rustls-pemfile",
  "serde",
@@ -4938,20 +4938,21 @@ dependencies = [
  "twox-hash",
  "url",
  "webpki",
- "webpki-roots 0.23.1",
+ "webpki-roots 0.25.3",
 ]
 
 [[package]]
 name = "mysql_common"
-version = "0.30.6"
+version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57349d5a326b437989b6ee4dc8f2f34b0cc131202748414712a8e7d98952fc8c"
+checksum = "06f19e4cfa0ab5a76b627cec2d81331c49b034988eaf302c3bafeada684eadef"
 dependencies = [
  "base64 0.21.5",
- "bigdecimal 0.3.1",
+ "bigdecimal",
  "bindgen",
  "bitflags 2.4.1",
  "bitvec",
+ "btoi",
  "byteorder",
  "bytes",
  "cc",
@@ -4961,7 +4962,6 @@ dependencies = [
  "flate2",
  "frunk",
  "lazy_static",
- "lexical",
  "mysql-common-derive",
  "num-bigint",
  "num-traits",
@@ -4978,6 +4978,7 @@ dependencies = [
  "thiserror",
  "time",
  "uuid",
+ "zstd 0.12.4",
 ]
 
 [[package]]
@@ -5349,9 +5350,9 @@ dependencies = [
 
 [[package]]
 name = "opensrv-mysql"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c66063eb6aca9e6b5354f91db29f7244a8e7f9c01219b3ce76a5340a78d9f6f"
+checksum = "208bfa36c4b4a8d6ac90eda62e34efa66f7e692df91bd3626bc47329844a86b1"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5822,6 +5823,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3163d2912b7c3b52d651a055f2c7eec9ba5cd22d26ef75b8dd3a59980b185923"
+dependencies = [
+ "base64 0.21.5",
+ "serde",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6216,16 +6227,6 @@ checksum = "ae005bd773ab59b4725093fd7df83fd7892f7d8eafb48dbd7de6e024e4215f9d"
 dependencies = [
  "proc-macro2",
  "syn 2.0.39",
-]
-
-[[package]]
-name = "priority-queue"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fff39edfcaec0d64e8d0da38564fad195d2d51b680940295fcc307366e101e61"
-dependencies = [
- "autocfg",
- "indexmap 1.9.3",
 ]
 
 [[package]]
@@ -7408,7 +7409,7 @@ checksum = "629648aced5775d558af50b2b4c7b02983a04b312126d45eeead26e7caa498b9"
 dependencies = [
  "log",
  "ring 0.17.5",
- "rustls-webpki 0.101.7",
+ "rustls-webpki",
  "sct",
 ]
 
@@ -7431,16 +7432,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
  "base64 0.21.5",
-]
-
-[[package]]
-name = "rustls-webpki"
-version = "0.100.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f6a5fc258f1c1276dfe3016516945546e2d5383911efc0fc4f1cdc5df3a4ae3"
-dependencies = [
- "ring 0.16.20",
- "untrusted 0.7.1",
 ]
 
 [[package]]
@@ -9211,6 +9202,7 @@ dependencies = [
  "itertools 0.10.5",
  "meta-client",
  "meta-srv",
+ "mysql_async",
  "num_cpus",
  "object-store",
  "once_cell",
@@ -9236,6 +9228,7 @@ dependencies = [
  "substrait 0.4.3",
  "table",
  "tempfile",
+ "time",
  "tokio",
  "tokio-postgres",
  "tonic 0.10.2",
@@ -10477,12 +10470,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.23.1"
+version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b03058f88386e5ff5310d9111d53f48b17d732b401aeb83a8d5190f2ac459338"
-dependencies = [
- "rustls-webpki 0.100.3",
-]
+checksum = "1778a42e8b3b90bff8d0f5032bf22250792889a5cdc752aa0020c84abe3aaf10"
 
 [[package]]
 name = "which"

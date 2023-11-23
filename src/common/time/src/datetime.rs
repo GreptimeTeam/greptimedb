@@ -15,10 +15,11 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::{LocalResult, NaiveDateTime};
+use chrono::{LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
+use crate::timezone::TimeZone;
 use crate::util::{format_utc_datetime, local_datetime_to_utc};
 use crate::Date;
 
@@ -106,6 +107,15 @@ impl DateTime {
     /// Convert to [NaiveDateTime].
     pub fn to_chrono_datetime(&self) -> Option<NaiveDateTime> {
         NaiveDateTime::from_timestamp_millis(self.0)
+    }
+
+    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<TimeZone>) -> Option<NaiveDateTime> {
+        let datetime = self.to_chrono_datetime();
+        datetime.map(|v| match tz {
+            Some(TimeZone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
+            Some(TimeZone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
+            None => Utc.from_utc_datetime(&v).naive_local(),
+        })
     }
 
     /// Convert to [common_time::date].
