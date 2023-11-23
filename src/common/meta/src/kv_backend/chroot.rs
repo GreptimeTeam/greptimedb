@@ -187,8 +187,8 @@ impl ChrootKvBackend {
         txn_res
     }
 
-    fn key_prepend_root(root: &[u8], mut key: Vec<u8>) -> Vec<u8> {
-        let mut new_key = root.to_vec();
+    fn key_prepend_root(&self, mut key: Vec<u8>) -> Vec<u8> {
+        let mut new_key = self.root.to_vec();
         new_key.append(&mut key);
         new_key
     }
@@ -222,7 +222,7 @@ impl ChrootKvBackend {
     }
 
     fn txn_prepend_root(&self, mut txn: Txn) -> Txn {
-        let op_prepend_root = |op: Txn| match op {
+        let op_prepend_root = |op: TxnOp| match op {
             TxnOp::Put(k, v) => TxnOp::Put(self.key_prepend_root(k), v),
             TxnOp::Get(k) => TxnOp::Get(self.key_prepend_root(k)),
             TxnOp::Delete(k) => TxnOp::Delete(self.key_prepend_root(k)),
@@ -240,5 +240,34 @@ impl ChrootKvBackend {
             })
             .collect();
         txn
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::kv_backend::chroot::ChrootKvBackend;
+    use crate::kv_backend::memory::MemoryKvBackend;
+
+    #[test]
+    fn test_prefix_key_and_range_end() {
+        fn run_test_case(pfx: &[u8], key: &[u8], end: &[u8], w_key: &[u8], w_end: &[u8]) {
+            let chroot = ChrootKvBackend::new(pfx.into(), Arc::new(MemoryKvBackend::new()));
+            assert_eq!(chroot.key_prepend_root(key.into()), w_key);
+            assert_eq!(chroot.range_end_prepend_root(end.into()), w_end);
+        }
+
+        // single key
+        run_test_case(b"pfx/", b"a", b"", b"pfx/a", b"");
+
+        // range
+        run_test_case(b"pfx/", b"abc", b"def", b"pfx/abc", b"pfx/def");
+
+        // one-sided range (HACK - b'/' + 1 = b'0')
+        run_test_case(b"pfx/", b"abc", b"\0", b"pfx/abc", b"pfx0");
+
+        // one-sided range, end of keyspace
+        run_test_case(b"\xFF\xFF", b"abc", b"\0", b"\xff\xffabc", b"\0");
     }
 }
