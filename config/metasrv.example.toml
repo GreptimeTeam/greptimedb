@@ -42,3 +42,23 @@ first_heartbeat_estimate = "1000ms"
 # timeout = "10s"
 # connect_timeout = "10s"
 # tcp_nodelay = true
+
+# Wal options.
+[wal]
+# Available wal providers:
+# - "RaftEngine" (default)
+# - "Kafka"
+provider = "Kafka"
+
+# Kafka wal options.
+[wal.kafka]
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
+broker_endpoints = ["127.0.0.1:9090"]
+num_topics = 64
+# Topic selector type.
+# Available selector types: 
+# - "RoundRobin" (default)
+selector_type = "RoundRobin"
+topic_name_prefix = "gt_kafka_topic"
+num_partitions = 1
+replication_factor = 3

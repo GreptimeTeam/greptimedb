@@ -97,6 +97,7 @@ fn test_create_region_request_template() {
         1,
         create_table_task(),
         test_data::new_region_routes(),
+        None,
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     );
 
@@ -183,6 +184,7 @@ async fn test_on_datanode_create_regions() {
         1,
         create_table_task(),
         region_routes,
+        None,
         test_data::new_ddl_context(datanode_manager),
     );
 

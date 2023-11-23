@@ -17,6 +17,7 @@ use std::str::Utf8Error;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use rskafka::client::error::Error as RsKafkaError;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionNumber;
@@ -266,6 +267,66 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display("Missing required Kafka options"))]
+    MissingKafkaOpts { location: Location },
+
+    #[snafu(display("Invalid number of topics {}", num_topics))]
+    InvalidNumTopics {
+        num_topics: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to deserialize Kafka topics"))]
+    DeserKafkaTopics {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("Failed to serialize Kafka topics"))]
+    SerKafkaTopics {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("Failed to persist Kafka topics"))]
+    PersistKafkaTopics { location: Location },
+
+    #[snafu(display(
+        "Failed to build a rskafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildKafkaClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
+    },
+
+    #[snafu(display("Failed to build a rskafka controller client"))]
+    BuildKafkaCtrlClient {
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
+    },
+
+    #[snafu(display(
+        "Too many created Kafka topics, num_created_topics: {}",
+        num_created_topics
+    ))]
+    TooManyCreatedKafkaTopics {
+        num_created_topics: usize,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create a Kafka topic client"))]
+    CreateKafkaTopic {
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -323,6 +384,16 @@ impl ErrorExt for Error {
             RetryLater { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+
+            Error::MissingKafkaOpts { .. }
+            | Error::DeserKafkaTopics { .. }
+            | Error::SerKafkaTopics { .. }
+            | Error::PersistKafkaTopics { .. }
+            | Error::InvalidNumTopics { .. }
+            | Error::BuildKafkaClient { .. }
+            | Error::BuildKafkaCtrlClient { .. }
+            | Error::TooManyCreatedKafkaTopics { .. }
+            | Error::CreateKafkaTopic { .. } => StatusCode::Unexpected,
         }
     }
 

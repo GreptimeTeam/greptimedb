@@ -19,19 +19,23 @@ use std::time::Duration;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::ddl::TableMetadataAllocatorRef;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::sequence::{Sequence, SequenceRef};
+use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
+use common_meta::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
+use common_meta::wal::WalProvider;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::Result;
+use crate::error::{BuildKafkaTopicManagerSnafu, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -188,14 +192,30 @@ impl MetaSrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
         };
+
+        let kafka_topic_manager = match options.wal.provider {
+            WalProvider::Kafka => Some(
+                KafkaTopicManager::try_new(&options.wal.kafka_opts, &kv_backend)
+                    .await
+                    .context(BuildKafkaTopicManagerSnafu)?,
+            ),
+            WalProvider::RaftEngine => None,
+        };
+
+        let table_meta_allocator = Arc::new(MetaSrvTableMetadataAllocator::new(
+            selector_ctx.clone(),
+            selector.clone(),
+            table_id_sequence.clone(),
+            kafka_topic_manager,
+        ));
+
         let ddl_manager = build_ddl_manager(
             &options,
             datanode_clients,
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            (&selector, &selector_ctx),
-            &table_id_sequence,
+            table_meta_allocator,
         );
         let _ = ddl_manager.try_start();
         let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
@@ -328,8 +348,7 @@ fn build_ddl_manager(
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    (selector, selector_ctx): (&SelectorRef, &SelectorContext),
-    table_id_sequence: &SequenceRef,
+    table_meta_allocator: TableMetadataAllocatorRef,
 ) -> DdlManagerRef {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
@@ -347,12 +366,6 @@ fn build_ddl_manager(
         MetasrvInfo {
             server_addr: options.server_addr.clone(),
         },
-    ));
-
-    let table_meta_allocator = Arc::new(MetaSrvTableMetadataAllocator::new(
-        selector_ctx.clone(),
-        selector.clone(),
-        table_id_sequence.clone(),
     ));
 
     Arc::new(DdlManager::new(

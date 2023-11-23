@@ -573,6 +573,12 @@ pub enum Error {
 
     #[snafu(display("Weight array is not set"))]
     NotSetWeightArray { location: Location },
+
+    #[snafu(display("Failed to build a Kafka topic manager"))]
+    BuildKafkaTopicManager {
+        source: common_meta::error::Error,
+        location: Location,
+    },
 }
 
 impl Error {
@@ -686,6 +692,8 @@ impl ErrorExt for Error {
             | Error::GetFullTableInfo { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } => source.status_code(),
+
+            Error::BuildKafkaTopicManager { source, .. } => source.status_code(),
 
             Error::Other { source, .. } => source.status_code(),
         }

@@ -26,7 +26,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
     TableMetadataAllocatorRef,
 };
 use crate::error::{
@@ -43,6 +43,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
+use crate::wal::kafka::KafkaTopic;
 
 pub type DdlManagerRef = Arc<DdlManager>;
 
@@ -164,11 +165,17 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_topics: Option<Vec<KafkaTopic>>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure =
-            CreateTableProcedure::new(cluster_id, create_table_task, region_routes, context);
+        let procedure = CreateTableProcedure::new(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_topics,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -360,7 +367,7 @@ async fn handle_create_table_task(
     cluster_id: u64,
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let (table_id, region_routes) = ddl_manager
+    let table_metadata = ddl_manager
         .table_meta_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
@@ -369,8 +376,14 @@ async fn handle_create_table_task(
         )
         .await?;
 
+    let TableMetadata {
+        table_id,
+        region_routes,
+        region_topics,
+    } = table_metadata;
+
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, region_routes)
+        .submit_create_table_task(cluster_id, create_table_task, region_routes, region_topics)
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");

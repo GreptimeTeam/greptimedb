@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -32,7 +32,7 @@ use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
@@ -126,7 +126,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
         _ctx: &TableMetadataAllocatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
+    ) -> MetaResult<TableMetadata> {
         let table_id = self.table_id_sequence.next().await? as u32;
         raw_table_info.ident.table_id = table_id;
         let region_routes = partitions
@@ -149,6 +149,10 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
             })
             .collect::<Vec<_>>();
 
-        Ok((table_id, region_routes))
+        Ok(TableMetadata {
+            table_id,
+            region_routes,
+            region_topics: None,
+        })
     }
 }

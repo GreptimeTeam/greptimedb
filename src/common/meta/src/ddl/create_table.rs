@@ -37,6 +37,9 @@ use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::wal::kafka::KafkaTopic;
+
+const TOPIC_KEY: &str = "kafka_topic";
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -50,11 +53,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_topics: Option<Vec<KafkaTopic>>,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes),
+            creator: TableCreator::new(cluster_id, task, region_routes, region_topics),
         }
     }
 
@@ -170,6 +174,7 @@ impl CreateTableProcedure {
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
+        let region_topics = create_table_data.region_topics.as_ref();
 
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
@@ -187,12 +192,24 @@ impl CreateTableProcedure {
             let regions = find_leader_regions(region_routes, &datanode);
             let requests = regions
                 .iter()
-                .map(|region_number| {
+                .enumerate()
+                .map(|(i, region_number)| {
                     let region_id = RegionId::new(self.table_id(), *region_number);
 
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
+
+                    if let Some(region_topics) = region_topics {
+                        // Safety: `TableMetadataAllocator` ensures the region routes and topics are of the same length.
+                        // and hence the following indexing operation is safe.
+                        assert_eq!(region_routes.len(), region_topics.len());
+
+                        create_region_request
+                            .options
+                            .insert(TOPIC_KEY.to_string(), region_topics[i].clone());
+                    }
+
                     PbRegionRequest::Create(create_region_request)
                 })
                 .collect::<Vec<_>>();
@@ -285,13 +302,19 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask, region_routes: Vec<RegionRoute>) -> Self {
+    pub fn new(
+        cluster_id: u64,
+        task: CreateTableTask,
+        region_routes: Vec<RegionRoute>,
+        region_topics: Option<Vec<KafkaTopic>>,
+    ) -> Self {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
                 region_routes,
+                region_topics,
             },
         }
     }
@@ -311,8 +334,9 @@ pub enum CreateTableState {
 pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
-    pub region_routes: Vec<RegionRoute>,
     pub cluster_id: u64,
+    pub region_routes: Vec<RegionRoute>,
+    pub region_topics: Option<Vec<KafkaTopic>>,
 }
 
 impl CreateTableData {

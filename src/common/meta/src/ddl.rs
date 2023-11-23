@@ -32,6 +32,8 @@ pub mod drop_table;
 pub mod truncate_table;
 pub mod utils;
 
+use crate::wal::kafka::KafkaTopic;
+
 #[derive(Debug, Default)]
 pub struct ExecutorContext {
     pub cluster_id: Option<u64>,
@@ -53,6 +55,12 @@ pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
+pub struct TableMetadata {
+    pub table_id: TableId,
+    pub region_routes: Vec<RegionRoute>,
+    pub region_topics: Option<Vec<KafkaTopic>>,
+}
+
 #[async_trait::async_trait]
 pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
@@ -60,7 +68,7 @@ pub trait TableMetadataAllocator: Send + Sync {
         ctx: &TableMetadataAllocatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> Result<(TableId, Vec<RegionRoute>)>;
+    ) -> Result<TableMetadata>;
 }
 
 pub type TableMetadataAllocatorRef = Arc<dyn TableMetadataAllocator>;
