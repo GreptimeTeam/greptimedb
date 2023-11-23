@@ -56,8 +56,10 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_put_influxdb_lines_without_time_column() {
-        let instance =
-            tests::create_distributed_instance("test_distributed_put_influxdb_lines").await;
+        let instance = tests::create_distributed_instance(
+            "test_distributed_put_influxdb_lines_without_time_column",
+        )
+        .await;
         test_put_influxdb_lines_without_time_column(&instance.frontend()).await;
     }
 
