@@ -1,0 +1,20 @@
+[package]
+name = "index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fst.workspace = true
+greptime-proto.workspace = true
+snafu.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+async-trait.workspace = true
+common-base.workspace = true
+futures.workspace = true
+prost.workspace = true
+
+[dev-dependencies]
+tokio-util.workspace = true
+tokio.workspace = true

@@ -51,6 +51,7 @@ members = [
     "src/sql",
     "src/store-api",
     "src/table",
+    "src/index",
     "tests-integration",
     "tests/runner",
 ]
@@ -83,9 +84,10 @@ datafusion-sql = { git = "https://github.com/apache/arrow-datafusion.git", rev =
 datafusion-substrait = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 derive_builder = "0.12"
 etcd-client = "0.12"
+fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "25429306d0379ad29211a062a81da2554a0208ab" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2ffdcae9f9816e41f261b24502e6603d68442466" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -192,3 +194,6 @@ strip = true
 lto = "thin"
 debug = false
 incremental = false
+
+[patch."https://github.com/GreptimeTeam/greptime-proto.git"]
+greptime-proto = { git = "https://github.com/zhongzc/greptime-proto.git", branch = "zhongzc/inverted-index-base-offset" }

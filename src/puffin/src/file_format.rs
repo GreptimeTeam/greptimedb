@@ -40,6 +40,8 @@
 //!
 //! Footer payload bytes is either uncompressed or LZ4-compressed (as a single LZ4 compression frame with content size present),
 //! UTF-8 encoded JSON payload representing a single [`FileMetadata`] object.
+//!
+//! [`FileMetadata`]: ../file_metadata/struct.FileMetadata.html
 
 pub mod reader;
 pub mod writer;
