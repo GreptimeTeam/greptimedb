@@ -30,6 +30,7 @@ humantime-serde.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+rand.workspace = true
 regex.workspace = true
 rskafka.workspace = true
 serde.workspace = true

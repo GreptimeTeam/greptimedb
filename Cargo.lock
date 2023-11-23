@@ -1807,6 +1807,7 @@ dependencies = [
  "lazy_static",
  "prometheus",
  "prost 0.12.2",
+ "rand",
  "regex",
  "rskafka",
  "serde",

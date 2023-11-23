@@ -195,7 +195,7 @@ impl MetaSrvBuilder {
 
         let kafka_topic_manager = match options.wal.provider {
             WalProvider::Kafka => Some(
-                KafkaTopicManager::try_new(&options.wal.kafka_opts, &kv_backend)
+                KafkaTopicManager::try_new(options.wal.kafka_opts.as_ref(), &kv_backend)
                     .await
                     .context(BuildKafkaTopicManagerSnafu)?,
             ),

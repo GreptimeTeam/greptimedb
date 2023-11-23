@@ -42,7 +42,7 @@ impl Default for KafkaOptions {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "gt_kafka_topic".to_string(),
+            topic_name_prefix: "greptime_wal".to_string(),
             num_partitions: 1,
             replication_factor: 3,
         }

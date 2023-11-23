@@ -291,9 +291,6 @@ pub enum Error {
         error: JsonError,
     },
 
-    #[snafu(display("Failed to persist Kafka topics"))]
-    PersistKafkaTopics { location: Location },
-
     #[snafu(display(
         "Failed to build a rskafka client, broker endpoints: {:?}",
         broker_endpoints
@@ -388,7 +385,6 @@ impl ErrorExt for Error {
             Error::MissingKafkaOpts { .. }
             | Error::DeserKafkaTopics { .. }
             | Error::SerKafkaTopics { .. }
-            | Error::PersistKafkaTopics { .. }
             | Error::InvalidNumTopics { .. }
             | Error::BuildKafkaClient { .. }
             | Error::BuildKafkaCtrlClient { .. }

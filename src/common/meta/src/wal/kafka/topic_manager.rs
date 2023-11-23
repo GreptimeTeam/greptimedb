@@ -14,21 +14,23 @@
 
 use std::collections::HashSet;
 
+use rand::seq::SliceRandom;
 use rskafka::client::ClientBuilder;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaTopicSnafu, DeserKafkaTopicsSnafu,
-    InvalidNumTopicsSnafu, MissingKafkaOptsSnafu, PersistKafkaTopicsSnafu, Result,
-    SerKafkaTopicsSnafu, TooManyCreatedKafkaTopicsSnafu,
+    InvalidNumTopicsSnafu, MissingKafkaOptsSnafu, Result, SerKafkaTopicsSnafu,
+    TooManyCreatedKafkaTopicsSnafu,
 };
 use crate::kv_backend::KvBackendRef;
+use crate::rpc::store::PutRequest;
 use crate::wal::kafka::topic_selector::{build_topic_selector, TopicSelectorRef};
-use crate::wal::kafka::KafkaOptions;
+use crate::wal::kafka::{KafkaOptions, TopicSelectorType};
 
 pub type Topic = String;
 
-const TOPICS_KEY: &str = "gt_kafka_topics";
+const METASRV_CREATED_TOPICS_KEY: &str = "metasrv_created_topics";
 const CREATE_TOPIC_TIMEOUT: i32 = 5_000; // 5,000 ms.
 
 pub struct TopicManager {
@@ -38,14 +40,22 @@ pub struct TopicManager {
 
 impl TopicManager {
     pub async fn try_new(
-        kafka_opts: &Option<KafkaOptions>,
+        kafka_opts: Option<&KafkaOptions>,
         kv_backend: &KvBackendRef,
     ) -> Result<Self> {
-        let opts = kafka_opts.as_ref().context(MissingKafkaOptsSnafu)?;
+        let opts = kafka_opts.context(MissingKafkaOptsSnafu)?;
+        let topic_pool = build_topic_pool(opts, kv_backend).await?;
+        let topic_selector = build_topic_selector(&opts.selector_type);
+
+        // The cursor in the round-robin selector is not persisted which may break the round-robin strategy cross crashes.
+        // Introduces a shuffling may help mitigate this issue.
+        let topic_pool = match opts.selector_type {
+            TopicSelectorType::RoundRobin => shuffle_topic_pool(topic_pool),
+        };
 
         Ok(Self {
-            topic_pool: build_topic_pool(opts, kv_backend).await?,
-            topic_selector: build_topic_selector(&opts.selector_type),
+            topic_pool,
+            topic_selector,
         })
     }
 
@@ -57,17 +67,10 @@ impl TopicManager {
 }
 
 async fn build_topic_pool(opts: &KafkaOptions, kv_backend: &KvBackendRef) -> Result<Vec<Topic>> {
-    let KafkaOptions {
-        broker_endpoints,
-        num_topics,
-        topic_name_prefix,
-        num_partitions,
-        replication_factor,
-        ..
-    } = opts.clone();
-
+    let num_topics = opts.num_topics;
     ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
+    let broker_endpoints = opts.broker_endpoints.clone();
     let kafka_client = ClientBuilder::new(broker_endpoints.clone())
         .build()
         .await
@@ -78,7 +81,7 @@ async fn build_topic_pool(opts: &KafkaOptions, kv_backend: &KvBackendRef) -> Res
         .context(BuildKafkaCtrlClientSnafu)?;
 
     let topics = (0..num_topics)
-        .map(|topic_id| format!("{topic_name_prefix}_{topic_id}"))
+        .map(|topic_id| format!("{}_{topic_id}", opts.topic_name_prefix))
         .collect::<Vec<_>>();
 
     let created_topics = restore_created_topics(kv_backend)
@@ -99,49 +102,46 @@ async fn build_topic_pool(opts: &KafkaOptions, kv_backend: &KvBackendRef) -> Res
                 return None;
             }
 
+            // TODO(niebayes): Determine how rskafka handles an already-exist topic. Check if an error would be raised.
             Some(kafka_ctrl_client.create_topic(
                 topic,
-                num_partitions,
-                replication_factor,
+                opts.num_partitions,
+                opts.replication_factor,
                 CREATE_TOPIC_TIMEOUT,
             ))
         })
         .collect::<Vec<_>>();
 
-    let _ = futures::future::try_join_all(create_topic_tasks)
+    futures::future::try_join_all(create_topic_tasks)
         .await
         .context(CreateKafkaTopicSnafu)?;
 
-    // FIXME(niebayes): current persistence strategy is all-or-none. Maybe we should increase the granularity.
     persist_created_topics(&topics, kv_backend).await?;
 
     Ok(topics)
 }
 
-async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<Topic>> {
-    let raw_topics = kv_backend
-        .get(TOPICS_KEY.as_bytes())
-        .await?
-        .map(|key_value| key_value.value)
-        .unwrap_or_default();
+fn shuffle_topic_pool(mut topic_pool: Vec<Topic>) -> Vec<Topic> {
+    topic_pool.shuffle(&mut rand::thread_rng());
+    topic_pool
+}
 
-    serde_json::from_slice(&raw_topics).context(DeserKafkaTopicsSnafu)
+async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<Topic>> {
+    kv_backend
+        .get(METASRV_CREATED_TOPICS_KEY.as_bytes())
+        .await?
+        .map(|key_value| serde_json::from_slice(&key_value.value).context(DeserKafkaTopicsSnafu))
+        .unwrap_or_else(|| Ok(vec![]))
 }
 
 async fn persist_created_topics(topics: &[Topic], kv_backend: &KvBackendRef) -> Result<()> {
     let raw_topics = serde_json::to_string(topics).context(SerKafkaTopicsSnafu)?;
     kv_backend
-        .put_conditionally(
-            TOPICS_KEY.as_bytes().to_vec(),
-            raw_topics.into_bytes(),
-            false,
-        )
-        .await
-        .and_then(|persisted| {
-            if !persisted {
-                PersistKafkaTopicsSnafu.fail()
-            } else {
-                Ok(())
-            }
+        .put(PutRequest {
+            key: METASRV_CREATED_TOPICS_KEY.as_bytes().to_vec(),
+            value: raw_topics.into_bytes(),
+            prev_kv: false,
         })
+        .await
+        .map(|_| ())
 }
