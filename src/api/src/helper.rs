@@ -37,7 +37,7 @@ use datatypes::vectors::{
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, VectorRef,
 };
 use greptime_proto::v1;
-use greptime_proto::v1::column_data_type_extension::Ext;
+use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ddl_request::Expr;
 use greptime_proto::v1::greptime_request::Request;
 use greptime_proto::v1::query_request::Query;
@@ -131,10 +131,10 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
             }
             ColumnDataType::DurationNanosecond => ConcreteDataType::duration_nanosecond_datatype(),
             ColumnDataType::Decimal128 => {
-                if let Some(Ext::DecimalType(d)) = datatype_wrapper
+                if let Some(TypeExt::DecimalType(d)) = datatype_wrapper
                     .datatype_ext
                     .as_ref()
-                    .and_then(|datatype_ext| datatype_ext.ext.as_ref())
+                    .and_then(|datatype_ext| datatype_ext.type_ext.as_ref())
                 {
                     ConcreteDataType::decimal128_datatype(d.precision as u8, d.scale as i8)
                 } else {
@@ -207,7 +207,10 @@ impl ColumnDataTypeWrapper {
         ColumnDataTypeWrapper {
             datatype: ColumnDataType::Decimal128,
             datatype_ext: Some(ColumnDataTypeExtension {
-                ext: Some(Ext::DecimalType(DecimalTypeExtension { precision, scale })),
+                type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension {
+                    precision,
+                    scale,
+                })),
             }),
         }
     }
@@ -268,7 +271,7 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                 datatype
                     .as_decimal128()
                     .map(|decimal_type| ColumnDataTypeExtension {
-                        ext: Some(Ext::DecimalType(DecimalTypeExtension {
+                        type_ext: Some(TypeExt::DecimalType(DecimalTypeExtension {
                             precision: decimal_type.precision() as i32,
                             scale: decimal_type.scale() as i32,
                         })),
@@ -572,8 +575,9 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::DurationNanosecondValue(v) => ValueRef::Duration(Duration::new_nanosecond(*v)),
         ValueData::Decimal128Value(v) => {
             // get precision and scale from datatype_extension
-            if let Some(Ext::DecimalType(d)) =
-                datatype_ext.as_ref().and_then(|ext| ext.ext.as_ref())
+            if let Some(TypeExt::DecimalType(d)) = datatype_ext
+                .as_ref()
+                .and_then(|column_ext| column_ext.type_ext.as_ref())
             {
                 ValueRef::Decimal128(Decimal128::from_pb_decimal128(
                     v.hi,
