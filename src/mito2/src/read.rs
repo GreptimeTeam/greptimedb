@@ -265,7 +265,7 @@ impl Batch {
     /// Removes rows whose op type is delete.
     pub fn filter_deleted(&mut self) -> Result<()> {
         if self.put_only {
-            // If there is only put operation, we can skip comparision and filtering.
+            // If there is only put operation, we can skip comparison and filtering.
             return Ok(());
         }
 
