@@ -51,8 +51,11 @@ impl Display for RegionIdent {
 /// The result of downgrade leader region.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DowngradeRegionReply {
+    /// Returns the `last_entry_id` if available.
     pub last_entry_id: Option<u64>,
-    pub exist: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Return error if any during the operation.
     pub error: Option<String>,
 }
 
@@ -60,8 +63,8 @@ impl Display for DowngradeRegionReply {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(last_entry_id={:?}, exist={}, error={:?})",
-            self.last_entry_id, self.exist, self.error
+            "(last_entry_id={:?}, exists={}, error={:?})",
+            self.last_entry_id, self.exists, self.error
         )
     }
 }

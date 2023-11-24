@@ -122,7 +122,7 @@ impl DowngradeLeaderRegion {
                 let reply = HeartbeatMailbox::json_reply(&msg)?;
                 let InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
-                    exist,
+                    exists,
                     error,
                 }) = reply
                 else {
@@ -143,7 +143,7 @@ impl DowngradeLeaderRegion {
                     .fail();
                 }
 
-                if !exist {
+                if !exists {
                     warn!(
                         "Trying to downgrade the region {} on Datanode {}, but region doesn't exist!",
                         region_id, leader
@@ -239,7 +239,7 @@ mod tests {
             payload: Some(Payload::Json(
                 serde_json::to_string(&InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id,
-                    exist,
+                    exists: exist,
                     error,
                 }))
                 .unwrap(),
