@@ -45,6 +45,7 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
+pub mod region_meta;
 pub mod schema_name;
 pub mod table_info;
 pub mod table_name;
@@ -82,6 +83,7 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
+use crate::key::region_meta::RegionMetaManager;
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
@@ -93,6 +95,7 @@ const NAME_PATTERN: &str = r"[a-zA-Z_:-][a-zA-Z0-9_:\-\.]*";
 
 const DATANODE_TABLE_KEY_PREFIX: &str = "__dn_table";
 const TABLE_REGION_KEY_PREFIX: &str = "__table_region";
+const REGION_META_KEY_PREFIX: &str = "__region_meta";
 
 pub const TABLE_INFO_KEY_PREFIX: &str = "__table_info";
 pub const TABLE_NAME_KEY_PREFIX: &str = "__table_name";
@@ -154,6 +157,7 @@ pub struct TableMetadataManager {
     catalog_manager: CatalogManager,
     schema_manager: SchemaManager,
     table_route_manager: TableRouteManager,
+    region_meta_manager: RegionMetaManager,
     kv_backend: KvBackendRef,
 }
 
@@ -289,6 +293,7 @@ impl TableMetadataManager {
             catalog_manager: CatalogManager::new(kv_backend.clone()),
             schema_manager: SchemaManager::new(kv_backend.clone()),
             table_route_manager: TableRouteManager::new(kv_backend.clone()),
+            region_meta_manager: RegionMetaManager::new(kv_backend.clone()),
             kv_backend,
         }
     }
@@ -327,6 +332,10 @@ impl TableMetadataManager {
 
     pub fn table_route_manager(&self) -> &TableRouteManager {
         &self.table_route_manager
+    }
+
+    pub fn region_meta_manager(&self) -> &RegionMetaManager {
+        &self.region_meta_manager
     }
 
     #[cfg(feature = "testing")]
