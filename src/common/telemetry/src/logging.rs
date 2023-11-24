@@ -54,6 +54,7 @@ impl PartialEq for LoggingOptions {
             && self.tracing_sample_ratio == other.tracing_sample_ratio
     }
 }
+
 impl Eq for LoggingOptions {}
 
 impl Default for LoggingOptions {
@@ -63,7 +64,7 @@ impl Default for LoggingOptions {
             level: None,
             enable_otlp_tracing: false,
             otlp_endpoint: None,
-            tracing_sample_ratio: Some(1.0),
+            tracing_sample_ratio: None,
         }
     }
 }
