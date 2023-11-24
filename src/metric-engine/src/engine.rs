@@ -76,7 +76,7 @@ use crate::metadata_region::MetadataRegion;
 /// they support are different. List below:
 ///
 /// | Operations | Logical Region | Physical Region |
-/// | :--------: | :------------: | :-------------: |
+/// | ---------- | -------------- | --------------- |
 /// |   Create   |       ✅        |        ✅        |
 /// |    Drop    |       ✅        |        ❌        |
 /// |   Write    |       ✅        |        ❌        |

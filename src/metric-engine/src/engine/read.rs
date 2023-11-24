@@ -144,10 +144,6 @@ impl MetricEngineInner {
             .context(MitoReadOperationSnafu)?;
         for logical_proj in origin_projection {
             let column_id = logical_columns[*logical_proj].column_id;
-            // filter out internal columns
-            if ReservedColumnId::is_reserved(column_id) {
-                continue;
-            }
             // Safety: logical columns is a strict subset of physical columns
             physical_projection.push(physical_metadata.column_index_by_id(column_id).unwrap());
         }
