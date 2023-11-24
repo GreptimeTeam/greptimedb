@@ -288,7 +288,7 @@ impl<T: LogicalPrimitiveType> PrimitiveVector<T> {
     }
 
     // To distinguish with `Vector::slice()`.
-    /// Slice the batch, returning a new batch.
+    /// Slice the vector, returning a new vector.
     ///
     /// # Panics
     /// This function panics if `offset + length > self.len()`.
