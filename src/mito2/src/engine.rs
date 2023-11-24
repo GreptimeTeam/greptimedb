@@ -37,7 +37,7 @@ mod projection_test;
 #[cfg(test)]
 mod prune_test;
 #[cfg(test)]
-mod set_readonly_gracefully_test;
+mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
 use std::sync::Arc;
