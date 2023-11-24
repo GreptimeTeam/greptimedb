@@ -27,7 +27,9 @@ use crate::inverted_index::format::reader::footer::InvertedIndeFooterReader;
 use crate::inverted_index::format::reader::{FstMap, InvertedIndexReader};
 use crate::inverted_index::format::MIN_BLOB_SIZE;
 
+/// Inverted index blob reader, implements [`InvertedIndexReader`]
 pub struct InvertedIndexBlobReader<R> {
+    /// The blob
     source: R,
 }
 
@@ -36,14 +38,8 @@ impl<R> InvertedIndexBlobReader<R> {
     pub fn new(source: R) -> Self {
         Self { source }
     }
-}
 
-#[async_trait]
-impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
-    async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
-        let end = SeekFrom::End(0);
-        let blob_size = self.source.seek(end).await.context(SeekSnafu)?;
-
+    fn validate_blob_size(blob_size: u64) -> Result<()> {
         ensure!(
             blob_size >= MIN_BLOB_SIZE,
             UnexpectedBlobSizeSnafu {
@@ -51,10 +47,19 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIn
                 actual_blob_size: blob_size,
             }
         );
+        Ok(())
+    }
+}
 
-        InvertedIndeFooterReader::new(&mut self.source, blob_size)
-            .metadata()
-            .await
+#[async_trait]
+impl<R: AsyncRead + AsyncSeek + Unpin + Send> InvertedIndexReader for InvertedIndexBlobReader<R> {
+    async fn metadata(&mut self) -> Result<InvertedIndexMetas> {
+        let end = SeekFrom::End(0);
+        let blob_size = self.source.seek(end).await.context(SeekSnafu)?;
+        Self::validate_blob_size(blob_size)?;
+
+        let mut footer_reader = InvertedIndeFooterReader::new(&mut self.source, blob_size);
+        footer_reader.metadata().await
     }
 
     async fn fst(&mut self, meta: &InvertedIndexMeta) -> Result<FstMap> {
@@ -115,7 +120,7 @@ mod tests {
         inverted_index.extend_from_slice(&create_fake_fst()); // fst
 
         let meta = InvertedIndexMeta {
-            name: "index0".to_string(),
+            name: "tag0".to_string(),
             base_offset: 0,
             inverted_index_size: inverted_index.len() as _,
             relative_null_bitmap_offset: bitmap_size as _,
@@ -127,7 +132,7 @@ mod tests {
 
         // second index
         let meta1 = InvertedIndexMeta {
-            name: "index1".to_string(),
+            name: "tag1".to_string(),
             base_offset: meta.inverted_index_size,
             inverted_index_size: inverted_index.len() as _,
             relative_null_bitmap_offset: bitmap_size as _,
@@ -167,8 +172,8 @@ mod tests {
         let metas = blob_reader.metadata().await.unwrap();
         assert_eq!(metas.metas.len(), 2);
 
-        let meta0 = metas.metas.get("index0").unwrap();
-        assert_eq!(meta0.name, "index0");
+        let meta0 = metas.metas.get("tag0").unwrap();
+        assert_eq!(meta0.name, "tag0");
         assert_eq!(meta0.base_offset, 0);
         assert_eq!(meta0.inverted_index_size, 54);
         assert_eq!(meta0.relative_null_bitmap_offset, 2);
@@ -176,8 +181,8 @@ mod tests {
         assert_eq!(meta0.relative_fst_offset, 4);
         assert_eq!(meta0.fst_size, 50);
 
-        let meta1 = metas.metas.get("index1").unwrap();
-        assert_eq!(meta1.name, "index1");
+        let meta1 = metas.metas.get("tag1").unwrap();
+        assert_eq!(meta1.name, "tag1");
         assert_eq!(meta1.base_offset, 54);
         assert_eq!(meta1.inverted_index_size, 54);
         assert_eq!(meta1.relative_null_bitmap_offset, 2);
@@ -192,14 +197,14 @@ mod tests {
         let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
 
         let metas = blob_reader.metadata().await.unwrap();
-        let meta = metas.metas.get("index0").unwrap();
+        let meta = metas.metas.get("tag0").unwrap();
 
         let fst_map = blob_reader.fst(meta).await.unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
         assert_eq!(fst_map.get("key2".as_bytes()), Some(2));
 
-        let meta = metas.metas.get("index1").unwrap();
+        let meta = metas.metas.get("tag1").unwrap();
         let fst_map = blob_reader.fst(meta).await.unwrap();
         assert_eq!(fst_map.len(), 2);
         assert_eq!(fst_map.get("key1".as_bytes()), Some(1));
@@ -212,7 +217,7 @@ mod tests {
         let mut blob_reader = InvertedIndexBlobReader::new(Cursor::new(blob));
 
         let metas = blob_reader.metadata().await.unwrap();
-        let meta = metas.metas.get("index0").unwrap();
+        let meta = metas.metas.get("tag0").unwrap();
 
         let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
@@ -220,7 +225,7 @@ mod tests {
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());
 
         let metas = blob_reader.metadata().await.unwrap();
-        let meta = metas.metas.get("index1").unwrap();
+        let meta = metas.metas.get("tag1").unwrap();
 
         let bitmap = blob_reader.bitmap(meta, 0, 2).await.unwrap();
         assert_eq!(bitmap.into_vec(), create_fake_bitmap());

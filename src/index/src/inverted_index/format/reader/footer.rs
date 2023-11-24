@@ -51,15 +51,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
         self.source.read_exact(size_buf).await.context(ReadSnafu)?;
 
         let payload_size = u32::from_le_bytes(*size_buf) as u64;
-
-        let max_payload_size = self.blob_size - FOOTER_PAYLOAD_SIZE_SIZE;
-        ensure!(
-            payload_size <= max_payload_size,
-            UnexpectedFooterPayloadSizeSnafu {
-                max_payload_size,
-                actual_payload_size: payload_size,
-            }
-        );
+        self.validate_payload_size(payload_size)?;
 
         Ok(payload_size)
     }
@@ -76,6 +68,19 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
         self.validate_metas(&metas, payload_size)?;
 
         Ok(metas)
+    }
+
+    fn validate_payload_size(&self, payload_size: u64) -> Result<()> {
+        let max_payload_size = self.blob_size - FOOTER_PAYLOAD_SIZE_SIZE;
+        ensure!(
+            payload_size <= max_payload_size,
+            UnexpectedFooterPayloadSizeSnafu {
+                max_payload_size,
+                actual_payload_size: payload_size,
+            }
+        );
+
+        Ok(())
     }
 
     /// Check if the read metadata is consistent with expected sizes and offsets.
