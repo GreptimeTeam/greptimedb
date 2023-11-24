@@ -309,19 +309,21 @@ impl MetadataRegion {
 
         let mut result = HashMap::new();
         for batch in scan_result {
-            let key = batch
-                .column(0)
-                .get_ref(0)
-                .as_string()
-                .unwrap()
-                .map(|s| s.to_string());
-            let val = batch
-                .column(1)
-                .get_ref(0)
-                .as_string()
-                .unwrap()
-                .map(|s| s.to_string());
-            result.insert(key.unwrap(), val.unwrap_or_default());
+            let key_col = batch.column(0);
+            let val_col = batch.column(1);
+            for row_index in 0..batch.num_rows() {
+                let key = key_col
+                    .get_ref(row_index)
+                    .as_string()
+                    .unwrap()
+                    .map(|s| s.to_string());
+                let val = val_col
+                    .get_ref(row_index)
+                    .as_string()
+                    .unwrap()
+                    .map(|s| s.to_string());
+                result.insert(key.unwrap(), val.unwrap_or_default());
+            }
         }
         Ok(result)
     }

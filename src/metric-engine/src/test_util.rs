@@ -192,7 +192,7 @@ pub fn create_logical_region_request(
             ),
         },
         ColumnMetadata {
-            column_id: 1,
+            column_id: 0,
             semantic_type: SemanticType::Field,
             column_schema: ColumnSchema::new(
                 "greptime_value",
@@ -201,9 +201,9 @@ pub fn create_logical_region_request(
             ),
         },
     ];
-    for (i, tag) in tags.iter().enumerate() {
+    for tag in tags {
         column_metadatas.push(ColumnMetadata {
-            column_id: i as u32,
+            column_id: 0,
             semantic_type: SemanticType::Tag,
             column_schema: ColumnSchema::new(
                 tag.to_string(),

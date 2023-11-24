@@ -72,7 +72,7 @@ impl MetricEngineInner {
             state
                 .get_physical_region_id(logical_region_id)
                 .with_context(|| {
-                    error!("Trying to alter an nonexistent region {logical_region_id}");
+                    error!("Trying to read an nonexistent region {logical_region_id}");
                     LogicalRegionNotFoundSnafu {
                         region_id: logical_region_id,
                     }

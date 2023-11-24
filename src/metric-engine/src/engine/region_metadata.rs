@@ -37,24 +37,23 @@ impl MetricEngineInner {
         let logical_columns = self
             .metadata_region
             .logical_columns(physical_region_id, logical_region_id)
-            .await?;
+            .await?
+            .into_iter()
+            .collect::<HashMap<String, SemanticType>>();
         let physical_columns = self
             .data_region
             .physical_columns(physical_region_id)
             .await?;
-        let logical_column_set = logical_columns
-            .into_iter()
-            .collect::<HashMap<String, SemanticType>>();
         let mut logical_column_metadata = physical_columns
             .into_iter()
             .filter_map(|mut col| {
                 // recover the semantic type of logical columns
-                if logical_column_set.contains_key(&col.column_schema.name) {
-                    col.semantic_type = logical_column_set[&col.column_schema.name];
-                    Some(col)
-                } else {
-                    None
-                }
+                logical_columns
+                    .get(&col.column_schema.name)
+                    .and_then(|semantic_type| {
+                        col.semantic_type = *semantic_type;
+                        Some(col)
+                    })
             })
             .collect::<Vec<_>>();
 
