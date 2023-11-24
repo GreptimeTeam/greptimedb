@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
+pub(crate) mod rollback_downgraded_region;
 pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
@@ -31,6 +32,8 @@ pub enum UpdateMetadata {
     Downgrade,
     /// Upgrade the candidate region.
     Upgrade,
+    /// Rollback the downgraded leader region.
+    Rollback,
 }
 
 #[async_trait::async_trait]
@@ -45,6 +48,12 @@ impl State for UpdateMetadata {
             }
             UpdateMetadata::Upgrade => {
                 self.upgrade_candidate_region(ctx).await?;
+
+                // TODO(weny): invalidate fe cache.
+                Ok(Box::new(RegionMigrationEnd))
+            }
+            UpdateMetadata::Rollback => {
+                self.rollback_downgraded_region(ctx).await?;
 
                 // TODO(weny): invalidate fe cache.
                 Ok(Box::new(RegionMigrationEnd))
