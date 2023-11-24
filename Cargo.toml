@@ -87,7 +87,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2ffdcae9f9816e41f261b24502e6603d68442466" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -194,6 +194,3 @@ strip = true
 lto = "thin"
 debug = false
 incremental = false
-
-[patch."https://github.com/GreptimeTeam/greptime-proto.git"]
-greptime-proto = { git = "https://github.com/zhongzc/greptime-proto.git", branch = "zhongzc/inverted-index-base-offset" }
