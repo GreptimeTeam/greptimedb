@@ -169,9 +169,7 @@ pub struct Instance {
 
 impl Instance {
     pub async fn start(&mut self) -> Result<()> {
-        // Start datanode instance before starting services, to avoid requests come in before internal components are started.
-        self.datanode.start().await.context(StartDatanodeSnafu)?;
-        info!("Datanode instance started");
+        self.datanode.start_telemetry();
 
         self.procedure_manager
             .start()
@@ -325,10 +323,8 @@ impl StartCommand {
         let dn_opts = opts.datanode.clone();
 
         info!("Standalone start command: {:#?}", self);
-        info!(
-            "Standalone frontend options: {:#?}, datanode options: {:#?}",
-            fe_opts, dn_opts
-        );
+
+        info!("Building standalone instance with {opts:#?}");
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
@@ -344,14 +340,12 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = DatanodeBuilder::new(
-            dn_opts.clone(),
-            Some(kv_backend.clone()),
-            Default::default(),
-        )
-        .build()
-        .await
-        .context(StartDatanodeSnafu)?;
+        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
+            .with_kv_backend(kv_backend.clone())
+            .build()
+            .await
+            .context(StartDatanodeSnafu)?;
+
         let region_server = datanode.region_server();
 
         let catalog_manager = KvBackendCatalogManager::new(

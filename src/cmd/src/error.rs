@@ -225,6 +225,13 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
+
+    #[snafu(display("Failed to parse address {}", addr))]
+    ParseAddr {
+        addr: String,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -252,7 +259,9 @@ impl ErrorExt for Error {
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
-            | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidDatabaseName { .. }
+            | Error::ParseAddr { .. } => StatusCode::InvalidArguments,
+
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,

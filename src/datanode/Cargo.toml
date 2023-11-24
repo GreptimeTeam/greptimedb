@@ -17,6 +17,7 @@ axum = "0.6"
 axum-macros = "0.3"
 bytes = "1.1"
 catalog.workspace = true
+client.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true

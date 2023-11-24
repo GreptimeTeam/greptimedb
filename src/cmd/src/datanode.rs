@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_telemetry::logging;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use meta_client::MetaClientOptions;
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{Options, TopLevelOptions};
@@ -177,7 +179,27 @@ impl StartCommand {
         logging::info!("Datanode start command: {:#?}", self);
         logging::info!("Datanode options: {:#?}", opts);
 
-        let datanode = DatanodeBuilder::new(opts, None, plugins)
+        let node_id = opts
+            .node_id
+            .context(MissingConfigSnafu { msg: "'node_id'" })?;
+
+        let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client_options'",
+        })?;
+
+        let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)
+            .await
+            .context(StartDatanodeSnafu)?;
+
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let datanode = DatanodeBuilder::new(opts, plugins)
+            .with_meta_client(meta_client)
+            .with_kv_backend(meta_backend)
+            .enable_region_server_service()
+            .enable_http_service()
             .build()
             .await
             .context(StartDatanodeSnafu)?;

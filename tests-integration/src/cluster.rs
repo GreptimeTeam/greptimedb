@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
+use catalog::kvbackend::MetaKvBackend;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
@@ -220,7 +221,12 @@ impl GreptimeDbClusterBuilder {
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
 
-        let mut datanode = DatanodeBuilder::new(opts, None, Plugins::default())
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
+            .with_kv_backend(meta_backend)
             .with_meta_client(meta_client)
             .build()
             .await
