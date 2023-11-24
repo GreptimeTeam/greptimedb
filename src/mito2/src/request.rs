@@ -268,17 +268,21 @@ impl WriteRequest {
 
     /// Checks whether we should allow a row doesn't provide this column.
     fn check_missing_column(&self, column: &ColumnMetadata) -> Result<()> {
-        // For delete request, all tags and timestamp is required. We don't fill default
-        // tag or timestamp while deleting rows.
-        ensure!(
-            self.op_type != OpType::Delete || column.semantic_type == SemanticType::Field,
-            InvalidRequestSnafu {
-                region_id: self.region_id,
-                reason: format!("delete requests need column {}", column.column_schema.name),
+        if self.op_type == OpType::Delete {
+            if column.semantic_type == SemanticType::Field {
+                // For delete request, all tags and timestamp is required. We don't fill default
+                // tag or timestamp while deleting rows.
+                return Ok(());
+            } else {
+                return InvalidRequestSnafu {
+                    region_id: self.region_id,
+                    reason: format!("delete requests need column {}", column.column_schema.name),
+                }
+                .fail();
             }
-        );
+        }
 
-        // Checks whether they have default value.
+        // Not a delete request. Checks whether they have default value.
         ensure!(
             column.column_schema.is_nullable()
                 || column.column_schema.default_constraint().is_some(),
@@ -964,7 +968,7 @@ mod tests {
         assert_eq!(expect_rows, request.rows);
     }
 
-    fn region_metadata_two_fields() -> RegionMetadata {
+    fn builder_with_ts_tag() -> RegionMetadataBuilder {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -985,6 +989,13 @@ mod tests {
                 semantic_type: SemanticType::Tag,
                 column_id: 2,
             })
+            .primary_key(vec![2]);
+        builder
+    }
+
+    fn region_metadata_two_fields() -> RegionMetadata {
+        let mut builder = builder_with_ts_tag();
+        builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: datatypes::schema::ColumnSchema::new(
                     "f0",
@@ -1007,8 +1018,7 @@ mod tests {
                 .unwrap(),
                 semantic_type: SemanticType::Field,
                 column_id: 4,
-            })
-            .primary_key(vec![2]);
+            });
         builder.build().unwrap()
     }
 
@@ -1041,6 +1051,75 @@ mod tests {
                     SemanticType::Timestamp,
                 ),
             ],
+            rows: vec![Row {
+                values: vec![i64_value(100), ts_ms_value(1)],
+            }],
+        };
+        let mut request = WriteRequest::new(RegionId::new(1, 1), OpType::Delete, rows).unwrap();
+        let err = request.check_schema(&metadata).unwrap_err();
+        assert!(err.is_fill_default());
+        request.fill_missing_columns(&metadata).unwrap();
+
+        let expect_rows = Rows {
+            schema: vec![
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+                new_column_schema("f0", ColumnDataType::Int64, SemanticType::Field),
+                new_column_schema("f1", ColumnDataType::Int64, SemanticType::Field),
+            ],
+            // Column f1 is not nullable and we use 0 for padding.
+            rows: vec![Row {
+                values: vec![
+                    i64_value(100),
+                    ts_ms_value(1),
+                    Value { value_data: None },
+                    i64_value(0),
+                ],
+            }],
+        };
+        assert_eq!(expect_rows, request.rows);
+    }
+
+    #[test]
+    fn test_fill_missing_without_default_in_delete() {
+        let mut builder = builder_with_ts_tag();
+        builder
+            // f0 is nullable.
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "f0",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            // f1 is not nullable and don't has default.
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "f1",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            });
+        let metadata = builder.build().unwrap();
+
+        let rows = Rows {
+            schema: vec![
+                new_column_schema("k0", ColumnDataType::Int64, SemanticType::Tag),
+                new_column_schema(
+                    "ts",
+                    ColumnDataType::TimestampMillisecond,
+                    SemanticType::Timestamp,
+                ),
+            ],
+            // Missing f0 (nullable), f1 (not nullable).
             rows: vec![Row {
                 values: vec![i64_value(100), ts_ms_value(1)],
             }],
