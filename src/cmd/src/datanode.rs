@@ -184,7 +184,7 @@ impl StartCommand {
             .context(MissingConfigSnafu { msg: "'node_id'" })?;
 
         let meta_config = opts.meta_client.as_ref().context(MissingConfigSnafu {
-            msg: "'meta_client'",
+            msg: "'meta_client_options'",
         })?;
 
         let meta_client = datanode::heartbeat::new_metasrv_client(node_id, meta_config)

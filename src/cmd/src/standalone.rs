@@ -324,7 +324,7 @@ impl StartCommand {
 
         info!("Standalone start command: {:#?}", self);
 
-        info!("Building Standalone Instance with {opts:#?}");
+        info!("Building standalone instance with {opts:#?}");
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
