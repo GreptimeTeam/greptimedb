@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -25,8 +27,9 @@ use store_api::region_request::RegionPutRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::consts::{
-    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
-    METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
+    METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
+    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+    METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use crate::error::{
     CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu,
@@ -129,6 +132,31 @@ impl MetadataRegion {
             .map(|s| Self::deserialize_semantic_type(&s))
             .transpose()
     }
+
+    // TODO(ruihang): avoid using `get_all`
+    /// Get all the columns of a given logical region.
+    /// Return a list of (column_name, semantic_type).
+    pub async fn logical_columns(
+        &self,
+        physical_region_id: RegionId,
+        logical_region_id: RegionId,
+    ) -> Result<Vec<(String, SemanticType)>> {
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let region_column_prefix = Self::concat_column_key_prefix(logical_region_id);
+
+        let mut columns = vec![];
+        for (k, v) in self.get_all(metadata_region_id).await? {
+            if !k.starts_with(&region_column_prefix) {
+                continue;
+            }
+            // Safety: we have checked the prefix
+            let (_, column_name) = Self::parse_column_key(&k)?.unwrap();
+            let semantic_type = Self::deserialize_semantic_type(&v)?;
+            columns.push((column_name, semantic_type));
+        }
+
+        Ok(columns)
+    }
 }
 
 // utils to concat and parse key/value
@@ -141,6 +169,11 @@ impl MetadataRegion {
     pub fn concat_column_key(region_id: RegionId, column_name: &str) -> String {
         let encoded_column_name = STANDARD_NO_PAD.encode(column_name);
         format!("__column_{}_{}", region_id.as_u64(), encoded_column_name)
+    }
+
+    /// Concat a column key prefix without column name
+    pub fn concat_column_key_prefix(region_id: RegionId) -> String {
+        format!("__column_{}_", region_id.as_u64())
     }
 
     #[allow(dead_code)]
@@ -252,6 +285,47 @@ impl MetadataRegion {
             .map(|s| s.to_string());
 
         Ok(val)
+    }
+
+    /// Load all metadata from a given region.
+    pub async fn get_all(&self, region_id: RegionId) -> Result<HashMap<String, String>> {
+        let scan_req = ScanRequest {
+            projection: Some(vec![
+                METADATA_SCHEMA_KEY_COLUMN_INDEX,
+                METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+            ]),
+            filters: vec![],
+            output_ordering: None,
+            limit: None,
+        };
+        let record_batch_stream = self
+            .mito
+            .handle_query(region_id, scan_req)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let scan_result = collect(record_batch_stream)
+            .await
+            .context(CollectRecordBatchStreamSnafu)?;
+
+        let mut result = HashMap::new();
+        for batch in scan_result {
+            let key_col = batch.column(0);
+            let val_col = batch.column(1);
+            for row_index in 0..batch.num_rows() {
+                let key = key_col
+                    .get_ref(row_index)
+                    .as_string()
+                    .unwrap()
+                    .map(|s| s.to_string());
+                let val = val_col
+                    .get_ref(row_index)
+                    .as_string()
+                    .unwrap()
+                    .map(|s| s.to_string());
+                result.insert(key.unwrap(), val.unwrap_or_default());
+            }
+        }
+        Ok(result)
     }
 
     /// Builds a [ScanRequest] to read metadata for a given key.

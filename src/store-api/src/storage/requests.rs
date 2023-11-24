@@ -48,7 +48,8 @@ pub trait WriteRequest: Send {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
-    /// Indices of columns to read, `None` to read all columns.
+    /// Indices of columns to read, `None` to read all columns. This indices is
+    /// based on table schema.
     pub projection: Option<Vec<usize>>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
