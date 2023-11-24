@@ -953,6 +953,7 @@ mod tests {
                     .unwrap()
                     .datatype() as i32,
                 semantic_type: c.semantic_type as i32,
+                ..Default::default()
             })
             .collect();
 

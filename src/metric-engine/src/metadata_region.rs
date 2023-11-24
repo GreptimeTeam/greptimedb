@@ -349,16 +349,19 @@ impl MetadataRegion {
                 column_name: METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::TimestampMillisecond as _,
                 semantic_type: SemanticType::Timestamp as _,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String as _,
                 semantic_type: SemanticType::Tag as _,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String as _,
                 semantic_type: SemanticType::Field as _,
+                ..Default::default()
             },
         ];
         let rows = Rows {

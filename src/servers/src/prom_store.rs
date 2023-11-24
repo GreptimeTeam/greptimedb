@@ -577,6 +577,7 @@ mod tests {
                 column_name: k.to_string(),
                 datatype: t as i32,
                 semantic_type: s as i32,
+                ..Default::default()
             })
             .collect()
     }

@@ -215,6 +215,7 @@ fn write_by_semantic_type(
                 column_name: name.to_string(),
                 datatype: datatype as i32,
                 semantic_type: semantic_type as i32,
+                ..Default::default()
             });
             one_row.push(value.into());
         } else {
@@ -269,6 +270,7 @@ pub fn write_ts_precision(
             column_name: name,
             datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
         });
         one_row.push(ValueData::TimestampMillisecondValue(ts).into())
     } else {

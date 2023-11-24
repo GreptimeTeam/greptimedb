@@ -117,7 +117,11 @@ impl<'a> SplitReadRowHelper<'a> {
                 .iter()
                 .map(|idx| {
                     idx.as_ref().map_or(Value::Null, |idx| {
-                        helper::pb_value_to_value_ref(&row.values[*idx]).into()
+                        helper::pb_value_to_value_ref(
+                            &row.values[*idx],
+                            &self.schema[*idx].datatype_extension,
+                        )
+                        .into()
                     })
                 })
                 .collect()
@@ -144,16 +148,19 @@ mod tests {
                 column_name: "id".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "name".to_string(),
                 datatype: ColumnDataType::String as i32,
                 semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
             },
             ColumnSchema {
                 column_name: "age".to_string(),
                 datatype: ColumnDataType::Uint32 as i32,
                 semantic_type: SemanticType::Field as i32,
+                ..Default::default()
             },
         ];
         let rows = vec![

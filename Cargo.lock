@@ -199,6 +199,7 @@ name = "api"
 version = "0.4.3"
 dependencies = [
  "common-base",
+ "common-decimal",
  "common-error",
  "common-macro",
  "common-time",
@@ -3536,7 +3537,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=25429306d0379ad29211a062a81da2554a0208ab#25429306d0379ad29211a062a81da2554a0208ab"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a11efce55d8ce20257e08842e4f4c1c8fce2b3a8#a11efce55d8ce20257e08842e4f4c1c8fce2b3a8"
 dependencies = [
  "prost 0.12.2",
  "serde",

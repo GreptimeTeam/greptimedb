@@ -20,7 +20,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{Column, ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
 use common_base::BitVec;
-use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::VectorRef;
 use snafu::prelude::*;
 use snafu::ResultExt;
@@ -46,6 +45,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
             column_name: column.column_name.clone(),
             datatype: column.datatype,
             semantic_type: column.semantic_type,
+            datatype_extension: column.datatype_extension.clone(),
         };
         schema.push(column_schema);
 
@@ -57,7 +57,7 @@ pub fn columns_to_rows(columns: Vec<Column>, row_count: u32) -> Result<Rows> {
 
 fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
     let null_mask = BitVec::from_vec(column.null_mask);
-    let column_type = ColumnDataTypeWrapper::try_new(column.datatype)
+    let column_type = ColumnDataTypeWrapper::try_new(column.datatype, column.datatype_extension)
         .context(ColumnDataTypeSnafu)?
         .datatype();
     let column_values = column.values.unwrap_or_default();
@@ -177,6 +177,7 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
             DurationNanosecondValue,
             duration_nanosecond_values
         ),
+        (Decimal128, Decimal128Value, decimal128_values),
     );
 
     Ok(())
@@ -206,10 +207,16 @@ pub fn column_schema(
     columns
         .iter()
         .map(|(column_name, vector)| {
+            let (datatype, datatype_extension) =
+                ColumnDataTypeWrapper::try_from(vector.data_type().clone())
+                    .context(ColumnDataTypeSnafu)?
+                    .to_parts();
+
             Ok(ColumnSchema {
                 column_name: column_name.clone(),
-                datatype: data_type(vector.data_type())?.into(),
+                datatype: datatype as i32,
                 semantic_type: semantic_type(table_info, column_name)?.into(),
+                datatype_extension,
             })
         })
         .collect::<Result<Vec<_>>>()
@@ -245,11 +252,6 @@ fn semantic_type(table_info: &TableInfo, column: &str) -> Result<SemanticType> {
     Ok(semantic_type)
 }
 
-fn data_type(data_type: ConcreteDataType) -> Result<ColumnDataType> {
-    let datatype: ColumnDataTypeWrapper = data_type.try_into().context(ColumnDataTypeSnafu)?;
-    Ok(datatype.datatype())
-}
-
 #[cfg(test)]
 mod tests {
     use api::v1::column::Values;
@@ -270,6 +272,7 @@ mod tests {
                     i32_values: vec![42],
                     ..Default::default()
                 }),
+                ..Default::default()
             },
             Column {
                 column_name: String::from("col2"),
@@ -284,6 +287,7 @@ mod tests {
                     ],
                     ..Default::default()
                 }),
+                ..Default::default()
             },
         ];
         let row_count = 3;
@@ -335,6 +339,7 @@ mod tests {
                 i8_values: vec![42],
                 ..Default::default()
             }),
+            ..Default::default()
         }];
         let row_count = 3;
         assert!(columns_to_rows(columns, row_count).is_err());
@@ -349,6 +354,7 @@ mod tests {
                 i32_values: vec![42],
                 ..Default::default()
             }),
+            ..Default::default()
         }];
         let row_count = 3;
         assert!(columns_to_rows(columns, row_count).is_err());
@@ -363,6 +369,7 @@ mod tests {
                 i32_values: vec![42],
                 ..Default::default()
             }),
+            ..Default::default()
         }];
         let row_count = 3;
         assert!(columns_to_rows(columns, row_count).is_err());

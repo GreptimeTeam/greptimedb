@@ -14,9 +14,8 @@
 
 //! Utilities for testing.
 
-use api::helper::to_column_data_type;
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
@@ -233,26 +232,23 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
     let mut schema = vec![
         PbColumnSchema {
             column_name: "greptime_timestamp".to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::timestamp_millisecond_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
+            datatype_extension: None,
         },
         PbColumnSchema {
             column_name: "greptime_value".to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::float64_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
+            datatype_extension: None,
         },
     ];
     for tag in tags {
         schema.push(PbColumnSchema {
             column_name: tag.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::string_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::String as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
     }
     schema

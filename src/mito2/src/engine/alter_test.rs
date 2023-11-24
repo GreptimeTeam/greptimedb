@@ -220,6 +220,7 @@ async fn test_put_after_alter() {
         column_name: "tag_1".to_string(),
         datatype: ColumnDataType::String as i32,
         semantic_type: SemanticType::Tag as i32,
+        ..Default::default()
     });
     // Put with new schema.
     let rows = Rows {

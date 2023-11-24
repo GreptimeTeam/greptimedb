@@ -96,9 +96,24 @@ impl Decimal128 {
         self.scale
     }
 
-    /// Convert to ScalarValue
+    /// Convert to ScalarValue(value,precision,scale)
     pub fn to_scalar_value(&self) -> (Option<i128>, u8, i8) {
         (Some(self.value), self.precision, self.scale)
+    }
+
+    /// split the self.value(i128) to (high-64 bit, low-64 bit), and
+    /// the precision, scale information is discarded.
+    ///
+    /// Return: (high-64 bit, low-64 bit)
+    pub fn split_value(&self) -> (i64, i64) {
+        ((self.value >> 64) as i64, self.value as i64)
+    }
+
+    /// Convert from precision, scale, a i128 value which
+    /// represents by two i64 value(high-64 bit, low-64 bit).
+    pub fn from_value_precision_scale(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
+        let value = (hi as i128) << 64 | lo as i128;
+        Self::new(value, precision, scale)
     }
 }
 
