@@ -45,6 +45,7 @@
 
 pub mod catalog_name;
 pub mod datanode_table;
+#[allow(dead_code)]
 pub mod region_meta;
 pub mod schema_name;
 pub mod table_info;
@@ -83,7 +84,7 @@ use self::schema_name::{SchemaManager, SchemaNameKey, SchemaNameValue};
 use self::table_route::{TableRouteManager, TableRouteValue};
 use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
-use crate::key::region_meta::RegionMetaManager;
+use crate::key::region_meta::{RegionMetaManager, RegionMetaValue};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
@@ -740,7 +741,8 @@ impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
     DatanodeTableValue,
-    TableRouteValue
+    TableRouteValue,
+    RegionMetaValue
 }
 
 impl_optional_meta_value! {
