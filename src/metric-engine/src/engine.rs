@@ -115,7 +115,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> std::result::Result<Output, BoxedError> {
+    ) -> Result<Output, BoxedError> {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),
@@ -145,7 +145,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.inner
             .read_region(region_id, request)
             .await
@@ -153,10 +153,7 @@ impl RegionEngine for MetricEngine {
     }
 
     /// Retrieves region's metadata.
-    async fn get_metadata(
-        &self,
-        region_id: RegionId,
-    ) -> std::result::Result<RegionMetadataRef, BoxedError> {
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
         todo!()
     }
 
@@ -166,15 +163,11 @@ impl RegionEngine for MetricEngine {
     }
 
     /// Stops the engine
-    async fn stop(&self) -> std::result::Result<(), BoxedError> {
+    async fn stop(&self) -> Result<(), BoxedError> {
         todo!()
     }
 
-    fn set_writable(
-        &self,
-        region_id: RegionId,
-        writable: bool,
-    ) -> std::result::Result<(), BoxedError> {
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         todo!()
     }
 

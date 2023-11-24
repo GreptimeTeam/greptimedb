@@ -50,9 +50,9 @@ impl MetricEngineInner {
                 // recover the semantic type of logical columns
                 logical_columns
                     .get(&col.column_schema.name)
-                    .and_then(|semantic_type| {
+                    .map(|semantic_type| {
                         col.semantic_type = *semantic_type;
-                        Some(col)
+                        col
                     })
             })
             .collect::<Vec<_>>();
