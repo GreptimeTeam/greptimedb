@@ -304,7 +304,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(to_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
         // Sends an incorrect reply.
@@ -337,7 +337,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(to_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
         // Sends an timeout error.
@@ -372,7 +372,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(to_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
@@ -424,7 +424,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(to_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| Ok(new_open_region_reply(id, true, None)));

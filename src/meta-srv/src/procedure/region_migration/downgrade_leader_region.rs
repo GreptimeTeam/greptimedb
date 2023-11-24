@@ -277,7 +277,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         drop(rx);
@@ -306,7 +306,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         // Sends an incorrect reply.
@@ -336,7 +336,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
@@ -367,7 +367,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
@@ -404,7 +404,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         common_runtime::spawn_bg(async move {
@@ -453,7 +453,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         common_runtime::spawn_bg(async move {
@@ -496,7 +496,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
