@@ -32,6 +32,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
@@ -472,6 +473,14 @@ pub(crate) enum WorkerRequest {
         notify: BackgroundNotify,
     },
 
+    /// The internal commands.
+    SetReadonlyGracefully {
+        /// Id of the region to send.
+        region_id: RegionId,
+        /// The sender of [SetReadonlyResponse].
+        sender: Sender<SetReadonlyResponse>,
+    },
+
     /// Notify a worker to stop.
     Stop,
 }
@@ -541,6 +550,17 @@ impl WorkerRequest {
         };
 
         Ok((worker_request, receiver))
+    }
+
+    pub(crate) fn new_set_readonly_gracefully(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<SetReadonlyResponse>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::SetReadonlyGracefully { region_id, sender },
+            receiver,
+        )
     }
 }
 

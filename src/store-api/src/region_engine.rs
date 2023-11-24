@@ -23,9 +23,27 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use serde::{Deserialize, Serialize};
 
+use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::RegionRequest;
 use crate::storage::{RegionId, ScanRequest};
+
+/// The result of setting readonly for the region.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SetReadonlyResponse {
+    Success {
+        /// Returns `last_entry_id` of the region if available(e.g., It's not available in file engine).
+        last_entry_id: Option<entry::Id>,
+    },
+    NotFound,
+}
+
+impl SetReadonlyResponse {
+    /// Returns a [SetReadonlyResponse::Success] with the `last_entry_id`.
+    pub fn success(last_entry_id: Option<entry::Id>) -> Self {
+        Self::Success { last_entry_id }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GrantedRegion {
@@ -127,6 +145,14 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError>;
+
+    /// Sets readonly for a region gracefully.
+    ///
+    /// After the call returns, the engine ensures no more write operations will succeed in the region.
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResponse, BoxedError>;
 
     /// Indicates region role.
     ///

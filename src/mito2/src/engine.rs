@@ -37,8 +37,9 @@ mod projection_test;
 #[cfg(test)]
 mod prune_test;
 #[cfg(test)]
+mod set_readonly_test;
+#[cfg(test)]
 mod truncate_test;
-
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -49,7 +50,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -188,6 +189,16 @@ impl EngineInner {
         Ok(())
     }
 
+    /// Sets read-only for a region and ensures no more writes in the region after it returns.
+    async fn set_readonly_gracefully(&self, region_id: RegionId) -> Result<SetReadonlyResponse> {
+        // Notes: It acquires the mutable ownership to ensure no other threads,
+        // Therefore, we submit it to the worker.
+        let (request, receiver) = WorkerRequest::new_set_readonly_gracefully(region_id);
+        self.workers.submit_to_worker(region_id, request).await?;
+
+        receiver.await.context(RecvSnafu)
+    }
+
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.workers.get_region(region_id).map(|region| {
             if region.is_writable() {
@@ -258,6 +269,16 @@ impl RegionEngine for MitoEngine {
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         self.inner
             .set_writable(region_id, writable)
+            .map_err(BoxedError::new)
+    }
+
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResponse, BoxedError> {
+        self.inner
+            .set_readonly_gracefully(region_id)
+            .await
             .map_err(BoxedError::new)
     }
 
