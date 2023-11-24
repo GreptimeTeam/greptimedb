@@ -107,7 +107,7 @@ impl Datanode for RegionInvoker {
     }
 }
 
-pub struct StandaloneTableMetadataCreator {
+pub(crate) struct StandaloneTableMetadataCreator {
     table_id_sequence: SequenceRef,
 }
 

@@ -92,7 +92,7 @@ impl RegionServer {
         query_engine: QueryEngineRef,
         runtime: Arc<Runtime>,
         event_listener: RegionServerEventListenerRef,
-        table_provider_factory: Arc<dyn TableProviderFactory>,
+        table_provider_factory: TableProviderFactoryRef,
     ) -> Self {
         Self {
             inner: Arc::new(RegionServerInner::new(
@@ -248,7 +248,7 @@ struct RegionServerInner {
     query_engine: QueryEngineRef,
     runtime: Arc<Runtime>,
     event_listener: RegionServerEventListenerRef,
-    table_provider_factory: Arc<dyn TableProviderFactory>,
+    table_provider_factory: TableProviderFactoryRef,
 }
 
 impl RegionServerInner {
@@ -256,7 +256,7 @@ impl RegionServerInner {
         query_engine: QueryEngineRef,
         runtime: Arc<Runtime>,
         event_listener: RegionServerEventListenerRef,
-        table_provider_factory: Arc<dyn TableProviderFactory>,
+        table_provider_factory: TableProviderFactoryRef,
     ) -> Self {
         Self {
             engines: RwLock::new(HashMap::new()),
@@ -599,3 +599,5 @@ pub trait TableProviderFactory: Send + Sync {
         engine: RegionEngineRef,
     ) -> Result<Arc<dyn TableProvider>>;
 }
+
+pub type TableProviderFactoryRef = Arc<dyn TableProviderFactory>;

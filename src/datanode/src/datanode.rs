@@ -236,7 +236,7 @@ impl DatanodeBuilder {
         self.initialize_region_server(&region_server, kv_backend, !controlled_by_metasrv)
             .await?;
 
-        let heartbeat_task = if controlled_by_metasrv {
+        let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
         } else {
             None
