@@ -18,6 +18,7 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 
+use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
 use super::migration_end::RegionMigrationEnd;
@@ -49,13 +50,17 @@ impl State for UpdateMetadata {
             UpdateMetadata::Upgrade => {
                 self.upgrade_candidate_region(ctx).await?;
 
-                // TODO(weny): invalidate fe cache.
+                if let Err(err) = ctx.invalidate_table_cache().await {
+                    warn!("Failed to broadcast the invalidate table cache message during the upgrade candidate, error: {err:?}");
+                };
                 Ok(Box::new(RegionMigrationEnd))
             }
             UpdateMetadata::Rollback => {
                 self.rollback_downgraded_region(ctx).await?;
 
-                // TODO(weny): invalidate fe cache.
+                if let Err(err) = ctx.invalidate_table_cache().await {
+                    warn!("Failed to broadcast the invalidate table cache message during the rollback, error: {err:?}");
+                };
                 Ok(Box::new(RegionMigrationEnd))
             }
         }

@@ -23,6 +23,8 @@ pub(crate) mod update_metadata;
 use std::any::Any;
 use std::fmt::Debug;
 
+use api::v1::meta::MailboxMessage;
+use common_meta::instruction::Instruction;
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
@@ -40,7 +42,7 @@ use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Error, Result};
 use crate::procedure::utils::region_lock_key;
 use crate::region::lease_keeper::{OpeningRegionGuard, OpeningRegionKeeperRef};
-use crate::service::mailbox::MailboxRef;
+use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 
 /// It's shared in each step and available even after recovering.
 ///
@@ -209,6 +211,27 @@ impl Context {
     pub fn region_id(&self) -> RegionId {
         self.persistent_ctx.region_id
     }
+
+    /// Broadcasts the invalidate table cache message.
+    pub async fn invalidate_table_cache(&self) -> Result<()> {
+        let table_id = self.region_id().table_id();
+        let instruction = Instruction::InvalidateTableIdCache(table_id);
+
+        let msg = &MailboxMessage::json_message(
+            "Invalidate Table Cache",
+            &format!("Metasrv@{}", self.server_addr()),
+            "Frontend broadcast",
+            common_time::util::current_time_millis(),
+            &instruction,
+        )
+        .with_context(|_| error::SerializeToJsonSnafu {
+            input: instruction.to_string(),
+        })?;
+
+        self.mailbox
+            .broadcast(&BroadcastChannel::Frontend, msg)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -320,7 +343,9 @@ mod tests {
 
     use super::migration_end::RegionMigrationEnd;
     use super::*;
+    use crate::handler::HeartbeatMailbox;
     use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
         PersistentContext {
@@ -419,5 +444,30 @@ mod tests {
         }
         assert_eq!(procedure.context.persistent_ctx.cluster_id, 2);
         assert_matches!(status.unwrap(), Status::Done);
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_invalidate_table_cache() {
+        let mut env = TestingEnv::new();
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+
+        // No receivers.
+        ctx.invalidate_table_cache().await.unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Frontend(1), tx)
+            .await;
+
+        ctx.invalidate_table_cache().await.unwrap();
+
+        let resp = rx.recv().await.unwrap().unwrap();
+        let msg = resp.mailbox_message.unwrap();
+
+        let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
+        assert_matches!(instruction, Instruction::InvalidateTableIdCache(1024));
     }
 }
