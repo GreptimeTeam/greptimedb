@@ -331,7 +331,7 @@ pub enum Error {
     #[snafu(display(
         "Unexpected number of region topics, num_region_topics: {}, num_region_routes: {}",
         num_region_topics,
-        num_region_routes
+        num_region_routes,
     ))]
     UnexpectedNumRegionTopics {
         num_region_topics: usize,

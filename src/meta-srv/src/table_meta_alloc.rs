@@ -73,10 +73,10 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         .map_err(BoxedError::new)
         .context(meta_error::ExternalSnafu)?;
 
-        // Each region gets assigned one topic.
         let region_topics = match self.wal_meta_allocator.wal_provider() {
             WalProvider::RaftEngine => vec![],
             WalProvider::Kafka => {
+                // Each region gets assigned one topic.
                 self.wal_meta_allocator
                     .try_alloc_topics(region_routes.len())
                     .await?
