@@ -381,7 +381,7 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
     // convert ConcreteDataType to grpc ColumnDataTypeWrapper
     let (datatype, datatype_ext) = ColumnDataTypeWrapper::try_from(data_type.clone())
         .context(ConvertToGrpcDataTypeSnafu)?
-        .datatype();
+        .to_parts();
 
     Ok(api::v1::ColumnDef {
         name,

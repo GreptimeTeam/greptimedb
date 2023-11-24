@@ -101,16 +101,17 @@ impl Decimal128 {
         (Some(self.value), self.precision, self.scale)
     }
 
-    /// Convert to PbDecimal128, the PbDecimal128 is represented as (high-64 bit, low-64 bit),
-    /// and the precision and scale is not stored in PbDecimal128.
+    /// split the self.value(i128) to (high-64 bit, low-64 bit), and
+    /// the precision, scale information is discarded.
     ///
-    /// Return (high-64 bit, low-64 bit)
-    pub fn to_pb_decimal128(&self) -> (i64, i64) {
+    /// Return: (high-64 bit, low-64 bit)
+    pub fn split_value(&self) -> (i64, i64) {
         ((self.value >> 64) as i64, self.value as i64)
     }
 
-    /// Convert from PbDecimal128
-    pub fn from_pb_decimal128(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
+    /// Convert from precision, scale, a i128 value which
+    /// represents by two i64 value(high-64 bit, low-64 bit).
+    pub fn from_value_precision_scale(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
         let value = (hi as i128) << 64 | lo as i128;
         Self::new(value, precision, scale)
     }

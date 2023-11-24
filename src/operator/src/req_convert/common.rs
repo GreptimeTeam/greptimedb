@@ -59,8 +59,7 @@ fn push_column_to_rows(column: Column, rows: &mut [Row]) -> Result<()> {
     let null_mask = BitVec::from_vec(column.null_mask);
     let column_type = ColumnDataTypeWrapper::try_new(column.datatype, column.datatype_extension)
         .context(ColumnDataTypeSnafu)?
-        .datatype()
-        .0;
+        .datatype();
     let column_values = column.values.unwrap_or_default();
 
     macro_rules! push_column_values_match_types {
@@ -211,7 +210,7 @@ pub fn column_schema(
             let (datatype, datatype_extension) =
                 ColumnDataTypeWrapper::try_from(vector.data_type().clone())
                     .context(ColumnDataTypeSnafu)?
-                    .datatype();
+                    .to_parts();
 
             Ok(ColumnSchema {
                 column_name: column_name.clone(),

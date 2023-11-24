@@ -533,7 +533,7 @@ pub(crate) fn column_metadata_to_column_schema(metadata: &ColumnMetadata) -> api
     let (datatype, datatype_extension) =
         ColumnDataTypeWrapper::try_from(metadata.column_schema.data_type.clone())
             .unwrap()
-            .datatype();
+            .to_parts();
     api::v1::ColumnSchema {
         column_name: metadata.column_schema.name.clone(),
         datatype: datatype as i32,

@@ -316,7 +316,7 @@ pub fn column_schemas_to_defs(
         .iter()
         .map(|c| {
             ColumnDataTypeWrapper::try_from(c.data_type.clone())
-                .map(|w| w.datatype())
+                .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)
         })
         .collect::<Result<Vec<_>>>()?;

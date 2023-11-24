@@ -98,7 +98,7 @@ impl<'a> StatementToRegion<'a> {
             let (datatype, datatype_extension) =
                 ColumnDataTypeWrapper::try_from(column_schema.data_type.clone())
                     .context(ColumnDataTypeSnafu)?
-                    .datatype();
+                    .to_parts();
             let semantic_type = semantic_type(&table_info, column_name)?;
 
             let grpc_column_schema = GrpcColumnSchema {

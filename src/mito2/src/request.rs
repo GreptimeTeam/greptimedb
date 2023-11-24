@@ -254,13 +254,13 @@ impl WriteRequest {
         // Insert column schema.
         let (datatype, datatype_ext) =
             ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone())
-                .context(ConvertColumnDataTypeSnafu {
+                .with_context(|_| ConvertColumnDataTypeSnafu {
                     reason: format!(
                         "no protobuf type for column {} ({:?})",
                         column.column_schema.name, column.column_schema.data_type
                     ),
                 })?
-                .datatype();
+                .to_parts();
         self.rows.schema.push(ColumnSchema {
             column_name: column.column_schema.name.clone(),
             datatype: datatype as i32,

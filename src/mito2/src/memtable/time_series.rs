@@ -951,7 +951,7 @@ mod tests {
                 column_name: c.column_schema.name.clone(),
                 datatype: ColumnDataTypeWrapper::try_from(c.column_schema.data_type.clone())
                     .unwrap()
-                    .datatype()
+                    .to_parts()
                     .0 as i32,
                 semantic_type: c.semantic_type as i32,
                 ..Default::default()

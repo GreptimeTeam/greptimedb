@@ -33,13 +33,13 @@ pub struct Decimal128Type {
 
 impl Decimal128Type {
     pub fn new(precision: u8, scale: i8) -> Self {
-        // debug assert precision and scale is valid
-        debug_assert!(
+        // assert precision and scale is valid
+        assert!(
             precision > 0 && precision <= DECIMAL128_MAX_PRECISION,
             "precision should be in [1, {}]",
             DECIMAL128_MAX_PRECISION
         );
-        debug_assert!(
+        assert!(
             scale >= 0 && scale <= precision as i8,
             "scale should be in [0, precision]"
         );

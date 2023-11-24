@@ -79,8 +79,13 @@ impl ColumnDataTypeWrapper {
         }
     }
 
+    /// Get the ColumnDataType.
+    pub fn datatype(&self) -> ColumnDataType {
+        self.datatype
+    }
+
     /// Get a tuple of ColumnDataType and ColumnDataTypeExtension.
-    pub fn datatype(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
+    pub fn to_parts(&self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
         (self.datatype, self.datatype_ext.clone())
     }
 }
@@ -145,6 +150,12 @@ impl From<ColumnDataTypeWrapper> for ConcreteDataType {
     }
 }
 
+/// This macro is used to generate datatype functions
+/// with lower style for ColumnDataTypeWrapper.
+///
+///
+/// For example: we can use `ColumnDataTypeWrapper::int8_datatype()`,
+/// to get a ColumnDataTypeWrapper with datatype `ColumnDataType::Int8`.
 macro_rules! impl_column_type_functions {
     ($($Type: ident), +) => {
         paste! {
@@ -162,6 +173,12 @@ macro_rules! impl_column_type_functions {
     }
 }
 
+/// This macro is used to generate datatype functions
+/// with snake style for ColumnDataTypeWrapper.
+///
+///
+/// For example: we can use `ColumnDataTypeWrapper::duration_second_datatype()`,
+/// to get a ColumnDataTypeWrapper with datatype `ColumnDataType::DurationSecond`.
 macro_rules! impl_column_type_functions_with_snake {
     ($($TypeName: ident), +) => {
         paste!{
@@ -579,7 +596,7 @@ pub fn pb_value_to_value_ref<'a>(
                 .as_ref()
                 .and_then(|column_ext| column_ext.type_ext.as_ref())
             {
-                ValueRef::Decimal128(Decimal128::from_pb_decimal128(
+                ValueRef::Decimal128(Decimal128::from_value_precision_scale(
                     v.hi,
                     v.lo,
                     d.precision as u8,
@@ -587,7 +604,7 @@ pub fn pb_value_to_value_ref<'a>(
                 ))
             } else {
                 // If the precision and scale are not set, use the default value.
-                ValueRef::Decimal128(Decimal128::from_pb_decimal128(
+                ValueRef::Decimal128(Decimal128::from_value_precision_scale(
                     v.hi,
                     v.lo,
                     DECIMAL128_MAX_PRECISION,
@@ -683,7 +700,7 @@ pub fn pb_values_to_vector_ref(data_type: &ConcreteDataType, values: Values) -> 
         },
         ConcreteDataType::Decimal128(d) => Arc::new(Decimal128Vector::from_values(
             values.decimal128_values.iter().map(|x| {
-                Decimal128::from_pb_decimal128(x.hi, x.lo, d.precision(), d.scale()).into()
+                Decimal128::from_value_precision_scale(x.hi, x.lo, d.precision(), d.scale()).into()
             }),
         )),
         ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => {
@@ -860,7 +877,7 @@ pub fn pb_values_to_values(data_type: &ConcreteDataType, values: Values) -> Vec<
             .decimal128_values
             .into_iter()
             .map(|v| {
-                Value::Decimal128(Decimal128::from_pb_decimal128(
+                Value::Decimal128(Decimal128::from_value_precision_scale(
                     v.hi,
                     v.lo,
                     d.precision(),
@@ -885,11 +902,9 @@ pub fn is_column_type_value_eq(
     type_extension: Option<ColumnDataTypeExtension>,
     expect_type: &ConcreteDataType,
 ) -> bool {
-    let Ok(column_type_wrapper) = ColumnDataTypeWrapper::try_new(type_value, type_extension) else {
-        return false;
-    };
-
-    is_column_type_eq(column_type_wrapper, expect_type)
+    ColumnDataTypeWrapper::try_new(type_value, type_extension)
+        .map(|wrapper| ConcreteDataType::from(wrapper) == *expect_type)
+        .unwrap_or(false)
 }
 
 /// Convert value into proto's value.
@@ -997,7 +1012,7 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
             },
         },
         Value::Decimal128(v) => {
-            let (hi, lo) = v.to_pb_decimal128();
+            let (hi, lo) = v.split_value();
             v1::Value {
                 value_data: Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo })),
             }
@@ -1107,20 +1122,11 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Nanosecond => ValueData::DurationNanosecondValue(v.value()),
             }),
             Value::Decimal128(v) => {
-                let (hi, lo) = v.to_pb_decimal128();
+                let (hi, lo) = v.split_value();
                 Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo }))
             }
             Value::List(_) => unreachable!(),
         },
-    }
-}
-
-/// Returns true if the column type is equal to expected type.
-fn is_column_type_eq(column_type: ColumnDataTypeWrapper, expect_type: &ConcreteDataType) -> bool {
-    if let Ok(expect) = ColumnDataTypeWrapper::try_from(expect_type.clone()) {
-        column_type == expect
-    } else {
-        false
     }
 }
 
@@ -2035,5 +2041,13 @@ mod tests {
             column1.datatype_extension,
             &ConcreteDataType::boolean_datatype(),
         ));
+    }
+
+    #[test]
+    fn test_convert_to_pb_decimal128() {
+        let decimal = Decimal128::new(123, 3, 1);
+        let pb_decimal = convert_to_pb_decimal128(decimal);
+        assert_eq!(pb_decimal.lo, 123);
+        assert_eq!(pb_decimal.hi, 0);
     }
 }
