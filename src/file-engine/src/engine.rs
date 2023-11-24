@@ -107,9 +107,9 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
     ) -> Result<SetReadonlyResponse, BoxedError> {
-        let exist = self.inner.get_region(region_id).await.is_some();
+        let exists = self.inner.get_region(region_id).await.is_some();
 
-        if exist {
+        if exists {
             Ok(SetReadonlyResponse::success(None))
         } else {
             Ok(SetReadonlyResponse::NotFound)
