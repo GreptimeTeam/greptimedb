@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use object_store::services::S3;
+use object_store::services::{Oss, S3};
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
@@ -36,7 +36,7 @@ pub fn is_supported_in_s3(key: &str) -> bool {
         || key == ENABLE_VIRTUAL_HOST_STYLE
 }
 
-pub fn build_s3_backend(
+fn build_aws_backend(
     host: &str,
     path: &str,
     connection: &HashMap<String, String>,
@@ -83,6 +83,47 @@ pub fn build_s3_backend(
     Ok(ObjectStore::new(builder)
         .context(error::BuildBackendSnafu)?
         .finish())
+}
+
+fn build_aliyun_backend(
+    host: &str,
+    path: &str,
+    connection: &HashMap<String, String>,
+) -> Result<ObjectStore> {
+    let mut builder = Oss::default();
+    let _ = builder.root(path).bucket(host);
+
+    if let Some(endpoint) = connection.get(ENDPOINT) {
+        let _ = builder.endpoint(endpoint);
+    }
+
+    if let Some(key_id) = connection.get(ACCESS_KEY_ID) {
+        let _ = builder.access_key_id(key_id);
+    }
+
+    if let Some(key) = connection.get(SECRET_ACCESS_KEY) {
+        builder.access_key_secret(key);
+    }
+
+    Ok(ObjectStore::new(builder)
+        .context(error::BuildBackendSnafu)?
+        .finish())
+}
+
+pub fn build_s3_backend(
+    host: &str,
+    path: &str,
+    connection: &HashMap<String, String>,
+) -> Result<ObjectStore> {
+    if let Some(endpoint) = connection.get(ENDPOINT) {
+        if endpoint.ends_with("aliyuncs.com") {
+            return build_aliyun_backend(host, path, connection);
+        } else {
+            return build_aws_backend(host, path, connection);
+        }
+    } else {
+        return build_aws_backend(host, path, connection);
+    }
 }
 
 #[cfg(test)]
