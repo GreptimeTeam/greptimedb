@@ -134,7 +134,7 @@ worker_request_batch_size = 64
 # Number of meta action updated to trigger a new checkpoint for the manifest
 manifest_checkpoint_distance = 10
 # Manifest compression type
-manifest_compress_type = "Uncompressed"
+manifest_compress_type = "uncompressed"
 # Max number of running background jobs
 max_background_jobs = 4
 # Interval to auto flush a region if it has not flushed yet.
@@ -162,3 +162,5 @@ sst_write_buffer_size = "8MB"
 # enable_otlp_tracing = false
 # tracing exporter endpoint with format `ip:port`, we use grpc oltp as exporter, default endpoint is `localhost:4317`
 # otlp_endpoint = "localhost:4317"
+# The percentage of tracing will be sampled and exported. Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1. ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+# tracing_sample_ratio = 1.0

@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::Sampler;
 use opentelemetry_semantic_conventions::resource;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -34,14 +35,26 @@ pub use crate::{debug, error, info, trace, warn};
 
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
     pub dir: String,
     pub level: Option<String>,
     pub enable_otlp_tracing: bool,
     pub otlp_endpoint: Option<String>,
+    pub tracing_sample_ratio: Option<f64>,
 }
+
+impl PartialEq for LoggingOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir
+            && self.level == other.level
+            && self.enable_otlp_tracing == other.enable_otlp_tracing
+            && self.otlp_endpoint == other.otlp_endpoint
+            && self.tracing_sample_ratio == other.tracing_sample_ratio
+    }
+}
+impl Eq for LoggingOptions {}
 
 impl Default for LoggingOptions {
     fn default() -> Self {
@@ -50,6 +63,7 @@ impl Default for LoggingOptions {
             level: None,
             enable_otlp_tracing: false,
             otlp_endpoint: None,
+            tracing_sample_ratio: Some(1.0),
         }
     }
 }
@@ -145,7 +159,10 @@ pub fn init_global_logging(
     let filter = targets_string
         .parse::<filter::Targets>()
         .expect("error parsing log level string");
-
+    let sampler = opts
+        .tracing_sample_ratio
+        .map(Sampler::TraceIdRatioBased)
+        .unwrap_or(Sampler::AlwaysOn);
     // Must enable 'tokio_unstable' cfg to use this feature.
     // For example: `RUSTFLAGS="--cfg tokio_unstable" cargo run -F common-telemetry/console -- standalone start`
     #[cfg(feature = "tokio-console")]
@@ -200,17 +217,19 @@ pub fn init_global_logging(
                         .unwrap_or(DEFAULT_OTLP_ENDPOINT.to_string()),
                 ),
             )
-            .with_trace_config(opentelemetry_sdk::trace::config().with_resource(
-                opentelemetry_sdk::Resource::new(vec![
-                    KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
-                    KeyValue::new(
-                        resource::SERVICE_INSTANCE_ID,
-                        node_id.unwrap_or("none".to_string()),
-                    ),
-                    KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                    KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
-                ]),
-            ))
+            .with_trace_config(
+                opentelemetry_sdk::trace::config()
+                    .with_sampler(sampler)
+                    .with_resource(opentelemetry_sdk::Resource::new(vec![
+                        KeyValue::new(resource::SERVICE_NAME, app_name.to_string()),
+                        KeyValue::new(
+                            resource::SERVICE_INSTANCE_ID,
+                            node_id.unwrap_or("none".to_string()),
+                        ),
+                        KeyValue::new(resource::SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                        KeyValue::new(resource::PROCESS_PID, std::process::id().to_string()),
+                    ])),
+            )
             .install_batch(opentelemetry_sdk::runtime::Tokio)
             .expect("otlp tracer install failed");
         let tracing_layer = Some(tracing_opentelemetry::layer().with_tracer(tracer));
