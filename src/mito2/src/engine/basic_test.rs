@@ -29,7 +29,7 @@ use super::*;
 use crate::region::version::VersionControlData;
 use crate::test_util::{
     build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
-    flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
+    flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
 #[tokio::test]
@@ -350,6 +350,55 @@ async fn test_put_delete() {
 | a     | 1.0     | 1970-01-01T00:00:01 |
 | b     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_delete_not_null_fields() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().all_not_null(true).build();
+    let region_dir = request.region_dir.clone();
+
+    let column_schemas = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows_for_key("a", 0, 4, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+    // Delete (a, 2)
+    let rows = Rows {
+        schema: delete_schema.clone(),
+        rows: build_delete_rows_for_key("a", 2, 3),
+    };
+    delete_rows(&engine, region_id, rows).await;
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    // Reopen and scan again.
+    reopen_region(&engine, region_id, region_dir, false).await;
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
