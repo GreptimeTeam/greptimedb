@@ -277,6 +277,7 @@ pub struct CreateRequestBuilder {
     field_num: usize,
     options: HashMap<String, String>,
     primary_key: Option<Vec<ColumnId>>,
+    all_not_null: bool,
 }
 
 impl Default for CreateRequestBuilder {
@@ -287,6 +288,7 @@ impl Default for CreateRequestBuilder {
             field_num: 1,
             options: HashMap::new(),
             primary_key: None,
+            all_not_null: false,
         }
     }
 }
@@ -321,8 +323,15 @@ impl CreateRequestBuilder {
         self
     }
 
+    #[must_use]
     pub fn insert_option(mut self, key: &str, value: &str) -> Self {
         self.options.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    #[must_use]
+    pub fn all_not_null(mut self, value: bool) -> Self {
+        self.all_not_null = value;
         self
     }
 
@@ -330,12 +339,13 @@ impl CreateRequestBuilder {
         let mut column_id = 0;
         let mut column_metadatas = Vec::with_capacity(self.tag_num + self.field_num + 1);
         let mut primary_key = Vec::with_capacity(self.tag_num);
+        let nullable = !self.all_not_null;
         for i in 0..self.tag_num {
             column_metadatas.push(ColumnMetadata {
                 column_schema: ColumnSchema::new(
                     format!("tag_{i}"),
                     ConcreteDataType::string_datatype(),
-                    true,
+                    nullable,
                 ),
                 semantic_type: SemanticType::Tag,
                 column_id,
@@ -348,7 +358,7 @@ impl CreateRequestBuilder {
                 column_schema: ColumnSchema::new(
                     format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
-                    true,
+                    nullable,
                 ),
                 semantic_type: SemanticType::Field,
                 column_id,
@@ -359,6 +369,7 @@ impl CreateRequestBuilder {
             column_schema: ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
+                // Time index is always not null.
                 false,
             ),
             semantic_type: SemanticType::Timestamp,
