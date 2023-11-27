@@ -98,8 +98,8 @@ impl VolatileContext {
     }
 
     /// Resets the `leader_region_lease_deadline`.
-    pub fn reset_leader_region_lease_deadline(&mut self, deadline: Instant) {
-        self.leader_region_lease_deadline = Some(deadline);
+    pub fn reset_leader_region_lease_deadline(&mut self) {
+        self.leader_region_lease_deadline = None;
     }
 
     /// Sets the `leader_region_last_entry_id`.

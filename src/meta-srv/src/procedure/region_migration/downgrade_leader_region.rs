@@ -23,7 +23,7 @@ use common_meta::instruction::{
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
-use tokio::time::{sleep, Instant};
+use tokio::time::sleep;
 
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::error::{self, Result};
@@ -60,8 +60,9 @@ impl State for DowngradeLeaderRegion {
         self.downgrade_region_with_retry(ctx).await;
 
         // Safety: must exist.
-        let deadline = ctx.volatile_ctx.leader_region_lease_deadline.unwrap();
-        tokio::time::sleep_until(deadline).await;
+        if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
+            tokio::time::sleep_until(*deadline).await;
+        }
 
         Ok(Box::new(UpgradeCandidateRegion))
     }
@@ -179,19 +180,18 @@ impl DowngradeLeaderRegion {
 
         let mut retry = 0;
 
-        while retry < self.optimistic_retry {
+        loop {
             if let Err(err) = self.downgrade_region(ctx, &instruction).await {
-                if err.is_retryable() {
-                    warn!("Failed to downgrade region, error: {err:?}, retry later.");
+                retry += 1;
+                if err.is_retryable() && retry < self.optimistic_retry {
+                    warn!("Failed to downgrade region, error: {err:?}, retry later");
                     sleep(self.retry_initial_interval).await;
-                    retry += 1;
                 } else {
                     break;
                 }
             } else {
-                // Sets the deadline to now.
-                ctx.volatile_ctx
-                    .reset_leader_region_lease_deadline(Instant::now());
+                // Resets the deadline.
+                ctx.volatile_ctx.reset_leader_region_lease_deadline();
                 break;
             }
         }
@@ -433,7 +433,7 @@ mod tests {
 
         state.downgrade_region_with_retry(&mut ctx).await;
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
-        assert!(ctx.volatile_ctx.leader_region_lease_deadline.unwrap() < Instant::now())
+        assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
     }
 
     #[tokio::test]
@@ -508,7 +508,7 @@ mod tests {
         let elapsed = timer.elapsed().as_secs();
         assert!(elapsed < REGION_LEASE_SECS / 2);
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));
-        assert!(ctx.volatile_ctx.leader_region_lease_deadline.unwrap() < Instant::now());
+        assert!(ctx.volatile_ctx.leader_region_lease_deadline.is_none());
 
         let _ = next
             .as_any()
