@@ -25,6 +25,10 @@ SELECT * from t;
 |   | 1970-01-01T00:00:00.004 |
 +---+-------------------------+
 
+ALTER TABLE t RENAME 'Hi👋';
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid table name: Hi👋
+
 ALTER TABLE t RENAME new_table;
 
 Affected Rows: 0

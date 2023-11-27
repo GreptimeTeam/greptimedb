@@ -50,6 +50,10 @@ CREATE TABLE test2 (i INTEGER, j TIMESTAMP TIME INDEX);
 
 Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test2`
 
+CREATE TABLE 'N.~' (i TIMESTAMP TIME INDEX);
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid table name: N.~
+
 DESC TABLE integers;
 
 +--------+----------------------+-----+------+---------+---------------+
