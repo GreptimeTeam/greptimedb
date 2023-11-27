@@ -3344,6 +3344,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fst"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3537,7 +3543,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a11efce55d8ce20257e08842e4f4c1c8fce2b3a8#a11efce55d8ce20257e08842e4f4c1c8fce2b3a8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7#2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7"
 dependencies = [
  "prost 0.12.2",
  "serde",
@@ -3900,6 +3906,23 @@ checksum = "b139284b5cf57ecfa712bcc66950bb635b31aff41c188e8a4cfc758eca374a3f"
 dependencies = [
  "proc-macro2",
  "quote",
+]
+
+[[package]]
+name = "index"
+version = "0.4.3"
+dependencies = [
+ "async-trait",
+ "common-base",
+ "common-error",
+ "common-macro",
+ "fst",
+ "futures",
+ "greptime-proto",
+ "prost 0.12.2",
+ "snafu",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
