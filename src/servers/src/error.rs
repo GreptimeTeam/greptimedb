@@ -339,6 +339,7 @@ pub enum Error {
         source: crate::http::pprof::nix::Error,
     },
 
+    #[cfg(not(windows))]
     #[snafu(display("Failed to update jemalloc metrics"))]
     UpdateJemallocMetrics {
         #[snafu(source)]
@@ -412,8 +413,10 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. }
-            | UpdateJemallocMetrics { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. } => StatusCode::Internal,
+
+            #[cfg(not(windows))]
+            UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
