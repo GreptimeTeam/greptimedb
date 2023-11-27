@@ -12,31 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(btree_extract_if)]
-#![feature(async_closure)]
+pub mod wal_meta;
 
-pub mod cache_invalidator;
-pub mod datanode_manager;
-pub mod ddl;
-pub mod ddl_manager;
-pub mod distributed_time_constants;
-pub mod error;
-pub mod heartbeat;
-pub mod instruction;
-pub mod key;
-pub mod kv_backend;
-pub mod metrics;
-pub mod peer;
-pub mod range_stream;
-pub mod region_meta;
-pub mod rpc;
-pub mod sequence;
-pub mod state_store;
-pub mod table_name;
-pub mod util;
+use serde::{Deserialize, Serialize};
 
-pub type ClusterId = u64;
-pub type DatanodeId = u64;
+use crate::region_meta::wal_meta::RegionWalMeta;
 
-pub use instruction::RegionIdent;
+/// Stores a region's unique metadata. Any common metadata or options among regions shall not be stored in the struct.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct RegionMeta {
+    /// The region's unique wal metadata.
+    pub wal_meta: RegionWalMeta,
+}
