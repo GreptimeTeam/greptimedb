@@ -43,6 +43,12 @@ pub enum Error {
         region_id: RegionId,
     },
 
+    #[snafu(display("Failed to init ddl manager"))]
+    InitDdlManager {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to create default catalog and schema"))]
     InitMetadata {
         location: Location,
@@ -685,7 +691,9 @@ impl ErrorExt for Error {
             | Error::UpdateTableRoute { source, .. }
             | Error::GetFullTableInfo { source, .. } => source.status_code(),
 
-            Error::InitMetadata { source, .. } => source.status_code(),
+            Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
+                source.status_code()
+            }
 
             Error::Other { source, .. } => source.status_code(),
         }

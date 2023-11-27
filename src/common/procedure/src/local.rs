@@ -527,6 +527,13 @@ impl LocalManager {
 
         Ok(())
     }
+
+    #[cfg(any(test, feature = "testing"))]
+    /// Returns true if contains a specified loader.
+    pub fn contains_loader(&self, name: &str) -> bool {
+        let loaders = self.manager_ctx.loaders.lock().unwrap();
+        loaders.contains_key(name)
+    }
 }
 
 #[async_trait]

@@ -43,9 +43,9 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
-
 pub type DdlManagerRef = Arc<DdlManager>;
 
+/// The [DdlManager] provides the ability to execute Ddl.
 pub struct DdlManager {
     procedure_manager: ProcedureManagerRef,
     datanode_manager: DatanodeManagerRef,
@@ -55,26 +55,31 @@ pub struct DdlManager {
 }
 
 impl DdlManager {
-    pub fn new(
+    /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
+    pub fn try_new(
         procedure_manager: ProcedureManagerRef,
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
         table_meta_allocator: TableMetadataAllocatorRef,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let manager = Self {
             procedure_manager,
             datanode_manager: datanode_clients,
             cache_invalidator,
             table_metadata_manager,
             table_meta_allocator,
-        }
+        };
+        manager.register_loaders()?;
+        Ok(manager)
     }
 
+    /// Returns the [TableMetadataManagerRef].
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.table_metadata_manager
     }
 
+    /// Returns the [DdlContext]
     pub fn create_context(&self) -> DdlContext {
         DdlContext {
             datanode_manager: self.datanode_manager.clone(),
@@ -83,7 +88,7 @@ impl DdlManager {
         }
     }
 
-    pub fn try_start(&self) -> Result<()> {
+    fn register_loaders(&self) -> Result<()> {
         let context = self.create_context();
 
         self.procedure_manager
@@ -142,6 +147,7 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes an alter table task.
     pub async fn submit_alter_table_task(
         &self,
         cluster_id: u64,
@@ -159,6 +165,7 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a create table task.
     pub async fn submit_create_table_task(
         &self,
         cluster_id: u64,
@@ -176,6 +183,7 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a drop table task.
     pub async fn submit_drop_table_task(
         &self,
         cluster_id: u64,
@@ -199,6 +207,7 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a truncate table task.
     pub async fn submit_truncate_table_task(
         &self,
         cluster_id: u64,
@@ -414,5 +423,82 @@ impl DdlTaskExecutor for DdlManager {
         }
         .trace(span)
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::meta::Partition;
+    use common_procedure::local::LocalManager;
+    use table::metadata::{RawTableInfo, TableId};
+
+    use super::DdlManager;
+    use crate::cache_invalidator::DummyCacheInvalidator;
+    use crate::datanode_manager::{DatanodeManager, DatanodeRef};
+    use crate::ddl::alter_table::AlterTableProcedure;
+    use crate::ddl::create_table::CreateTableProcedure;
+    use crate::ddl::drop_table::DropTableProcedure;
+    use crate::ddl::truncate_table::TruncateTableProcedure;
+    use crate::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+    use crate::error::Result;
+    use crate::key::TableMetadataManager;
+    use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::peer::Peer;
+    use crate::rpc::router::RegionRoute;
+    use crate::state_store::KvStateStore;
+
+    /// A dummy implemented [DatanodeManager].
+    pub struct DummyDatanodeManager;
+
+    #[async_trait::async_trait]
+    impl DatanodeManager for DummyDatanodeManager {
+        async fn datanode(&self, _datanode: &Peer) -> DatanodeRef {
+            unimplemented!()
+        }
+    }
+
+    /// A dummy implemented [TableMetadataAllocator].
+    pub struct DummyTableMetadataAllocator;
+
+    #[async_trait::async_trait]
+    impl TableMetadataAllocator for DummyTableMetadataAllocator {
+        async fn create(
+            &self,
+            _ctx: &TableMetadataAllocatorContext,
+            _table_info: &mut RawTableInfo,
+            _partitions: &[Partition],
+        ) -> Result<(TableId, Vec<RegionRoute>)> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn test_try_new() {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+
+        let state_store = Arc::new(KvStateStore::new(kv_backend));
+        let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));
+
+        let _ = DdlManager::try_new(
+            procedure_manager.clone(),
+            Arc::new(DummyDatanodeManager),
+            Arc::new(DummyCacheInvalidator),
+            table_metadata_manager,
+            Arc::new(DummyTableMetadataAllocator),
+        );
+
+        let expected_loaders = vec![
+            CreateTableProcedure::TYPE_NAME,
+            AlterTableProcedure::TYPE_NAME,
+            DropTableProcedure::TYPE_NAME,
+            TruncateTableProcedure::TYPE_NAME,
+        ];
+
+        for loader in expected_loaders {
+            assert!(procedure_manager.contains_loader(loader));
+        }
     }
 }

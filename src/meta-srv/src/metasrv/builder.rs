@@ -28,10 +28,11 @@ use common_meta::sequence::{Sequence, SequenceRef};
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
+use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -196,8 +197,7 @@ impl MetaSrvBuilder {
             &table_metadata_manager,
             (&selector, &selector_ctx),
             &table_id_sequence,
-        );
-        let _ = ddl_manager.try_start();
+        )?;
         let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
 
         let handler_group = match handler_group {
@@ -330,7 +330,7 @@ fn build_ddl_manager(
     table_metadata_manager: &TableMetadataManagerRef,
     (selector, selector_ctx): (&SelectorRef, &SelectorContext),
     table_id_sequence: &SequenceRef,
-) -> DdlManagerRef {
+) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
             .timeout(Duration::from_millis(
@@ -355,12 +355,15 @@ fn build_ddl_manager(
         table_id_sequence.clone(),
     ));
 
-    Arc::new(DdlManager::new(
-        procedure_manager.clone(),
-        datanode_clients,
-        cache_invalidator,
-        table_metadata_manager.clone(),
-        table_meta_allocator,
+    Ok(Arc::new(
+        DdlManager::try_new(
+            procedure_manager.clone(),
+            datanode_clients,
+            cache_invalidator,
+            table_metadata_manager.clone(),
+            table_meta_allocator,
+        )
+        .context(error::InitDdlManagerSnafu)?,
     ))
 }
 
