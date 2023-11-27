@@ -99,16 +99,19 @@ impl GreptimeDbStandaloneBuilder {
             .init()
             .await
             .unwrap();
-        procedure_manager.start().await.unwrap();
+
         let instance = Instance::try_new_standalone(
             kv_backend,
-            procedure_manager,
+            procedure_manager.clone(),
             catalog_manager,
             plugins,
             datanode.region_server(),
         )
         .await
         .unwrap();
+
+        // Ensures all loaders are registered.
+        procedure_manager.start().await.unwrap();
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 

@@ -328,13 +328,16 @@ impl Instance {
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
         let cache_invalidator = Arc::new(DummyCacheInvalidator);
-        let ddl_executor = Arc::new(DdlManager::new(
-            procedure_manager,
-            datanode_manager,
-            cache_invalidator.clone(),
-            table_metadata_manager.clone(),
-            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
-        ));
+        let ddl_executor = Arc::new(
+            DdlManager::try_new(
+                procedure_manager,
+                datanode_manager,
+                cache_invalidator.clone(),
+                table_metadata_manager.clone(),
+                Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+            )
+            .context(error::InitDdlManagerSnafu)?,
+        );
 
         let statement_executor = Arc::new(StatementExecutor::new(
             catalog_manager.clone(),

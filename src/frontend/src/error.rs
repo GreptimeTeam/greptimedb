@@ -26,6 +26,12 @@ use store_api::storage::RegionNumber;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to init ddl manager"))]
+    InitDdlManager {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         location: Location,
@@ -319,7 +325,9 @@ impl ErrorExt for Error {
 
             Error::ParseSql { source, .. } => source.status_code(),
 
-            Error::InvalidateTableCache { source, .. } => source.status_code(),
+            Error::InvalidateTableCache { source, .. } | Error::InitDdlManager { source, .. } => {
+                source.status_code()
+            }
 
             Error::Table { source, .. }
             | Error::CopyTable { source, .. }
