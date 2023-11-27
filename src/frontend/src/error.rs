@@ -44,7 +44,7 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("External error"))]
     External {
         location: Location,
         source: BoxedError,
@@ -170,7 +170,7 @@ pub enum Error {
         source: query::error::Error,
     },
 
-    #[snafu(display(""))]
+    #[snafu(display("Operation to region server failed"))]
     InvokeRegionServer {
         location: Location,
         source: servers::error::Error,

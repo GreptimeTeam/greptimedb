@@ -54,6 +54,7 @@ fn create_table_task() -> CreateTableTask {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Timestamp as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             PbColumnDef {
                 name: "my_tag1".to_string(),
@@ -62,6 +63,7 @@ fn create_table_task() -> CreateTableTask {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             PbColumnDef {
                 name: "my_tag2".to_string(),
@@ -70,6 +72,7 @@ fn create_table_task() -> CreateTableTask {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Tag as i32,
                 comment: String::new(),
+                ..Default::default()
             },
             PbColumnDef {
                 name: "my_field_column".to_string(),
@@ -78,6 +81,7 @@ fn create_table_task() -> CreateTableTask {
                 default_constraint: vec![],
                 semantic_type: SemanticType::Field as i32,
                 comment: String::new(),
+                ..Default::default()
             },
         ],
         time_index: "ts".to_string(),
@@ -114,6 +118,7 @@ fn test_create_region_request_template() {
                     default_constraint: vec![],
                     semantic_type: SemanticType::Timestamp as i32,
                     comment: String::new(),
+                    ..Default::default()
                 }),
                 column_id: 0,
             },
@@ -125,6 +130,7 @@ fn test_create_region_request_template() {
                     default_constraint: vec![],
                     semantic_type: SemanticType::Tag as i32,
                     comment: String::new(),
+                    ..Default::default()
                 }),
                 column_id: 1,
             },
@@ -136,6 +142,7 @@ fn test_create_region_request_template() {
                     default_constraint: vec![],
                     semantic_type: SemanticType::Tag as i32,
                     comment: String::new(),
+                    ..Default::default()
                 }),
                 column_id: 2,
             },
@@ -147,6 +154,7 @@ fn test_create_region_request_template() {
                     default_constraint: vec![],
                     semantic_type: SemanticType::Field as i32,
                     comment: String::new(),
+                    ..Default::default()
                 }),
                 column_id: 3,
             },
@@ -287,6 +295,7 @@ fn test_create_alter_region_request() {
                         default_constraint: b"hello".to_vec(),
                         semantic_type: SemanticType::Tag as i32,
                         comment: String::new(),
+                        ..Default::default()
                     }),
                     location: Some(AddColumnLocation {
                         location_type: LocationType::After as i32,
@@ -321,7 +330,8 @@ fn test_create_alter_region_request() {
                             is_nullable: true,
                             default_constraint: b"hello".to_vec(),
                             semantic_type: SemanticType::Tag as i32,
-                            comment: String::new()
+                            comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 3,
                     }),

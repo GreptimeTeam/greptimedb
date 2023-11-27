@@ -212,9 +212,6 @@ pub enum Error {
     #[snafu(display("Expect KvBackend but not found"))]
     MissingKvBackend { location: Location },
 
-    #[snafu(display("Expect MetaClient but not found"))]
-    MissingMetaClient { location: Location },
-
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -294,9 +291,6 @@ pub enum Error {
 
     #[snafu(display("Missing node id in Datanode config"))]
     MissingNodeId { location: Location },
-
-    #[snafu(display("Missing node id option in distributed mode"))]
-    MissingMetasrvOpts { location: Location },
 
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
@@ -477,13 +471,11 @@ impl ErrorExt for Error {
             | SchemaExists { .. }
             | DatabaseNotFound { .. }
             | MissingNodeId { .. }
-            | MissingMetasrvOpts { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
             | PrepareImmutableTable { .. }
             | ColumnDataType { .. }
-            | MissingKvBackend { .. }
-            | MissingMetaClient { .. } => StatusCode::InvalidArguments,
+            | MissingKvBackend { .. } => StatusCode::InvalidArguments,
 
             EncodeJson { .. } | PayloadNotExist { .. } | Unexpected { .. } => {
                 StatusCode::Unexpected

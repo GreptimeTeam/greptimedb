@@ -340,6 +340,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![32, 0],
                     semantic_type: SemanticType::Tag as i32,
                     datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "b".to_string(),
@@ -573,6 +574,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![2],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Int32 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
@@ -611,6 +613,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![2],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::String as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),
@@ -743,6 +746,7 @@ CREATE TABLE {table_name} (
                     null_mask: vec![4],
                     semantic_type: SemanticType::Field as i32,
                     datatype: ColumnDataType::Float64 as i32,
+                    ..Default::default()
                 },
                 Column {
                     column_name: "ts".to_string(),

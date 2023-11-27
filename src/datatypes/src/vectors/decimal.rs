@@ -392,7 +392,26 @@ pub mod tests {
         let decimal_array = Decimal128Array::from(vec![Some(123), Some(456)]);
         let decimal_vector = Decimal128Vector::from(decimal_array);
         let expect = Decimal128Vector::from_values(vec![123, 456]);
+        assert_eq!(decimal_vector, expect);
 
+        let decimal_array = Decimal128Array::from(vec![Some(123), Some(456)])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        let decimal_vector = Decimal128Vector::from(decimal_array);
+        let expect = Decimal128Vector::from_values(vec![123, 456])
+            .with_precision_and_scale(10, 2)
+            .unwrap();
+        assert_eq!(decimal_vector, expect);
+
+        let decimal_array: ArrayRef = Arc::new(
+            Decimal128Array::from(vec![Some(123), Some(456)])
+                .with_precision_and_scale(3, 2)
+                .unwrap(),
+        );
+        let decimal_vector = Decimal128Vector::try_from_arrow_array(decimal_array).unwrap();
+        let expect = Decimal128Vector::from_values(vec![123, 456])
+            .with_precision_and_scale(3, 2)
+            .unwrap();
         assert_eq!(decimal_vector, expect);
     }
 

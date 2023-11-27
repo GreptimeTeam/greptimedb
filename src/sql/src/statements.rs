@@ -107,6 +107,16 @@ fn parse_string_to_value(
                 .fail()
             }
         }
+        ConcreteDataType::Decimal128(_) => {
+            if let Ok(val) = common_decimal::Decimal128::from_str(&s) {
+                Ok(Value::Decimal128(val))
+            } else {
+                ParseSqlValueSnafu {
+                    msg: format!("Fail to parse number {s} to Decimal128 value"),
+                }
+                .fail()
+            }
+        }
         _ => {
             unreachable!()
         }
@@ -146,7 +156,19 @@ macro_rules! parse_number_to_value {
                 let n  = parse_sql_number::<i64>($n)?;
                 Ok(Value::Timestamp(Timestamp::new(n, t.unit())))
             },
-            // TODO(QuenKar): parse decimal128 string with precision and scale
+            // TODO(QuenKar): This could need to be optimized
+            // if this from_str function is slow,
+            // we can implement parse decimal string with precision and scale manually.
+            ConcreteDataType::Decimal128(_) => {
+                if let Ok(val) = common_decimal::Decimal128::from_str($n) {
+                    Ok(Value::Decimal128(val))
+                } else {
+                    ParseSqlValueSnafu {
+                        msg: format!("Fail to parse number {}, invalid column type: {:?}",
+                                        $n, $data_type)
+                    }.fail()
+                }
+            }
 
             _ => ParseSqlValueSnafu {
                 msg: format!("Fail to parse number {}, invalid column type: {:?}",
@@ -356,18 +378,20 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         .map(ColumnDefaultConstraint::try_into) // serialize default constraint to bytes
         .transpose()
         .context(SerializeColumnDefaultConstraintSnafu)?;
-
-    let data_type = ColumnDataTypeWrapper::try_from(data_type)
+    // convert ConcreteDataType to grpc ColumnDataTypeWrapper
+    let (datatype, datatype_ext) = ColumnDataTypeWrapper::try_from(data_type.clone())
         .context(ConvertToGrpcDataTypeSnafu)?
-        .datatype() as i32;
+        .to_parts();
+
     Ok(api::v1::ColumnDef {
         name,
-        data_type,
+        data_type: datatype as i32,
         is_nullable,
         default_constraint: default_constraint.unwrap_or_default(),
         // TODO(#1308): support adding new primary key columns
         semantic_type: SemanticType::Field as _,
         comment: String::new(),
+        datatype_extension: datatype_ext,
     })
 }
 

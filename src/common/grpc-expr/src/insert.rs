@@ -119,7 +119,7 @@ mod tests {
         nullable: bool,
     ) -> error::Result<ColumnSchema> {
         let datatype_wrapper =
-            ColumnDataTypeWrapper::try_new(datatype).context(ColumnDataTypeSnafu)?;
+            ColumnDataTypeWrapper::try_new(datatype, None).context(ColumnDataTypeSnafu)?;
 
         Ok(ColumnSchema::new(
             column_name,
@@ -170,7 +170,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "host")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -184,7 +185,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "cpu")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -198,7 +200,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "memory")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -212,7 +215,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "time")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -226,7 +230,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "interval")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -240,7 +245,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "duration")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -254,7 +260,8 @@ mod tests {
                         .iter()
                         .find(|c| c.name == "ts")
                         .unwrap()
-                        .data_type
+                        .data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -284,8 +291,11 @@ mod tests {
         assert_eq!(
             ConcreteDataType::string_datatype(),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(host_column.column_def.as_ref().unwrap().data_type)
-                    .unwrap()
+                ColumnDataTypeWrapper::try_new(
+                    host_column.column_def.as_ref().unwrap().data_type,
+                    None
+                )
+                .unwrap()
             )
         );
 
@@ -294,7 +304,8 @@ mod tests {
             ConcreteDataType::float64_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    memory_column.column_def.as_ref().unwrap().data_type
+                    memory_column.column_def.as_ref().unwrap().data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -304,8 +315,11 @@ mod tests {
         assert_eq!(
             ConcreteDataType::time_datatype(TimeUnit::Millisecond),
             ConcreteDataType::from(
-                ColumnDataTypeWrapper::try_new(time_column.column_def.as_ref().unwrap().data_type)
-                    .unwrap()
+                ColumnDataTypeWrapper::try_new(
+                    time_column.column_def.as_ref().unwrap().data_type,
+                    None
+                )
+                .unwrap()
             )
         );
 
@@ -314,7 +328,8 @@ mod tests {
             ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    interval_column.column_def.as_ref().unwrap().data_type
+                    interval_column.column_def.as_ref().unwrap().data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -326,7 +341,8 @@ mod tests {
             ConcreteDataType::duration_millisecond_datatype(),
             ConcreteDataType::from(
                 ColumnDataTypeWrapper::try_new(
-                    duration_column.column_def.as_ref().unwrap().data_type
+                    duration_column.column_def.as_ref().unwrap().data_type,
+                    None
                 )
                 .unwrap()
             )
@@ -360,6 +376,7 @@ mod tests {
             values: Some(host_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::String as i32,
+            ..Default::default()
         };
 
         let cpu_vals = Values {
@@ -372,6 +389,7 @@ mod tests {
             values: Some(cpu_vals),
             null_mask: vec![2],
             datatype: ColumnDataType::Float64 as i32,
+            ..Default::default()
         };
 
         let mem_vals = Values {
@@ -384,6 +402,7 @@ mod tests {
             values: Some(mem_vals),
             null_mask: vec![1],
             datatype: ColumnDataType::Float64 as i32,
+            ..Default::default()
         };
 
         let time_vals = Values {
@@ -396,6 +415,7 @@ mod tests {
             values: Some(time_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::TimeMillisecond as i32,
+            ..Default::default()
         };
 
         let interval1 = IntervalMonthDayNano {
@@ -418,6 +438,7 @@ mod tests {
             values: Some(interval_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::IntervalMonthDayNano as i32,
+            ..Default::default()
         };
 
         let duration_vals = Values {
@@ -430,6 +451,7 @@ mod tests {
             values: Some(duration_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::DurationMillisecond as i32,
+            ..Default::default()
         };
 
         let ts_vals = Values {
@@ -442,6 +464,7 @@ mod tests {
             values: Some(ts_vals),
             null_mask: vec![0],
             datatype: ColumnDataType::TimestampMillisecond as i32,
+            ..Default::default()
         };
 
         (

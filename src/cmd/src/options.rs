@@ -28,7 +28,7 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 /// Options mixed up from datanode, frontend and metasrv.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,

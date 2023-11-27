@@ -56,6 +56,7 @@ macro_rules! sql_tests {
                 test_mysql_auth,
                 test_mysql_crud,
                 test_mysql_timezone,
+                test_mysql_async_timestamp,
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_parameter_inference,
@@ -421,5 +422,160 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     assert_eq!(1, rows.len());
 
     let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_async_timestamp(store_type: StorageType) {
+    use mysql_async::prelude::*;
+    use time::PrimitiveDateTime;
+
+    #[derive(Debug)]
+    struct CpuMetric {
+        hostname: String,
+        environment: String,
+        usage_user: f64,
+        usage_system: f64,
+        usage_idle: f64,
+        ts: i64,
+    }
+
+    impl CpuMetric {
+        fn new(
+            hostname: String,
+            environment: String,
+            usage_user: f64,
+            usage_system: f64,
+            usage_idle: f64,
+            ts: i64,
+        ) -> Self {
+            Self {
+                hostname,
+                environment,
+                usage_user,
+                usage_system,
+                usage_idle,
+                ts,
+            }
+        }
+    }
+    common_telemetry::init_default_ut_logging();
+
+    let (addr, mut guard, fe_mysql_server) = setup_mysql_server(store_type, "sql_timestamp").await;
+    let url = format!("mysql://{addr}/public");
+    let opts = mysql_async::Opts::from_url(&url).unwrap();
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .expect("create connection failure");
+
+    r"CREATE TABLE IF NOT EXISTS cpu_metrics (
+    hostname STRING,
+    environment STRING,
+    usage_user DOUBLE,
+    usage_system DOUBLE,
+    usage_idle DOUBLE,
+    ts TIMESTAMP,
+    TIME INDEX(ts),
+    PRIMARY KEY(hostname, environment)
+);"
+    .ignore(&mut conn)
+    .await
+    .expect("create table failure");
+
+    let metrics = vec![
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307200050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307200050,
+        ),
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307260050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307260050,
+        ),
+        CpuMetric::new(
+            "host0".into(),
+            "test".into(),
+            32f64,
+            3f64,
+            4f64,
+            1680307320050,
+        ),
+        CpuMetric::new(
+            "host1".into(),
+            "test".into(),
+            29f64,
+            32f64,
+            50f64,
+            1680307320050,
+        ),
+    ];
+
+    r"INSERT INTO cpu_metrics (hostname, environment, usage_user, usage_system, usage_idle, ts)
+      VALUES (:hostname, :environment, :usage_user, :usage_system, :usage_idle, :ts)"
+        .with(metrics.iter().map(|metric| {
+            params! {
+                "hostname" => &metric.hostname,
+                "environment" => &metric.environment,
+                "usage_user" => metric.usage_user,
+                "usage_system" => metric.usage_system,
+                "usage_idle" => metric.usage_idle,
+                "ts" => metric.ts,
+            }
+        }))
+        .batch(&mut conn)
+        .await
+        .expect("insert data failure");
+
+    // query data
+    let loaded_metrics = "SELECT * FROM cpu_metrics"
+        .with(())
+        .map(
+            &mut conn,
+            |(hostname, environment, usage_user, usage_system, usage_idle, raw_ts): (
+                String,
+                String,
+                f64,
+                f64,
+                f64,
+                PrimitiveDateTime,
+            )| {
+                let ts = raw_ts.assume_utc().unix_timestamp() * 1000;
+                CpuMetric::new(
+                    hostname,
+                    environment,
+                    usage_user,
+                    usage_system,
+                    usage_idle,
+                    ts,
+                )
+            },
+        )
+        .await
+        .expect("query data failure");
+    assert_eq!(loaded_metrics.len(), 6);
+
+    let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
 }

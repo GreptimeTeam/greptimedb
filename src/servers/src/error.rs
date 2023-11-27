@@ -339,8 +339,12 @@ pub enum Error {
         source: crate::http::pprof::nix::Error,
     },
 
-    #[snafu(display(""))]
-    Metrics { source: BoxedError },
+    #[snafu(display("Failed to update jemalloc metrics"))]
+    UpdateJemallocMetrics {
+        #[snafu(source)]
+        error: tikv_jemalloc_ctl::Error,
+        location: Location,
+    },
 
     #[snafu(display("DataFrame operation error"))]
     DataFrame {
@@ -408,7 +412,8 @@ impl ErrorExt for Error {
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
-            | BuildHttpResponse { .. } => StatusCode::Internal,
+            | BuildHttpResponse { .. }
+            | UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
             CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
 
@@ -478,8 +483,6 @@ impl ErrorExt for Error {
 
             #[cfg(feature = "pprof")]
             DumpPprof { source, .. } => source.status_code(),
-
-            Metrics { source } => source.status_code(),
 
             ConvertScalarValue { source, .. } => source.status_code(),
 

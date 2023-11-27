@@ -534,6 +534,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 1,
                     }),

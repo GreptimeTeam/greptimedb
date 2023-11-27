@@ -15,6 +15,8 @@
 mod alter;
 mod create;
 mod put;
+mod read;
+mod region_metadata;
 mod state;
 
 use std::sync::Arc;
@@ -25,7 +27,7 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::RegionRequest;
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::RwLock;
@@ -74,7 +76,7 @@ use crate::metadata_region::MetadataRegion;
 /// they support are different. List below:
 ///
 /// | Operations | Logical Region | Physical Region |
-/// | :--------: | :------------: | :-------------: |
+/// | ---------- | -------------- | --------------- |
 /// |   Create   |       ✅        |        ✅        |
 /// |    Drop    |       ✅        |        ❌        |
 /// |   Write    |       ✅        |        ❌        |
@@ -113,7 +115,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> std::result::Result<Output, BoxedError> {
+    ) -> Result<Output, BoxedError> {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),
@@ -143,15 +145,15 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: ScanRequest,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        todo!()
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.inner
+            .read_region(region_id, request)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's metadata.
-    async fn get_metadata(
-        &self,
-        region_id: RegionId,
-    ) -> std::result::Result<RegionMetadataRef, BoxedError> {
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
         todo!()
     }
 
@@ -161,16 +163,19 @@ impl RegionEngine for MetricEngine {
     }
 
     /// Stops the engine
-    async fn stop(&self) -> std::result::Result<(), BoxedError> {
+    async fn stop(&self) -> Result<(), BoxedError> {
         todo!()
     }
 
-    fn set_writable(
+    fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
+        todo!()
+    }
+
+    async fn set_readonly_gracefully(
         &self,
         region_id: RegionId,
-        writable: bool,
-    ) -> std::result::Result<(), BoxedError> {
-        todo!()
+    ) -> std::result::Result<SetReadonlyResponse, BoxedError> {
+        self.inner.mito.set_readonly_gracefully(region_id).await
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

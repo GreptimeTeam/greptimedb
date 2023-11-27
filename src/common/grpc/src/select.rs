@@ -12,18 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::helper::convert_i128_to_interval;
+use api::helper::{convert_i128_to_interval, convert_to_pb_decimal128};
 use api::v1::column::Values;
 use common_base::BitVec;
 use datatypes::types::{DurationType, IntervalType, TimeType, TimestampType, WrapperType};
 use datatypes::vectors::{
-    BinaryVector, BooleanVector, DateTimeVector, DateVector, DurationMicrosecondVector,
-    DurationMillisecondVector, DurationNanosecondVector, DurationSecondVector, Float32Vector,
-    Float64Vector, Int16Vector, Int32Vector, Int64Vector, Int8Vector, IntervalDayTimeVector,
-    IntervalMonthDayNanoVector, IntervalYearMonthVector, StringVector, TimeMicrosecondVector,
-    TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector, TimestampMicrosecondVector,
-    TimestampMillisecondVector, TimestampNanosecondVector, TimestampSecondVector, UInt16Vector,
-    UInt32Vector, UInt64Vector, UInt8Vector, VectorRef,
+    BinaryVector, BooleanVector, DateTimeVector, DateVector, Decimal128Vector,
+    DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
+    DurationSecondVector, Float32Vector, Float64Vector, Int16Vector, Int32Vector, Int64Vector,
+    Int8Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector, IntervalYearMonthVector,
+    StringVector, TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector,
+    TimeSecondVector, TimestampMicrosecondVector, TimestampMillisecondVector,
+    TimestampNanosecondVector, TimestampSecondVector, UInt16Vector, UInt32Vector, UInt64Vector,
+    UInt8Vector, VectorRef,
 };
 use snafu::OptionExt;
 
@@ -71,8 +72,7 @@ macro_rules! convert_arrow_array_to_grpc_vals {
                     return Ok(vals);
                 },
             )+
-            // TODO(QuenKar): support gRPC for Decimal128
-            ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) | ConcreteDataType::Decimal128(_) => unreachable!("Should not send {:?} in gRPC", $data_type),
+            ConcreteDataType::Null(_) | ConcreteDataType::List(_) | ConcreteDataType::Dictionary(_) => unreachable!("Should not send {:?} in gRPC", $data_type),
         }
     }};
 }
@@ -238,6 +238,12 @@ pub fn values(arrays: &[VectorRef]) -> Result<Values> {
             DurationNanosecondVector,
             duration_nanosecond_values,
             |x| { x.into_native() }
+        ),
+        (
+            ConcreteDataType::Decimal128(_),
+            Decimal128Vector,
+            decimal128_values,
+            |x| { convert_to_pb_decimal128(x) }
         )
     )
 }
@@ -313,6 +319,17 @@ mod tests {
         let values = values(&[array]).unwrap();
 
         assert_eq!(vec![1, 2, 3], values.duration_second_values);
+    }
+
+    #[test]
+    fn test_convert_arrow_array_decimal128() {
+        let array = Decimal128Vector::from(vec![Some(1), Some(2), None, Some(3)]);
+
+        let vals = values(&[Arc::new(array)]).unwrap();
+        (0..3).for_each(|i| {
+            assert_eq!(vals.decimal128_values[i].hi, 0);
+            assert_eq!(vals.decimal128_values[i].lo, i as i64 + 1);
+        });
     }
 
     #[test]

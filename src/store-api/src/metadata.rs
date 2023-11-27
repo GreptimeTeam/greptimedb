@@ -81,7 +81,11 @@ impl ColumnMetadata {
                     .context(ConvertDatatypesSnafu)?,
             )
         };
-        let data_type = ColumnDataTypeWrapper::new(column_def.data_type()).into();
+        let data_type = ColumnDataTypeWrapper::new(
+            column_def.data_type(),
+            column_def.datatype_extension.clone(),
+        )
+        .into();
         let column_schema = ColumnSchema::new(column_def.name, data_type, column_def.is_nullable)
             .with_default_constraint(default_constrain)
             .context(ConvertDatatypesSnafu)?;

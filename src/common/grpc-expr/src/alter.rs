@@ -158,6 +158,7 @@ mod tests {
                         default_constraint: vec![],
                         semantic_type: SemanticType::Field as i32,
                         comment: String::new(),
+                        ..Default::default()
                     }),
                     location: None,
                 }],
@@ -199,6 +200,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         location: Some(Location {
                             location_type: LocationType::First.into(),
@@ -213,6 +215,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Field as i32,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         location: Some(Location {
                             location_type: LocationType::After.into(),

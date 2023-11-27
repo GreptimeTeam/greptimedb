@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::helper::{
-    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_column_data_type,
-    to_proto_value,
+    is_column_type_value_eq, is_semantic_type_eq, proto_value_type, to_proto_value,
+    ColumnDataTypeWrapper,
 };
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value};
 use common_query::Output;
@@ -32,6 +32,7 @@ use prost::Message;
 use smallvec::SmallVec;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
     RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
     RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
@@ -40,8 +41,8 @@ use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::error::{
-    CompactRegionSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu, FlushRegionSnafu,
-    InvalidRequestSnafu, Result,
+    CompactRegionSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu, Error, FillDefaultSnafu,
+    FlushRegionSnafu, InvalidRequestSnafu, Result,
 };
 use crate::memtable::MemtableId;
 use crate::metrics::COMPACTION_ELAPSED_TOTAL;
@@ -152,7 +153,11 @@ impl WriteRequest {
             if let Some(input_col) = rows_columns.remove(&column.column_schema.name) {
                 // Check data type.
                 ensure!(
-                    is_column_type_value_eq(input_col.datatype, &column.column_schema.data_type),
+                    is_column_type_value_eq(
+                        input_col.datatype,
+                        input_col.datatype_extension.clone(),
+                        &column.column_schema.data_type
+                    ),
                     InvalidRequestSnafu {
                         region_id,
                         reason: format!(
@@ -248,19 +253,20 @@ impl WriteRequest {
         }
 
         // Insert column schema.
-        let datatype = to_column_data_type(&column.column_schema.data_type).with_context(|| {
-            InvalidRequestSnafu {
-                region_id: self.region_id,
-                reason: format!(
-                    "no protobuf type for column {} ({:?})",
-                    column.column_schema.name, column.column_schema.data_type
-                ),
-            }
-        })?;
+        let (datatype, datatype_ext) =
+            ColumnDataTypeWrapper::try_from(column.column_schema.data_type.clone())
+                .with_context(|_| ConvertColumnDataTypeSnafu {
+                    reason: format!(
+                        "no protobuf type for column {} ({:?})",
+                        column.column_schema.name, column.column_schema.data_type
+                    ),
+                })?
+                .to_parts();
         self.rows.schema.push(ColumnSchema {
             column_name: column.column_schema.name.clone(),
             datatype: datatype as i32,
             semantic_type: column.semantic_type as i32,
+            datatype_extension: datatype_ext,
         });
 
         Ok(())
@@ -467,6 +473,14 @@ pub(crate) enum WorkerRequest {
         notify: BackgroundNotify,
     },
 
+    /// The internal commands.
+    SetReadonlyGracefully {
+        /// Id of the region to send.
+        region_id: RegionId,
+        /// The sender of [SetReadonlyResponse].
+        sender: Sender<SetReadonlyResponse>,
+    },
+
     /// Notify a worker to stop.
     Stop,
 }
@@ -536,6 +550,17 @@ impl WorkerRequest {
         };
 
         Ok((worker_request, receiver))
+    }
+
+    pub(crate) fn new_set_readonly_gracefully(
+        region_id: RegionId,
+    ) -> (WorkerRequest, Receiver<SetReadonlyResponse>) {
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            WorkerRequest::SetReadonlyGracefully { region_id, sender },
+            receiver,
+        )
     }
 }
 
@@ -715,6 +740,7 @@ mod tests {
             column_name: name.to_string(),
             datatype: data_type as i32,
             semantic_type: semantic_type as i32,
+            ..Default::default()
         }
     }
 

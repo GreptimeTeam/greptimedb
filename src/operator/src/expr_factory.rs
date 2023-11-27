@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::alter_expr::Kind;
 use api::v1::{
-    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, CreateTableExpr, DropColumn,
-    DropColumns, RenameTable, SemanticType,
+    AddColumn, AddColumns, AlterExpr, Column, ColumnDataType, ColumnDataTypeExtension,
+    CreateTableExpr, DropColumn, DropColumns, RenameTable, SemanticType,
 };
 use common_error::ext::BoxedError;
 use common_grpc_expr::util::ColumnExpr;
@@ -312,14 +312,14 @@ pub fn column_schemas_to_defs(
     column_schemas: Vec<ColumnSchema>,
     primary_keys: &[String],
 ) -> Result<Vec<api::v1::ColumnDef>> {
-    let column_datatypes = column_schemas
+    let column_datatypes: Vec<(ColumnDataType, Option<ColumnDataTypeExtension>)> = column_schemas
         .iter()
         .map(|c| {
             ColumnDataTypeWrapper::try_from(c.data_type.clone())
-                .map(|w| w.datatype())
+                .map(|w| w.to_parts())
                 .context(ColumnDataTypeSnafu)
         })
-        .collect::<Result<Vec<ColumnDataType>>>()?;
+        .collect::<Result<Vec<_>>>()?;
 
     column_schemas
         .iter()
@@ -340,7 +340,7 @@ pub fn column_schemas_to_defs(
 
             Ok(api::v1::ColumnDef {
                 name: schema.name.clone(),
-                data_type: datatype as i32,
+                data_type: datatype.0 as i32,
                 is_nullable: schema.is_nullable(),
                 default_constraint: match schema.default_constraint() {
                     None => vec![],
@@ -354,6 +354,7 @@ pub fn column_schemas_to_defs(
                 },
                 semantic_type,
                 comment,
+                datatype_extension: datatype.1,
             })
         })
         .collect()

@@ -13,14 +13,18 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
+use catalog::kvbackend::MetaKvBackend;
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::kv_backend::chroot::ChrootKvBackend;
+use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
@@ -63,10 +67,25 @@ pub struct GreptimeDbClusterBuilder {
 }
 
 impl GreptimeDbClusterBuilder {
-    pub fn new(cluster_name: &str) -> Self {
+    pub async fn new(cluster_name: &str) -> Self {
+        let endpoints = env::var("GT_ETCD_ENDPOINTS").unwrap_or_default();
+
+        let kv_backend: KvBackendRef = if endpoints.is_empty() {
+            Arc::new(MemoryKvBackend::new())
+        } else {
+            let endpoints = endpoints
+                .split(',')
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>();
+            let backend = EtcdStore::with_endpoints(endpoints)
+                .await
+                .expect("malformed endpoints");
+            Arc::new(ChrootKvBackend::new(cluster_name.into(), backend))
+        };
+
         Self {
             cluster_name: cluster_name.to_string(),
-            kv_backend: Arc::new(MemoryKvBackend::new()),
+            kv_backend,
             store_config: None,
             datanodes: None,
         }
@@ -202,7 +221,12 @@ impl GreptimeDbClusterBuilder {
             .build();
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
 
-        let mut datanode = DatanodeBuilder::new(opts, None, Plugins::default())
+        let meta_backend = Arc::new(MetaKvBackend {
+            client: Arc::new(meta_client.clone()),
+        });
+
+        let mut datanode = DatanodeBuilder::new(opts, Plugins::default())
+            .with_kv_backend(meta_backend)
             .with_meta_client(meta_client)
             .build()
             .await

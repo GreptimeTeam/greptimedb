@@ -22,6 +22,7 @@ use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -73,7 +74,13 @@ impl DataRegion {
         let new_column_id_start = 1 + region_metadata
             .column_metadatas
             .iter()
-            .map(|c| c.column_id)
+            .filter_map(|c| {
+                if ReservedColumnId::is_reserved(c.column_id) {
+                    None
+                } else {
+                    Some(c.column_id)
+                }
+            })
             .max()
             .unwrap_or(0);
 
@@ -136,6 +143,19 @@ impl DataRegion {
             .handle_request(region_id, RegionRequest::Put(request))
             .await
             .context(MitoWriteOperationSnafu)
+    }
+
+    pub async fn physical_columns(
+        &self,
+        physical_region_id: RegionId,
+    ) -> Result<Vec<ColumnMetadata>> {
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        Ok(metadata.column_metadatas.clone())
     }
 }
 

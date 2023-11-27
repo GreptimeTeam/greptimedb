@@ -48,7 +48,8 @@ pub trait WriteRequest: Send {
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
-    /// Indices of columns to read, `None` to read all columns.
+    /// Indices of columns to read, `None` to read all columns. This indices is
+    /// based on table schema.
     pub projection: Option<Vec<usize>>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
@@ -149,7 +150,8 @@ impl TryFrom<PbAddColumn> for AddColumn {
             })?;
 
         let data_type = column_def.data_type;
-        let data_type = ColumnDataTypeWrapper::try_new(data_type)
+        let data_type_ext = column_def.datatype_extension.clone();
+        let data_type = ColumnDataTypeWrapper::try_new(data_type, data_type_ext)
             .map_err(|_| {
                 InvalidRawRegionRequestSnafu {
                     err: format!("unknown raw column datatype: {data_type}"),
@@ -312,6 +314,7 @@ mod tests {
                             default_constraint: vec![],
                             semantic_type: SemanticType::Tag as _,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 1,
                     }),
@@ -328,6 +331,7 @@ mod tests {
                                 .unwrap(),
                             semantic_type: SemanticType::Field as _,
                             comment: String::new(),
+                            ..Default::default()
                         }),
                         column_id: 2,
                     }),

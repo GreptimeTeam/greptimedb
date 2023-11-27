@@ -132,6 +132,7 @@ impl CreateTableProcedure {
                         default_constraint: c.default_constraint.clone(),
                         semantic_type: semantic_type as i32,
                         comment: String::new(),
+                        datatype_extension: c.datatype_extension.clone(),
                     }),
                     column_id: i as u32,
                 }

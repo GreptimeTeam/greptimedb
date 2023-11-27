@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -27,6 +28,16 @@ use tokio_stream::wrappers::TcpListenerStream;
 use crate::error::{self, Result};
 
 pub(crate) type AbortableStream = Abortable<TcpListenerStream>;
+
+pub type ServerHandlers = HashMap<String, ServerHandler>;
+
+pub type ServerHandler = (Box<dyn Server>, SocketAddr);
+
+pub async fn start_server(server_handler: &ServerHandler) -> Result<Option<SocketAddr>> {
+    let (server, addr) = server_handler;
+    info!("Starting {} at {}", server.name(), addr);
+    server.start(*addr).await.map(Some)
+}
 
 #[async_trait]
 pub trait Server: Send + Sync {

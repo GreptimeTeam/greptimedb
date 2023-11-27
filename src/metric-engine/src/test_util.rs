@@ -14,9 +14,8 @@
 
 //! Utilities for testing.
 
-use api::helper::to_column_data_type;
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
+use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use mito2::config::MitoConfig;
@@ -119,46 +118,11 @@ impl TestEnv {
 
         // create logical region
         let region_id = self.default_logical_region_id();
-        let region_create_request = RegionCreateRequest {
-            engine: METRIC_ENGINE_NAME.to_string(),
-            column_metadatas: vec![
-                ColumnMetadata {
-                    column_id: 0,
-                    semantic_type: SemanticType::Timestamp,
-                    column_schema: ColumnSchema::new(
-                        "greptime_timestamp",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 1,
-                    semantic_type: SemanticType::Field,
-                    column_schema: ColumnSchema::new(
-                        "greptime_value",
-                        ConcreteDataType::float64_datatype(),
-                        false,
-                    ),
-                },
-                ColumnMetadata {
-                    column_id: 2,
-                    semantic_type: SemanticType::Tag,
-                    column_schema: ColumnSchema::new(
-                        "job",
-                        ConcreteDataType::string_datatype(),
-                        false,
-                    ),
-                },
-            ],
-            primary_key: vec![2],
-            options: [(
-                LOGICAL_TABLE_METADATA_KEY.to_string(),
-                self.default_physical_region_id().as_u64().to_string(),
-            )]
-            .into_iter()
-            .collect(),
-            region_dir: "test_metric_region_logical".to_string(),
-        };
+        let region_create_request = create_logical_region_request(
+            &["job"],
+            self.default_physical_region_id(),
+            "test_metric_logical_region",
+        );
         self.metric()
             .handle_request(region_id, RegionRequest::Create(region_create_request))
             .await
@@ -209,6 +173,58 @@ pub fn alter_logical_region_add_tag_columns(new_tags: &[&str]) -> RegionAlterReq
     }
 }
 
+/// Generate a [RegionCreateRequest] for logical region.
+/// Only need to specify tag column's name
+pub fn create_logical_region_request(
+    tags: &[&str],
+    physical_region_id: RegionId,
+    region_dir: &str,
+) -> RegionCreateRequest {
+    let mut column_metadatas = vec![
+        ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Timestamp,
+            column_schema: ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        },
+        ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                "greptime_value",
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        },
+    ];
+    for tag in tags {
+        column_metadatas.push(ColumnMetadata {
+            column_id: 0,
+            semantic_type: SemanticType::Tag,
+            column_schema: ColumnSchema::new(
+                tag.to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+        });
+    }
+    RegionCreateRequest {
+        engine: METRIC_ENGINE_NAME.to_string(),
+        column_metadatas,
+        primary_key: vec![],
+        options: [(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_region_id.as_u64().to_string(),
+        )]
+        .into_iter()
+        .collect(),
+        region_dir: region_dir.to_string(),
+    }
+}
+
 /// Generate a row schema with given tag columns.
 ///
 /// The result will also contains default timestamp and value column at beginning.
@@ -216,26 +232,23 @@ pub fn row_schema_with_tags(tags: &[&str]) -> Vec<PbColumnSchema> {
     let mut schema = vec![
         PbColumnSchema {
             column_name: "greptime_timestamp".to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::timestamp_millisecond_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
             semantic_type: SemanticType::Timestamp as _,
+            datatype_extension: None,
         },
         PbColumnSchema {
             column_name: "greptime_value".to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::float64_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Float64 as i32,
             semantic_type: SemanticType::Field as _,
+            datatype_extension: None,
         },
     ];
     for tag in tags {
         schema.push(PbColumnSchema {
             column_name: tag.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::string_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::String as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
     }
     schema

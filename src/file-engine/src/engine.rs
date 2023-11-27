@@ -24,7 +24,7 @@ use common_telemetry::{error, info};
 use object_store::ObjectStore;
 use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngine, RegionRole};
+use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{
     RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest, RegionRequest,
 };
@@ -101,6 +101,19 @@ impl RegionEngine for FileRegionEngine {
         self.inner
             .set_writable(region_id, writable)
             .map_err(BoxedError::new)
+    }
+
+    async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResponse, BoxedError> {
+        let exists = self.inner.get_region(region_id).await.is_some();
+
+        if exists {
+            Ok(SetReadonlyResponse::success(None))
+        } else {
+            Ok(SetReadonlyResponse::NotFound)
+        }
     }
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {

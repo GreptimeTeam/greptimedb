@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod etcd;
-
 use common_error::ext::ErrorExt;
 
 use crate::rpc::store::{DeleteRangeResponse, PutResponse, RangeResponse};
+
+mod etcd;
 
 #[async_trait::async_trait]
 pub trait TxnService: Sync + Send {
@@ -122,7 +122,8 @@ pub struct TxnResponse {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Txn {
-    req: TxnRequest,
+    // HACK - chroot would modify this field
+    pub(super) req: TxnRequest,
     c_when: bool,
     c_then: bool,
     c_else: bool,

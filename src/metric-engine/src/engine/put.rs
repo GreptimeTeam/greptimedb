@@ -15,9 +15,8 @@
 use std::hash::{BuildHasher, Hash, Hasher};
 
 use ahash::RandomState;
-use api::helper::to_column_data_type;
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema, Row, Rows, SemanticType};
+use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
 use common_query::Output;
 use common_telemetry::{error, info};
 use datatypes::data_type::ConcreteDataType;
@@ -162,18 +161,16 @@ impl MetricEngineInner {
         // add table_name column
         rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::uint32_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Uint32 as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
         // add tsid column
         rows.schema.push(ColumnSchema {
             column_name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
-            datatype: to_column_data_type(&ConcreteDataType::uint64_datatype())
-                .unwrap()
-                .into(),
+            datatype: ColumnDataType::Uint64 as i32,
             semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
         });
 
         // fill internal columns
@@ -212,14 +209,82 @@ impl MetricEngineInner {
 #[cfg(test)]
 mod tests {
 
+    use common_recordbatch::RecordBatches;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
+    use store_api::storage::ScanRequest;
 
     use super::*;
     use crate::test_util::{self, TestEnv};
 
     #[tokio::test]
     async fn test_write_logical_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        // prepare data
+        let schema = test_util::row_schema_with_tags(&["job"]);
+        let rows = test_util::build_rows(1, 5);
+        let request = RegionRequest::Put(RegionPutRequest {
+            rows: Rows { schema, rows },
+        });
+
+        // write data
+        let logical_region_id = env.default_logical_region_id();
+        let Output::AffectedRows(count) = env
+            .metric()
+            .handle_request(logical_region_id, request)
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(count, 5);
+
+        // read data from physical region
+        let physical_region_id = env.default_physical_region_id();
+        let request = ScanRequest::default();
+        let stream = env
+            .metric()
+            .handle_query(physical_region_id, request)
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++-------------------------+----------------+------------+---------------------+-------+
+| greptime_timestamp      | greptime_value | __table_id | __tsid              | job   |
++-------------------------+----------------+------------+---------------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | 3          | 4844750677434873907 | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | 3          | 4844750677434873907 | tag_0 |
++-------------------------+----------------+------------+---------------------+-------+";
+        assert_eq!(expected, batches.pretty_print().unwrap(), "physical region");
+
+        // read data from logical region
+        let request = ScanRequest::default();
+        let stream = env
+            .metric()
+            .handle_query(logical_region_id, request)
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let expected = "\
++-------------------------+----------------+-------+
+| greptime_timestamp      | greptime_value | job   |
++-------------------------+----------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | tag_0 |
++-------------------------+----------------+-------+";
+        assert_eq!(expected, batches.pretty_print().unwrap(), "logical region");
+    }
+
+    #[tokio::test]
+    async fn test_write_logical_region_row_count() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
         let engine = env.metric();

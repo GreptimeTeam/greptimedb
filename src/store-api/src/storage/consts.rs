@@ -82,6 +82,11 @@ impl ReservedColumnId {
     pub const fn table_id() -> ColumnId {
         Self::BASE | ReservedColumnType::TableId as ColumnId
     }
+
+    /// Test if the column id is reserved.
+    pub fn is_reserved(column_id: ColumnId) -> bool {
+        column_id & Self::BASE != 0
+    }
 }
 
 // -----------------------------------------------------------------------------
