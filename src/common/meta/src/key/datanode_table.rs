@@ -286,10 +286,19 @@ impl DatanodeTableManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::region_meta::wal_meta::{KeyName, RegionWalMeta, RegionWalMetaKey};
+
+    fn new_test_region_meta(table_id: TableId, region_number: RegionNumber) -> RegionMeta {
+        let topic_key =
+            RegionWalMetaKey::new(table_id, region_number, KeyName::KafkaTopic).to_string();
+        let topic_value = "test_topic".to_string();
+        let wal_meta = RegionWalMeta::with_metas([(topic_key, topic_value)]);
+        RegionMeta { wal_meta }
+    }
 
     #[test]
     fn test_serde() {
-        let key = DatanodeTableKey {
+        let key: DatanodeTableKey = DatanodeTableKey {
             datanode_id: 1,
             table_id: 2,
         };
@@ -299,11 +308,11 @@ mod tests {
         let value = DatanodeTableValue {
             table_id: 42,
             regions: vec![1, 2, 3],
-            region_metas: Vec::default(),
+            region_metas: Vec::new(),
             region_info: RegionInfo::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"region_metas":"","engine":"","region_storage_path":"","region_options":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"region_metas":[],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
@@ -312,9 +321,55 @@ mod tests {
         assert_eq!(actual, value);
 
         // test serde default
-        let raw_str = br#"{"table_id":42,"regions":[1,2,3],"version":1}"#;
+        let raw_str = br#"{"table_id":42,"regions":[1,2,3],"region_metas":[],"version":1}"#;
         let parsed = DatanodeTableValue::try_from_raw_value(raw_str);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_serde_with_region_metas() {
+        let table_id = 42;
+        let region_numbers = vec![1, 2, 3];
+        let region_metas = region_numbers
+            .iter()
+            .map(|region_number| new_test_region_meta(table_id, *region_number))
+            .collect();
+
+        let value = DatanodeTableValue {
+            table_id: 42,
+            regions: region_numbers,
+            region_metas,
+            region_info: RegionInfo::default(),
+            version: 1,
+        };
+
+        let literal = br#"
+            {
+                "table_id": 42,
+                "regions": [1, 2, 3],
+                "region_metas": [
+                    {"wal_meta": {"42/1/kafka_topic": "test_topic"}},
+                    {"wal_meta": {"42/2/kafka_topic": "test_topic"}},
+                    {"wal_meta": {"42/3/kafka_topic": "test_topic"}}
+                ],
+                "engine": "",
+                "region_storage_path": "",
+                "region_options": {},
+                "version": 1
+            }
+        "#;
+        let literal = String::from_utf8(literal.to_vec())
+            .unwrap()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        let literal = literal.as_bytes();
+
+        let raw_value = value.try_as_raw_value().unwrap();
+        assert_eq!(raw_value, literal);
+
+        let parsed = DatanodeTableValue::try_from_raw_value(literal).unwrap();
+        assert_eq!(parsed, value);
     }
 
     #[test]
