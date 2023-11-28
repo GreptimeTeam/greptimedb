@@ -6,11 +6,11 @@ use upper_case_table_name;
 
 Affected Rows: 0
 
-create table system_Metric(ts timestamp time index);
+create table "system_Metric"(ts timestamp time index);
 
 Affected Rows: 0
 
-insert into system_Metric values (0), (1);
+insert into "system_Metric" values (0), (1);
 
 Affected Rows: 2
 
@@ -27,7 +27,43 @@ select * from "system_Metric";
 | 1970-01-01T00:00:00.001 |
 +-------------------------+
 
-drop table system_Metric;
+drop table "system_Metric";
+
+Affected Rows: 0
+
+create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index);
+
+Affected Rows: 0
+
+desc table "AbCdEfG";
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLA   | String               |     | YES  |         | FIELD         |
+| cOlB   | String               |     | YES  |         | FIELD         |
+| tS     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index);
+
+Affected Rows: 0
+
+desc table AbCdEfGe;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| cola   | String               |     | YES  |         | FIELD         |
+| colb   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+drop table "AbCdEfG";
+
+Affected Rows: 0
+
+drop table AbCdEfGe;
 
 Affected Rows: 0
 

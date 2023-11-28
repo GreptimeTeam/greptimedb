@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use snafu::ResultExt;
+use sqlparser::ast::Ident;
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::{Parser, ParserError};
@@ -165,6 +166,29 @@ impl<'a> ParserContext<'a> {
     #[inline]
     pub(crate) fn peek_token_as_string(&self) -> String {
         self.parser.peek_token().to_string()
+    }
+
+    /// Canonicalize the identifier to lowercase if it's not quoted.
+    pub fn canonicalize_identifier(ident: Ident) -> Ident {
+        if ident.quote_style.is_some() {
+            ident
+        } else {
+            Ident {
+                value: ident.value.to_lowercase(),
+                quote_style: None,
+            }
+        }
+    }
+
+    /// Like [canonicalize_identifier] but for [ObjectName].
+    pub fn canonicalize_object_name(object_name: ObjectName) -> ObjectName {
+        ObjectName(
+            object_name
+                .0
+                .into_iter()
+                .map(Self::canonicalize_identifier)
+                .collect(),
+        )
     }
 }
 

@@ -33,7 +33,8 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 
-        let table_name = parser.parse_object_name()?;
+        let raw_table_name = parser.parse_object_name()?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let alter_operation = if parser.parse_keyword(Keyword::ADD) {
             if let Some(constraint) = parser.parse_optional_table_constraint()? {

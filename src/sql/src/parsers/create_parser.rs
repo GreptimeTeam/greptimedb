@@ -142,7 +142,7 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let table_name = self
+        let raw_table_name = self
             .parser
             .parse_object_name()
             .context(error::UnexpectedSnafu {
@@ -150,6 +150,7 @@ impl<'a> ParserContext<'a> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let (columns, constraints) = self.parse_columns()?;
 
@@ -435,7 +436,7 @@ impl<'a> ParserContext<'a> {
             };
         }
         Ok(ColumnDef {
-            name,
+            name: Self::canonicalize_identifier(name),
             data_type,
             collation,
             options,

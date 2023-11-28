@@ -50,7 +50,7 @@ impl<'a> ParserContext<'a> {
 
     /// Parse SHOW CREATE TABLE statement
     fn parse_show_create_table(&mut self) -> Result<Statement> {
-        let table_name =
+        let raw_table_name =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -58,6 +58,7 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
         ensure!(
             !table_name.0.is_empty(),
             InvalidTableNameSnafu {
