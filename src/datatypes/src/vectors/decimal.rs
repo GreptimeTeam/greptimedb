@@ -379,7 +379,7 @@ vectors::impl_try_from_arrow_array_for_vector!(Decimal128Array, Decimal128Vector
 
 #[cfg(test)]
 pub mod tests {
-    use arrow_array::{Decimal128Array, Int8Array};
+    use arrow_array::Decimal128Array;
     use common_decimal::Decimal128;
 
     use super::*;
