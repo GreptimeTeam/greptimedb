@@ -196,8 +196,7 @@ impl Vector for Decimal128Vector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let array = self.array.slice(offset, length);
-        Arc::new(Self { array })
+        Arc::new(self.get_slice(offset, length))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -380,7 +379,7 @@ vectors::impl_try_from_arrow_array_for_vector!(Decimal128Array, Decimal128Vector
 
 #[cfg(test)]
 pub mod tests {
-    use arrow_array::Decimal128Array;
+    use arrow_array::{Decimal128Array, Int8Array};
     use common_decimal::Decimal128;
 
     use super::*;
@@ -535,23 +534,23 @@ pub mod tests {
         // because 100 is out of Decimal(3, 1) range, so it will be null
         assert!(array.is_null(4));
     }
-}
 
-#[test]
-fn test_decimal28_vector_iter_data() {
-    let vector = Decimal128Vector::from_values(vec![1, 2, 3, 4])
-        .with_precision_and_scale(3, 1)
-        .unwrap();
-    let mut iter = vector.iter_data();
-    assert_eq!(iter.next(), Some(Some(Decimal128::new(1, 3, 1))));
-    assert_eq!(iter.next(), Some(Some(Decimal128::new(2, 3, 1))));
-    assert_eq!(iter.next(), Some(Some(Decimal128::new(3, 3, 1))));
-    assert_eq!(iter.next(), Some(Some(Decimal128::new(4, 3, 1))));
-    assert_eq!(iter.next(), None);
+    #[test]
+    fn test_decimal28_vector_iter_data() {
+        let vector = Decimal128Vector::from_values(vec![1, 2, 3, 4])
+            .with_precision_and_scale(3, 1)
+            .unwrap();
+        let mut iter = vector.iter_data();
+        assert_eq!(iter.next(), Some(Some(Decimal128::new(1, 3, 1))));
+        assert_eq!(iter.next(), Some(Some(Decimal128::new(2, 3, 1))));
+        assert_eq!(iter.next(), Some(Some(Decimal128::new(3, 3, 1))));
+        assert_eq!(iter.next(), Some(Some(Decimal128::new(4, 3, 1))));
+        assert_eq!(iter.next(), None);
 
-    let values = vector
-        .iter_data()
-        .filter_map(|v| v.map(|x| x.val() * 2))
-        .collect::<Vec<_>>();
-    assert_eq!(values, vec![2, 4, 6, 8]);
+        let values = vector
+            .iter_data()
+            .filter_map(|v| v.map(|x| x.val() * 2))
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![2, 4, 6, 8]);
+    }
 }

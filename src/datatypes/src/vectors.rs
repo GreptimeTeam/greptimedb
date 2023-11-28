@@ -229,17 +229,16 @@ macro_rules! impl_try_from_arrow_array_for_vector {
             ) -> crate::error::Result<$Vector> {
                 use snafu::OptionExt;
 
-                let data = array
+                let arrow_array = array
                     .as_ref()
                     .as_any()
                     .downcast_ref::<$Array>()
                     .with_context(|| crate::error::ConversionSnafu {
                         from: std::format!("{:?}", array.as_ref().data_type()),
                     })?
-                    .to_data();
+                    .clone();
 
-                let concrete_array = $Array::from(data);
-                Ok($Vector::from(concrete_array))
+                Ok($Vector::from(arrow_array))
             }
         }
     };
