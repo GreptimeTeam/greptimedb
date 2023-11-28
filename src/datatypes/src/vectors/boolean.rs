@@ -119,8 +119,7 @@ impl Vector for BooleanVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.slice(offset, length);
-        Arc::new(Self::from(data))
+        Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
     fn get(&self, index: usize) -> Value {
