@@ -35,7 +35,7 @@ use super::header::GreptimeDbName;
 use super::PUBLIC_APIS;
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
-    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu,
+    NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
@@ -166,7 +166,9 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
             return Ok(None);
         };
 
-        match extract_influxdb_user_from_query(query_str) {
+        let query_str = urlencoding::decode(query_str).context(UrlDecodeSnafu)?;
+
+        match extract_influxdb_user_from_query(&query_str) {
             (None, None) => Ok(None),
             (Some(username), Some(password)) => {
                 Ok(Some((username.to_string(), password.to_string().into())))

@@ -394,6 +394,13 @@ pub enum Error {
         error: serde_json::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to decode url"))]
+    UrlDecode {
+        #[snafu(source)]
+        error: FromUtf8Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -444,6 +451,7 @@ impl ErrorExt for Error {
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
+            | UrlDecode { .. }
             | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
