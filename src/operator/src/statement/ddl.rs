@@ -24,6 +24,7 @@ use common_catalog::format_full_table_name;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::ExecutorContext;
 use common_meta::key::schema_name::{SchemaNameKey, SchemaNameValue};
+use common_meta::key::NAME_PATTERN;
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use common_meta::rpc::router::{Partition, Partition as MetaPartition};
 use common_meta::table_name::TableName;
@@ -31,7 +32,9 @@ use common_query::Output;
 use common_telemetry::{info, tracing};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::RawSchema;
+use lazy_static::lazy_static;
 use partition::partition::{PartitionBound, PartitionDef};
+use regex::Regex;
 use session::context::QueryContextRef;
 use snafu::{ensure, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
@@ -41,7 +44,7 @@ use sql::statements::sql_value_to_value;
 use sql::MAXVALUE;
 use table::dist_table::DistTable;
 use table::metadata::{self, RawTableInfo, RawTableMeta, TableId, TableInfo, TableType};
-use table::requests::{AlterTableRequest, TableOptions};
+use table::requests::{AlterKind, AlterTableRequest, TableOptions};
 use table::TableRef;
 
 use super::StatementExecutor;
@@ -52,6 +55,10 @@ use crate::error::{
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
+
+lazy_static! {
+    static ref NAME_PATTERN_REG: Regex = Regex::new(&format!("^{NAME_PATTERN}$")).unwrap();
+}
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -121,6 +128,13 @@ impl StatementExecutor {
                 .fail()
             };
         }
+
+        ensure!(
+            NAME_PATTERN_REG.is_match(&create_table.table_name),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid table name: {}", create_table.table_name)
+            }
+        );
 
         let table_name = TableName::new(
             &create_table.catalog_name,
@@ -213,7 +227,20 @@ impl StatementExecutor {
         let request: AlterTableRequest = common_grpc_expr::alter_expr_to_request(table_id, expr)
             .context(AlterExprToRequestSnafu)?;
 
-        let AlterTableRequest { table_name, .. } = &request;
+        let AlterTableRequest {
+            table_name,
+            alter_kind,
+            ..
+        } = &request;
+
+        if let AlterKind::RenameTable { new_table_name } = alter_kind {
+            ensure!(
+                NAME_PATTERN_REG.is_match(new_table_name),
+                error::UnexpectedSnafu {
+                    violated: format!("Invalid table name: {}", new_table_name)
+                }
+            );
+        }
 
         let _ = table_info
             .meta
@@ -359,6 +386,20 @@ impl StatementExecutor {
         database: &str,
         create_if_not_exists: bool,
     ) -> Result<Output> {
+        ensure!(
+            NAME_PATTERN_REG.is_match(catalog),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid catalog name: {}", catalog)
+            }
+        );
+
+        ensure!(
+            NAME_PATTERN_REG.is_match(database),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid database name: {}", database)
+            }
+        );
+
         // TODO(weny): considers executing it in the procedures.
         let schema_key = SchemaNameKey::new(catalog, database);
         let exists = self
@@ -586,6 +627,13 @@ mod test {
 
     use super::*;
     use crate::expr_factory;
+
+    #[test]
+    fn test_name_is_match() {
+        assert!(!NAME_PATTERN_REG.is_match("/adaf"));
+        assert!(!NAME_PATTERN_REG.is_match("🈲"));
+        assert!(NAME_PATTERN_REG.is_match("hello"));
+    }
 
     #[test]
     fn test_validate_partition_columns() {

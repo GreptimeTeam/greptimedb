@@ -6,6 +6,10 @@ create database 'illegal-database';
 
 Affected Rows: 1
 
+create database '㊙️database';
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️database
+
 show databases;
 
 +--------------------+
