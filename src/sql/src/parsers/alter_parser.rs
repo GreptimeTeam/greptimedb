@@ -73,7 +73,8 @@ impl<'a> ParserContext<'a> {
                 )));
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
-            let new_table_name_obj = parser.parse_object_name()?;
+            let new_table_name_obj_raw = parser.parse_object_name()?;
+            let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
             let new_table_name = match &new_table_name_obj.0[..] {
                 [table] => table.value.clone(),
                 _ => {

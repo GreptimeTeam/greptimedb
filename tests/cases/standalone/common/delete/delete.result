@@ -60,3 +60,27 @@ DROP TABLE monitor;
 
 Affected Rows: 0
 
+CREATE TABLE "MoNiToR" ("hOsT" STRING PRIMARY KEY, "tS" TIMESTAMP TIME INDEX, "cPu" DOUBLE DEFAULT 0);
+
+Affected Rows: 0
+
+DELETE FROM "MoNiToR" WHERE "hOsT" = 'host2';
+
+Affected Rows: 0
+
+DROP TABLE "MoNiToR";
+
+Affected Rows: 0
+
+CREATE TABLE MoNiToR (hOsT STRING PRIMARY KEY, tS TIMESTAMP TIME INDEX, cPu DOUBLE DEFAULT 0);
+
+Affected Rows: 0
+
+DELETE FROM MoNiToR WHERE hOsT = 'host2';
+
+Affected Rows: 0
+
+DROP TABLE MoNiToR;
+
+Affected Rows: 0
+

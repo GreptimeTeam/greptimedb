@@ -81,3 +81,46 @@ DROP TABLE new_table;
 
 Affected Rows: 0
 
+CREATE TABLE "AbCdE"("CoLa" INTEGER, "cOlB" TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+ALTER TABLE "AbCdE" RENAME "fGhI";
+
+Affected Rows: 0
+
+DESC TABLE "fGhI";
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLa   | Int32                |     | YES  |         | FIELD         |
+| cOlB   | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM "fGhI";
+
+++
+++
+
+ALTER TABLE "fGhI" RENAME JkLmN;
+
+Affected Rows: 0
+
+DESC TABLE "JkLmN";
+
+Error: 4001(TableNotFound), Table not found: JkLmN
+
+DESC TABLE JkLmN;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLa   | Int32                |     | YES  |         | FIELD         |
+| cOlB   | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+DROP TABLE jklmn;
+
+Affected Rows: 0
+
