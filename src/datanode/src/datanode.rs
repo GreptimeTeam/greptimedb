@@ -508,22 +508,45 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::region_meta::wal_meta::{KeyName, RegionWalMeta, RegionWalMetaKey};
+    use common_meta::region_meta::RegionMeta;
     use store_api::region_request::RegionRequest;
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, RegionNumber, TableId};
 
     use crate::config::DatanodeOptions;
     use crate::datanode::DatanodeBuilder;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
+    fn new_test_region_meta_map(
+        table_id: TableId,
+        region_numbers: Vec<RegionNumber>,
+    ) -> HashMap<RegionNumber, RegionMeta> {
+        region_numbers
+            .into_iter()
+            .map(|region_number| {
+                let topic_key =
+                    RegionWalMetaKey::new(table_id, region_number, KeyName::KafkaTopic).to_string();
+                let topic_value = "test_topic".to_string();
+                let wal_meta = RegionWalMeta::with_metas([(topic_key, topic_value)]);
+                let region_meta = RegionMeta { wal_meta };
+                (region_number, region_meta)
+            })
+            .collect()
+    }
+
     async fn setup_table_datanode(kv: &KvBackendRef) {
         let mgr = DatanodeTableManager::new(kv.clone());
+        let table_id = 1028;
+        let region_numbers = vec![0, 1, 2];
+
         let txn = mgr
             .build_create_txn(
                 1028,
                 "mock",
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
-                BTreeMap::from([(0, vec![0, 1, 2])]),
+                new_test_region_meta_map(table_id, region_numbers.clone()),
+                BTreeMap::from([(0, region_numbers)]),
             )
             .unwrap();
 

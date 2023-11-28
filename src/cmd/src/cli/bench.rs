@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +22,15 @@ use clap::Parser;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
+use common_meta::region_meta::wal_meta::{KeyName, RegionWalMeta, RegionWalMetaKey};
+use common_meta::region_meta::RegionMeta;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use rand::Rng;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
 use self::metadata::TableMetadataBencher;
@@ -159,4 +162,27 @@ fn create_region_routes() -> Vec<RegionRoute> {
     }
 
     regions
+}
+
+fn create_region_meta_map(table_id: TableId) -> HashMap<RegionNumber, RegionMeta> {
+    // The region ids shall be coincident with the those used in `create_region_routes`.
+    (0..64u64)
+        .map(|region_id| {
+            let key = RegionId::from_u64(region_id).region_number();
+            let value = new_bench_region_meta(table_id, region_id);
+            (key, value)
+        })
+        .collect()
+}
+
+fn new_bench_region_meta(table_id: TableId, region_id: u64) -> RegionMeta {
+    let topic_key = RegionWalMetaKey::new(
+        table_id,
+        RegionId::from_u64(region_id).region_number(),
+        KeyName::KafkaTopic,
+    )
+    .to_string();
+    let topic_value = "test_topic".to_string();
+    let wal_meta = RegionWalMeta::with_metas([(topic_key, topic_value)]);
+    RegionMeta { wal_meta }
 }

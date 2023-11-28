@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::region_meta::wal_meta::RegionWalMeta;
 
 /// Stores a region's unique metadata. Any common metadata or options among regions shall not be stored in the struct.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct RegionMeta {
     /// The region's unique wal metadata.
     pub wal_meta: RegionWalMeta,

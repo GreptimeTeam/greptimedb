@@ -1540,6 +1540,7 @@ dependencies = [
  "servers",
  "session",
  "snafu",
+ "store-api",
  "substrait 0.4.3",
  "table",
  "temp-env",

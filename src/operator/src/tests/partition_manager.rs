@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -21,6 +21,8 @@ use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
+use common_meta::region_meta::wal_meta::{KeyName, RegionWalMeta, RegionWalMetaKey};
+use common_meta::region_meta::RegionMeta;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_query::prelude::Expr;
 use datafusion_expr::expr_fn::{and, binary_expr, col, or};
@@ -37,7 +39,7 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use partition::partition::{PartitionBound, PartitionDef};
 use partition::range::RangePartitionRule;
 use partition::PartitionRuleRef;
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionNumber, TableId};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
 use table::meter_insert_request;
 use table::requests::InsertRequest;
@@ -80,6 +82,23 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
+fn new_test_region_meta_map(
+    table_id: TableId,
+    region_numbers: Vec<RegionNumber>,
+) -> HashMap<RegionNumber, RegionMeta> {
+    region_numbers
+        .into_iter()
+        .map(|region_number| {
+            let topic_key =
+                RegionWalMetaKey::new(table_id, region_number, KeyName::KafkaTopic).to_string();
+            let topic_value = "test_topic".to_string();
+            let wal_meta = RegionWalMeta::with_metas([(topic_key, topic_value)]);
+            let region_meta = RegionMeta { wal_meta };
+            (region_number, region_meta)
+        })
+        .collect()
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -102,9 +121,13 @@ pub(crate) async fn create_partition_rule_manager(
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
 
+    // TODO(niebayes): Maybe make region numbers coincident with region ids.
+    let table_id = 1;
+    let region_numbers = vec![1u32, 2, 3];
+
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(1, "table_1", vec![0u32, 1, 2].into_iter()).into(),
+            new_test_table_info(table_id, "table_1", region_numbers.clone().into_iter()).into(),
             vec![
                 RegionRoute {
                     region: Region {
@@ -161,13 +184,17 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
+            new_test_region_meta_map(table_id, region_numbers),
         )
         .await
         .unwrap();
 
+    let table_id = 2;
+    let region_numbers = vec![1u32, 2, 3];
+
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(2, "table_2", vec![0u32, 1, 2].into_iter()).into(),
+            new_test_table_info(table_id, "table_2", region_numbers.clone().into_iter()).into(),
             vec![
                 RegionRoute {
                     region: Region {
@@ -230,6 +257,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
+            new_test_region_meta_map(table_id, region_numbers),
         )
         .await
         .unwrap();

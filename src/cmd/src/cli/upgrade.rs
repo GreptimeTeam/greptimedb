@@ -394,6 +394,8 @@ impl MigrateTableMetadata {
         );
         let region_distribution: RegionDistribution =
             value.regions_id_map.clone().into_iter().collect();
+        // TODO(niebayes): Requires properly construct a region_meta_map.
+        let region_metas = Vec::new();
 
         let datanode_table_kvs = region_distribution
             .into_iter()
@@ -405,6 +407,7 @@ impl MigrateTableMetadata {
                     DatanodeTableValue::new(
                         table_id,
                         regions,
+                        region_metas.clone(),
                         RegionInfo {
                             engine: engine.to_string(),
                             region_storage_path: region_storage_path.clone(),

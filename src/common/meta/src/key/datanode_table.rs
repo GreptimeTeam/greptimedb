@@ -29,6 +29,7 @@ use crate::key::{
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
+use crate::region_meta::RegionMeta;
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
@@ -101,16 +102,25 @@ impl TableMetaKey for DatanodeTableKey {
 pub struct DatanodeTableValue {
     pub table_id: TableId,
     pub regions: Vec<RegionNumber>,
+    /// Region's unique metadata or options.
+    pub region_metas: Vec<RegionMeta>,
+    /// Regions' common metadata or options.
     #[serde(flatten)]
     pub region_info: RegionInfo,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, region_info: RegionInfo) -> Self {
+    pub fn new(
+        table_id: TableId,
+        regions: Vec<RegionNumber>,
+        region_metas: Vec<RegionMeta>,
+        region_info: RegionInfo,
+    ) -> Self {
         Self {
             table_id,
             regions,
+            region_metas,
             region_info,
             version: 0,
         }
@@ -165,15 +175,22 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
+        region_meta_map: HashMap<RegionNumber, RegionMeta>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
+                let region_metas = regions
+                    .iter()
+                    .filter_map(|region_number| region_meta_map.get(region_number).cloned())
+                    .collect();
+
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
                     table_id,
                     regions,
+                    region_metas,
                     RegionInfo {
                         engine: engine.to_string(),
                         region_storage_path: region_storage_path.to_string(),
@@ -201,6 +218,9 @@ impl DatanodeTableManager {
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
+        // TODO(niebayes): Properly construct or fetch region metas.
+        let new_region_metas = Vec::new();
+
         // Removes the old datanode table key value pairs
         for current_datanode in current_region_distribution.keys() {
             if !new_region_distribution.contains_key(current_datanode) {
@@ -221,8 +241,13 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
-                    .try_as_raw_value()?;
+                let val = DatanodeTableValue::new(
+                    table_id,
+                    regions,
+                    new_region_metas.clone(),
+                    region_info.clone(),
+                )
+                .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
         }
@@ -269,10 +294,11 @@ mod tests {
         let value = DatanodeTableValue {
             table_id: 42,
             regions: vec![1, 2, 3],
+            region_metas: Vec::default(),
             region_info: RegionInfo::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"region_metas":"","engine":"","region_storage_path":"","region_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);

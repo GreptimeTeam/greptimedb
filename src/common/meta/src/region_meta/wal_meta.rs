@@ -35,13 +35,13 @@ impl Display for KeyName {
 }
 
 /// The key to identify a wal meta.
-pub struct WalMetaKey {
+pub struct RegionWalMetaKey {
     table_id: TableId,
     region_number: RegionNumber,
     name: KeyName,
 }
 
-impl WalMetaKey {
+impl RegionWalMetaKey {
     /// Construct a wal meta key with the given table id, region number, and key name.
     pub fn new(table_id: TableId, region_number: RegionNumber, name: KeyName) -> Self {
         Self {
@@ -52,26 +52,33 @@ impl WalMetaKey {
     }
 }
 
-impl ToString for WalMetaKey {
+impl ToString for RegionWalMetaKey {
     fn to_string(&self) -> String {
         format!("{}/{}/{}", self.table_id, self.region_number, self.name)
     }
 }
 
 /// A region's unique wal metadata.
-// FIXME(niebayes): Shall String or WalMetaKey be used as the key type?
-#[derive(Default, Debug, Serialize, Deserialize)]
+// FIXME(niebayes): Shall String or RegionWalMetaKey be used as the key type?
+#[derive(Default, Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct RegionWalMeta(HashMap<String, String>);
 
 impl RegionWalMeta {
+    pub fn with_metas<T>(metas: T) -> Self
+    where
+        T: IntoIterator<Item = (String, String)>,
+    {
+        Self(HashMap::from_iter(metas))
+    }
+
     /// Gets the value associated with the given wal meta key.
-    pub fn get(&self, key: &WalMetaKey) -> Option<String> {
+    pub fn get(&self, key: &RegionWalMetaKey) -> Option<&String> {
         self.0.get(&key.to_string())
     }
 
     /// Inserts a key-value pair with the key represented as a wal meta key while the value a string.
     /// This insertion always succeeds since the given key-value pair will override the existing one.
-    pub fn insert(&self, key: WalMetaKey, value: String) {
-        self.0.insert(key, value);
+    pub fn insert(&mut self, key: RegionWalMetaKey, value: String) {
+        self.0.insert(key.to_string(), value);
     }
 }

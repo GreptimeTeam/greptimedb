@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
     CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
@@ -25,7 +27,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
@@ -35,6 +37,7 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
 use crate::metrics;
+use crate::region_meta::RegionMeta;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 
@@ -76,6 +79,10 @@ impl CreateTableProcedure {
 
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
         &self.creator.data.region_routes
+    }
+
+    pub fn region_meta_map(&self) -> &HashMap<RegionNumber, RegionMeta> {
+        &self.creator.data.region_meta_map
     }
 
     /// Checks whether the table exists.
@@ -235,8 +242,10 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
+        let region_meta_map = self.region_meta_map().clone();
+
         manager
-            .create_table_metadata(raw_table_info, region_routes)
+            .create_table_metadata(raw_table_info, region_routes, region_meta_map)
             .await?;
         info!("Created table metadata for table {table_id}");
 
@@ -293,6 +302,8 @@ impl TableCreator {
                 cluster_id,
                 task,
                 region_routes,
+                // TODO(niebayes): Allocate region metadata in `TableMetadataAllocator`.
+                region_meta_map: HashMap::new(),
             },
         }
     }
@@ -313,6 +324,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
+    pub region_meta_map: HashMap<RegionNumber, RegionMeta>,
     pub cluster_id: u64,
 }
 

@@ -84,6 +84,7 @@ use crate::ddl::utils::region_storage_path;
 use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
+use crate::region_meta::RegionMeta;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
 use crate::DatanodeId;
 
@@ -364,6 +365,7 @@ impl TableMetadataManager {
         &self,
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
+        region_meta_map: HashMap<RegionNumber, RegionMeta>,
     ) -> Result<()> {
         let region_numbers = region_routes
             .iter()
@@ -399,8 +401,11 @@ impl TableMetadataManager {
             &engine,
             &region_storage_path,
             region_options,
+            region_meta_map,
             distribution,
         )?;
+
+        // TODO(niebayes): Build a txn to persist region metas.
 
         // Creates table route.
         let table_route_value = TableRouteValue::new(region_routes);
@@ -746,6 +751,7 @@ mod tests {
 
     use bytes::Bytes;
     use futures::TryStreamExt;
+    use store_api::storage::{RegionId, RegionNumber, TableId};
     use table::metadata::{RawTableInfo, TableInfo};
 
     use super::datanode_table::DatanodeTableKey;
@@ -758,11 +764,16 @@ mod tests {
     use crate::key::{to_removed_key, DeserializedValueWithBytes, TableMetadataManager};
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
+    use crate::region_meta::wal_meta::{KeyName, RegionWalMeta, RegionWalMetaKey};
+    use crate::region_meta::RegionMeta;
     use crate::rpc::router::{region_distribution, Region, RegionRoute, RegionStatus};
+    use crate::DatanodeId;
 
     #[test]
     fn test_deserialized_value_with_bytes() {
-        let region_route = new_test_region_route();
+        let datanode_id = 1;
+        let region_id = 1;
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
 
         let expected_region_routes =
@@ -795,59 +806,93 @@ mod tests {
         assert_eq!(removed, to_removed_key(key));
     }
 
-    fn new_test_region_route() -> RegionRoute {
-        new_region_route(1, 2)
-    }
-
-    fn new_region_route(region_id: u64, datanode: u64) -> RegionRoute {
+    fn new_test_region_route(region_id: u64, datanode_id: DatanodeId) -> RegionRoute {
         RegionRoute {
             region: Region {
                 id: region_id.into(),
-                name: "r1".to_string(),
+                name: format!("r{region_id}"),
                 partition: None,
                 attrs: BTreeMap::new(),
             },
-            leader_peer: Some(Peer::new(datanode, "a2")),
+            leader_peer: Some(Peer::new(datanode_id, format!("a{region_id}"))),
             follower_peers: vec![],
             leader_status: None,
         }
     }
 
-    fn new_test_table_info(region_numbers: impl Iterator<Item = u32>) -> TableInfo {
-        test_utils::new_test_table_info(10, region_numbers)
+    fn new_test_table_info(table_id: TableId, region_numbers: Vec<RegionNumber>) -> TableInfo {
+        test_utils::new_test_table_info(table_id, region_numbers)
+    }
+
+    fn new_test_region_meta_map(
+        table_id: TableId,
+        region_ids: Vec<u64>,
+    ) -> HashMap<RegionNumber, RegionMeta> {
+        region_ids
+            .into_iter()
+            .map(|region_id| {
+                let region_number = RegionId::from_u64(region_id).region_number();
+
+                let topic_key =
+                    RegionWalMetaKey::new(table_id, region_number, KeyName::KafkaTopic).to_string();
+                let topic_value = "test_topic".to_string();
+                let wal_meta = RegionWalMeta::with_metas([(topic_key, topic_value)]);
+
+                let region_meta = RegionMeta { wal_meta };
+
+                (region_number, region_meta)
+            })
+            .collect()
     }
 
     #[tokio::test]
     async fn test_create_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_id = 1;
+        let region_number = RegionId::from_u64(region_id).region_number();
+
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
+        let region_meta_map = new_test_region_meta_map(table_id, vec![region_id]);
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                region_meta_map.clone(),
+            )
             .await
             .unwrap();
-        // if metadata was already created, it should be ok.
+
+        // creating metadata with the same key and content is idempotent and deemed ok.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                region_meta_map.clone(),
+            )
             .await
             .unwrap();
+
+        // creating metadata with the same key but different content would incur an error.
         let mut modified_region_routes = region_routes.clone();
         modified_region_routes.push(region_route.clone());
-        // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
-            .create_table_metadata(table_info.clone(), modified_region_routes)
+            .create_table_metadata(table_info.clone(), modified_region_routes, region_meta_map)
             .await
             .is_err());
 
+        // ensures the metadata is not overwritten.
         let (remote_table_info, remote_table_route) = table_metadata_manager
             .get_full_table_info(10)
             .await
             .unwrap();
-
         assert_eq!(
             remote_table_info.unwrap().into_inner().table_info,
             table_info
@@ -862,18 +907,23 @@ mod tests {
     async fn test_delete_table_metadata() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_id = 1;
+        let region_number = RegionId::from_u64(region_id).region_number();
+
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
-        let datanode_id = 2;
+        let region_meta_map = new_test_region_meta_map(table_id, vec![region_id]);
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
         let table_route_value =
             DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
 
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(table_info.clone(), region_routes.clone(), region_meta_map)
             .await
             .unwrap();
 
@@ -937,29 +987,38 @@ mod tests {
     async fn test_rename_table() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_id = 1;
+        let region_number = RegionId::from_u64(region_id).region_number();
+
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
+        let region_meta_map = new_test_region_meta_map(table_id, vec![region_id]);
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(table_info.clone(), region_routes.clone(), region_meta_map)
             .await
             .unwrap();
+
+        // renames the table.
         let new_table_name = "another_name".to_string();
         let table_info_value =
             DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info.clone()));
+        table_metadata_manager
+            .rename_table(table_info_value.clone(), new_table_name.clone())
+            .await
+            .unwrap();
 
+        // renaming a table to the same name is idempotent and deemed ok.
         table_metadata_manager
             .rename_table(table_info_value.clone(), new_table_name.clone())
             .await
             .unwrap();
-        // if remote metadata was updated, it should be ok.
-        table_metadata_manager
-            .rename_table(table_info_value.clone(), new_table_name.clone())
-            .await
-            .unwrap();
+
         let mut modified_table_info = table_info.clone();
         modified_table_info.name = "hi".to_string();
         let modified_table_info_value =
@@ -1005,14 +1064,20 @@ mod tests {
     async fn test_update_table_info() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_id = 1;
+        let region_number = RegionId::from_u64(region_id).region_number();
+
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
+        let region_meta_map = new_test_region_meta_map(table_id, vec![region_id]);
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(table_info.clone(), region_routes.clone(), region_meta_map)
             .await
             .unwrap();
         let mut new_table_info = table_info.clone();
@@ -1057,42 +1122,33 @@ mod tests {
     async fn test_update_table_leader_region_status() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let datanode = 1;
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_ids = [1, 2];
+
         let region_routes = vec![
-            RegionRoute {
-                region: Region {
-                    id: 1.into(),
-                    name: "r1".to_string(),
-                    partition: None,
-                    attrs: BTreeMap::new(),
-                },
-                leader_peer: Some(Peer::new(datanode, "a2")),
-                leader_status: Some(RegionStatus::Downgraded),
-                follower_peers: vec![],
-            },
-            RegionRoute {
-                region: Region {
-                    id: 2.into(),
-                    name: "r2".to_string(),
-                    partition: None,
-                    attrs: BTreeMap::new(),
-                },
-                leader_peer: Some(Peer::new(datanode, "a1")),
-                leader_status: None,
-                follower_peers: vec![],
-            },
+            new_test_region_route(region_ids[0], datanode_id),
+            new_test_region_route(region_ids[1], datanode_id),
         ];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
-        let current_table_route_value =
-            DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
+        let region_meta_map = new_test_region_meta_map(table_id, region_ids.to_vec());
+        let table_info: RawTableInfo = new_test_table_info(
+            table_id,
+            region_ids
+                .iter()
+                .map(|id| RegionId::from_u64(*id).region_number())
+                .collect(),
+        )
+        .into();
+
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(table_info.clone(), region_routes.clone(), region_meta_map)
             .await
             .unwrap();
 
+        let current_table_route_value =
+            DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
         table_metadata_manager
             .update_leader_region_status(table_id, &current_table_route_value, |region_route| {
                 if region_route.leader_status.is_some() {
@@ -1143,28 +1199,38 @@ mod tests {
     async fn test_update_table_route() {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
-        let region_route = new_test_region_route();
+
+        let datanode_id = 1;
+        let table_id = 1;
+        let region_id = 1;
+        let region_number = RegionId::from_u64(region_id).region_number();
+
+        let region_route = new_test_region_route(region_id, datanode_id);
         let region_routes = vec![region_route.clone()];
-        let table_info: RawTableInfo =
-            new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
-        let table_id = table_info.ident.table_id;
+        let region_meta_map = new_test_region_meta_map(table_id, vec![region_id]);
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
         let engine = table_info.meta.engine.as_str();
         let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
         let current_table_route_value =
             DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
+
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(table_info.clone(), region_routes.clone(), region_meta_map)
             .await
             .unwrap();
         assert_datanode_table(&table_metadata_manager, table_id, &region_routes).await;
+
+        // updates metadata with new region routes.
         let new_region_routes = vec![
-            new_region_route(1, 1),
-            new_region_route(2, 2),
-            new_region_route(3, 3),
+            new_test_region_route(1, 1),
+            new_test_region_route(2, 2),
+            new_test_region_route(3, 3),
         ];
         // it should be ok.
+        // TODO(niebayes): Requires integrating region metas.
         table_metadata_manager
             .update_table_route(
                 table_id,
@@ -1202,7 +1268,7 @@ mod tests {
                 .inner
                 .update(new_region_routes.clone()),
         );
-        let new_region_routes = vec![new_region_route(2, 4), new_region_route(5, 5)];
+        let new_region_routes = vec![new_test_region_route(2, 4), new_test_region_route(5, 5)];
         // it should be ok.
         table_metadata_manager
             .update_table_route(
@@ -1224,10 +1290,10 @@ mod tests {
         // The ABA problem.
         let wrong_table_route_value =
             DeserializedValueWithBytes::from_inner(current_table_route_value.update(vec![
-                new_region_route(1, 1),
-                new_region_route(2, 2),
-                new_region_route(3, 3),
-                new_region_route(4, 4),
+                new_test_region_route(1, 1),
+                new_test_region_route(2, 2),
+                new_test_region_route(3, 3),
+                new_test_region_route(4, 4),
             ]));
         assert!(table_metadata_manager
             .update_table_route(
@@ -1244,4 +1310,6 @@ mod tests {
             .await
             .is_err());
     }
+
+    // TODO(niebayes): Maybe add necessary tests for integrating region metas.
 }

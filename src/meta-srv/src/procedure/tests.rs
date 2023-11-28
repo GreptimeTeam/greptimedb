@@ -368,7 +368,7 @@ async fn test_submit_alter_region_requests() {
     let table_info = test_data::new_table_info();
     context
         .table_metadata_manager
-        .create_table_metadata(table_info.clone(), region_routes.clone())
+        .create_table_metadata(table_info.clone(), region_routes.clone(), HashMap::new())
         .await
         .unwrap();
 

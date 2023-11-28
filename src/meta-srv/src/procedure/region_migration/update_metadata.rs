@@ -95,6 +95,7 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -162,7 +163,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::new())
             .await
             .unwrap();
 
@@ -215,7 +216,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::new())
             .await
             .unwrap();
 
