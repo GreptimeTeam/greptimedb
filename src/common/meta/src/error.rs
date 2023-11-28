@@ -266,6 +266,12 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display("The length of region metas is not identical with that of regions, num_region_metas: {}, num_regions: {}", num_region_metas, num_regions))]
+    RegionMetaLengthMismatched {
+        num_region_metas: usize,
+        num_regions: usize,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -323,6 +329,8 @@ impl ErrorExt for Error {
             RetryLater { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+
+            RegionMetaLengthMismatched { .. } => StatusCode::InvalidArguments,
         }
     }
 
