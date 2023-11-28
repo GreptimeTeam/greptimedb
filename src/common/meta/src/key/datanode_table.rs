@@ -18,11 +18,11 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, OptionExt};
+use snafu::OptionExt;
 use store_api::storage::RegionNumber;
 use table::metadata::TableId;
 
-use crate::error::{InvalidTableMetadataSnafu, RegionMetaLengthMismatchedSnafu, Result};
+use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::{
     RegionDistribution, TableMetaKey, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
 };
@@ -183,16 +183,13 @@ impl DatanodeTableManager {
             .map(|(datanode_id, regions)| {
                 let region_metas = regions
                     .iter()
-                    .filter_map(|region_number| region_meta_map.get(region_number).cloned())
+                    .map(|region_number| {
+                        region_meta_map
+                            .get(region_number)
+                            .cloned()
+                            .unwrap_or_default()
+                    })
                     .collect::<Vec<_>>();
-
-                ensure!(
-                    regions.len() == region_metas.len(),
-                    RegionMetaLengthMismatchedSnafu {
-                        num_region_metas: region_metas.len(),
-                        num_regions: regions.len(),
-                    }
-                );
 
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
