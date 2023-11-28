@@ -22,4 +22,8 @@ SELECT * FROM test;
 
 DESC TABLE test;
 
+ALTER TABLE test ADD COLUMN "IdC" STRING default 'idc' PRIMARY KEY;
+
+DESC TABLE test;
+
 DROP TABLE test;

@@ -41,13 +41,14 @@ impl<'a> ParserContext<'a> {
                 AlterTableOperation::AddConstraint(constraint)
             } else {
                 let _ = parser.parse_keyword(Keyword::COLUMN);
-                let column_def = parser.parse_column_def()?;
+                let mut column_def = parser.parse_column_def()?;
+                column_def.name = Self::canonicalize_identifier(column_def.name);
                 let location = if parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
                         let _ = parser.next_token();
-                        let name = parser.parse_identifier()?;
+                        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
                         Some(AddColumnLocation::After {
                             column_name: name.value,
                         })
@@ -64,7 +65,7 @@ impl<'a> ParserContext<'a> {
             }
         } else if parser.parse_keyword(Keyword::DROP) {
             if parser.parse_keyword(Keyword::COLUMN) {
-                let name = self.parser.parse_identifier()?;
+                let name = Self::canonicalize_identifier(self.parser.parse_identifier()?);
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(

@@ -6,7 +6,11 @@ INSERT INTO test VALUES (1, 1), (2, 2);
 
 Affected Rows: 2
 
-ALTER TABLE test DROP COLUMN i;
+ALTER TABLE test DROP COLUMN "I";
+
+Error: 4002(TableColumnNotFound), Column I not exists in table test
+
+ALTER TABLE test DROP COLUMN I;
 
 Affected Rows: 0
 
