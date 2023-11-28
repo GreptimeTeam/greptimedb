@@ -92,6 +92,7 @@ tonic-reflection = "0.10"
 tonic.workspace = true
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.3", features = ["full"] }
+urlencoding = "2.1"
 
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
