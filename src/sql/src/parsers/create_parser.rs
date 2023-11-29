@@ -73,7 +73,7 @@ impl<'a> ParserContext<'a> {
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-        let table_name = self
+        let raw_table_name = self
             .parser
             .parse_object_name()
             .context(error::UnexpectedSnafu {
@@ -81,6 +81,7 @@ impl<'a> ParserContext<'a> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
         let (columns, constraints) = self.parse_columns()?;
         let engine = self.parse_table_engine(common_catalog::consts::FILE_ENGINE)?;
         let options = self
@@ -142,7 +143,7 @@ impl<'a> ParserContext<'a> {
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
 
-        let table_name = self
+        let raw_table_name = self
             .parser
             .parse_object_name()
             .context(error::UnexpectedSnafu {
@@ -150,6 +151,7 @@ impl<'a> ParserContext<'a> {
                 expected: "a table name",
                 actual: self.peek_token_as_string(),
             })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let (columns, constraints) = self.parse_columns()?;
 
@@ -197,10 +199,14 @@ impl<'a> ParserContext<'a> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        let column_list = self
+        let raw_column_list = self
             .parser
             .parse_parenthesized_column_list(Mandatory, false)
             .context(error::SyntaxSnafu)?;
+        let column_list = raw_column_list
+            .into_iter()
+            .map(Self::canonicalize_identifier)
+            .collect();
 
         let entries = self.parse_comma_separated(Self::parse_partition_entry)?;
 
@@ -435,7 +441,7 @@ impl<'a> ParserContext<'a> {
             };
         }
         Ok(ColumnDef {
-            name,
+            name: Self::canonicalize_identifier(name),
             data_type,
             collation,
             options,
@@ -488,7 +494,8 @@ impl<'a> ParserContext<'a> {
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-            Some(self.parser.parse_identifier().context(error::SyntaxSnafu)?)
+            let raw_name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
+            Some(Self::canonicalize_identifier(raw_name))
         } else {
             None
         };
@@ -504,10 +511,14 @@ impl<'a> ParserContext<'a> {
                         expected: "KEY",
                         actual: self.peek_token_as_string(),
                     })?;
-                let columns = self
+                let raw_columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect();
                 Ok(Some(TableConstraint::Unique {
                     name,
                     columns,
@@ -526,10 +537,14 @@ impl<'a> ParserContext<'a> {
                         actual: self.peek_token_as_string(),
                     })?;
 
-                let columns = self
+                let raw_columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect::<Vec<_>>();
 
                 ensure!(
                     columns.len() == 1,

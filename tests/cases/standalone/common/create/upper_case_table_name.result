@@ -6,11 +6,11 @@ use upper_case_table_name;
 
 Affected Rows: 0
 
-create table system_Metric(ts timestamp time index);
+create table "system_Metric"(ts timestamp time index);
 
 Affected Rows: 0
 
-insert into system_Metric values (0), (1);
+insert into "system_Metric" values (0), (1);
 
 Affected Rows: 2
 
@@ -27,7 +27,76 @@ select * from "system_Metric";
 | 1970-01-01T00:00:00.001 |
 +-------------------------+
 
-drop table system_Metric;
+drop table "system_Metric";
+
+Affected Rows: 0
+
+create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index, primary key ("CoLA"));
+
+Affected Rows: 0
+
+desc table "AbCdEfG";
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| CoLA   | String               | PRI | YES  |         | TAG           |
+| cOlB   | String               |     | YES  |         | FIELD         |
+| tS     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+-- unquoted table name and column name.
+create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
+
+Affected Rows: 0
+
+desc table aBcDeFgE;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| cola   | String               | PRI | YES  |         | TAG           |
+| colb   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+drop table "AbCdEfG";
+
+Affected Rows: 0
+
+drop table aBcDeFgE;
+
+Affected Rows: 0
+
+-- unquoted column name in partition
+create table AbCdEfGe(
+    CoLA string PRIMARY KEY,
+    tS timestamp time index
+) PARTITION BY RANGE COLUMNS (cOlA) (
+    PARTITION p0 VALUES LESS THAN (MAXVALUE)
+);
+
+Affected Rows: 0
+
+drop table abcdefge;
+
+Affected Rows: 0
+
+-- unquoted column name in TIME INDEX
+create table AbCdEfGe(CoLA string, tS timestamp, TIME INDEX (Ts));
+
+Affected Rows: 0
+
+desc table abcdefge;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| cola   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+drop table abcdefge;
 
 Affected Rows: 0
 
