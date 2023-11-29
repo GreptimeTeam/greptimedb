@@ -65,7 +65,7 @@ worker_request_batch_size = 64
 # Number of meta action updated to trigger a new checkpoint for the manifest
 manifest_checkpoint_distance = 10
 # Manifest compression type
-manifest_compress_type = "uncompressed"
+manifest_compress_type = "Uncompressed"
 # Max number of running background jobs
 max_background_jobs = 4
 # Interval to auto flush a region if it has not flushed yet.

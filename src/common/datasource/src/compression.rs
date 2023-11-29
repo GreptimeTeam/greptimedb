@@ -26,9 +26,7 @@ use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::error::{self, Error, Result};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum CompressionType {
     /// Gzip-ed file
     Gzip,
