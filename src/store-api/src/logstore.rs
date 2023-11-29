@@ -18,10 +18,9 @@ use std::collections::HashMap;
 
 use common_error::ext::ErrorExt;
 
-use crate::logstore::entry::{Entry, Id as EntryId};
+use crate::logstore::entry::{Entry, Id as EntryId, Offset as EntryOffset};
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::namespace::{Id as NamespaceId, Namespace};
-use crate::storage::RegionId;
 
 pub mod entry;
 pub mod entry_stream;
@@ -87,12 +86,20 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 }
 
+/// The response of an `append` operation.
 #[derive(Debug)]
 pub struct AppendResponse {
+    /// The entry id of the appended log entry.
     pub entry_id: EntryId,
+    /// The start entry offset of the appended log entry.
+    /// Depends on the `LogStore` implementation, the entry offset may be missing.
+    pub offset: Option<EntryOffset>,
 }
 
-#[derive(Debug)]
+/// The response of an `append_batch` operation.
+#[derive(Debug, Default)]
 pub struct AppendBatchResponse {
-    pub region_min_entry_id: HashMap<RegionId, EntryId>,
+    /// Key: region id (as u64). Value: the known minimum start offset of appended log entries belonging to the region.
+    /// Depends on the `LogStore` implementation, the entry offsets may be missing.
+    pub offsets: HashMap<u64, EntryOffset>,
 }

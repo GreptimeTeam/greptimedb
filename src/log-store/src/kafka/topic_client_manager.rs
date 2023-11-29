@@ -114,3 +114,5 @@ impl TopicClientManager {
         Ok(Arc::new(topic_client))
     }
 }
+
+// TODO(niebayes): Add necessary unit tests.

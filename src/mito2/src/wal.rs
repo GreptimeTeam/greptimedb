@@ -172,7 +172,7 @@ impl<S: LogStore> WalWriter<S> {
     pub async fn write_to_wal(&mut self) -> Result<()> {
         // TODO(yingwen): metrics.
 
-        // TODO(niebayes): Returns an `AppendBatchResponse`.
+        // TODO(niebayes): Returns an `AppendBatchResponse` or the inner region_offset_map.
         let entries = mem::take(&mut self.entries);
         self.store
             .append_batch(entries)

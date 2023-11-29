@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::num::TryFromIntError;
 
 use common_config::wal::kafka::KafkaTopic;
 use common_error::ext::ErrorExt;
@@ -21,7 +22,8 @@ use common_runtime::error::Error as RuntimeError;
 use rskafka::client::error::Error as RsKafkaError;
 use snafu::{Location, Snafu};
 use store_api::logstore::entry::Id as EntryId;
-use store_api::storage::RegionId;
+use store_api::logstore::namespace::Id as NamespaceId;
+use store_api::logstore::RegionWalOptions;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -113,35 +115,57 @@ pub enum Error {
         error: RsKafkaError,
     },
 
-    #[snafu(display(
-        "Failed to get a Kafka topic client, topic: {}, region id: {}",
-        topic,
-        region_id
-    ))]
+    #[snafu(display("Failed to get a Kafka topic client, topic: {}", topic))]
     GetKafkaTopicClient {
         topic: KafkaTopic,
-        region_id: u64,
         location: Location,
     },
 
-    #[snafu(display(
-        "Failed to write entries to Kafka, topic: {}, region id: {}",
-        topic,
-        region_id
-    ))]
+    #[snafu(display("Failed to write entries to Kafka, topic: {}", topic))]
     WriteEntriesToKafka {
         topic: KafkaTopic,
-        region_id: RegionId,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display("Empty log entries provided"))]
-    EmptyLogEntries { location: Location },
-
     #[snafu(display("Returned Kafka offsets are empty"))]
     EmptyKafkaOffsets { location: Location },
+
+    #[snafu(display(
+        "Failed to convert an rskafka offset to entry offset, rskafka_offset: {}",
+        rskafka_offset
+    ))]
+    ConvertRsKafkaOffsetToEntryOffset {
+        rskafka_offset: i64,
+        location: Location,
+        #[snafu(source)]
+        error: TryFromIntError,
+    },
+
+    #[snafu(display(
+        "Missing required entry offset, entry_id: {}, region_id: {}, topic: {}",
+        entry_id,
+        region_id,
+        topic
+    ))]
+    MissingEntryOffset {
+        entry_id: EntryId,
+        region_id: u64,
+        topic: KafkaTopic,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Missing required kafka topic, ns_id: {}, region_wal_options: {:?}",
+        ns_id,
+        region_wal_options,
+    ))]
+    MissingKafkaTopic {
+        ns_id: NamespaceId,
+        region_wal_options: RegionWalOptions,
+        location: Location,
+    },
 
     #[snafu(display("Failed to serialize an entry meta"))]
     SerEntryMeta {

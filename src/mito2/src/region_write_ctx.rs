@@ -155,6 +155,7 @@ impl RegionWriteCtx {
         &mut self,
         wal_writer: &mut WalWriter<S>,
     ) -> Result<()> {
+        // TODO(niebayes): An entry id may be mapped to an entry offset. We need to maintain the mapping at somewhere.
         wal_writer.add_entry(self.region_id, self.next_entry_id, &self.wal_entry)?;
         // We only call this method one time, but we still bump next entry id for consistency.
         self.next_entry_id += 1;

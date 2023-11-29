@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 pub type KafkaTopic = String;
 pub const TOPIC_NAME_PREFIX: &str = "greptime_topic";
+pub const TOPIC_KEY: &str = "kafka_topic";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Compression {
