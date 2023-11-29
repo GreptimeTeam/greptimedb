@@ -211,6 +211,8 @@ impl SeqScan {
 
     /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
     async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
+        debug!("Build parallel reader, parallelism: {}", self.parallelism);
+
         assert!(self.parallelism > 1);
         let semaphore = Arc::new(Semaphore::new(self.parallelism));
 
