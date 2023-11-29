@@ -769,6 +769,6 @@ mod test {
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),
         )))];
-        assert!(parse_align_to(&args, 0).unwrap() == -1 * 8 * 60 * 60 * 1000);
+        assert!(parse_align_to(&args, 0).unwrap() == -8 * 60 * 60 * 1000);
     }
 }
