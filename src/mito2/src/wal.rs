@@ -25,11 +25,12 @@ use futures::StreamExt;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
-use store_api::logstore::LogStore;
+use store_api::logstore::{LogStore, RegionWalOptions};
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
+    BuildWalNamespaceSnafu, DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result,
+    WriteWalSnafu,
 };
 
 /// WAL entry id.
@@ -66,7 +67,16 @@ impl<S: LogStore> Wal<S> {
     /// Scan entries of specific region starting from `start_id` (inclusive).
     pub fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
         let stream = try_stream!({
-            let namespace = self.store.namespace(region_id.into());
+            // TODO(niebayes): Properly construct or fetch `region_wal_options`.
+            let region_wal_options = RegionWalOptions::default();
+            let namespace = self
+                .store
+                .namespace(region_id.into(), &region_wal_options)
+                .map_err(BoxedError::new)
+                .context(BuildWalNamespaceSnafu {
+                    region_id,
+                    region_wal_options,
+                })?;
             let mut stream = self
                 .store
                 .read(&namespace, start_id)
@@ -90,7 +100,15 @@ impl<S: LogStore> Wal<S> {
 
     /// Mark entries whose ids `<= last_id` as deleted.
     pub async fn obsolete(&self, region_id: RegionId, last_id: EntryId) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+        let region_wal_options = RegionWalOptions::default();
+        let namespace = self
+            .store
+            .namespace(region_id.into(), &region_wal_options)
+            .map_err(BoxedError::new)
+            .context(BuildWalNamespaceSnafu {
+                region_id,
+                region_wal_options,
+            })?;
         self.store
             .obsolete(namespace, last_id)
             .await
@@ -127,7 +145,15 @@ impl<S: LogStore> WalWriter<S> {
         entry_id: EntryId,
         wal_entry: &WalEntry,
     ) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+        let region_wal_options = RegionWalOptions::default();
+        let namespace = self
+            .store
+            .namespace(region_id.into(), &region_wal_options)
+            .map_err(BoxedError::new)
+            .context(BuildWalNamespaceSnafu {
+                region_id,
+                region_wal_options,
+            })?;
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
         wal_entry
@@ -146,12 +172,14 @@ impl<S: LogStore> WalWriter<S> {
     pub async fn write_to_wal(&mut self) -> Result<()> {
         // TODO(yingwen): metrics.
 
+        // TODO(niebayes): Returns an `AppendBatchResponse`.
         let entries = mem::take(&mut self.entries);
         self.store
             .append_batch(entries)
             .await
             .map_err(BoxedError::new)
             .context(WriteWalSnafu)
+            .map(|_| ())
     }
 }
 

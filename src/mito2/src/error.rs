@@ -25,6 +25,7 @@ use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
 use prost::{DecodeError, EncodeError};
 use snafu::{Location, Snafu};
+use store_api::logstore::RegionWalOptions;
 use store_api::manifest::ManifestVersion;
 use store_api::storage::RegionId;
 
@@ -217,6 +218,17 @@ pub enum Error {
     DeleteWal {
         region_id: RegionId,
         location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Failed to build a wal namespace, region_id: {}, region_wal_options: {:?}",
+        region_id,
+        region_wal_options
+    ))]
+    BuildWalNamespace {
+        region_id: RegionId,
+        region_wal_options: RegionWalOptions,
         source: BoxedError,
     },
 
@@ -455,7 +467,8 @@ impl ErrorExt for Error {
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. } => StatusCode::Internal,
+            | DecodeWal { .. }
+            | BuildWalNamespace { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),

@@ -14,8 +14,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use store_api::logstore::entry::{Entry, Id};
-use store_api::logstore::namespace::Namespace;
+use store_api::logstore::entry::{Entry, Id as EntryId};
+use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 
 use crate::error::Error;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
@@ -42,7 +42,7 @@ impl EntryImpl {
 }
 
 impl NamespaceImpl {
-    pub fn with_id(id: Id) -> Self {
+    pub fn with_id(id: NamespaceId) -> Self {
         Self {
             id,
             ..Default::default()
@@ -60,7 +60,7 @@ impl Hash for NamespaceImpl {
 impl Eq for NamespaceImpl {}
 
 impl Namespace for NamespaceImpl {
-    fn id(&self) -> store_api::logstore::namespace::Id {
+    fn id(&self) -> NamespaceId {
         self.id
     }
 }
@@ -73,7 +73,7 @@ impl Entry for EntryImpl {
         self.data.as_slice()
     }
 
-    fn id(&self) -> Id {
+    fn id(&self) -> EntryId {
         self.id
     }
 
