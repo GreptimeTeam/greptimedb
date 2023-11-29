@@ -115,6 +115,8 @@ impl MitoEngine {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Parallelism to scan data.
+    scan_parallelism: usize,
 }
 
 impl EngineInner {
@@ -124,8 +126,10 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
+        let scan_parallelism = config.scan_parallelism;
         EngineInner {
             workers: WorkerGroup::start(config, log_store, object_store_manager),
+            scan_parallelism,
         }
     }
 
@@ -173,7 +177,8 @@ impl EngineInner {
             region.access_layer.clone(),
             request,
             Some(cache_manager),
-        );
+        )
+        .parallelism(self.scan_parallelism);
 
         scan_region.scanner()
     }
@@ -299,6 +304,7 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {
         config.sanitize();
+        let scan_parallelism = config.scan_parallelism;
 
         MitoEngine {
             inner: Arc::new(EngineInner {
@@ -309,6 +315,7 @@ impl MitoEngine {
                     write_buffer_manager,
                     listener,
                 ),
+                scan_parallelism,
             }),
         }
     }

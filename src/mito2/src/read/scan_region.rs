@@ -115,6 +115,8 @@ pub(crate) struct ScanRegion {
     request: ScanRequest,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
+    /// Parallelism to scan.
+    parallelism: usize,
 }
 
 impl ScanRegion {
@@ -130,7 +132,15 @@ impl ScanRegion {
             access_layer,
             request,
             cache_manager,
+            parallelism: 0,
         }
+    }
+
+    /// Sets parallelism.
+    #[must_use]
+    pub(crate) fn parallelism(mut self, parallelism: usize) -> Self {
+        self.parallelism = parallelism;
+        self
     }
 
     /// Returns a [Scanner] to scan the region.
@@ -196,7 +206,8 @@ impl ScanRegion {
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
             .with_files(files)
-            .with_cache(self.cache_manager);
+            .with_cache(self.cache_manager)
+            .with_parallelism(self.parallelism);
 
         Ok(seq_scan)
     }
