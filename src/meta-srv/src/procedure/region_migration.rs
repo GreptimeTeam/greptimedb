@@ -53,7 +53,7 @@ use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 /// It will only be updated/stored after the Red node has succeeded.
 ///
 /// **Notes: Stores with too large data in the context might incur replication overhead.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The Id of the cluster.
     cluster_id: ClusterId,
@@ -375,12 +375,7 @@ mod tests {
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
-        }
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
     #[test]
@@ -412,6 +407,16 @@ mod tests {
 
         let expected = r#"{"persistent_ctx":{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
+    }
+
+    #[test]
+    fn test_backward_compatibility() {
+        let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        // NOTES: Changes it will break backward compatibility.
+        let serialized = r#"{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
+        let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
+
+        assert_eq!(persistent_ctx, deserialized);
     }
 
     #[derive(Debug, Serialize, Deserialize, Default)]
