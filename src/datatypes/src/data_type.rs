@@ -833,6 +833,13 @@ mod tests {
             "List<Dictionary<Int32, String>>"
         );
         assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::list_datatype(
+                ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
+            ))
+            .to_string(),
+            "List<List<List<Int32>>>"
+        );
+        assert_eq!(
             ConcreteDataType::dictionary_datatype(
                 ConcreteDataType::int32_datatype(),
                 ConcreteDataType::string_datatype()
