@@ -26,7 +26,7 @@ use common_time::Timestamp;
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{MERGE_FILTER_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
 
 /// Minimum batch size to output.
 const MIN_BATCH_SIZE: usize = 64;
@@ -327,6 +327,12 @@ impl MergeReaderBuilder {
     /// Pushes a batch iterator to sources.
     pub fn push_batch_iter(&mut self, iter: BoxedBatchIterator) -> &mut Self {
         self.sources.push(Source::Iter(iter));
+        self
+    }
+
+    /// Pushes a batch stream to sources.
+    pub fn push_batch_stream(&mut self, stream: BoxedBatchStream) -> &mut Self {
+        self.sources.push(Source::Stream(stream));
         self
     }
 

@@ -124,6 +124,8 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
+# TODO(yingwen): replace other usage by this one.
+tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.10", features = ["tls"] }
