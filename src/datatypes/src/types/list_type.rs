@@ -52,8 +52,8 @@ impl ListType {
 }
 
 impl DataType for ListType {
-    fn name(&self) -> &str {
-        "List"
+    fn name(&self) -> String {
+        format!("List<{}>", self.item_type.name())
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn test_list_type() {
         let t = ListType::new(ConcreteDataType::boolean_datatype());
-        assert_eq!("List", t.name());
+        assert_eq!("List<Boolean>", t.name());
         assert_eq!(LogicalTypeId::List, t.logical_type_id());
         assert_eq!(
             Value::List(ListValue::new(None, ConcreteDataType::boolean_datatype())),
