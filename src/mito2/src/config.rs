@@ -17,7 +17,6 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_datasource::compression::CompressionType;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
@@ -42,8 +41,8 @@ pub struct MitoConfig {
     /// Number of meta action updated to trigger a new checkpoint
     /// for the manifest (default 10).
     pub manifest_checkpoint_distance: u64,
-    /// Manifest compression type (default uncompressed).
-    pub manifest_compress_type: CompressionType,
+    /// Whether to compress manifest and checkpoint file by gzip (default false).
+    pub compress_manifest: bool,
 
     // Background job configs:
     /// Max number of running background jobs (default 4).
@@ -78,7 +77,7 @@ impl Default for MitoConfig {
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
-            manifest_compress_type: CompressionType::Uncompressed,
+            compress_manifest: false,
             max_background_jobs: DEFAULT_MAX_BG_JOB,
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),

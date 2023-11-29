@@ -33,6 +33,7 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderRef;
 use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
@@ -259,7 +260,9 @@ impl RegionOpener {
         Ok(RegionManifestOptions {
             manifest_dir: new_manifest_dir(&self.region_dir),
             object_store,
-            compress_type: config.manifest_compress_type,
+            // We don't allow users to set the compression algorithm as we use it as a file suffix.
+            // Currently, the manifest storage doesn't have good support for changing compression algorithms.
+            compress_type: manifest_compress_type(config.compress_manifest),
             checkpoint_distance: config.manifest_checkpoint_distance,
         })
     }
