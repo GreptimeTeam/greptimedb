@@ -228,7 +228,7 @@ struct StartCommand {
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     env_prefix: String,
     /// The working home directory of this standalone instance.
-    #[clap(short('d'), long)]
+    #[clap(long)]
     data_home: Option<String>,
 }
 
