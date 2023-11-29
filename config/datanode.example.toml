@@ -29,8 +29,16 @@ connect_timeout = "1s"
 # `TCP_NODELAY` option for accepted connections, true by default.
 tcp_nodelay = true
 
-# WAL options, see `standalone.example.toml`.
+
+# WAL options.
 [wal]
+# Available wal providers:
+# - "RaftEngine" (default)
+# - "Kafka"
+provider = "Kafka"
+
+# Raft engine wal options, see `standalone.example.toml`.
+[wal.raft_engine_opts]
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 file_size = "256MB"
@@ -38,6 +46,31 @@ purge_threshold = "4GB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
+
+# Kafka wal options.
+[wal.kafka_opts]
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
+broker_endpoints = ["127.0.0.1:9090"]
+# Number of topics shall be created beforehand.
+num_topics = 64
+# Topic name prefix.
+topic_name_prefix = "greptime_topic"
+# Number of partitions per topic.
+num_partitions = 1
+# The compression algorithm used to compress log entries.
+# Available compression algorithms:
+# - NoCompression (default)
+# - Gzip
+# - Lz4
+# - Snappy
+# - Zstd
+compression = "Lz4"
+# The maximum log size an rskafka batch producer could buffer.
+max_batch_size = "4MB"
+# The linger duration of an rskafka batch producer.
+linger = "200ms"
+# The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
+max_wait_time = "100ms"
 
 # Storage options, see `standalone.example.toml`.
 [storage]

@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 common-base.workspace = true
 humantime-serde.workspace = true
+rskafka.workspace = true
 serde.workspace = true
