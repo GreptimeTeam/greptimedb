@@ -19,9 +19,11 @@ pub(crate) mod open_candidate_region;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod update_metadata;
+pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 use std::fmt::Debug;
+use std::time::Duration;
 
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
@@ -34,6 +36,7 @@ use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use serde::{Deserialize, Serialize};
 use snafu::{location, Location, OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use tokio::time::Instant;
 
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Error, Result};
@@ -80,6 +83,29 @@ pub struct VolatileContext {
     opening_region_guard: Option<OpeningRegionGuard>,
     /// `table_route_info` is stored via previous steps for future use.
     table_route_info: Option<DeserializedValueWithBytes<TableRouteValue>>,
+    /// The deadline of leader region lease.
+    leader_region_lease_deadline: Option<Instant>,
+    /// The last_entry_id of leader region.
+    leader_region_last_entry_id: Option<u64>,
+}
+
+impl VolatileContext {
+    /// Sets the `leader_region_lease_deadline` if it does not exist.
+    pub fn set_leader_region_lease_deadline(&mut self, lease_timeout: Duration) {
+        if self.leader_region_lease_deadline.is_none() {
+            self.leader_region_lease_deadline = Some(Instant::now() + lease_timeout);
+        }
+    }
+
+    /// Resets the `leader_region_lease_deadline`.
+    pub fn reset_leader_region_lease_deadline(&mut self) {
+        self.leader_region_lease_deadline = None;
+    }
+
+    /// Sets the `leader_region_last_entry_id`.
+    pub fn set_last_entry_id(&mut self, last_entry_id: u64) {
+        self.leader_region_last_entry_id = Some(last_entry_id)
+    }
 }
 
 /// Used to generate new [Context].

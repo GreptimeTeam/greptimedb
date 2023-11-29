@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::time::Duration;
 
+use common_meta::distributed_time_constants::REGION_LEASE_SECS;
 use common_meta::rpc::router::RegionStatus;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -36,7 +38,7 @@ impl State for UpdateMetadata {
             UpdateMetadata::Downgrade => {
                 self.downgrade_leader_region(ctx).await?;
 
-                Ok(Box::new(DowngradeLeaderRegion))
+                Ok(Box::<DowngradeLeaderRegion>::default())
             }
         }
     }
@@ -87,6 +89,9 @@ impl UpdateMetadata {
         }
 
         debug_assert!(ctx.remove_table_route_value());
+
+        ctx.volatile_ctx
+            .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
 
         Ok(())
     }

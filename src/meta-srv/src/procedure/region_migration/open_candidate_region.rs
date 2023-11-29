@@ -41,7 +41,7 @@ impl State for OpenCandidateRegion {
         let instruction = self.build_open_region_instruction(ctx).await?;
         self.open_candidate_region(ctx, instruction).await?;
 
-        Ok(Box::new(DowngradeLeaderRegion))
+        Ok(Box::<DowngradeLeaderRegion>::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -197,7 +197,9 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::{
+        new_close_region_reply, send_mock_reply, TestingEnv,
+    };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {
@@ -221,23 +223,6 @@ mod tests {
             region_storage_path: "/bar/foo/region/".to_string(),
             options: Default::default(),
         })
-    }
-
-    fn new_close_region_reply(id: u64) -> MailboxMessage {
-        MailboxMessage {
-            id,
-            subject: "mock".to_string(),
-            from: "datanode".to_string(),
-            to: "meta".to_string(),
-            timestamp_millis: current_time_millis(),
-            payload: Some(Payload::Json(
-                serde_json::to_string(&InstructionReply::CloseRegion(SimpleReply {
-                    result: false,
-                    error: None,
-                }))
-                .unwrap(),
-            )),
-        }
     }
 
     fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
@@ -328,21 +313,14 @@ mod tests {
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
             .insert_heartbeat_response_receiver(to_peer_id, tx)
             .await;
 
         // Sends an incorrect reply.
-        common_runtime::spawn_bg(async move {
-            let resp = rx.recv().await.unwrap().unwrap();
-            let reply_id = resp.mailbox_message.unwrap().id;
-            mailbox
-                .on_recv(reply_id, Ok(new_close_region_reply(reply_id)))
-                .await
-                .unwrap();
-        });
+        send_mock_reply(mailbox, rx, |id| Ok(new_close_region_reply(id)));
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
         let err = state
@@ -368,23 +346,15 @@ mod tests {
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
             .insert_heartbeat_response_receiver(to_peer_id, tx)
             .await;
 
         // Sends an timeout error.
-        common_runtime::spawn_bg(async move {
-            let resp = rx.recv().await.unwrap().unwrap();
-            let reply_id = resp.mailbox_message.unwrap().id;
-            mailbox
-                .on_recv(
-                    reply_id,
-                    Err(error::MailboxTimeoutSnafu { id: reply_id }.build()),
-                )
-                .await
-                .unwrap();
+        send_mock_reply(mailbox, rx, |id| {
+            Err(error::MailboxTimeoutSnafu { id }.build())
         });
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
@@ -411,26 +381,18 @@ mod tests {
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
             .insert_heartbeat_response_receiver(to_peer_id, tx)
             .await;
 
-        common_runtime::spawn_bg(async move {
-            let resp = rx.recv().await.unwrap().unwrap();
-            let reply_id = resp.mailbox_message.unwrap().id;
-            mailbox
-                .on_recv(
-                    reply_id,
-                    Ok(new_open_region_reply(
-                        reply_id,
-                        false,
-                        Some("test mocked".to_string()),
-                    )),
-                )
-                .await
-                .unwrap();
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_open_region_reply(
+                id,
+                false,
+                Some("test mocked".to_string()),
+            ))
         });
 
         let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
@@ -471,20 +433,13 @@ mod tests {
         let mailbox_ctx = env.mailbox_context();
         let mailbox = mailbox_ctx.mailbox().clone();
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
             .insert_heartbeat_response_receiver(to_peer_id, tx)
             .await;
 
-        common_runtime::spawn_bg(async move {
-            let resp = rx.recv().await.unwrap().unwrap();
-            let reply_id = resp.mailbox_message.unwrap().id;
-            mailbox
-                .on_recv(reply_id, Ok(new_open_region_reply(reply_id, true, None)))
-                .await
-                .unwrap();
-        });
+        send_mock_reply(mailbox, rx, |id| Ok(new_open_region_reply(id, true, None)));
 
         let next = state.next(&mut ctx).await.unwrap();
         let vc = ctx.volatile_ctx;
