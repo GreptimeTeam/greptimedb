@@ -199,10 +199,14 @@ impl<'a> ParserContext<'a> {
                 actual: self.peek_token_as_string(),
             })?;
 
-        let column_list = self
+        let raw_column_list = self
             .parser
             .parse_parenthesized_column_list(Mandatory, false)
             .context(error::SyntaxSnafu)?;
+        let column_list = raw_column_list
+            .into_iter()
+            .map(Self::canonicalize_identifier)
+            .collect();
 
         let entries = self.parse_comma_separated(Self::parse_partition_entry)?;
 
@@ -533,10 +537,14 @@ impl<'a> ParserContext<'a> {
                         actual: self.peek_token_as_string(),
                     })?;
 
-                let columns = self
+                let raw_columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect::<Vec<_>>();
 
                 ensure!(
                     columns.len() == 1,

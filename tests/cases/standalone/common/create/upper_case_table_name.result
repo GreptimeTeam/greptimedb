@@ -45,6 +45,7 @@ desc table "AbCdEfG";
 | tS     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
+-- unquoted table name and column name.
 create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
 
 Affected Rows: 0
@@ -64,6 +65,38 @@ drop table "AbCdEfG";
 Affected Rows: 0
 
 drop table aBcDeFgE;
+
+Affected Rows: 0
+
+-- unquoted column name in partition
+create table AbCdEfGe(
+    CoLA string PRIMARY KEY,
+    tS timestamp time index
+) PARTITION BY RANGE COLUMNS (cOlA) (
+    PARTITION p0 VALUES LESS THAN (MAXVALUE)
+);
+
+Affected Rows: 0
+
+drop table abcdefge;
+
+Affected Rows: 0
+
+-- unquoted column name in TIME INDEX
+create table AbCdEfGe(CoLA string, tS timestamp, TIME INDEX (Ts));
+
+Affected Rows: 0
+
+desc table abcdefge;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| cola   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+drop table abcdefge;
 
 Affected Rows: 0
 
