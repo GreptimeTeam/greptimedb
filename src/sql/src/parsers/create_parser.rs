@@ -401,7 +401,7 @@ impl<'a> ParserContext<'a> {
     pub fn parse_column_def(&mut self) -> std::result::Result<ColumnDef, ParserError> {
         let parser = &mut self.parser;
 
-        let name = parser.parse_identifier()?;
+        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
         if name.quote_style.is_none() &&
             // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
@@ -490,7 +490,8 @@ impl<'a> ParserContext<'a> {
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
         let name = if self.parser.parse_keyword(Keyword::CONSTRAINT) {
-            Some(self.parser.parse_identifier().context(error::SyntaxSnafu)?)
+            let raw_name = self.parser.parse_identifier().context(error::SyntaxSnafu)?;
+            Some(Self::canonicalize_identifier(raw_name))
         } else {
             None
         };

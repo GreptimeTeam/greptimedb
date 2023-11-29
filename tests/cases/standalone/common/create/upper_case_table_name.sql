@@ -12,11 +12,11 @@ select * from "system_Metric";
 
 drop table "system_Metric";
 
-create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index);
+create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index, primary key ("CoLA"));
 
 desc table "AbCdEfG";
 
-create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index);
+create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
 
 desc table AbCdEfGe;
 

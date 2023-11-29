@@ -31,7 +31,7 @@ drop table "system_Metric";
 
 Affected Rows: 0
 
-create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index);
+create table "AbCdEfG"("CoLA" string, "cOlB" string, "tS" timestamp time index, primary key ("CoLA"));
 
 Affected Rows: 0
 
@@ -40,24 +40,18 @@ desc table "AbCdEfG";
 +--------+----------------------+-----+------+---------+---------------+
 | Column | Type                 | Key | Null | Default | Semantic Type |
 +--------+----------------------+-----+------+---------+---------------+
-| CoLA   | String               |     | YES  |         | FIELD         |
+| CoLA   | String               | PRI | YES  |         | TAG           |
 | cOlB   | String               |     | YES  |         | FIELD         |
 | tS     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 +--------+----------------------+-----+------+---------+---------------+
 
-create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index);
+create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Cannot find column by name: cOlA
 
 desc table AbCdEfGe;
 
-+--------+----------------------+-----+------+---------+---------------+
-| Column | Type                 | Key | Null | Default | Semantic Type |
-+--------+----------------------+-----+------+---------+---------------+
-| cola   | String               |     | YES  |         | FIELD         |
-| colb   | String               |     | YES  |         | FIELD         |
-| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-+--------+----------------------+-----+------+---------+---------------+
+Error: 4001(TableNotFound), Table not found: abcdefge
 
 drop table "AbCdEfG";
 
@@ -65,7 +59,7 @@ Affected Rows: 0
 
 drop table AbCdEfGe;
 
-Affected Rows: 0
+Error: 4001(TableNotFound), Table not found: greptime.upper_case_table_name.abcdefge
 
 use public;
 
