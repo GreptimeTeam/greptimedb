@@ -405,7 +405,7 @@ impl<'a> ParserContext<'a> {
     pub fn parse_column_def(&mut self) -> std::result::Result<ColumnDef, ParserError> {
         let parser = &mut self.parser;
 
-        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
+        let name = parser.parse_identifier()?;
         if name.quote_style.is_none() &&
             // "ALL_KEYWORDS" are sorted.
             ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()
