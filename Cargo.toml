@@ -75,6 +75,7 @@ base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 chrono = { version = "0.4", features = ["serde"] }
+dashmap = "5.4"
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-expr = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
@@ -112,6 +113,7 @@ reqwest = { version = "0.11", default-features = false, features = [
     "rustls-tls-native-roots",
     "stream",
 ] }
+rskafka = "0.5.0"
 rust_decimal = "1.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

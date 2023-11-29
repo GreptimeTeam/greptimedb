@@ -14,10 +14,14 @@
 
 use std::any::Any;
 
+use common_config::wal::kafka::KafkaTopic;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use rskafka::client::error::Error as RsKafkaError;
 use snafu::{Location, Snafu};
+use store_api::logstore::entry::Id as EntryId;
+use store_api::storage::RegionId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -83,6 +87,114 @@ pub enum Error {
         first_index: u64,
         attempt_index: u64,
         location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build a rskafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildKafkaClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
+    },
+
+    #[snafu(display(
+        "Failed to build a rskafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildKafkaPartitionClient {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
+    },
+
+    #[snafu(display(
+        "Failed to get a Kafka topic client, topic: {}, region id: {}",
+        topic,
+        region_id
+    ))]
+    GetKafkaTopicClient {
+        topic: KafkaTopic,
+        region_id: u64,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to write entries to Kafka, topic: {}, region id: {}",
+        topic,
+        region_id
+    ))]
+    WriteEntriesToKafka {
+        topic: KafkaTopic,
+        region_id: RegionId,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::producer::Error,
+    },
+
+    #[snafu(display("Empty log entries provided"))]
+    EmptyLogEntries { location: Location },
+
+    #[snafu(display("Returned Kafka offsets are empty"))]
+    EmptyKafkaOffsets { location: Location },
+
+    #[snafu(display("Failed to serialize an entry meta"))]
+    SerEntryMeta {
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
+
+    #[snafu(display("Missing required value in a record, record: {:?}", record))]
+    MissingRecordValue {
+        record: rskafka::record::Record,
+        location: Location,
+    },
+
+    #[snafu(display("Missing required entry meta in a record header, record: {:?}", record))]
+    MissingEntryMeta {
+        record: rskafka::record::Record,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to deserialize an entry meta from the record header, record: {:?}",
+        record
+    ))]
+    DeserEntryMeta {
+        record: rskafka::record::Record,
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
+
+    #[snafu(display(
+        "Failed to convert an entry id into a Kafka offset, entry id: {}",
+        entry_id
+    ))]
+    ConvertEntryIdToOffset {
+        entry_id: EntryId,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to read a record from Kafka, start offset {}, topic: {}, region id: {}",
+        start_offset,
+        topic,
+        region_id,
+    ))]
+    ReadRecordFromKafka {
+        start_offset: i64,
+        topic: String,
+        region_id: u64,
+        location: Location,
+        #[snafu(source)]
+        error: RsKafkaError,
     },
 }
 
