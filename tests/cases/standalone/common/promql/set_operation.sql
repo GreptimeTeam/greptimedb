@@ -79,7 +79,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) and ignoring(g, job)
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- SQLNESS SORT_RESULT 3 1
+-- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="production"};
 
 -- # On overlap the rhs samples must be dropped.
@@ -90,7 +90,7 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="produc
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- SQLNESS SORT_RESULT 3 1
+-- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{instance="1"};
 
 
@@ -104,6 +104,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{ins
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
 -- NOT SUPPORTED: union on different schemas
+-- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (http_requests or cpu_count or vector_matching_a);
 
 -- eval instant at 50m (http_requests{group="canary"} + 1) or ignoring(l, group, job) (http_requests or cpu_count or vector_matching_a)
@@ -114,6 +115,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (htt
 -- 	vector_matching_a{l="x"} 10
 -- 	vector_matching_a{l="y"} 20
 -- NOT SUPPORTED: union on different schemas
+-- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or ignoring(l, g, job) (http_requests or cpu_count or vector_matching_a);
 
 -- eval instant at 50m http_requests{group="canary"} unless http_requests{instance="0"}
@@ -167,3 +169,7 @@ tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
 drop table http_requests;
+
+drop table cpu_count;
+
+drop table vector_matching_a;

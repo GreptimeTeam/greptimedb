@@ -28,7 +28,7 @@ pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
 
-    #[snafu(display("Unsupported vector matches: {:?}, only One-to-One is supported", name))]
+    #[snafu(display("Unsupported vector matches: {:?}", name))]
     UnsupportedVectorMatch {
         name: VectorMatchCardinality,
         location: Location,

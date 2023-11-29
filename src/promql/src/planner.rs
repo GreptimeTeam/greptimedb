@@ -1386,25 +1386,21 @@ impl PromPlanner {
         op: TokenType,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
-        if matches!(op.id(), token::T_LOR) {
-            let builder = LogicalPlanBuilder::from(left)
-                .union_distinct(right)
-                .context(DataFusionPlanningSnafu)?;
-            return builder.build().context(DataFusionPlanningSnafu);
-        }
-
         let mut left_tag_col_set = left_tag_cols.into_iter().collect::<HashSet<_>>();
         let mut right_tag_col_set = right_tag_cols.into_iter().collect::<HashSet<_>>();
 
         // apply modifier
         if let Some(modifier) = modifier {
-            // only support one-to-one matching
-            // ensure!(
-            //     matches!(modifier.card, VectorMatchCardinality::OneToOne),
-            //     UnsupportedVectorMatchSnafu {
-            //         name: modifier.card.clone(),
-            //     },
-            // );
+            // one-to-many and many-to-one are not supported
+            ensure!(
+                matches!(
+                    modifier.card,
+                    VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany
+                ),
+                UnsupportedVectorMatchSnafu {
+                    name: modifier.card.clone(),
+                },
+            );
             // apply label modifier
             if let Some(matching) = &modifier.matching {
                 match matching {
@@ -1427,13 +1423,15 @@ impl PromPlanner {
             }
         }
         // ensure two sides have the same tag columns
-        ensure!(
-            left_tag_col_set == right_tag_col_set,
-            CombineTableColumnMismatchSnafu {
-                left: left_tag_col_set.into_iter().collect::<Vec<_>>(),
-                right: right_tag_col_set.into_iter().collect::<Vec<_>>(),
-            }
-        );
+        if !matches!(op.id(), token::T_LOR) {
+            ensure!(
+                left_tag_col_set == right_tag_col_set,
+                CombineTableColumnMismatchSnafu {
+                    left: left_tag_col_set.into_iter().collect::<Vec<_>>(),
+                    right: right_tag_col_set.into_iter().collect::<Vec<_>>(),
+                }
+            )
+        };
         let join_keys = left_tag_col_set
             .into_iter()
             .chain([self.ctx.time_index_column.clone().unwrap()])
@@ -1442,55 +1440,39 @@ impl PromPlanner {
         // Generate join plan.
         // All set operations in PromQL are "distinct"
         match op.id() {
-            token::T_LAND => {
-                // LogicalPlanBuilder::intersect(left, right, false).context(DataFusionPlanningSnafu)
-                LogicalPlanBuilder::from(left)
-                    .distinct()
-                    .context(DataFusionPlanningSnafu)?
-                    .join_detailed(
-                        right,
-                        JoinType::LeftSemi,
-                        (join_keys.clone(), join_keys),
-                        None,
-                        true,
-                    )
-                    .context(DataFusionPlanningSnafu)?
-                    .build()
-                    .context(DataFusionPlanningSnafu)
-            }
-            token::T_LUNLESS => {
-                // LogicalPlanBuilder::except(left, right, false).context(DataFusionPlanningSnafu)
-                LogicalPlanBuilder::from(left)
-                    .distinct()
-                    .context(DataFusionPlanningSnafu)?
-                    .join_detailed(
-                        right,
-                        JoinType::LeftAnti,
-                        (join_keys.clone(), join_keys),
-                        None,
-                        true,
-                    )
-                    .context(DataFusionPlanningSnafu)?
-                    .build()
-                    .context(DataFusionPlanningSnafu)
-            }
+            token::T_LAND => LogicalPlanBuilder::from(left)
+                .distinct()
+                .context(DataFusionPlanningSnafu)?
+                .join_detailed(
+                    right,
+                    JoinType::LeftSemi,
+                    (join_keys.clone(), join_keys),
+                    None,
+                    true,
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu),
+            token::T_LUNLESS => LogicalPlanBuilder::from(left)
+                .distinct()
+                .context(DataFusionPlanningSnafu)?
+                .join_detailed(
+                    right,
+                    JoinType::LeftAnti,
+                    (join_keys.clone(), join_keys),
+                    None,
+                    true,
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu),
             token::T_LOR => {
-                // let left_columns = left.schema().fields().into_iter().map(|field| {
-                //     DfExpr::Column(Column {
-                //         relation: field.qualifier().cloned(),
-                //         name: field.name().clone(),
-                //     })
-                // });
-                // // `union()` requires the input plans have the same schema
-                // let right_projected = LogicalPlanBuilder::from(right)
-                //     .project(left_columns)
-                //     .context(DataFusionPlanningSnafu)?
-                //     .build()
-                //     .context(DataFusionPlanningSnafu)?;
-                let builder = LogicalPlanBuilder::from(left)
-                    .union_distinct(right)
-                    .context(DataFusionPlanningSnafu)?;
-                builder.build().context(DataFusionPlanningSnafu)
+                // `OR` can not be expressed by `UNION` precisely.
+                // it will generate unexpceted result when schemas don't match
+                UnsupportedExprSnafu {
+                    name: "set operation `OR`",
+                }
+                .fail()
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }
