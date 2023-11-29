@@ -264,13 +264,8 @@ impl Context {
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
 trait State: Sync + Send + Debug {
-    /// Yields the next state.
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>>;
-
-    /// Indicates the procedure execution status of the `State`.
-    fn status(&self) -> Status {
-        Status::Executing { persist: true }
-    }
+    /// Yields the next [State] and [Status].
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)>;
 
     /// Returns as [Any](std::any::Any).
     fn as_any(&self) -> &dyn Any;
@@ -340,14 +335,16 @@ impl Procedure for RegionMigrationProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
-        *state = state.next(&mut self.context).await.map_err(|e| {
+        let (next, status) = state.next(&mut self.context).await.map_err(|e| {
             if matches!(e, Error::RetryLater { .. }) {
                 ProcedureError::retry_later(e)
             } else {
                 ProcedureError::external(e)
             }
         })?;
-        Ok(state.status())
+
+        *state = next;
+        Ok(status)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -425,14 +422,14 @@ mod tests {
     #[async_trait::async_trait]
     #[typetag::serde]
     impl State for MockState {
-        async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+        async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
             let pc = &mut ctx.persistent_ctx;
 
             if pc.cluster_id == 2 {
-                Ok(Box::new(RegionMigrationEnd))
+                Ok((Box::new(RegionMigrationEnd), Status::Done))
             } else {
                 pc.cluster_id += 1;
-                Ok(Box::new(MockState))
+                Ok((Box::new(MockState), Status::executing(false)))
             }
         }
 

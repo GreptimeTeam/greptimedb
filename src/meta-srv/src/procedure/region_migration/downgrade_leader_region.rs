@@ -20,6 +20,7 @@ use common_meta::distributed_time_constants::{MAILBOX_RTT_SECS, REGION_LEASE_SEC
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
+use common_procedure::Status;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
@@ -53,7 +54,7 @@ impl Default for DowngradeLeaderRegion {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for DowngradeLeaderRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         // Ensures the `leader_region_lease_deadline` must exist after recovering.
         ctx.volatile_ctx
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
@@ -64,7 +65,10 @@ impl State for DowngradeLeaderRegion {
             tokio::time::sleep_until(*deadline).await;
         }
 
-        Ok(Box::<UpgradeCandidateRegion>::default())
+        Ok((
+            Box::<UpgradeCandidateRegion>::default(),
+            Status::executing(false),
+        ))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -504,7 +508,7 @@ mod tests {
         });
 
         let timer = Instant::now();
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
         let elapsed = timer.elapsed().as_secs();
         assert!(elapsed < REGION_LEASE_SECS / 2);
         assert_eq!(ctx.volatile_ctx.leader_region_last_entry_id, Some(1));

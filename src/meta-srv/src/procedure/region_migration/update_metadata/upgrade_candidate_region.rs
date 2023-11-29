@@ -353,7 +353,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
 

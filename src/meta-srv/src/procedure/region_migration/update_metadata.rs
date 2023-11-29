@@ -18,6 +18,7 @@ pub(crate) mod upgrade_candidate_region;
 
 use std::any::Any;
 
+use common_procedure::Status;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
@@ -41,12 +42,15 @@ pub enum UpdateMetadata {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for UpdateMetadata {
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         match self {
             UpdateMetadata::Downgrade => {
                 self.downgrade_leader_region(ctx).await?;
 
-                Ok(Box::<DowngradeLeaderRegion>::default())
+                Ok((
+                    Box::<DowngradeLeaderRegion>::default(),
+                    Status::executing(false),
+                ))
             }
             UpdateMetadata::Upgrade => {
                 self.upgrade_candidate_region(ctx).await?;
@@ -54,7 +58,7 @@ impl State for UpdateMetadata {
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the upgrade candidate, error: {err:?}");
                 };
-                Ok(Box::new(RegionMigrationEnd))
+                Ok((Box::new(RegionMigrationEnd), Status::Done))
             }
             UpdateMetadata::Rollback => {
                 self.rollback_downgraded_region(ctx).await?;
@@ -62,9 +66,12 @@ impl State for UpdateMetadata {
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the rollback, error: {err:?}");
                 };
-                Ok(Box::new(RegionMigrationAbort::new(
-                    "Failed to upgrade the candidate region.",
-                )))
+                Ok((
+                    Box::new(RegionMigrationAbort::new(
+                        "Failed to upgrade the candidate region.",
+                    )),
+                    Status::executing(false),
+                ))
             }
         }
     }
