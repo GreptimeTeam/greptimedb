@@ -55,9 +55,9 @@ EXPLAIN SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| RangeSelect: range_exprs=[MIN(host.val) RANGE 5s FILL NULL], align=5s time_index=ts_|
+| logical_plan_| RangeSelect: range_exprs=[MIN(host.val) RANGE 5s FILL NULL], align=5s, align_to=0s, align_by=[host.host], time_index=ts |
 |_|_MergeScan [is_placeholder=false]_|
-| physical_plan | RangeSelectExec: range_expr=[RangeFnExec{ MIN(host.val), range: 5000}], align=5000, time_index=ts, by=[host@1] |
+| physical_plan | RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s FILL NULL], align=5s, align_to=0s, align_by=[host@1], time_index=ts |
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -71,7 +71,7 @@ EXPLAIN ANALYZE SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| Plan with Metrics | RangeSelectExec: range_expr=[RangeFnExec{ MIN(host.val), range: 5000}], align=5000, time_index=ts, by=[host@1], REDACTED
+| Plan with Metrics | RangeSelectExec: range_expr=[MIN(host.val) RANGE 5s FILL NULL], align=5s, align_to=0s, align_by=[host@1], time_index=ts, REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
