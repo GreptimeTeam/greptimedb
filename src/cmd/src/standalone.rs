@@ -227,6 +227,9 @@ struct StartCommand {
     user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
     env_prefix: String,
+    /// The working home directory of this standalone instance.
+    #[clap(short('d'), long)]
+    data_home: Option<String>,
 }
 
 impl StartCommand {
@@ -255,6 +258,10 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr = addr.clone()
+        }
+
+        if let Some(data_home) = &self.data_home {
+            opts.storage.data_home = data_home.clone();
         }
 
         if let Some(addr) = &self.rpc_addr {
