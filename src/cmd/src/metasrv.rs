@@ -100,6 +100,9 @@ struct StartCommand {
     http_timeout: Option<u64>,
     #[clap(long, default_value = "GREPTIMEDB_METASRV")]
     env_prefix: String,
+    /// The working home directory of this metasrv instance.
+    #[clap(long)]
+    data_home: Option<String>,
 }
 
 impl StartCommand {
@@ -150,6 +153,10 @@ impl StartCommand {
 
         if let Some(http_timeout) = self.http_timeout {
             opts.http.timeout = Duration::from_secs(http_timeout);
+        }
+
+        if let Some(data_home) = &self.data_home {
+            opts.data_home = data_home.clone();
         }
 
         // Disable dashboard in metasrv.
