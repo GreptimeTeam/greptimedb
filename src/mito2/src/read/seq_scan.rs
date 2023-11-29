@@ -270,7 +270,7 @@ impl SeqScan {
 
     /// Scan the input source in another task.
     fn scan_source_in_background(mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
-        let (sender, receiver) = mpsc::channel(64);
+        let (sender, receiver) = mpsc::channel(128);
         tokio::spawn(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
