@@ -18,10 +18,10 @@ desc table "AbCdEfG";
 
 create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
 
-desc table AbCdEfGe;
+desc table aBcDeFgE;
 
 drop table "AbCdEfG";
 
-drop table AbCdEfGe;
+drop table aBcDeFgE;
 
 use public;

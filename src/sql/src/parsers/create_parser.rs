@@ -507,10 +507,14 @@ impl<'a> ParserContext<'a> {
                         expected: "KEY",
                         actual: self.peek_token_as_string(),
                     })?;
-                let columns = self
+                let raw_columns = self
                     .parser
                     .parse_parenthesized_column_list(Mandatory, false)
                     .context(error::SyntaxSnafu)?;
+                let columns = raw_columns
+                    .into_iter()
+                    .map(Self::canonicalize_identifier)
+                    .collect();
                 Ok(Some(TableConstraint::Unique {
                     name,
                     columns,

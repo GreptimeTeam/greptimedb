@@ -47,19 +47,25 @@ desc table "AbCdEfG";
 
 create table AbCdEfGe(CoLA string, cOlB string, tS timestamp time index, primary key (cOlA));
 
-Error: 1004(InvalidArguments), Cannot find column by name: cOlA
+Affected Rows: 0
 
-desc table AbCdEfGe;
+desc table aBcDeFgE;
 
-Error: 4001(TableNotFound), Table not found: abcdefge
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| cola   | String               | PRI | YES  |         | TAG           |
+| colb   | String               |     | YES  |         | FIELD         |
+| ts     | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
 
 drop table "AbCdEfG";
 
 Affected Rows: 0
 
-drop table AbCdEfGe;
+drop table aBcDeFgE;
 
-Error: 4001(TableNotFound), Table not found: greptime.upper_case_table_name.abcdefge
+Affected Rows: 0
 
 use public;
 
