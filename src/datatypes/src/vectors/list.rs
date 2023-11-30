@@ -46,17 +46,6 @@ impl ListVector {
             .map(|value_opt| value_opt.map(Helper::try_into_vector).transpose())
     }
 
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
-    }
-
-    fn from_array_data_and_type(data: ArrayData, item_type: ConcreteDataType) -> Self {
-        Self {
-            array: ListArray::from(data),
-            item_type,
-        }
-    }
-
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
     }
@@ -80,13 +69,11 @@ impl Vector for ListVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(ListArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(ListArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -106,8 +93,10 @@ impl Vector for ListVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.to_data().slice(offset, length);
-        Arc::new(Self::from_array_data_and_type(data, self.item_type.clone()))
+        Arc::new(Self {
+            array: self.array.slice(offset, length),
+            item_type: self.item_type.clone(),
+        })
     }
 
     fn get(&self, index: usize) -> Value {

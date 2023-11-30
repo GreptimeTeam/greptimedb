@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
 use crate::arrow_array::{MutableStringArray, StringArray};
@@ -35,16 +35,6 @@ pub struct StringVector {
 impl StringVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
-    }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
-    }
-
-    fn from_array_data(data: ArrayData) -> Self {
-        Self {
-            array: StringArray::from(data),
-        }
     }
 }
 
@@ -120,13 +110,11 @@ impl Vector for StringVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(StringArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(StringArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -146,8 +134,7 @@ impl Vector for StringVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.to_data().slice(offset, length);
-        Arc::new(Self::from_array_data(data))
+        Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
     fn get(&self, index: usize) -> Value {
@@ -256,6 +243,7 @@ vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
+
     use arrow::datatypes::DataType;
 
     use super::*;

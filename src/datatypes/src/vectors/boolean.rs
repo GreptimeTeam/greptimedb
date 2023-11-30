@@ -16,9 +16,7 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef, BooleanArray, BooleanBuilder,
-};
+use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef, BooleanArray, BooleanBuilder};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
@@ -42,16 +40,6 @@ impl BooleanVector {
     /// Get the inner boolean array.
     pub fn as_boolean_array(&self) -> &BooleanArray {
         &self.array
-    }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
-    }
-
-    fn from_array_data(data: ArrayData) -> BooleanVector {
-        BooleanVector {
-            array: BooleanArray::from(data),
-        }
     }
 
     pub(crate) fn false_count(&self) -> usize {
@@ -107,13 +95,11 @@ impl Vector for BooleanVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(BooleanArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(BooleanArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {
@@ -133,8 +119,7 @@ impl Vector for BooleanVector {
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
-        let data = self.array.to_data().slice(offset, length);
-        Arc::new(Self::from_array_data(data))
+        Arc::new(Self::from(self.array.slice(offset, length)))
     }
 
     fn get(&self, index: usize) -> Value {
