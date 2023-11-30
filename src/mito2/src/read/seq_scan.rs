@@ -133,6 +133,7 @@ impl SeqScan {
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
         let start = Instant::now();
+        let mut metrics = Metrics::default();
         let use_parallel = self.use_parallel_reader();
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut reader = if use_parallel {
@@ -140,9 +141,9 @@ impl SeqScan {
         } else {
             self.build_reader().await?
         };
-        let mut metrics = Metrics {
-            scan_cost: start.elapsed(),
-        };
+        let elapsed = start.elapsed();
+        metrics.build_reader_cost = elapsed;
+        metrics.scan_cost = elapsed;
 
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
@@ -325,6 +326,8 @@ impl SeqScan {
 /// Metrics for [SeqScan].
 #[derive(Debug, Default)]
 struct Metrics {
+    /// Duration to build the reader.
+    build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
 }
