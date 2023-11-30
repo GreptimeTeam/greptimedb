@@ -12,9 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-pub mod format;
-pub mod search;
+mod intersection_apply;
+mod keys_apply;
 
-pub type FstMap = fst::Map<Vec<u8>>;
-pub type Bytes = Vec<u8>;
+pub use intersection_apply::IntersectionFstApplier;
+pub use keys_apply::KeysFstApplier;
+
+use crate::inverted_index::FstMap;
+
+/// A trait for objects that can process a finite state transducer (FstMap) and return
+/// associated values.
+pub trait FstApplier: Send + Sync {
+    /// Retrieves values from an FstMap.
+    ///
+    /// * `fst`: A reference to the FstMap from which the values will be fetched.
+    ///
+    /// Returns a `Vec<u64>`, with each u64 being a value from the FstMap.
+    fn apply(&self, fst: &FstMap) -> Vec<u64>;
+}
