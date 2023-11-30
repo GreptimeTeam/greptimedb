@@ -177,7 +177,7 @@ fn may_compat_primary_key(
         CompatReaderSnafu {
             region_id: expect.region_id,
             reason: format!(
-                "primary key has more columns {} than exepct {}",
+                "primary key has more columns {} than expect {}",
                 actual.primary_key.len(),
                 expect.primary_key.len()
             ),

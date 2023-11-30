@@ -227,7 +227,7 @@ mod tests {
             Predicate::Range(RangePredicate {
                 range: Range {
                     lower: Some(Bound {
-                        value: b("ba"),
+                        value: b("bar"),
                         inclusive: true,
                     }),
                     upper: None,
