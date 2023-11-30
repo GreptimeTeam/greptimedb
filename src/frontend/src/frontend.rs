@@ -44,6 +44,7 @@ pub struct FrontendOptions {
     pub logging: LoggingOptions,
     pub datanode: DatanodeOptions,
     pub user_provider: Option<String>,
+    pub flow_grpc_addr: Option<String>,
 }
 
 impl Default for FrontendOptions {
@@ -64,6 +65,7 @@ impl Default for FrontendOptions {
             logging: LoggingOptions::default(),
             datanode: DatanodeOptions::default(),
             user_provider: None,
+            flow_grpc_addr: None,
         }
     }
 }

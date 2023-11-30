@@ -24,6 +24,7 @@ pub mod standalone;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -82,6 +83,8 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
+use tokio::sync::Mutex;
+use tonic::transport::Channel;
 
 use self::region_query::FrontendRegionQueryHandler;
 use self::standalone::StandaloneTableMetadataCreator;
@@ -117,6 +120,12 @@ pub trait FrontendInstance:
 pub type FrontendInstanceRef = Arc<dyn FrontendInstance>;
 pub type StatementExecutorRef = Arc<StatementExecutor>;
 
+/// Send certain query to flow worker through grpc
+pub struct FlowProxy {
+    flow_client: Mutex<GreptimeDatabaseClient<Channel>>,
+}
+pub type FlowProxyRef = Arc<FlowProxy>;
+
 #[derive(Clone)]
 pub struct Instance {
     catalog_manager: CatalogManagerRef,
@@ -128,6 +137,7 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
+    flow: Option<FlowProxyRef>,
 }
 
 impl Instance {
@@ -219,6 +229,7 @@ impl Instance {
             heartbeat_task,
             inserter,
             deleter,
+            flow: None,
         })
     }
 
@@ -345,6 +356,11 @@ impl Instance {
             inserter.clone(),
         ));
 
+        let addr = std::env::var("FLOW_ADDR").unwrap_or("[::1]:14514".to_string());
+        let conn = tonic::transport::Endpoint::new(addr)
+            .unwrap()
+            .connect_lazy();
+        let client = GreptimeDatabaseClient::new(conn);
         Ok(Instance {
             catalog_manager: catalog_manager.clone(),
             script_executor,
@@ -355,6 +371,12 @@ impl Instance {
             heartbeat_task: None,
             inserter,
             deleter,
+            flow: Some(
+                FlowProxy {
+                    flow_client: Mutex::new(client),
+                }
+                .into(),
+            ),
         })
     }
 

@@ -15,7 +15,7 @@
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests};
+use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests, GreptimeRequest};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
@@ -47,6 +47,17 @@ impl GrpcQueryHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
             .context(PermissionSnafu)?;
+        // copy row inserts to flow worker
+        if let Request::RowInserts(_) = &request {
+            let full_req = GreptimeRequest{
+                header: None,
+                request: Some(request.clone())
+            };
+
+            if let Some(flow_proxy) = &self.flow{
+                flow_proxy.flow_client.lock().await.handle(full_req).await.unwrap();
+            }
+        };
 
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
