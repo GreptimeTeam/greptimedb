@@ -22,6 +22,7 @@ pub(crate) mod seq_scan;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use api::v1::OpType;
 use async_trait::async_trait;
@@ -671,7 +672,7 @@ pub enum Source {
     /// Source from a [BoxedBatchIterator].
     Iter(BoxedBatchIterator),
     /// Source from a [BoxedBatchStream].
-    Stream(BoxedBatchStream),
+    Stream(BoxedBatchStream, Duration),
 }
 
 impl Source {
@@ -680,7 +681,20 @@ impl Source {
         match self {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
-            Source::Stream(stream) => stream.try_next().await,
+            Source::Stream(stream, duration) => {
+                let start = Instant::now();
+                let ret = stream.try_next().await;
+                *duration += start.elapsed();
+                ret
+            }
+        }
+    }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        if let Source::Stream(s, du) = &self {
+            common_telemetry::debug!("Source fetch time {:?}", du);
         }
     }
 }
