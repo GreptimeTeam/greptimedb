@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
-const DEFAULT_SCAN_CHANNEL_SIZE: usize = 64;
+/// Default channel size for parallel scan task.
+const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
