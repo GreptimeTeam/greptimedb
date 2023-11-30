@@ -111,6 +111,7 @@ impl OpenRegion {
 /// The instruction of downgrading leader region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DowngradeRegion {
+    /// The [RegionId].
     pub region_id: RegionId,
 }
 
@@ -120,13 +121,59 @@ impl Display for DowngradeRegion {
     }
 }
 
+/// Upgrades a follower region to leader region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeRegion {
+    /// The [RegionId].
+    pub region_id: RegionId,
+    /// The `last_entry_id` of old leader region.
+    pub last_entry_id: Option<u64>,
+    /// The second of waiting for a wal replay.
+    ///
+    /// `None` stands for no wait,
+    /// it's helpful to verify whether the leader region is ready.
+    pub wait_for_replay_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Display)]
 pub enum Instruction {
+    /// Opens a region.
+    ///
+    /// - Returns true if a specified region exists.
     OpenRegion(OpenRegion),
+    /// Closes a region.
+    ///
+    /// - Returns true if a specified region does not exist.
     CloseRegion(RegionIdent),
+    /// Upgrades a region.
+    UpgradeRegion(UpgradeRegion),
+    /// Downgrades a region.
     DowngradeRegion(DowngradeRegion),
+    /// Invalidates a specified table cache.
     InvalidateTableIdCache(TableId),
+    /// Invalidates a specified table name index cache.
     InvalidateTableNameCache(TableName),
+}
+
+/// The reply of [UpgradeRegion].
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+pub struct UpgradeRegionReply {
+    /// Returns true if `last_entry_id` has been replayed to the latest.
+    pub ready: bool,
+    /// Indicates whether the region exists.
+    pub exists: bool,
+    /// Returns error if any.
+    pub error: Option<String>,
+}
+
+impl Display for UpgradeRegionReply {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(ready={}, exists={}, error={:?})",
+            self.ready, self.exists, self.error
+        )
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -134,6 +181,7 @@ pub enum Instruction {
 pub enum InstructionReply {
     OpenRegion(SimpleReply),
     CloseRegion(SimpleReply),
+    UpgradeRegion(UpgradeRegionReply),
     InvalidateTableCache(SimpleReply),
     DowngradeRegion(DowngradeRegionReply),
 }
@@ -143,6 +191,7 @@ impl Display for InstructionReply {
         match self {
             Self::OpenRegion(reply) => write!(f, "InstructionReply::OpenRegion({})", reply),
             Self::CloseRegion(reply) => write!(f, "InstructionReply::CloseRegion({})", reply),
+            Self::UpgradeRegion(reply) => write!(f, "InstructionReply::UpgradeRegion({})", reply),
             Self::InvalidateTableCache(reply) => {
                 write!(f, "InstructionReply::Invalidate({})", reply)
             }

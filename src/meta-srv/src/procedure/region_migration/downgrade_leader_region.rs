@@ -64,7 +64,7 @@ impl State for DowngradeLeaderRegion {
             tokio::time::sleep_until(*deadline).await;
         }
 
-        Ok(Box::new(UpgradeCandidateRegion))
+        Ok(Box::<UpgradeCandidateRegion>::default())
     }
 
     fn as_any(&self) -> &dyn Any {

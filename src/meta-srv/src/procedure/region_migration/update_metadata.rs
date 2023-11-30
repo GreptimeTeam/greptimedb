@@ -32,9 +32,9 @@ use crate::procedure::region_migration::{Context, State};
 pub enum UpdateMetadata {
     /// Downgrades the leader region.
     Downgrade,
-    /// Upgrade the candidate region.
+    /// Upgrades the candidate region.
     Upgrade,
-    /// Rollback the downgraded leader region.
+    /// Rolls back the downgraded region.
     Rollback,
 }
 

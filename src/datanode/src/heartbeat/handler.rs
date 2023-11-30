@@ -62,6 +62,9 @@ impl RegionHeartbeatResponseHandler {
                 let close_region_req = RegionRequest::Close(RegionCloseRequest {});
                 Ok((region_id, close_region_req))
             }
+            Instruction::UpgradeRegion(_) => {
+                todo!()
+            }
             Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InvalidHeartbeatResponseSnafu.fail()
             }
@@ -86,6 +89,9 @@ impl RegionHeartbeatResponseHandler {
                 result: false,
                 error: None,
             }),
+            Instruction::UpgradeRegion(_) => {
+                todo!()
+            }
             Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InstructionReply::InvalidateTableCache(SimpleReply {
                     result: false,
@@ -118,6 +124,9 @@ impl RegionHeartbeatResponseHandler {
                     reply.error = error;
                 }
             },
+            InstructionReply::UpgradeRegion(_) => {
+                todo!()
+            }
             InstructionReply::InvalidateTableCache(reply) => {
                 reply.result = success;
                 reply.error = error;
