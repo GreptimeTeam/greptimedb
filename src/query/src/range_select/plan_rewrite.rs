@@ -109,29 +109,21 @@ fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
 fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
+    let interval_to_duration = |interval: Interval| -> Duration {
+        Duration::from_millis((interval.to_nanosecond() / NANOS_PER_MILLI as i128) as u64)
+    };
     match args.get(i) {
         Some(Expr::Literal(ScalarValue::Utf8(Some(str)))) => {
             parse_duration(str).map_err(DataFusionError::Plan)
         }
-        Some(Expr::Literal(ScalarValue::IntervalYearMonth(Some(i)))) => Ok(Duration::from_millis(
-            (Interval::from_year_month(*i).to_nanosecond() / NANOS_PER_MILLI as i128) as u64,
-        )),
+        Some(Expr::Literal(ScalarValue::IntervalYearMonth(Some(i)))) => {
+            Ok(interval_to_duration(Interval::from_i32(*i)))
+        }
         Some(Expr::Literal(ScalarValue::IntervalDayTime(Some(i)))) => {
-            let days = ((*i >> 32) & 0xFFFF_FFFF) as i32;
-            let millis = (*i & 0xFFFF_FFFF) as i32;
-            Ok(Duration::from_millis(
-                (Interval::from_day_time(days, millis).to_nanosecond() / NANOS_PER_MILLI as i128)
-                    as u64,
-            ))
+            Ok(interval_to_duration(Interval::from_i64(*i)))
         }
         Some(Expr::Literal(ScalarValue::IntervalMonthDayNano(Some(i)))) => {
-            let months = ((*i >> 96) & 0xFFFF_FFFF) as i32;
-            let days = ((*i >> 64) & 0xFFFF_FFFF) as i32;
-            let millis = (*i & 0xFFFF_FFFF_FFFF_FFFF) as i64;
-            Ok(Duration::from_millis(
-                (Interval::from_month_day_nano(months, days, millis).to_nanosecond()
-                    / NANOS_PER_MILLI as i128) as u64,
-            ))
+            Ok(interval_to_duration(Interval::from_i128(*i)))
         }
         other => Err(dispose_parse_error(other)),
     }
