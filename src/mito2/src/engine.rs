@@ -33,6 +33,8 @@ pub mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
+mod parallel_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
