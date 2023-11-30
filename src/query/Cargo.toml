@@ -72,4 +72,4 @@ stats-cli = "3.0"
 store-api.workspace = true
 streaming-stats = "0.2"
 table = { workspace = true, features = ["testing"] }
-tokio-stream = "0.1"
+tokio-stream.workspace = true

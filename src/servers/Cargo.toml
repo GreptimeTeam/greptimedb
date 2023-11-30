@@ -86,7 +86,7 @@ sql.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio-rustls = "0.24"
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
 tonic-reflection = "0.10"
 tonic.workspace = true

@@ -65,7 +65,7 @@ sql.workspace = true
 store-api.workspace = true
 substrait.workspace = true
 table.workspace = true
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
 toml.workspace = true
 tonic.workspace = true
