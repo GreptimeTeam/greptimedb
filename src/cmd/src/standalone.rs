@@ -463,7 +463,6 @@ mod tests {
             
             [storage]
             data_home = "/tmp/greptimedb/"
-            [storage.default_store]
             type = "File"
 
             [[storage.providers]]

@@ -214,9 +214,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{
-        FileConfig, GcsConfig, ObjectStoreConfig, S3Config,
-    };
+    use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
@@ -254,7 +252,6 @@ mod tests {
 
             [storage]
             data_home = "/tmp/greptimedb/"
-            [storage.default_store]
             type = "File"
 
             [[storage.providers]]

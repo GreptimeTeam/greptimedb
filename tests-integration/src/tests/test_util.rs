@@ -79,6 +79,7 @@ pub(crate) async fn distributed_with_multiple_object_stores() -> Arc<dyn MockIns
     let test_name = uuid::Uuid::new_v4().to_string();
     let providers = StorageType::build_storage_types_based_on_env();
     let cluster = GreptimeDbClusterBuilder::new(&test_name)
+        .await
         .with_store_providers(providers)
         .build()
         .await;
