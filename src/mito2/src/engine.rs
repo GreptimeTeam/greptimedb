@@ -40,6 +40,7 @@ mod prune_test;
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -57,7 +58,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
@@ -116,7 +117,7 @@ struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
     /// Parallelism to scan data.
-    scan_parallelism: usize,
+    scan_parallelism: ScanParallism,
 }
 
 impl EngineInner {
@@ -126,7 +127,10 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
-        let scan_parallelism = config.scan_parallelism;
+        let scan_parallelism = ScanParallism {
+            parallelism: config.scan_parallelism,
+            channel_size: config.parallel_scan_channel_size,
+        };
         EngineInner {
             workers: WorkerGroup::start(config, log_store, object_store_manager),
             scan_parallelism,
@@ -304,7 +308,10 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {
         config.sanitize();
-        let scan_parallelism = config.scan_parallelism;
+        let scan_parallelism = ScanParallism {
+            parallelism: config.scan_parallelism,
+            channel_size: config.parallel_scan_channel_size,
+        };
 
         MitoEngine {
             inner: Arc::new(EngineInner {

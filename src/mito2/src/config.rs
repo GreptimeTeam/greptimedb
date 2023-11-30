@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
+const DEFAULT_SCAN_CHANNEL_SIZE: usize = 64;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -68,8 +69,10 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Scan parallelism.
+    /// Parallelism to scan a region (default 0).
     pub scan_parallelism: usize,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 64).
+    pub parallel_scan_channel_size: usize,
 }
 
 impl Default for MitoConfig {
@@ -89,6 +92,7 @@ impl Default for MitoConfig {
             page_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
             scan_parallelism: 0,
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
         }
     }
 }
@@ -132,6 +136,14 @@ impl MitoConfig {
             warn!(
                 "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
+            );
+        }
+
+        if self.parallel_scan_channel_size < 1 {
+            self.parallel_scan_channel_size = DEFAULT_SCAN_CHANNEL_SIZE;
+            warn!(
+                "Sanitize scan channel size to {}",
+                self.parallel_scan_channel_size
             );
         }
     }

@@ -36,6 +36,7 @@ use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
+use crate::read::scan_region::ScanParallism;
 use crate::read::{BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
 use crate::sst::file::FileHandle;
 
@@ -60,9 +61,7 @@ pub struct SeqScan {
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
-    ///
-    /// Uses parallel reader if `parallelism > 1`.
-    parallelism: usize,
+    parallelism: ScanParallism,
 }
 
 impl SeqScan {
@@ -78,7 +77,7 @@ impl SeqScan {
             files: Vec::new(),
             cache_manager: None,
             ignore_file_not_found: false,
-            parallelism: 0,
+            parallelism: ScanParallism::default(),
         }
     }
 
@@ -126,7 +125,7 @@ impl SeqScan {
 
     /// Sets scan parallelism.
     #[must_use]
-    pub(crate) fn with_parallelism(mut self, parallelism: usize) -> Self {
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
         self.parallelism = parallelism;
         self
     }
@@ -215,14 +214,14 @@ impl SeqScan {
 
     /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
     async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
-        assert!(self.parallelism > 1);
-        let semaphore = Arc::new(Semaphore::new(self.parallelism));
+        assert!(self.parallelism.allow_parallel_scan());
+        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
 
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
         let mut builder = MergeReaderBuilder::new();
         for mem in &self.memtables {
             let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
-            let stream = Self::scan_source_in_background(Source::Iter(iter), semaphore.clone());
+            let stream = self.spawn_scan_task(Source::Iter(iter), semaphore.clone());
 
             builder.push_batch_stream(stream);
         }
@@ -257,7 +256,7 @@ impl SeqScan {
                 Source::Reader(Box::new(compat_reader))
             };
 
-            let stream = Self::scan_source_in_background(reader, semaphore.clone());
+            let stream = self.spawn_scan_task(reader, semaphore.clone());
             builder.push_batch_stream(stream);
         }
         Ok(Box::new(builder.build().await?))
@@ -265,12 +264,12 @@ impl SeqScan {
 
     /// Returns whether to use a parallel reader.
     fn use_parallel_reader(&self) -> bool {
-        self.parallelism > 1 && (self.files.len() + self.memtables.len()) > 1
+        self.parallelism.allow_parallel_scan() && (self.files.len() + self.memtables.len()) > 1
     }
 
     /// Scan the input source in another task.
-    fn scan_source_in_background(mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
-        let (sender, receiver) = mpsc::channel(128);
+    fn spawn_scan_task(&self, mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
+        let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
         tokio::spawn(async move {
             loop {
                 // We release the permit before sending result to avoid the task waiting on
