@@ -15,11 +15,14 @@
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
-use api::v1::{DeleteRequests, InsertRequests, RowDeleteRequests, RowInsertRequests, GreptimeRequest};
+use api::v1::{
+    DeleteRequests, GreptimeRequest, InsertRequests, RowDeleteRequests, RowInsertRequests,
+};
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::info;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -49,16 +52,25 @@ impl GrpcQueryHandler for Instance {
             .context(PermissionSnafu)?;
         // copy row inserts to flow worker
         if let Request::RowInserts(_) = &request {
-            let full_req = GreptimeRequest{
+            let full_req = GreptimeRequest {
                 header: None,
-                request: Some(request.clone())
+                request: Some(request.clone()),
             };
 
-            if let Some(flow_proxy) = &self.flow{
-                flow_proxy.flow_client.lock().await.handle(full_req).await.unwrap();
+            if let Some(flow_proxy) = &self.flow {
+                flow_proxy
+                    .flow_client
+                    .lock()
+                    .await
+                    .handle(full_req)
+                    .await
+                    .unwrap();
+            } else {
+                info!("flow proxy is not initialized");
             }
         };
-
+        let output = Output::AffectedRows(0);
+        /*
         let output = match request {
             Request::Inserts(requests) => self.handle_inserts(requests, ctx.clone()).await?,
             Request::RowInserts(requests) => self.handle_row_inserts(requests, ctx.clone()).await?,
@@ -144,7 +156,7 @@ impl GrpcQueryHandler for Instance {
             }
         };
 
-        let output = interceptor.post_execute(output, ctx)?;
+        let output = interceptor.post_execute(output, ctx)?;*/
         Ok(output)
     }
 }
