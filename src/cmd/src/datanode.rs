@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
+use common_config::wal::raft_engine::RaftEngineOptions;
 use common_telemetry::logging;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -154,7 +155,11 @@ impl StartCommand {
         }
 
         if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = Some(wal_dir.clone());
+            opts.wal
+                .raft_engine_opts
+                .get_or_insert(RaftEngineOptions::default())
+                .dir
+                .replace(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -243,12 +248,25 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "RaftEngine"
+
+            [wal.raft_engine_opts]
             dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
+
+            [wal.kafka_opts]
+            broker_endpoints = ["127.0.0.1:9090"]
+            num_topics = 64
+            topic_name_prefix = "greptime_topic"
+            num_partitions = 1
+            compression = "Lz4"
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
 
             [storage]
             type = "File"
@@ -272,12 +290,13 @@ mod tests {
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
-        assert_eq!("/other/wal", options.wal.dir.unwrap());
 
-        assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
-        assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
-        assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
-        assert!(!options.wal.sync_write);
+        let raft_engine_opts = options.wal.raft_engine_opts.unwrap();
+        assert_eq!("/other/wal", raft_engine_opts.dir.unwrap());
+        assert_eq!(Duration::from_secs(600), raft_engine_opts.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, raft_engine_opts.file_size.0);
+        assert_eq!(1024 * 1024 * 1024 * 50, raft_engine_opts.purge_threshold.0);
+        assert!(!raft_engine_opts.sync_write);
 
         let HeartbeatOptions {
             interval: heart_beat_interval,
@@ -379,10 +398,23 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "RaftEngine"
+
+            [wal.raft_engine_opts]
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "10m"
             sync_write = false
+
+            [wal.kafka_opts]
+            broker_endpoints = ["127.0.0.1:9090"]
+            num_topics = 64
+            topic_name_prefix = "greptime_topic"
+            num_partitions = 1
+            compression = "Lz4"
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
 
             [storage]
             type = "File"
@@ -398,20 +430,22 @@ mod tests {
         temp_env::with_vars(
             [
                 (
-                    // wal.purge_interval = 1m
+                    // wal.raft_engine_opts.purge_interval = 1m
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
+                        "raft_engine_opts".to_uppercase(),
                         "purge_interval".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
                     Some("1m"),
                 ),
                 (
-                    // wal.read_batch_size = 100
+                    // wal.raft_engine_opts.read_batch_size = 100
                     [
                         env_prefix.to_string(),
                         "wal".to_uppercase(),
+                        "raft_engine_opts".to_uppercase(),
                         "read_batch_size".to_uppercase(),
                     ]
                     .join(ENV_VAR_SEP),
@@ -443,7 +477,8 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.wal.read_batch_size, 100,);
+                let raft_engine_opts = opts.wal.raft_engine_opts.unwrap();
+                assert_eq!(raft_engine_opts.read_batch_size, 100);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -454,10 +489,14 @@ mod tests {
                 );
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.wal.purge_interval, Duration::from_secs(60 * 10));
+                assert_eq!(
+                    raft_engine_opts.purge_interval,
+                    Duration::from_secs(60 * 10)
+                );
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
+                let wal_dir = raft_engine_opts.dir.unwrap();
+                assert_eq!(wal_dir, "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(opts.http.addr, DatanodeOptions::default().http.addr);

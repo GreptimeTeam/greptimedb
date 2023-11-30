@@ -446,8 +446,7 @@ pub enum Error {
     #[snafu(display("Failed to build a Kafka log store"))]
     BuildKafkaLogStore {
         location: Location,
-        #[snafu(source)]
-        error: log_store::error::Error,
+        source: BoxedError,
     },
 }
 

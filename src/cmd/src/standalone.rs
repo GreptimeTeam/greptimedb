@@ -19,7 +19,8 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::CatalogManagerRef;
 use clap::Parser;
 use common_base::Plugins;
-use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
+use common_config::wal::{WalOptions, WalProvider};
+use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyKvCacheInvalidator;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
@@ -39,12 +40,12 @@ use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 
 use crate::error::{
     CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
     ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StopProcedureManagerSnafu,
+    StopProcedureManagerSnafu, UnexpectedWalProviderSnafu,
 };
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
@@ -95,7 +96,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal: WalConfig,
+    pub wal: WalOptions,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -117,7 +118,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal: WalConfig::default(),
+            wal: WalOptions::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -329,6 +330,13 @@ impl StartCommand {
 
         let dn_opts = opts.datanode.clone();
 
+        ensure!(
+            dn_opts.wal.provider == WalProvider::RaftEngine,
+            UnexpectedWalProviderSnafu {
+                wal_provider: dn_opts.wal.provider
+            }
+        );
+
         info!("Standalone start command: {:#?}", self);
 
         info!("Building standalone instance with {opts:#?}");
@@ -460,6 +468,9 @@ mod tests {
             enable_memory_catalog = true
 
             [wal]
+            provider = "RaftEngine"
+
+            [wal.raft_engine_opts]
             dir = "/tmp/greptimedb/test/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -467,19 +478,19 @@ mod tests {
             read_batch_size = 128
             sync_write = false
 
+            [wal.kafka_opts]
+            broker_endpoints = ["127.0.0.1:9090"]
+            num_topics = 64
+            topic_name_prefix = "greptime_topic"
+            num_partitions = 1
+            compression = "Lz4"
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
+
             [storage]
             type = "S3"
-            access_key_id = "access_key_id"
-            secret_access_key = "secret_access_key"
-
-            [storage.compaction]
-            max_inflight_tasks = 3
-            max_files_in_level0 = 7
-            max_purge_tasks = 32
-
-            [storage.manifest]
-            checkpoint_margin = 9
-            gc_duration = '7s'
+            data_home = "/tmp/greptimedb/"
 
             [http]
             addr = "127.0.0.1:4000"
@@ -515,7 +526,10 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
+        assert_eq!(
+            "/tmp/greptimedb/test/wal",
+            dn_opts.wal.raft_engine_opts.unwrap().dir.unwrap()
+        );
 
         match &dn_opts.storage.store {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
