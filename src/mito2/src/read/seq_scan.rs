@@ -311,14 +311,14 @@ impl SeqScan {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?
         else {
-            metrics.fetch_cost += start.elapsed();
             metrics.scan_cost += start.elapsed();
 
             return Ok(None);
         };
 
-        metrics.fetch_cost += start.elapsed();
+        let convert_start = Instant::now();
         let record_batch = mapper.convert(&batch, cache)?;
+        metrics.convert_cost += convert_start.elapsed();
         metrics.scan_cost += start.elapsed();
 
         Ok(Some(record_batch))
@@ -332,8 +332,8 @@ struct Metrics {
     build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
-    /// Duration to fetch from the reader.
-    fetch_cost: Duration,
+    /// Duration to convert batches.
+    convert_cost: Duration,
 }
 
 #[cfg(test)]
