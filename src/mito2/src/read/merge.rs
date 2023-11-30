@@ -332,7 +332,7 @@ impl MergeReaderBuilder {
 
     /// Pushes a batch stream to sources.
     pub fn push_batch_stream(&mut self, stream: BoxedBatchStream) -> &mut Self {
-        self.sources.push(Source::Stream(stream, Duration::ZERO));
+        self.sources.push(Source::Stream(stream));
         self
     }
 
