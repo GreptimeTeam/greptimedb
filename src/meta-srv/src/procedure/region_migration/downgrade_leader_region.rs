@@ -16,7 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+use common_meta::distributed_time_constants::{MAILBOX_RTT_SECS, REGION_LEASE_SECS};
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
@@ -31,7 +31,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const DOWNGRADE_LEADER_REGION_TIMEOUT: Duration = Duration::from_secs(1);
+const DOWNGRADE_LEADER_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DowngradeLeaderRegion {
@@ -159,7 +159,7 @@ impl DowngradeLeaderRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on Datanode {:?}", 
+                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}", 
                     leader,
                 );
                 error::RetryLaterSnafu { reason }.fail()

@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::ddl::utils::region_storage_path;
+use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::RegionIdent;
 use serde::{Deserialize, Serialize};
@@ -29,7 +30,7 @@ use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeader
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(1);
+const OPEN_CANDIDATE_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OpenCandidateRegion;
@@ -152,7 +153,7 @@ impl OpenCandidateRegion {
                 } else {
                     error::RetryLaterSnafu {
                         reason: format!(
-                            "Region {region_id} is not opened by Datanode {:?}, error: {error:?}",
+                            "Region {region_id} is not opened by datanode {:?}, error: {error:?}",
                             candidate,
                         ),
                     }
@@ -161,7 +162,7 @@ impl OpenCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for open candidate region {region_id} on Datanode {:?}", 
+                    "Mailbox received timeout for open candidate region {region_id} on datanode {:?}", 
                     candidate,
                 );
                 error::RetryLaterSnafu { reason }.fail()

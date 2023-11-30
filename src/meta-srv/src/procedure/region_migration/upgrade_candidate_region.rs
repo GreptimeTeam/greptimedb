@@ -16,6 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
+use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
@@ -69,7 +70,7 @@ impl State for UpgradeCandidateRegion {
 }
 
 impl UpgradeCandidateRegion {
-    const UPGRADE_CANDIDATE_REGION_RTT: Duration = Duration::from_secs(1);
+    const UPGRADE_CANDIDATE_REGION_RTT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
 
     /// Returns the timeout of the upgrade candidate region.
     ///
@@ -146,7 +147,7 @@ impl UpgradeCandidateRegion {
                 if error.is_some() {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Failed to upgrade the region {} on Datanode {:?}, error: {:?}",
+                            "Failed to upgrade the region {} on datanode {:?}, error: {:?}",
                             region_id, candidate, error
                         ),
                     }
@@ -157,7 +158,7 @@ impl UpgradeCandidateRegion {
                     exists,
                     error::UnexpectedSnafu {
                         violated: format!(
-                            "Expected region {} doesn't exist on Datanode {:?}",
+                            "Expected region {} doesn't exist on datanode {:?}",
                             region_id, candidate
                         )
                     }
@@ -166,7 +167,7 @@ impl UpgradeCandidateRegion {
                 if self.require_ready && !ready {
                     return error::RetryLaterSnafu {
                         reason: format!(
-                            "Candidate region {} still replaying the wal on Datanode {:?}",
+                            "Candidate region {} still replaying the wal on datanode {:?}",
                             region_id, candidate
                         ),
                     }
@@ -177,7 +178,7 @@ impl UpgradeCandidateRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                        "Mailbox received timeout for upgrade candidate region {region_id} on Datanode {:?}", 
+                        "Mailbox received timeout for upgrade candidate region {region_id} on datanode {:?}", 
                         candidate,
                     );
                 error::RetryLaterSnafu { reason }.fail()
