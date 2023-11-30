@@ -31,10 +31,12 @@ runs:
           echo "prerelease=false" >> $GITHUB_ENV
           echo "makeLatest=true" >> $GITHUB_ENV
           echo "generateReleaseNotes=false" >> $GITHUB_ENV
+          echo "omitBody=true" >> $GITHUB_ENV
         else
           echo "prerelease=true" >> $GITHUB_ENV
           echo "makeLatest=false" >> $GITHUB_ENV
           echo "generateReleaseNotes=true" >> $GITHUB_ENV
+          echo "omitBody=false" >> $GITHUB_ENV
         fi
 
     - name: Publish release
@@ -45,6 +47,7 @@ runs:
         makeLatest: ${{ env.makeLatest }}
         tag: ${{ inputs.version }}
         generateReleaseNotes: ${{ env.generateReleaseNotes }}
+        omitBody: ${{ env.omitBody }} # omitBody is true when the release is a official release.
         allowUpdates: true
         artifacts: |
           **/greptime-*/*
