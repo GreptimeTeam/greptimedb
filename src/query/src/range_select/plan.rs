@@ -342,15 +342,14 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "RangeSelect: range_exprs=[{}], align={}s, align_to={}s, align_by=[{}], time_index={}",
+            "RangeSelect: range_exprs=[{}], align={}ms, align_to={}ms, align_by=[{}], time_index={}",
             self.range_expr
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
-            self.align.as_secs(),
-            // convert ms to s
-            self.align_to / 1000,
+            self.align.as_millis(),
+            self.align_to,
             self.by
                 .iter()
                 .map(ToString::to_string)
@@ -552,10 +551,10 @@ impl DisplayAs for RangeSelectExec {
                 let by: Vec<String> = self.by.iter().map(|e| e.to_string()).collect();
                 write!(
                     f,
-                    "range_expr=[{}], align={}s, align_to={}s, align_by=[{}], time_index={}",
+                    "range_expr=[{}], align={}ms, align_to={}ms, align_by=[{}], time_index={}",
                     range_expr_strs.join(", "),
-                    self.align / 1000,
-                    self.align_to / 1000,
+                    self.align,
+                    self.align_to,
                     by.join(", "),
                     self.time_index,
                 )?;
