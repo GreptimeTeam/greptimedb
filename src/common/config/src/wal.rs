@@ -12,31 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod wal;
+pub mod kafka;
+pub mod raft_engine;
 
-use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-pub fn metadata_store_dir(store_dir: &str) -> String {
-    format!("{store_dir}/metadata")
+use crate::wal::kafka::KafkaOptions;
+use crate::wal::raft_engine::RaftEngineOptions;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum WalProvider {
+    RaftEngine,
+    Kafka,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct KvBackendConfig {
-    // Kv file size in bytes
-    pub file_size: ReadableSize,
-    // Kv purge threshold in bytes
-    pub purge_threshold: ReadableSize,
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct WalOptions {
+    pub provider: WalProvider,
+    pub raft_engine_opts: Option<RaftEngineOptions>,
+    pub kafka_opts: Option<KafkaOptions>,
 }
 
-impl Default for KvBackendConfig {
+impl Default for WalOptions {
     fn default() -> Self {
         Self {
-            // log file size 256MB
-            file_size: ReadableSize::mb(256),
-            // purge threshold 4GB
-            purge_threshold: ReadableSize::gb(4),
+            provider: WalProvider::RaftEngine,
+            raft_engine_opts: Some(RaftEngineOptions::default()),
+            kafka_opts: None,
         }
     }
 }

@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
-use common_config::WalConfig;
+use common_config::wal::WalOptions;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
@@ -221,7 +221,7 @@ pub struct DatanodeOptions {
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub meta_client: Option<MetaClientOptions>,
-    pub wal: WalConfig,
+    pub wal: WalOptions,
     pub storage: StorageConfig,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
@@ -242,7 +242,7 @@ impl Default for DatanodeOptions {
             rpc_max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
             http: HttpOptions::default(),
             meta_client: None,
-            wal: WalConfig::default(),
+            wal: WalOptions::default(),
             storage: StorageConfig::default(),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),

@@ -21,6 +21,9 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
+use common_config::wal::kafka::KafkaOptions;
+use common_config::wal::raft_engine::RaftEngineOptions;
+use common_config::wal::WalProvider;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
@@ -32,8 +35,10 @@ use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
 use futures_util::StreamExt;
+use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
+use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
@@ -44,7 +49,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::LogStore;
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -54,9 +58,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
-    ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu,
+    MissingRaftEngineOptsSnafu, OpenLogStoreSnafu, ParseAddrSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu, UnexpectedWalProviderSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -220,8 +224,6 @@ impl DatanodeBuilder {
         let kv_backend = self.kv_backend.take().context(MissingKvBackendSnafu)?;
 
         // build and initialize region server
-        let log_store = Self::build_log_store(&self.opts).await?;
-
         let (region_event_listener, region_event_receiver) = if controlled_by_metasrv {
             let (tx, rx) = new_region_server_event_channel();
             (Box::new(tx) as _, Some(rx))
@@ -229,9 +231,7 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let region_server = self
-            .new_region_server(log_store, region_event_listener)
-            .await?;
+        let region_server = self.new_region_server(region_event_listener).await?;
 
         self.initialize_region_server(&region_server, kv_backend, !controlled_by_metasrv)
             .await?;
@@ -393,7 +393,6 @@ impl DatanodeBuilder {
 
     async fn new_region_server(
         &self,
-        log_store: Arc<RaftEngineLogStore>,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
         let opts = &self.opts;
@@ -430,8 +429,7 @@ impl DatanodeBuilder {
             "default", // TODO: use a name which is set in the configuration when #919 is done.
             object_store,
         );
-        let engines =
-            Self::build_store_engines(opts, log_store, Arc::new(object_store_manager)).await?;
+        let engines = Self::build_store_engines(opts, Arc::new(object_store_manager)).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -441,48 +439,18 @@ impl DatanodeBuilder {
 
     // internal utils
 
-    /// Build [RaftEngineLogStore]
-    async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
-        let data_home = normalize_dir(&opts.storage.data_home);
-        let wal_dir = match &opts.wal.dir {
-            Some(dir) => dir.clone(),
-            None => format!("{}{WAL_DIR}", data_home),
-        };
-        let wal_config = opts.wal.clone();
-
-        // create WAL directory
-        fs::create_dir_all(Path::new(&wal_dir))
-            .await
-            .context(CreateDirSnafu { dir: &wal_dir })?;
-        info!(
-            "Creating logstore with config: {:?} and storage path: {}",
-            wal_config, &wal_dir
-        );
-        let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
-            .await
-            .map_err(Box::new)
-            .context(OpenLogStoreSnafu)?;
-        Ok(Arc::new(logstore))
-    }
-
     /// Build [RegionEngineRef] from `store_engine` section in `opts`
-    async fn build_store_engines<S>(
+    async fn build_store_engines(
         opts: &DatanodeOptions,
-        log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> Result<Vec<RegionEngineRef>>
-    where
-        S: LogStore,
-    {
+    ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let engine: MitoEngine = MitoEngine::new(
-                        config.clone(),
-                        log_store.clone(),
-                        object_store_manager.clone(),
-                    );
+                    let engine =
+                        Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
+                            .await?;
                     engines.push(Arc::new(engine) as _);
                 }
                 RegionEngineConfig::File(config) => {
@@ -495,6 +463,74 @@ impl DatanodeBuilder {
             }
         }
         Ok(engines)
+    }
+
+    async fn build_mito_engine(
+        opts: &DatanodeOptions,
+        object_store_manager: ObjectStoreManagerRef,
+        config: MitoConfig,
+    ) -> Result<MitoEngine> {
+        // Providing a remote wal for standalone mode is not allowed.
+        let mode = &opts.mode;
+        let wal_provider = &opts.wal.provider;
+        if mode == &Mode::Standalone && wal_provider != &WalProvider::RaftEngine {
+            return UnexpectedWalProviderSnafu {
+                wal_provider: wal_provider.clone(),
+                mode: mode.clone(),
+            }
+            .fail();
+        }
+
+        let mito_engine = match opts.wal.provider {
+            WalProvider::RaftEngine => MitoEngine::new(
+                config,
+                Self::build_raft_engine_log_store(
+                    &opts.storage.data_home,
+                    &opts.wal.raft_engine_opts,
+                )
+                .await?,
+                object_store_manager,
+            ),
+            WalProvider::Kafka => todo!(),
+        };
+        Ok(mito_engine)
+    }
+
+    async fn build_raft_engine_log_store(
+        data_home: &str,
+        raft_engine_opts: &Option<RaftEngineOptions>,
+    ) -> Result<Arc<RaftEngineLogStore>> {
+        let opts = raft_engine_opts
+            .as_ref()
+            .context(MissingRaftEngineOptsSnafu)?;
+
+        let data_home = normalize_dir(data_home);
+        let wal_dir = match &opts.dir {
+            Some(dir) => dir.clone(),
+            None => format!("{}{WAL_DIR}", data_home),
+        };
+
+        // create WAL directory
+        fs::create_dir_all(Path::new(&wal_dir))
+            .await
+            .context(CreateDirSnafu { dir: &wal_dir })?;
+        info!(
+            "Creating raft-engine logstore with config: {:?} and storage path: {}",
+            opts, &wal_dir
+        );
+        let logstore = RaftEngineLogStore::try_new(wal_dir, opts.clone())
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)?;
+
+        Ok(Arc::new(logstore))
+    }
+
+    #[allow(dead_code)]
+    async fn build_kafka_log_store(
+        _kafka_opts: &Option<KafkaOptions>,
+    ) -> Result<Arc<KafkaLogStore>> {
+        todo!()
     }
 }
 

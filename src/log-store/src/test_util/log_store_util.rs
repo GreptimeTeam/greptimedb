@@ -15,16 +15,16 @@
 use std::path::Path;
 
 use common_base::readable_size::ReadableSize;
-use common_config::WalConfig;
+use common_config::wal::raft_engine::RaftEngineOptions;
 
 use crate::raft_engine::log_store::RaftEngineLogStore;
 
 /// Create a write log for the provided path, used for test.
 pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEngineLogStore {
     let path = path.as_ref().display().to_string();
-    let cfg = WalConfig {
+    let opts = RaftEngineOptions {
         file_size: ReadableSize::kb(128),
         ..Default::default()
     };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
+    RaftEngineLogStore::try_new(path, opts).await.unwrap()
 }

@@ -14,6 +14,7 @@
 
 use std::any::Any;
 
+use common_config::wal::WalProvider;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -424,6 +425,30 @@ pub enum Error {
         location: Location,
         source: BoxedError,
     },
+
+    #[snafu(display(
+        "The wal provider and the mode is unmatched, wal provider: {:?}, mode: {:?}",
+        wal_provider,
+        mode
+    ))]
+    UnexpectedWalProvider {
+        wal_provider: WalProvider,
+        mode: servers::Mode,
+        location: Location,
+    },
+
+    #[snafu(display("Missing required raft-engine options"))]
+    MissingRaftEngineOpts { location: Location },
+
+    #[snafu(display("Missing required Kafka options"))]
+    MissingKafkaOpts { location: Location },
+
+    #[snafu(display("Failed to build a Kafka log store"))]
+    BuildKafkaLogStore {
+        location: Location,
+        #[snafu(source)]
+        error: log_store::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -516,6 +541,11 @@ impl ErrorExt for Error {
             WaitProcedure { source, .. } => source.status_code(),
             HandleRegionRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
+
+            UnexpectedWalProvider { .. }
+            | MissingRaftEngineOpts { .. }
+            | MissingKafkaOpts { .. }
+            | BuildKafkaLogStore { .. } => StatusCode::InvalidArguments,
         }
     }
 
