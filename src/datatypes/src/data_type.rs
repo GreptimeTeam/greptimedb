@@ -85,31 +85,48 @@ pub enum ConcreteDataType {
 impl fmt::Display for ConcreteDataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConcreteDataType::Null(_) => write!(f, "Null"),
-            ConcreteDataType::Boolean(_) => write!(f, "Boolean"),
-            ConcreteDataType::Int8(_) => write!(f, "Int8"),
-            ConcreteDataType::Int16(_) => write!(f, "Int16"),
-            ConcreteDataType::Int32(_) => write!(f, "Int32"),
-            ConcreteDataType::Int64(_) => write!(f, "Int64"),
-            ConcreteDataType::UInt8(_) => write!(f, "UInt8"),
-            ConcreteDataType::UInt16(_) => write!(f, "UInt16"),
-            ConcreteDataType::UInt32(_) => write!(f, "UInt32"),
-            ConcreteDataType::UInt64(_) => write!(f, "UInt64"),
-            ConcreteDataType::Float32(_) => write!(f, "Float32"),
-            ConcreteDataType::Float64(_) => write!(f, "Float64"),
-            ConcreteDataType::Binary(_) => write!(f, "Binary"),
-            ConcreteDataType::String(_) => write!(f, "String"),
-            ConcreteDataType::Date(_) => write!(f, "Date"),
-            ConcreteDataType::DateTime(_) => write!(f, "DateTime"),
-            ConcreteDataType::Timestamp(_) => write!(f, "Timestamp"),
-            ConcreteDataType::Time(_) => write!(f, "Time"),
-            ConcreteDataType::List(_) => write!(f, "List"),
-            ConcreteDataType::Dictionary(_) => write!(f, "Dictionary"),
-            ConcreteDataType::Interval(_) => write!(f, "Interval"),
-            ConcreteDataType::Duration(_) => write!(f, "Duration"),
-            ConcreteDataType::Decimal128(d) => {
-                write!(f, "Decimal128({},{})", d.precision(), d.scale())
-            }
+            ConcreteDataType::Null(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Boolean(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Int8(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Int16(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Int32(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Int64(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::UInt8(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::UInt16(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::UInt32(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::UInt64(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Float32(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Float64(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Binary(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::String(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Date(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::DateTime(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Timestamp(t) => match t {
+                TimestampType::Second(v) => write!(f, "{}", v.name()),
+                TimestampType::Millisecond(v) => write!(f, "{}", v.name()),
+                TimestampType::Microsecond(v) => write!(f, "{}", v.name()),
+                TimestampType::Nanosecond(v) => write!(f, "{}", v.name()),
+            },
+            ConcreteDataType::Time(t) => match t {
+                TimeType::Second(v) => write!(f, "{}", v.name()),
+                TimeType::Millisecond(v) => write!(f, "{}", v.name()),
+                TimeType::Microsecond(v) => write!(f, "{}", v.name()),
+                TimeType::Nanosecond(v) => write!(f, "{}", v.name()),
+            },
+            ConcreteDataType::Interval(i) => match i {
+                IntervalType::YearMonth(v) => write!(f, "{}", v.name()),
+                IntervalType::DayTime(v) => write!(f, "{}", v.name()),
+                IntervalType::MonthDayNano(v) => write!(f, "{}", v.name()),
+            },
+            ConcreteDataType::Duration(d) => match d {
+                DurationType::Second(v) => write!(f, "{}", v.name()),
+                DurationType::Millisecond(v) => write!(f, "{}", v.name()),
+                DurationType::Microsecond(v) => write!(f, "{}", v.name()),
+                DurationType::Nanosecond(v) => write!(f, "{}", v.name()),
+            },
+            ConcreteDataType::Decimal128(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::List(v) => write!(f, "{}", v.name()),
+            ConcreteDataType::Dictionary(v) => write!(f, "{}", v.name()),
         }
     }
 }
@@ -492,7 +509,7 @@ impl ConcreteDataType {
 #[enum_dispatch::enum_dispatch]
 pub trait DataType: std::fmt::Debug + Send + Sync {
     /// Name of this data type.
-    fn name(&self) -> &str;
+    fn name(&self) -> String;
 
     /// Returns id of the Logical data type.
     fn logical_type_id(&self) -> LogicalTypeId;
@@ -523,7 +540,7 @@ mod tests {
     fn test_concrete_type_as_datatype_trait() {
         let concrete_type = ConcreteDataType::boolean_datatype();
 
-        assert_eq!("Boolean", concrete_type.name());
+        assert_eq!("Boolean", concrete_type.to_string());
         assert_eq!(Value::Boolean(false), concrete_type.default_value());
         assert_eq!(LogicalTypeId::Boolean, concrete_type.logical_type_id());
         assert_eq!(ArrowDataType::Boolean, concrete_type.as_arrow_type());
@@ -767,94 +784,68 @@ mod tests {
 
     #[test]
     fn test_display_concrete_data_type() {
+        assert_eq!(ConcreteDataType::null_datatype().to_string(), "Null");
+        assert_eq!(ConcreteDataType::boolean_datatype().to_string(), "Boolean");
+        assert_eq!(ConcreteDataType::binary_datatype().to_string(), "Binary");
+        assert_eq!(ConcreteDataType::int8_datatype().to_string(), "Int8");
+        assert_eq!(ConcreteDataType::int16_datatype().to_string(), "Int16");
+        assert_eq!(ConcreteDataType::int32_datatype().to_string(), "Int32");
+        assert_eq!(ConcreteDataType::int64_datatype().to_string(), "Int64");
+        assert_eq!(ConcreteDataType::uint8_datatype().to_string(), "UInt8");
+        assert_eq!(ConcreteDataType::uint16_datatype().to_string(), "UInt16");
+        assert_eq!(ConcreteDataType::uint32_datatype().to_string(), "UInt32");
+        assert_eq!(ConcreteDataType::uint64_datatype().to_string(), "UInt64");
+        assert_eq!(ConcreteDataType::float32_datatype().to_string(), "Float32");
+        assert_eq!(ConcreteDataType::float64_datatype().to_string(), "Float64");
+        assert_eq!(ConcreteDataType::string_datatype().to_string(), "String");
+        assert_eq!(ConcreteDataType::date_datatype().to_string(), "Date");
         assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Null).to_string(),
-            "Null"
+            ConcreteDataType::timestamp_millisecond_datatype().to_string(),
+            "TimestampMillisecond"
         );
         assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Boolean).to_string(),
-            "Boolean"
+            ConcreteDataType::time_millisecond_datatype().to_string(),
+            "TimeMillisecond"
         );
         assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Binary).to_string(),
-            "Binary"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::LargeBinary).to_string(),
-            "Binary"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Int8).to_string(),
-            "Int8"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Int16).to_string(),
-            "Int16"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Int32).to_string(),
-            "Int32"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Int64).to_string(),
-            "Int64"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt8).to_string(),
-            "UInt8"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt16).to_string(),
-            "UInt16"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt32).to_string(),
-            "UInt32"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::UInt64).to_string(),
-            "UInt64"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Float32).to_string(),
-            "Float32"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Float64).to_string(),
-            "Float64"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8).to_string(),
-            "String"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::List(Arc::new(Field::new(
-                "item",
-                ArrowDataType::Int32,
-                true,
-            ))))
-            .to_string(),
-            "List"
-        );
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Date32).to_string(),
-            "Date"
-        );
-        assert_eq!(ConcreteDataType::time_second_datatype().to_string(), "Time");
-        assert_eq!(
-            ConcreteDataType::from_arrow_type(&ArrowDataType::Interval(
-                arrow_schema::IntervalUnit::MonthDayNano,
-            ))
-            .to_string(),
-            "Interval"
+            ConcreteDataType::interval_month_day_nano_datatype().to_string(),
+            "IntervalMonthDayNano"
         );
         assert_eq!(
             ConcreteDataType::duration_second_datatype().to_string(),
-            "Duration"
+            "DurationSecond"
         );
         assert_eq!(
             ConcreteDataType::decimal128_datatype(10, 2).to_string(),
-            "Decimal128(10,2)"
+            "Decimal(10, 2)"
+        );
+        // Nested types
+        assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype()).to_string(),
+            "List<Int32>"
+        );
+        assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::Dictionary(DictionaryType::new(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype()
+            )))
+            .to_string(),
+            "List<Dictionary<Int32, String>>"
+        );
+        assert_eq!(
+            ConcreteDataType::list_datatype(ConcreteDataType::list_datatype(
+                ConcreteDataType::list_datatype(ConcreteDataType::int32_datatype())
+            ))
+            .to_string(),
+            "List<List<List<Int32>>>"
+        );
+        assert_eq!(
+            ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype()
+            )
+            .to_string(),
+            "Dictionary<Int32, String>"
         );
     }
 }

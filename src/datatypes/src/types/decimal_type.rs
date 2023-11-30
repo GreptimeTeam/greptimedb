@@ -56,9 +56,8 @@ impl Decimal128Type {
 }
 
 impl DataType for Decimal128Type {
-    fn name(&self) -> &str {
-        // TODO(QuenKar): support precision and scale information in name
-        "decimal"
+    fn name(&self) -> String {
+        format!("Decimal({}, {})", self.precision, self.scale)
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

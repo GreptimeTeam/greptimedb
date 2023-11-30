@@ -32,8 +32,8 @@ use crate::vectors::{DateVector, DateVectorBuilder, MutableVector, Vector};
 pub struct DateType;
 
 impl DataType for DateType {
-    fn name(&self) -> &str {
-        "Date"
+    fn name(&self) -> String {
+        "Date".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

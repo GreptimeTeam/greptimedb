@@ -34,8 +34,8 @@ impl StringType {
 }
 
 impl DataType for StringType {
-    fn name(&self) -> &str {
-        "String"
+    fn name(&self) -> String {
+        "String".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

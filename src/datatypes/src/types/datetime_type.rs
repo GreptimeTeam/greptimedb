@@ -30,8 +30,8 @@ use crate::vectors::{DateTimeVector, DateTimeVectorBuilder, PrimitiveVector};
 pub struct DateTimeType;
 
 impl DataType for DateTimeType {
-    fn name(&self) -> &str {
-        "DateTime"
+    fn name(&self) -> String {
+        "DateTime".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

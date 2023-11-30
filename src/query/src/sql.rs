@@ -286,8 +286,11 @@ fn describe_column_names(columns_schemas: &[ColumnSchema]) -> VectorRef {
 }
 
 fn describe_column_types(columns_schemas: &[ColumnSchema]) -> VectorRef {
-    Arc::new(StringVector::from_iterator(
-        columns_schemas.iter().map(|cs| cs.data_type.name()),
+    Arc::new(StringVector::from(
+        columns_schemas
+            .iter()
+            .map(|cs| cs.data_type.name())
+            .collect::<Vec<_>>(),
     ))
 }
 
