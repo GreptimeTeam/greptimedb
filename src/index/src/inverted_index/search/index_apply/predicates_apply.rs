@@ -40,7 +40,7 @@ impl IndexApplier for PredicatesIndexApplier {
     async fn apply(&self, reader: &mut dyn InvertedIndexReader) -> Result<Vec<usize>> {
         let metadata = reader.metadata().await?;
 
-        let mut bitmap = Self::bitmap_full(&metadata); // scan all
+        let mut bitmap = Self::bitmap_full_range(&metadata);
         for (tag_name, fst_applier) in &self.fst_appliers {
             if bitmap.count_ones() == 0 {
                 break;
@@ -91,8 +91,8 @@ impl PredicatesIndexApplier {
         Ok(PredicatesIndexApplier { fst_appliers })
     }
 
-    /// Creates a BitVec representing the full range of data in the index for initial scanning.
-    fn bitmap_full(metadata: &InvertedIndexMetas) -> BitVec {
+    /// Creates a `BitVec` representing the full range of data in the index for initial scanning.
+    fn bitmap_full_range(metadata: &InvertedIndexMetas) -> BitVec {
         let total_count = metadata.total_row_count;
         let segment_count = metadata.segment_row_count;
         let len = (total_count + segment_count - 1) / segment_count;
