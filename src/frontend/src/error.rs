@@ -182,9 +182,6 @@ pub enum Error {
         source: servers::error::Error,
     },
 
-    #[snafu(display("Missing meta_client_options section in config"))]
-    MissingMetasrvOpts { location: Location },
-
     #[snafu(display("Failed to find leaders when altering table, table: {}", table))]
     LeaderNotFound { table: String, location: Location },
 
@@ -299,7 +296,6 @@ impl ErrorExt for Error {
             | Error::IllegalPrimaryKeysDef { .. }
             | Error::SchemaExists { .. }
             | Error::ColumnNotFound { .. }
-            | Error::MissingMetasrvOpts { .. }
             | Error::UnsupportedFormat { .. }
             | Error::IllegalAuthConfig { .. }
             | Error::EmptyData { .. }
