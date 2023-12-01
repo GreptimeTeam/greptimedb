@@ -109,6 +109,12 @@ pub enum Error {
         location: Location,
         predicates: Vec<Predicate>,
     },
+
+    #[snafu(display("Tag not found in index, tag_name: {tag_name}"))]
+    TagNotFoundInIndex {
+        tag_name: String,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -128,7 +134,8 @@ impl ErrorExt for Error {
             | ParseDFA { .. }
             | KeysApplierWithoutInList { .. }
             | IntersectionApplierWithInList { .. }
-            | EmptyPredicates { .. } => StatusCode::InvalidArguments,
+            | EmptyPredicates { .. }
+            | TagNotFoundInIndex { .. } => StatusCode::InvalidArguments,
         }
     }
 

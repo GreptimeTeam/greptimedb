@@ -131,7 +131,6 @@ mod tests {
     async fn test_read_payload() {
         let meta = InvertedIndexMeta {
             name: "test".to_string(),
-            segment_row_count: 4096,
             ..Default::default()
         };
 
@@ -145,14 +144,12 @@ mod tests {
         assert_eq!(metas.metas.len(), 1);
         let index_meta = &metas.metas.get("test").unwrap();
         assert_eq!(index_meta.name, "test");
-        assert_eq!(index_meta.segment_row_count, 4096);
     }
 
     #[tokio::test]
     async fn test_invalid_footer_payload_size() {
         let meta = InvertedIndexMeta {
             name: "test".to_string(),
-            segment_row_count: 4096,
             ..Default::default()
         };
 
@@ -171,7 +168,6 @@ mod tests {
             name: "test".to_string(),
             base_offset: 0,
             inverted_index_size: 1, // Set size to 1 to make ecceed the blob size
-            segment_row_count: 4096,
             ..Default::default()
         };
 

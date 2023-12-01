@@ -22,6 +22,7 @@ use crate::inverted_index::FstMap;
 
 /// A trait for objects that can process a finite state transducer (FstMap) and return
 /// associated values.
+#[mockall::automock]
 pub trait FstApplier: Send + Sync {
     /// Retrieves values from an FstMap.
     ///
