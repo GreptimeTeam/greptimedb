@@ -53,11 +53,11 @@ impl<'a> FstValuesMapper<'a> {
                 .await?;
 
             // Ensure the longest BitVec is the left operand to prevent truncation during OR.
-            bitmap = if bm.len() > bitmap.len() {
-                bm | bitmap
+            if bm.len() > bitmap.len() {
+                bitmap = bm | bitmap
             } else {
-                bitmap | bm
-            };
+                bitmap |= bm
+            }
         }
 
         Ok(bitmap)
