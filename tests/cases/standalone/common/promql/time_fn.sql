@@ -1,6 +1,6 @@
 -- Test `time()` and related functions.
 -- Some cases are part of promql/testdata/functions.test, "Test time-related functions" section
--- And anothers are from compliance test
+-- And others are from compliance test
 
 -- time() with itself or scalar
 
