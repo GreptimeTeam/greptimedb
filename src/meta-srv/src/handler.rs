@@ -298,6 +298,19 @@ impl HeartbeatMailbox {
         serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
     }
 
+    /// Parses the [Instruction] from [MailboxMessage].
+    #[cfg(test)]
+    pub(crate) fn json_instruction(msg: &MailboxMessage) -> Result<Instruction> {
+        let Payload::Json(payload) =
+            msg.payload
+                .as_ref()
+                .with_context(|| UnexpectedInstructionReplySnafu {
+                    mailbox_message: msg.to_string(),
+                    reason: format!("empty payload, msg: {msg:?}"),
+                })?;
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+    }
+
     pub fn create(pushers: Pushers, sequence: Sequence) -> MailboxRef {
         let mailbox = Arc::new(Self::new(pushers, sequence));
 
