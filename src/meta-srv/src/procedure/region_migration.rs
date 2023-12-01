@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
+pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
 pub(crate) mod open_candidate_region;

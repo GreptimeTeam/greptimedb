@@ -66,7 +66,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::error::Error;
-    use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
+    use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
     use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
@@ -221,7 +221,10 @@ mod tests {
 
         let next = state.next(&mut ctx).await.unwrap();
 
-        let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+        let _ = next
+            .as_any()
+            .downcast_ref::<RegionMigrationAbort>()
+            .unwrap();
 
         assert!(ctx.volatile_ctx.table_route.is_none());
 

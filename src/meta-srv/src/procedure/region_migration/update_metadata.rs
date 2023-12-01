@@ -21,6 +21,7 @@ use std::any::Any;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
+use super::migration_abort::RegionMigrationAbort;
 use super::migration_end::RegionMigrationEnd;
 use crate::error::Result;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -61,7 +62,9 @@ impl State for UpdateMetadata {
                 if let Err(err) = ctx.invalidate_table_cache().await {
                     warn!("Failed to broadcast the invalidate table cache message during the rollback, error: {err:?}");
                 };
-                Ok(Box::new(RegionMigrationEnd))
+                Ok(Box::new(RegionMigrationAbort::new(
+                    "Failed to upgrade the candidate region.",
+                )))
             }
         }
     }
