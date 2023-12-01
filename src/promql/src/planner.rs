@@ -252,7 +252,7 @@ impl PromPlanner {
                         let input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         // check if the literal is a special time expr
                         if let Some(time_expr) = Self::try_build_special_time_expr(
-                            &lhs,
+                            &rhs,
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ) {
                             expr = time_expr

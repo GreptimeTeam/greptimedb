@@ -46,6 +46,8 @@ tql eval (1, 2, '1s') metrics + time();
 
 tql eval (1, 2, '1s') metrics == time();
 
+tql eval (1, 2, '1s') metrics == bool time();
+
 -- other time-related functions
 
 tql eval (1, 2, '1s') hour();
