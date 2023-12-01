@@ -74,15 +74,13 @@ mod tests {
     #[tokio::test]
     async fn test_map_values() {
         let mut mock_reader = MockInvertedIndexReader::new();
-
         mock_reader
             .expect_bitmap()
-            .withf(|_meta, offset, size| *offset == 1 && *size == 1)
-            .returning(|_, _, _| Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]));
-        mock_reader
-            .expect_bitmap()
-            .withf(|_meta, offset, size| *offset == 2 && *size == 1)
-            .returning(|_, _, _| Ok(bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]));
+            .returning(|_, offset, size| match (offset, size) {
+                (1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]),
+                (2, 1) => Ok(bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]),
+                _ => unreachable!(),
+            });
 
         let meta = InvertedIndexMeta::default();
         let mut values_mapper = FstValuesMapper::new(&mut mock_reader, &meta);
