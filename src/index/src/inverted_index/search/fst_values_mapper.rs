@@ -77,15 +77,11 @@ mod tests {
 
         mock_reader
             .expect_bitmap()
-            .withf(|meta, offset, size| {
-                meta == &InvertedIndexMeta::default() && *offset == 1 && *size == 1
-            })
+            .withf(|_meta, offset, size| *offset == 1 && *size == 1)
             .returning(|_, _, _| Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]));
         mock_reader
             .expect_bitmap()
-            .withf(|meta, offset, size| {
-                meta == &InvertedIndexMeta::default() && *offset == 2 && *size == 1
-            })
+            .withf(|_meta, offset, size| *offset == 2 && *size == 1)
             .returning(|_, _, _| Ok(bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]));
 
         let meta = InvertedIndexMeta::default();
