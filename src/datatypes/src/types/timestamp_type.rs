@@ -109,8 +109,8 @@ macro_rules! impl_data_type_for_timestamp {
             pub struct [<Timestamp $unit Type>];
 
             impl DataType for [<Timestamp $unit Type>] {
-                fn name(&self) -> &str {
-                    stringify!([<Timestamp $unit>])
+                fn name(&self) -> String {
+                    stringify!([<Timestamp $unit>]).to_string()
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

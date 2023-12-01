@@ -18,11 +18,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::meta::Role;
-use catalog::kvbackend::MetaKvBackend;
+use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -33,13 +35,16 @@ use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
 use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
-use frontend::frontend::FrontendOptions;
+use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
+use frontend::heartbeat::HeartbeatTask;
+use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
 use meta_srv::mocks::MockInfo;
 use servers::grpc::GrpcServer;
+use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use tonic::transport::Server;
 use tower::service_fn;
@@ -252,18 +257,26 @@ impl GreptimeDbClusterBuilder {
         meta_client.start(&[&meta_srv.server_addr]).await.unwrap();
         let meta_client = Arc::new(meta_client);
 
-        let frontend_opts = FrontendOptions::default();
+        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-        Arc::new(
-            FeInstance::try_new_distributed_with(
-                meta_client,
-                datanode_clients,
-                Plugins::default(),
-                &frontend_opts,
-            )
+        let handlers_executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+        ]);
+
+        let heartbeat_task = HeartbeatTask::new(
+            meta_client.clone(),
+            HeartbeatOptions::default(),
+            Arc::new(handlers_executor),
+        );
+
+        let instance = FrontendBuilder::new(meta_backend, datanode_clients, meta_client)
+            .with_heartbeat_task(heartbeat_task)
+            .try_build()
             .await
-            .unwrap(),
-        )
+            .unwrap();
+
+        Arc::new(instance)
     }
 }
 

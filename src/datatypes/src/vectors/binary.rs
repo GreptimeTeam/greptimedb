@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayBuilder, ArrayData, ArrayIter, ArrayRef};
+use arrow::array::{Array, ArrayBuilder, ArrayIter, ArrayRef};
 use snafu::ResultExt;
 
 use crate::arrow_array::{BinaryArray, MutableBinaryArray};
@@ -35,10 +35,6 @@ pub struct BinaryVector {
 impl BinaryVector {
     pub(crate) fn as_arrow(&self) -> &dyn Array {
         &self.array
-    }
-
-    fn to_array_data(&self) -> ArrayData {
-        self.array.to_data()
     }
 }
 
@@ -74,13 +70,11 @@ impl Vector for BinaryVector {
     }
 
     fn to_arrow_array(&self) -> ArrayRef {
-        let data = self.to_array_data();
-        Arc::new(BinaryArray::from(data))
+        Arc::new(self.array.clone())
     }
 
     fn to_boxed_arrow_array(&self) -> Box<dyn Array> {
-        let data = self.to_array_data();
-        Box::new(BinaryArray::from(data))
+        Box::new(self.array.clone())
     }
 
     fn validity(&self) -> Validity {

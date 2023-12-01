@@ -12,18 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use catalog::kvbackend::CachedMetaKvBackend;
 use clap::Parser;
+use client::client_manager::DatanodeClients;
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::logging;
 use frontend::frontend::FrontendOptions;
+use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
+use frontend::heartbeat::HeartbeatTask;
+use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::MetaClientOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, Result, StartFrontendSnafu};
+use crate::error::{self, MissingConfigSnafu, Result, StartFrontendSnafu};
 use crate::options::{Options, TopLevelOptions};
 
 pub struct Instance {
@@ -196,9 +204,37 @@ impl StartCommand {
         logging::info!("Frontend start command: {:#?}", self);
         logging::info!("Frontend options: {:#?}", opts);
 
-        let mut instance = FeInstance::try_new_distributed(&opts, plugins.clone())
+        let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
+            msg: "'meta_client'",
+        })?;
+        let meta_client = FeInstance::create_meta_client(meta_client_options)
             .await
             .context(StartFrontendSnafu)?;
+
+        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
+
+        let executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateTableCacheHandler::new(meta_backend.clone())),
+        ]);
+
+        let heartbeat_task = HeartbeatTask::new(
+            meta_client.clone(),
+            opts.heartbeat.clone(),
+            Arc::new(executor),
+        );
+
+        let mut instance = FrontendBuilder::new(
+            meta_backend.clone(),
+            Arc::new(DatanodeClients::default()),
+            meta_client,
+        )
+        .with_cache_invalidator(meta_backend)
+        .with_plugin(plugins)
+        .with_heartbeat_task(heartbeat_task)
+        .try_build()
+        .await
+        .context(StartFrontendSnafu)?;
 
         instance
             .build_servers(opts)

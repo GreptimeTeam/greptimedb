@@ -78,8 +78,8 @@ macro_rules! impl_data_type_for_duration {
             pub struct [<Duration $unit Type>];
 
             impl DataType for [<Duration $unit Type>] {
-                fn name(&self) -> &str {
-                    stringify!([<Duration $unit>])
+                fn name(&self) -> String {
+                    stringify!([<Duration $unit>]).to_string()
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

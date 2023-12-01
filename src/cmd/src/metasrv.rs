@@ -173,7 +173,12 @@ impl StartCommand {
         logging::info!("MetaSrv start command: {:#?}", self);
         logging::info!("MetaSrv options: {:#?}", opts);
 
-        let instance = MetaSrvInstance::new(opts, plugins)
+        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        let instance = MetaSrvInstance::new(opts, plugins, metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

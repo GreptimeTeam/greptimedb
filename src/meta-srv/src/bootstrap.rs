@@ -22,7 +22,7 @@ use api::v1::meta::store_server::StoreServer;
 use common_base::Plugins;
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
-use common_meta::kv_backend::ResettableKvBackendRef;
+use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
@@ -60,8 +60,11 @@ pub struct MetaSrvInstance {
 }
 
 impl MetaSrvInstance {
-    pub async fn new(opts: MetaSrvOptions, plugins: Plugins) -> Result<MetaSrvInstance> {
-        let meta_srv = build_meta_srv(&opts, plugins.clone()).await?;
+    pub async fn new(
+        opts: MetaSrvOptions,
+        plugins: Plugins,
+        meta_srv: MetaSrv,
+    ) -> Result<MetaSrvInstance> {
         let http_srv = Arc::new(
             HttpServerBuilder::new(opts.http.clone())
                 .with_metrics_handler(MetricsHandler)
@@ -161,28 +164,26 @@ pub fn router(meta_srv: MetaSrv) -> Router {
         .add_service(admin::make_admin_service(meta_srv))
 }
 
-pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<MetaSrv> {
-    let (kv_backend, election, lock) = if opts.use_memory_store {
-        (
+pub async fn metasrv_builder(
+    opts: &MetaSrvOptions,
+    plugins: Plugins,
+    kv_backend: Option<KvBackendRef>,
+) -> Result<MetaSrvBuilder> {
+    let (kv_backend, election, lock) = match (kv_backend, opts.use_memory_store) {
+        (Some(kv_backend), _) => (kv_backend, None, Some(Arc::new(MemLock::default()) as _)),
+        (None, true) => (
             Arc::new(MemoryKvBackend::new()) as _,
             None,
             Some(Arc::new(MemLock::default()) as _),
-        )
-    } else {
-        let etcd_endpoints = opts
-            .store_addr
-            .split(',')
-            .map(|x| x.trim())
-            .filter(|x| !x.is_empty())
-            .collect::<Vec<_>>();
-        let etcd_client = Client::connect(&etcd_endpoints, None)
-            .await
-            .context(error::ConnectEtcdSnafu)?;
-        (
-            EtcdStore::with_etcd_client(etcd_client.clone()),
-            Some(EtcdElection::with_etcd_client(&opts.server_addr, etcd_client.clone()).await?),
-            Some(EtcdLock::with_etcd_client(etcd_client)?),
-        )
+        ),
+        (None, false) => {
+            let etcd_client = create_etcd_client(opts).await?;
+            (
+                EtcdStore::with_etcd_client(etcd_client.clone()),
+                Some(EtcdElection::with_etcd_client(&opts.server_addr, etcd_client.clone()).await?),
+                Some(EtcdLock::with_etcd_client(etcd_client)?),
+            )
+        }
     };
 
     let in_memory = Arc::new(MemoryKvBackend::new()) as ResettableKvBackendRef;
@@ -192,14 +193,24 @@ pub async fn build_meta_srv(opts: &MetaSrvOptions, plugins: Plugins) -> Result<M
         SelectorType::LeaseBased => Arc::new(LeaseBasedSelector) as SelectorRef,
     };
 
-    MetaSrvBuilder::new()
+    Ok(MetaSrvBuilder::new()
         .options(opts.clone())
         .kv_backend(kv_backend)
         .in_memory(in_memory)
         .selector(selector)
         .election(election)
         .lock(lock)
-        .plugins(plugins)
-        .build()
+        .plugins(plugins))
+}
+
+async fn create_etcd_client(opts: &MetaSrvOptions) -> Result<Client> {
+    let etcd_endpoints = opts
+        .store_addr
+        .split(',')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>();
+    Client::connect(&etcd_endpoints, None)
         .await
+        .context(error::ConnectEtcdSnafu)
 }

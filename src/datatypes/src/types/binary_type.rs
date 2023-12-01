@@ -34,8 +34,8 @@ impl BinaryType {
 }
 
 impl DataType for BinaryType {
-    fn name(&self) -> &str {
-        "Binary"
+    fn name(&self) -> String {
+        "Binary".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

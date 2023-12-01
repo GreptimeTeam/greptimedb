@@ -35,19 +35,19 @@ use datafusion::sql::TableReference;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql_parser::label::{MatchOp, Matcher, Matchers, METRIC_NAME};
 use promql_parser::parser::{
-    token, AggregateExpr, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr, Function,
-    LabelModifier, MatrixSelector, NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr,
-    TokenType, UnaryExpr, VectorSelector,
+    token, AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
+    Expr as PromExpr, Function, LabelModifier, MatrixSelector, NumberLiteral, Offset, ParenExpr,
+    StringLiteral, SubqueryExpr, TokenType, UnaryExpr, VectorMatchCardinality, VectorSelector,
 };
 use snafu::{ensure, OptionExt, ResultExt};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
-    FunctionInvalidArgumentSnafu, MultipleMetricMatchersSnafu, MultipleVectorSnafu,
-    NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
+    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
@@ -282,14 +282,29 @@ impl PromPlanner {
                         let left_field_columns = self.ctx.field_columns.clone();
                         let left_table_ref: OwnedTableReference =
                             self.ctx.table_name.clone().unwrap_or_default().into();
+                        let left_tag_cols = self.ctx.tag_columns.clone();
 
                         let right_input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         let right_field_columns = self.ctx.field_columns.clone();
                         let right_table_ref: OwnedTableReference =
                             self.ctx.table_name.clone().unwrap_or_default().into();
+                        let right_tag_cols = self.ctx.tag_columns.clone();
 
                         // TODO(ruihang): avoid join if left and right are the same table
 
+                        // set op has "special" join semantics
+                        if Self::is_token_a_set_op(*op) {
+                            return self.set_op_on_non_field_columns(
+                                left_input,
+                                right_input,
+                                left_tag_cols,
+                                right_tag_cols,
+                                *op,
+                                modifier,
+                            );
+                        }
+
+                        // normal join
                         let mut field_columns =
                             left_field_columns.iter().zip(right_field_columns.iter());
                         let join_plan = self.join_on_non_field_columns(
@@ -1444,6 +1459,16 @@ impl PromPlanner {
         )
     }
 
+    /// Check if the given op is a set operator (UNION, INTERSECT and EXCEPT in SQL).
+    fn is_token_a_set_op(token: TokenType) -> bool {
+        matches!(
+            token.id(),
+            token::T_LAND // INTERSECT
+                | token::T_LOR // UNION
+                | token::T_LUNLESS // EXCEPT
+        )
+    }
+
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     fn join_on_non_field_columns(
         &self,
@@ -1483,6 +1508,107 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)
+    }
+
+    fn set_op_on_non_field_columns(
+        &self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_tag_cols: Vec<String>,
+        right_tag_cols: Vec<String>,
+        op: TokenType,
+        modifier: &Option<BinModifier>,
+    ) -> Result<LogicalPlan> {
+        let mut left_tag_col_set = left_tag_cols.into_iter().collect::<HashSet<_>>();
+        let mut right_tag_col_set = right_tag_cols.into_iter().collect::<HashSet<_>>();
+
+        // apply modifier
+        if let Some(modifier) = modifier {
+            // one-to-many and many-to-one are not supported
+            ensure!(
+                matches!(
+                    modifier.card,
+                    VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany
+                ),
+                UnsupportedVectorMatchSnafu {
+                    name: modifier.card.clone(),
+                },
+            );
+            // apply label modifier
+            if let Some(matching) = &modifier.matching {
+                match matching {
+                    // keeps columns mentioned in `on`
+                    LabelModifier::Include(on) => {
+                        let mask = on.labels.iter().cloned().collect::<HashSet<_>>();
+                        left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
+                        right_tag_col_set =
+                            right_tag_col_set.intersection(&mask).cloned().collect();
+                    }
+                    // removes columns memtioned in `ignoring`
+                    LabelModifier::Exclude(ignoring) => {
+                        // doesn't check existence of label
+                        for label in &ignoring.labels {
+                            let _ = left_tag_col_set.remove(label);
+                            let _ = right_tag_col_set.remove(label);
+                        }
+                    }
+                }
+            }
+        }
+        // ensure two sides have the same tag columns
+        if !matches!(op.id(), token::T_LOR) {
+            ensure!(
+                left_tag_col_set == right_tag_col_set,
+                CombineTableColumnMismatchSnafu {
+                    left: left_tag_col_set.into_iter().collect::<Vec<_>>(),
+                    right: right_tag_col_set.into_iter().collect::<Vec<_>>(),
+                }
+            )
+        };
+        let join_keys = left_tag_col_set
+            .into_iter()
+            .chain([self.ctx.time_index_column.clone().unwrap()])
+            .collect::<Vec<_>>();
+
+        // Generate join plan.
+        // All set operations in PromQL are "distinct"
+        match op.id() {
+            token::T_LAND => LogicalPlanBuilder::from(left)
+                .distinct()
+                .context(DataFusionPlanningSnafu)?
+                .join_detailed(
+                    right,
+                    JoinType::LeftSemi,
+                    (join_keys.clone(), join_keys),
+                    None,
+                    true,
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu),
+            token::T_LUNLESS => LogicalPlanBuilder::from(left)
+                .distinct()
+                .context(DataFusionPlanningSnafu)?
+                .join_detailed(
+                    right,
+                    JoinType::LeftAnti,
+                    (join_keys.clone(), join_keys),
+                    None,
+                    true,
+                )
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu),
+            token::T_LOR => {
+                // `OR` can not be expressed by `UNION` precisely.
+                // it will generate unexpceted result when schemas don't match
+                UnsupportedExprSnafu {
+                    name: "set operation `OR`",
+                }
+                .fail()
+            }
+            _ => UnexpectedTokenSnafu { token: op }.fail(),
+        }
     }
 
     /// Build a projection that project and perform operation expr for every value columns.

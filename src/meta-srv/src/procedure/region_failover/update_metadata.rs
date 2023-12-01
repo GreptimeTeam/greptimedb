@@ -105,7 +105,7 @@ impl UpdateRegionMetadata {
                     region_storage_path: self.region_storage_path.to_string(),
                     region_options: self.region_options.clone(),
                 },
-                table_route_value,
+                &table_route_value,
                 new_region_routes,
                 &self.region_options,
             )

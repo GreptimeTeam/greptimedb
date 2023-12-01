@@ -66,8 +66,8 @@ macro_rules! impl_data_type_for_interval {
             pub struct [<Interval $unit Type>];
 
             impl DataType for [<Interval $unit Type>] {
-                fn name(&self) -> &str {
-                    stringify!([<Interval $unit>])
+                fn name(&self) -> String {
+                    stringify!([<Interval $unit>]).to_string()
                 }
 
                 fn logical_type_id(&self) -> LogicalTypeId {

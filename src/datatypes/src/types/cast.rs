@@ -248,7 +248,7 @@ mod tests {
         assert!(res.is_err());
         assert_eq!(
             res.unwrap_err().to_string(),
-            "Type Timestamp with value 1970-01-01 08:00:10+0800 can't be cast to the destination type Int8"
+            "Type TimestampSecond with value 1970-01-01 08:00:10+0800 can't be cast to the destination type Int8"
         );
     }
 
