@@ -223,7 +223,7 @@ impl PromPlanner {
                         let input = self.prom_expr_to_plan(*rhs.clone()).await?;
                         // check if the literal is a special time expr
                         if let Some(time_expr) = Self::try_build_special_time_expr(
-                            &lhs,
+                            lhs,
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ) {
                             expr = time_expr
@@ -252,7 +252,7 @@ impl PromPlanner {
                         let input = self.prom_expr_to_plan(*lhs.clone()).await?;
                         // check if the literal is a special time expr
                         if let Some(time_expr) = Self::try_build_special_time_expr(
-                            &rhs,
+                            rhs,
                             self.ctx.time_index_column.as_ref().unwrap(),
                         ) {
                             expr = time_expr
@@ -1328,7 +1328,7 @@ impl PromPlanner {
             | PromExpr::Subquery(_) => None,
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    return Some(build_special_time_expr(SPECIAL_TIME_FUNCTION));
+                    Some(build_special_time_expr(SPECIAL_TIME_FUNCTION))
                 } else {
                     None
                 }
@@ -1369,7 +1369,7 @@ impl PromPlanner {
         match expr {
             PromExpr::Call(Call { func, .. }) => {
                 if func.name == SPECIAL_TIME_FUNCTION {
-                    return Some(build_special_time_expr(time_index_col));
+                    Some(build_special_time_expr(time_index_col))
                 } else {
                     None
                 }

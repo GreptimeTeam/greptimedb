@@ -42,11 +42,8 @@ tql eval (0, 0, '1s') 1 + time();
 | 1970-01-01T00:00:00 | 1.0   |
 +---------------------+-------+
 
+-- expect error: parse error: comparisons between scalars must use BOOL modifier
 tql eval (0, 0, '1s') time() < 1;
-
-Error: 2000(InvalidSyntax), comparisons between scalars must use BOOL modifier
-
-tql eval (0, 0, '1s') time() > 1;
 
 Error: 2000(InvalidSyntax), comparisons between scalars must use BOOL modifier
 
@@ -133,11 +130,30 @@ tql eval (1, 2, '1s') time() == bool metrics;
 
 tql eval (1, 2, '1s') metrics + time();
 
-Error: 1003(Internal), Internal error: 1003
++---------------------+--------------------------+
+| ts                  | val + ts / Float64(1000) |
++---------------------+--------------------------+
+| 1970-01-01T00:00:01 | 2.0                      |
+| 1970-01-01T00:00:02 | 4.0                      |
++---------------------+--------------------------+
 
 tql eval (1, 2, '1s') metrics == time();
 
-Error: 1003(Internal), Internal error: 1003
++---------------------+-----+
+| ts                  | val |
++---------------------+-----+
+| 1970-01-01T00:00:01 | 1.0 |
+| 1970-01-01T00:00:02 | 2.0 |
++---------------------+-----+
+
+tql eval (1, 2, '1s') metrics == bool time();
+
++---------------------+--------------------------+
+| ts                  | val = ts / Float64(1000) |
++---------------------+--------------------------+
+| 1970-01-01T00:00:01 | 1.0                      |
+| 1970-01-01T00:00:02 | 1.0                      |
++---------------------+--------------------------+
 
 -- other time-related functions
 tql eval (1, 2, '1s') hour();
