@@ -50,7 +50,7 @@ use store_api::storage::{ColumnId, RegionId};
 
 use crate::config::MitoConfig;
 use crate::engine::listener::EventListenerRef;
-use crate::engine::MitoEngine;
+use crate::engine::{MitoEngine, MITO_ENGINE_NAME};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
@@ -278,6 +278,7 @@ pub struct CreateRequestBuilder {
     options: HashMap<String, String>,
     primary_key: Option<Vec<ColumnId>>,
     all_not_null: bool,
+    engine: String,
 }
 
 impl Default for CreateRequestBuilder {
@@ -289,6 +290,7 @@ impl Default for CreateRequestBuilder {
             options: HashMap::new(),
             primary_key: None,
             all_not_null: false,
+            engine: MITO_ENGINE_NAME.to_string(),
         }
     }
 }
@@ -378,7 +380,7 @@ impl CreateRequestBuilder {
 
         RegionCreateRequest {
             // We use empty engine name as we already locates the engine.
-            engine: String::new(),
+            engine: self.engine.to_string(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options: self.options.clone(),

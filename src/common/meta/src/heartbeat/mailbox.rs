@@ -30,8 +30,8 @@ pub struct MessageMeta {
     pub from: String,
 }
 
-#[cfg(test)]
 impl MessageMeta {
+    #[cfg(any(test, feature = "testing"))]
     pub fn new_test(id: u64, subject: &str, to: &str, from: &str) -> Self {
         MessageMeta {
             id,
