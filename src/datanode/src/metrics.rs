@@ -18,6 +18,10 @@ use prometheus::*;
 /// Region request type label.
 pub const REGION_REQUEST_TYPE: &str = "datanode_region_request_type";
 
+pub const DATANODE_ID: &str = "datanode";
+
+pub const REGION_ROLE: &str = "region_role";
+
 lazy_static! {
     /// The elapsed time of handling a request in the region_server.
     pub static ref HANDLE_REGION_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
@@ -26,10 +30,18 @@ lazy_static! {
         &[REGION_REQUEST_TYPE]
     )
     .unwrap();
+    /// The elapsed time since the last received heartbeat.
     pub static ref LAST_RECEIVED_HEARTBEAT_ELAPSED: HistogramVec = register_histogram_vec!(
         "last_received_heartbeat_lease_elapsed",
         "last received heartbeat lease elapsed",
-        &["datanode"]
+        &[DATANODE_ID]
+    )
+    .unwrap();
+    /// The received region leases via heartbeat.
+    pub static ref HEARTBEAT_REGION_LEASES: IntGaugeVec = register_int_gauge_vec!(
+        "heartbeat_region_leases",
+        "received region leases via heartbeat",
+        &[DATANODE_ID, REGION_ROLE]
     )
     .unwrap();
 }

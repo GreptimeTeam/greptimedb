@@ -121,11 +121,27 @@ impl HeartbeatTask {
                 if let Some(msg) = res.mailbox_message.as_ref() {
                     info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
                 }
-                if res.region_lease.as_ref().is_some() {
+                if let Some(lease) = res.region_lease.as_ref() {
                     // Resets the timer.
                     _last_received_lease = metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
                         .with_label_values(&[&datanode])
                         .start_timer();
+
+                    let mut leader_region_lease_count = 0;
+                    let mut follower_region_lease_count = 0;
+                    for lease in &lease.regions {
+                        match lease.role() {
+                            RegionRole::Leader => leader_region_lease_count += 1,
+                            RegionRole::Follower => follower_region_lease_count += 1,
+                        }
+                    }
+
+                    metrics::HEARTBEAT_REGION_LEASES
+                        .with_label_values(&[&datanode, "leader"])
+                        .set(leader_region_lease_count);
+                    metrics::HEARTBEAT_REGION_LEASES
+                        .with_label_values(&[&datanode, "follower"])
+                        .set(follower_region_lease_count);
                 }
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()).await {
