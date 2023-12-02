@@ -72,9 +72,9 @@ impl HeartbeatTask {
             opts.heartbeat.interval.as_millis() as u64,
         ));
         let resp_handler_executor = Arc::new(HandlerGroupExecutor::new(vec![
+            region_alive_keeper.clone(),
             Arc::new(ParseMailboxMessageHandler),
             Arc::new(RegionHeartbeatResponseHandler::new(region_server.clone())),
-            region_alive_keeper.clone(),
         ]));
 
         Ok(Self {
