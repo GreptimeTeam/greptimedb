@@ -87,7 +87,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2aaee38de81047537dfa42af9df63bcfb866e06c" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
