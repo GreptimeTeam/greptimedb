@@ -104,7 +104,7 @@ impl HeartbeatTask {
         let client_id = meta_client.id();
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
 
-        let mut _last_received_lease = Instant::now();
+        let mut last_received_lease = Instant::now();
 
         let _handle = common_runtime::spawn_bg(async move {
             while let Some(res) = match rx.message().await {
@@ -119,9 +119,9 @@ impl HeartbeatTask {
                 }
                 if let Some(lease) = res.region_lease.as_ref() {
                     metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
-                        .set(_last_received_lease.elapsed().as_millis() as i64);
+                        .set(last_received_lease.elapsed().as_millis() as i64);
                     // Resets the timer.
-                    _last_received_lease = Instant::now();
+                    last_received_lease = Instant::now();
 
                     let mut leader_region_lease_count = 0;
                     let mut follower_region_lease_count = 0;
