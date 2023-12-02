@@ -21,7 +21,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
     DecodeProtoSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu,
-    UnexpectedOffsetSizeSnafu,
+    UnexpectedOffsetSizeSnafu, UnexpectedZeroSegmentRowCountSnafu,
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
@@ -85,6 +85,11 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
 
     /// Check if the read metadata is consistent with expected sizes and offsets.
     fn validate_metas(&self, metas: &InvertedIndexMetas, payload_size: u64) -> Result<()> {
+        ensure!(
+            metas.segment_row_count > 0,
+            UnexpectedZeroSegmentRowCountSnafu
+        );
+
         for meta in metas.metas.values() {
             let InvertedIndexMeta {
                 base_offset,

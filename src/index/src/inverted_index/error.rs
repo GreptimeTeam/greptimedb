@@ -64,6 +64,9 @@ pub enum Error {
         payload_size: u64,
     },
 
+    #[snafu(display("Unexpected zero segment row count"))]
+    UnexpectedZeroSegmentRowCount { location: Location },
+
     #[snafu(display("Failed to decode fst"))]
     DecodeFst {
         #[snafu(source)]
@@ -124,6 +127,7 @@ impl ErrorExt for Error {
             Seek { .. }
             | Read { .. }
             | UnexpectedFooterPayloadSize { .. }
+            | UnexpectedZeroSegmentRowCount { .. }
             | UnexpectedOffsetSize { .. }
             | UnexpectedBlobSize { .. }
             | DecodeProto { .. }
