@@ -37,6 +37,7 @@ use crate::alive_keeper::RegionAliveKeeper;
 use crate::config::DatanodeOptions;
 use crate::error::{self, MetaClientInitSnafu, Result};
 use crate::event_listener::RegionServerEventReceiver;
+use crate::metrics;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
@@ -102,7 +103,13 @@ impl HeartbeatTask {
     ) -> Result<HeartbeatSender> {
         let client_id = meta_client.id();
 
+        let datanode = format!("datanode-{}", client_id.1);
         let (tx, mut rx) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
+
+        let mut _last_received_lease = metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
+            .with_label_values(&[&datanode])
+            .start_timer();
+
         let _handle = common_runtime::spawn_bg(async move {
             while let Some(res) = match rx.message().await {
                 Ok(m) => m,
@@ -113,6 +120,12 @@ impl HeartbeatTask {
             } {
                 if let Some(msg) = res.mailbox_message.as_ref() {
                     info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
+                }
+                if res.region_lease.as_ref().is_some() {
+                    // Resets the timer.
+                    _last_received_lease = metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
+                        .with_label_values(&[&datanode])
+                        .start_timer();
                 }
                 let ctx = HeartbeatResponseHandlerContext::new(mailbox.clone(), res);
                 if let Err(e) = Self::handle_response(ctx, handler_executor.clone()).await {

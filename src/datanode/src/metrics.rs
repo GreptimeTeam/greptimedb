@@ -26,4 +26,10 @@ lazy_static! {
         &[REGION_REQUEST_TYPE]
     )
     .unwrap();
+    pub static ref LAST_RECEIVED_HEARTBEAT_ELAPSED: HistogramVec = register_histogram_vec!(
+        "last_received_heartbeat_lease_elapsed",
+        "last received heartbeat lease elapsed",
+        &["datanode"]
+    )
+    .unwrap();
 }
