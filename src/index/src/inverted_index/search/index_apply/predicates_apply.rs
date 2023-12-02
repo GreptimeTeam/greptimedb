@@ -180,14 +180,6 @@ mod tests {
             });
         let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert!(indices.is_empty());
-
-        // // index reader without tag "tag0"
-        // let mut mock_reader = MockInvertedIndexReader::new();
-        // mock_reader
-        //     .expect_metadata()
-        //     .returning(|| Ok(mock_metas(["tag1"])));
-        // let result = applier.apply(&mut mock_reader).await;
-        // assert!(matches!(result, Err(Error::TagNotFoundInIndex { .. })));
     }
 
     #[tokio::test]
