@@ -32,6 +32,9 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
+    MigrationAbort { location: Location, reason: String },
+
     #[snafu(display(
         "Another procedure is opening the region: {} on peer: {}",
         region_id,
@@ -295,6 +298,12 @@ pub enum Error {
     #[snafu(display("Failed to find table route for {table_id}"))]
     TableRouteNotFound {
         table_id: TableId,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to find table route for {region_id}"))]
+    RegionRouteNotFound {
+        region_id: RegionId,
         location: Location,
     },
 
@@ -658,7 +667,9 @@ impl ErrorExt for Error {
             | Error::Unexpected { .. }
             | Error::Txn { .. }
             | Error::TableIdChanged { .. }
-            | Error::RegionOpeningRace { .. } => StatusCode::Unexpected,
+            | Error::RegionOpeningRace { .. }
+            | Error::RegionRouteNotFound { .. }
+            | Error::MigrationAbort { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),

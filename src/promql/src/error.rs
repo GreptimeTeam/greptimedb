@@ -18,7 +18,7 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
-use promql_parser::parser::{Expr as PromExpr, TokenType};
+use promql_parser::parser::{Expr as PromExpr, TokenType, VectorMatchCardinality};
 use snafu::{Location, Snafu};
 
 #[derive(Snafu)]
@@ -27,6 +27,12 @@ use snafu::{Location, Snafu};
 pub enum Error {
     #[snafu(display("Unsupported expr type: {}", name))]
     UnsupportedExpr { name: String, location: Location },
+
+    #[snafu(display("Unsupported vector matches: {:?}", name))]
+    UnsupportedVectorMatch {
+        name: VectorMatchCardinality,
+        location: Location,
+    },
 
     #[snafu(display("Unexpected token: {:?}", token))]
     UnexpectedToken {
@@ -112,6 +118,17 @@ pub enum Error {
 
     #[snafu(display("Invalid function argument for {}", fn_name))]
     FunctionInvalidArgument { fn_name: String, location: Location },
+
+    #[snafu(display(
+        "Attempt to combine two tables with different column sets, left: {:?}, right: {:?}",
+        left,
+        right
+    ))]
+    CombineTableColumnMismatch {
+        left: Vec<String>,
+        right: Vec<String>,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -128,7 +145,9 @@ impl ErrorExt for Error {
             | ZeroRangeSelector { .. }
             | ColumnNotFound { .. }
             | Deserialize { .. }
-            | FunctionInvalidArgument { .. } => StatusCode::InvalidArguments,
+            | FunctionInvalidArgument { .. }
+            | UnsupportedVectorMatch { .. }
+            | CombineTableColumnMismatch { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. }
             | DataFusionPlanning { .. }

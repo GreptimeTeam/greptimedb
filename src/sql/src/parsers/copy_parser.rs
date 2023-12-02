@@ -69,7 +69,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_copy_table(&mut self) -> Result<CopyTable> {
-        let table_name =
+        let raw_table_name =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -77,6 +77,7 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         if self.parser.parse_keyword(Keyword::TO) {
             let (with, connection, location) = self.parse_copy_to()?;

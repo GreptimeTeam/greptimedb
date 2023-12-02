@@ -32,8 +32,8 @@ impl NullType {
 }
 
 impl DataType for NullType {
-    fn name(&self) -> &str {
-        "Null"
+    fn name(&self) -> String {
+        "Null".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

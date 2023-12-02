@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod builder;
 mod grpc;
 mod influxdb;
 mod opentsdb;
@@ -21,24 +22,16 @@ mod region_query;
 mod script;
 pub mod standalone;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
-use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use catalog::CatalogManagerRef;
-use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
-use common_meta::cache_invalidator::DummyCacheInvalidator;
-use common_meta::ddl_manager::DdlManager;
-use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
-use common_meta::heartbeat::handler::HandlerGroupExecutor;
-use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -47,19 +40,18 @@ use common_procedure::ProcedureManagerRef;
 use common_query::Output;
 use common_telemetry::error;
 use common_telemetry::logging::info;
-use datanode::region_server::RegionServer;
 use log_store::raft_engine::RaftEngineBackend;
 use meta_client::client::{MetaClient, MetaClientBuilder};
-use operator::delete::{Deleter, DeleterRef};
-use operator::insert::{Inserter, InserterRef};
+use meta_client::MetaClientOptions;
+use operator::delete::DeleterRef;
+use operator::insert::InserterRef;
 use operator::statement::StatementExecutor;
-use operator::table::{table_idents_to_full_name, TableMutationOperator};
-use partition::manager::PartitionRuleManager;
+use operator::table::table_idents_to_full_name;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::plan::LogicalPlan;
 use query::query_engine::options::{validate_catalog_and_schema, QueryOptions};
 use query::query_engine::DescribeResult;
-use query::{QueryEngineFactory, QueryEngineRef};
+use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
@@ -83,15 +75,11 @@ use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
 
-use self::region_query::FrontendRegionQueryHandler;
-use self::standalone::StandaloneTableMetadataCreator;
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, MissingMetasrvOptsSnafu,
-    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    TableOperationSnafu,
+    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, TableOperationSnafu,
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
-use crate::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics;
 use crate::script::ScriptExecutor;
@@ -131,99 +119,9 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub async fn try_new_distributed(opts: &FrontendOptions, plugins: Plugins) -> Result<Self> {
-        let meta_client = Self::create_meta_client(opts).await?;
-
-        let datanode_clients = Arc::new(DatanodeClients::default());
-
-        Self::try_new_distributed_with(meta_client, datanode_clients, plugins, opts).await
-    }
-
-    pub async fn try_new_distributed_with(
-        meta_client: Arc<MetaClient>,
-        datanode_clients: Arc<DatanodeClients>,
-        plugins: Plugins,
-        opts: &FrontendOptions,
-    ) -> Result<Self> {
-        let meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
-
-        let catalog_manager = KvBackendCatalogManager::new(
-            meta_backend.clone(),
-            meta_backend.clone(),
-            datanode_clients.clone(),
-        );
-        let partition_manager = Arc::new(PartitionRuleManager::new(meta_backend.clone()));
-
-        let region_query_handler = FrontendRegionQueryHandler::arc(
-            partition_manager.clone(),
-            catalog_manager.datanode_manager().clone(),
-        );
-
-        let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
-            partition_manager.clone(),
-            datanode_clients.clone(),
-        ));
-        let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
-            partition_manager,
-            datanode_clients,
-        ));
-
-        let table_mutation_handler = Arc::new(TableMutationOperator::new(
-            inserter.clone(),
-            deleter.clone(),
-        ));
-
-        let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            Some(region_query_handler.clone()),
-            Some(table_mutation_handler),
-            true,
-            plugins.clone(),
-        )
-        .query_engine();
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            meta_client.clone(),
-            meta_backend.clone(),
-            catalog_manager.clone(),
-            inserter.clone(),
-        ));
-
-        plugins.insert::<StatementExecutorRef>(statement_executor.clone());
-
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
-        let handlers_executor = HandlerGroupExecutor::new(vec![
-            Arc::new(ParseMailboxMessageHandler),
-            Arc::new(InvalidateTableCacheHandler::new(meta_backend)),
-        ]);
-
-        let heartbeat_task = Some(HeartbeatTask::new(
-            meta_client.clone(),
-            opts.heartbeat.clone(),
-            Arc::new(handlers_executor),
-        ));
-
-        Ok(Instance {
-            catalog_manager,
-            script_executor,
-            statement_executor,
-            query_engine,
-            plugins: plugins.clone(),
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task,
-            inserter,
-            deleter,
-        })
-    }
-
-    async fn create_meta_client(opts: &FrontendOptions) -> Result<Arc<MetaClient>> {
-        let meta_client_options = opts.meta_client.as_ref().context(MissingMetasrvOptsSnafu)?;
+    pub async fn create_meta_client(
+        meta_client_options: &MetaClientOptions,
+    ) -> Result<Arc<MetaClient>> {
         info!(
             "Creating Frontend instance in distributed mode with Meta server addr {:?}",
             meta_client_options.metasrv_addrs
@@ -285,82 +183,6 @@ impl Instance {
         Ok((kv_backend, procedure_manager))
     }
 
-    pub async fn try_new_standalone(
-        kv_backend: KvBackendRef,
-        procedure_manager: ProcedureManagerRef,
-        catalog_manager: CatalogManagerRef,
-        plugins: Plugins,
-        region_server: RegionServer,
-    ) -> Result<Self> {
-        let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend.clone()));
-        let datanode_manager = Arc::new(StandaloneDatanodeManager(region_server));
-
-        let region_query_handler =
-            FrontendRegionQueryHandler::arc(partition_manager.clone(), datanode_manager.clone());
-
-        let inserter = Arc::new(Inserter::new(
-            catalog_manager.clone(),
-            partition_manager.clone(),
-            datanode_manager.clone(),
-        ));
-        let deleter = Arc::new(Deleter::new(
-            catalog_manager.clone(),
-            partition_manager,
-            datanode_manager.clone(),
-        ));
-        let table_mutation_handler = Arc::new(TableMutationOperator::new(
-            inserter.clone(),
-            deleter.clone(),
-        ));
-
-        let query_engine = QueryEngineFactory::new_with_plugins(
-            catalog_manager.clone(),
-            Some(region_query_handler),
-            Some(table_mutation_handler),
-            true,
-            plugins.clone(),
-        )
-        .query_engine();
-
-        let script_executor =
-            Arc::new(ScriptExecutor::new(catalog_manager.clone(), query_engine.clone()).await?);
-
-        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
-
-        let cache_invalidator = Arc::new(DummyCacheInvalidator);
-        let ddl_executor = Arc::new(
-            DdlManager::try_new(
-                procedure_manager,
-                datanode_manager,
-                cache_invalidator.clone(),
-                table_metadata_manager.clone(),
-                Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
-            )
-            .context(error::InitDdlManagerSnafu)?,
-        );
-
-        let statement_executor = Arc::new(StatementExecutor::new(
-            catalog_manager.clone(),
-            query_engine.clone(),
-            ddl_executor,
-            kv_backend.clone(),
-            cache_invalidator,
-            inserter.clone(),
-        ));
-
-        Ok(Instance {
-            catalog_manager: catalog_manager.clone(),
-            script_executor,
-            statement_executor,
-            query_engine,
-            plugins,
-            servers: Arc::new(HashMap::new()),
-            heartbeat_task: None,
-            inserter,
-            deleter,
-        })
-    }
-
     pub async fn build_servers(
         &mut self,
         opts: impl Into<FrontendOptions> + TomlSerializable,
@@ -400,10 +222,13 @@ impl FrontendInstance for Instance {
 
         self.script_executor.start(self)?;
 
-        futures::future::try_join_all(self.servers.values().map(start_server))
-            .await
-            .context(error::StartServerSnafu)
-            .map(|_| ())
+        futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
+            info!("Starting service: {name}");
+            start_server(handler).await
+        }))
+        .await
+        .context(error::StartServerSnafu)
+        .map(|_| ())
     }
 }
 

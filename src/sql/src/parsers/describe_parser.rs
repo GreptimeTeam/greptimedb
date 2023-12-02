@@ -30,7 +30,7 @@ impl<'a> ParserContext<'a> {
     }
 
     fn parse_describe_table(&mut self) -> Result<Statement> {
-        let table_idents =
+        let raw_table_idents =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -38,6 +38,7 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
+        let table_idents = Self::canonicalize_object_name(raw_table_idents);
         ensure!(
             !table_idents.0.is_empty(),
             InvalidTableNameSnafu {

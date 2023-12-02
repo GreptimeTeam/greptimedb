@@ -100,6 +100,9 @@ struct StartCommand {
     http_timeout: Option<u64>,
     #[clap(long, default_value = "GREPTIMEDB_METASRV")]
     env_prefix: String,
+    /// The working home directory of this metasrv instance.
+    #[clap(long)]
+    data_home: Option<String>,
 }
 
 impl StartCommand {
@@ -152,6 +155,10 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
+        if let Some(data_home) = &self.data_home {
+            opts.data_home = data_home.clone();
+        }
+
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;
 
@@ -166,7 +173,12 @@ impl StartCommand {
         logging::info!("MetaSrv start command: {:#?}", self);
         logging::info!("MetaSrv options: {:#?}", opts);
 
-        let instance = MetaSrvInstance::new(opts, plugins)
+        let builder = meta_srv::bootstrap::metasrv_builder(&opts, plugins.clone(), None)
+            .await
+            .context(error::BuildMetaServerSnafu)?;
+        let metasrv = builder.build().await.context(error::BuildMetaServerSnafu)?;
+
+        let instance = MetaSrvInstance::new(opts, plugins, metasrv)
             .await
             .context(error::BuildMetaServerSnafu)?;
 

@@ -37,6 +37,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init DDL manager"))]
+    InitDdlManager {
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
         location: Location,
@@ -225,13 +231,6 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
-
-    #[snafu(display("Failed to parse address {}", addr))]
-    ParseAddr {
-        addr: String,
-        #[snafu(source)]
-        error: std::net::AddrParseError,
-    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -247,9 +246,11 @@ impl ErrorExt for Error {
             Error::ShutdownMetaServer { source, .. } => source.status_code(),
             Error::BuildMetaServer { source, .. } => source.status_code(),
             Error::UnsupportedSelectorType { source, .. } => source.status_code(),
-            Error::IterStream { source, .. } | Error::InitMetadata { source, .. } => {
-                source.status_code()
-            }
+
+            Error::IterStream { source, .. }
+            | Error::InitMetadata { source, .. }
+            | Error::InitDdlManager { source, .. } => source.status_code(),
+
             Error::ConnectServer { source, .. } => source.status_code(),
             Error::MissingConfig { .. }
             | Error::LoadLayeredConfig { .. }
@@ -259,8 +260,7 @@ impl ErrorExt for Error {
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
-            | Error::InvalidDatabaseName { .. }
-            | Error::ParseAddr { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),

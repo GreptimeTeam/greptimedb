@@ -202,7 +202,7 @@ impl InformationSchemaColumnsBuilder {
                         &schema_name,
                         &table_name,
                         &column.name,
-                        column.data_type.name(),
+                        &column.data_type.name(),
                         semantic_type,
                     );
                 }

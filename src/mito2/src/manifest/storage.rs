@@ -42,6 +42,7 @@ const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip
 /// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
 
+/// Returns the [CompressionType] according to whether to compress manifest files.
 #[inline]
 pub const fn manifest_compress_type(compress: bool) -> CompressionType {
     if compress {

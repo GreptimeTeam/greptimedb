@@ -251,8 +251,8 @@ macro_rules! define_non_timestamp_primitive {
         define_logical_primitive_type!($Native, $TypeId, $DataType, $Largest);
 
         impl DataType for $DataType {
-            fn name(&self) -> &str {
-                stringify!($TypeId)
+            fn name(&self) -> String {
+                stringify!($TypeId).to_string()
             }
 
             fn logical_type_id(&self) -> LogicalTypeId {
@@ -350,8 +350,8 @@ define_logical_primitive_type!(i64, Int64, Int64Type, Int64Type);
 define_logical_primitive_type!(i32, Int32, Int32Type, Int64Type);
 
 impl DataType for Int64Type {
-    fn name(&self) -> &str {
-        "Int64"
+    fn name(&self) -> String {
+        "Int64".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {
@@ -397,8 +397,8 @@ impl DataType for Int64Type {
 }
 
 impl DataType for Int32Type {
-    fn name(&self) -> &str {
-        "Int32"
+    fn name(&self) -> String {
+        "Int32".to_string()
     }
 
     fn logical_type_id(&self) -> LogicalTypeId {

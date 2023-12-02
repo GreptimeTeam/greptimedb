@@ -207,7 +207,7 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
                     .iter()
                     .map(|cs| ColumnSchema {
                         name: cs.name.clone(),
-                        data_type: cs.data_type.name().to_owned(),
+                        data_type: cs.data_type.name(),
                     })
                     .collect(),
             };

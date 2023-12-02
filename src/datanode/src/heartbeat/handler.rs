@@ -65,6 +65,10 @@ impl RegionHeartbeatResponseHandler {
             Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InvalidHeartbeatResponseSnafu.fail()
             }
+            Instruction::DowngradeRegion(_) => {
+                // TODO(weny): add it later.
+                todo!()
+            }
         }
     }
 
@@ -87,6 +91,10 @@ impl RegionHeartbeatResponseHandler {
                     result: false,
                     error: None,
                 })
+            }
+            Instruction::DowngradeRegion(_) => {
+                // TODO(weny): add it later.
+                todo!()
             }
         }
     }
@@ -113,6 +121,10 @@ impl RegionHeartbeatResponseHandler {
             InstructionReply::InvalidateTableCache(reply) => {
                 reply.result = success;
                 reply.error = error;
+            }
+            InstructionReply::DowngradeRegion(_) => {
+                // TODO(weny): add it later.
+                todo!()
             }
         }
 

@@ -284,23 +284,21 @@ impl Helper {
             ArrowDataType::Date64 => Arc::new(DateTimeVector::try_from_arrow_array(array)?),
             ArrowDataType::List(_) => Arc::new(ListVector::try_from_arrow_array(array)?),
             ArrowDataType::Timestamp(unit, _) => match unit {
-                TimeUnit::Second => Arc::new(
-                    TimestampSecondVector::try_from_arrow_timestamp_array(array)?,
-                ),
-                TimeUnit::Millisecond => Arc::new(
-                    TimestampMillisecondVector::try_from_arrow_timestamp_array(array)?,
-                ),
-                TimeUnit::Microsecond => Arc::new(
-                    TimestampMicrosecondVector::try_from_arrow_timestamp_array(array)?,
-                ),
-                TimeUnit::Nanosecond => Arc::new(
-                    TimestampNanosecondVector::try_from_arrow_timestamp_array(array)?,
-                ),
+                TimeUnit::Second => Arc::new(TimestampSecondVector::try_from_arrow_array(array)?),
+                TimeUnit::Millisecond => {
+                    Arc::new(TimestampMillisecondVector::try_from_arrow_array(array)?)
+                }
+                TimeUnit::Microsecond => {
+                    Arc::new(TimestampMicrosecondVector::try_from_arrow_array(array)?)
+                }
+                TimeUnit::Nanosecond => {
+                    Arc::new(TimestampNanosecondVector::try_from_arrow_array(array)?)
+                }
             },
             ArrowDataType::Time32(unit) => match unit {
-                TimeUnit::Second => Arc::new(TimeSecondVector::try_from_arrow_time_array(array)?),
+                TimeUnit::Second => Arc::new(TimeSecondVector::try_from_arrow_array(array)?),
                 TimeUnit::Millisecond => {
-                    Arc::new(TimeMillisecondVector::try_from_arrow_time_array(array)?)
+                    Arc::new(TimeMillisecondVector::try_from_arrow_array(array)?)
                 }
                 // Arrow use time32 for second/millisecond.
                 _ => unreachable!(
@@ -310,10 +308,10 @@ impl Helper {
             },
             ArrowDataType::Time64(unit) => match unit {
                 TimeUnit::Microsecond => {
-                    Arc::new(TimeMicrosecondVector::try_from_arrow_time_array(array)?)
+                    Arc::new(TimeMicrosecondVector::try_from_arrow_array(array)?)
                 }
                 TimeUnit::Nanosecond => {
-                    Arc::new(TimeNanosecondVector::try_from_arrow_time_array(array)?)
+                    Arc::new(TimeNanosecondVector::try_from_arrow_array(array)?)
                 }
                 // Arrow use time64 for microsecond/nanosecond.
                 _ => unreachable!(
@@ -322,29 +320,27 @@ impl Helper {
                 ),
             },
             ArrowDataType::Interval(unit) => match unit {
-                IntervalUnit::YearMonth => Arc::new(
-                    IntervalYearMonthVector::try_from_arrow_interval_array(array)?,
-                ),
-                IntervalUnit::DayTime => {
-                    Arc::new(IntervalDayTimeVector::try_from_arrow_interval_array(array)?)
+                IntervalUnit::YearMonth => {
+                    Arc::new(IntervalYearMonthVector::try_from_arrow_array(array)?)
                 }
-                IntervalUnit::MonthDayNano => Arc::new(
-                    IntervalMonthDayNanoVector::try_from_arrow_interval_array(array)?,
-                ),
+                IntervalUnit::DayTime => {
+                    Arc::new(IntervalDayTimeVector::try_from_arrow_array(array)?)
+                }
+                IntervalUnit::MonthDayNano => {
+                    Arc::new(IntervalMonthDayNanoVector::try_from_arrow_array(array)?)
+                }
             },
             ArrowDataType::Duration(unit) => match unit {
-                TimeUnit::Second => {
-                    Arc::new(DurationSecondVector::try_from_arrow_duration_array(array)?)
+                TimeUnit::Second => Arc::new(DurationSecondVector::try_from_arrow_array(array)?),
+                TimeUnit::Millisecond => {
+                    Arc::new(DurationMillisecondVector::try_from_arrow_array(array)?)
                 }
-                TimeUnit::Millisecond => Arc::new(
-                    DurationMillisecondVector::try_from_arrow_duration_array(array)?,
-                ),
-                TimeUnit::Microsecond => Arc::new(
-                    DurationMicrosecondVector::try_from_arrow_duration_array(array)?,
-                ),
-                TimeUnit::Nanosecond => Arc::new(
-                    DurationNanosecondVector::try_from_arrow_duration_array(array)?,
-                ),
+                TimeUnit::Microsecond => {
+                    Arc::new(DurationMicrosecondVector::try_from_arrow_array(array)?)
+                }
+                TimeUnit::Nanosecond => {
+                    Arc::new(DurationNanosecondVector::try_from_arrow_array(array)?)
+                }
             },
             ArrowDataType::Decimal128(_, _) => {
                 Arc::new(Decimal128Vector::try_from_arrow_array(array)?)

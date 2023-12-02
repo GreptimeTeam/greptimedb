@@ -30,7 +30,7 @@ impl<'a> ParserContext<'a> {
         let _ = self.parser.next_token();
 
         let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
-        let table_ident =
+        let raw_table_ident =
             self.parser
                 .parse_object_name()
                 .with_context(|_| error::UnexpectedSnafu {
@@ -38,6 +38,7 @@ impl<'a> ParserContext<'a> {
                     expected: "a table name",
                     actual: self.peek_token_as_string(),
                 })?;
+        let table_ident = Self::canonicalize_object_name(raw_table_ident);
         ensure!(
             !table_ident.0.is_empty(),
             InvalidTableNameSnafu {

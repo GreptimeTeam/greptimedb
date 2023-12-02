@@ -14,19 +14,27 @@
 
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatResponse, RequestHeader};
+use api::v1::meta::mailbox_message::Payload;
+use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
+use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
+use common_meta::peer::Peer;
 use common_meta::sequence::Sequence;
-use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
-use tokio::sync::mpsc::Sender;
+use common_time::util::current_time_millis;
+use store_api::storage::RegionId;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::ContextFactoryImpl;
+use crate::error::Result;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::procedure::region_migration::PersistentContext;
 use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
+
+pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
 /// The context of mailbox.
 pub struct MailboxContext {
@@ -46,10 +54,10 @@ impl MailboxContext {
     /// Inserts a pusher for `datanode_id`
     pub async fn insert_heartbeat_response_receiver(
         &mut self,
-        datanode_id: DatanodeId,
+        channel: Channel,
         tx: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) {
-        let pusher_id = Channel::Datanode(datanode_id).pusher_id();
+        let pusher_id = channel.pusher_id();
         let pusher = Pusher::new(tx, &RequestHeader::default());
         let _ = self.pushers.insert(pusher_id, pusher).await;
     }
@@ -118,5 +126,46 @@ impl TestingEnv {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
         }
+    }
+}
+
+/// Generates a [InstructionReply::CloseRegion] reply.
+pub fn new_close_region_reply(id: u64) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::CloseRegion(SimpleReply {
+                result: false,
+                error: None,
+            }))
+            .unwrap(),
+        )),
+    }
+}
+
+/// Sends a mock reply.
+pub fn send_mock_reply(
+    mailbox: MailboxRef,
+    mut rx: MockHeartbeatReceiver,
+    msg: impl FnOnce(u64) -> Result<MailboxMessage> + Send + 'static,
+) {
+    common_runtime::spawn_bg(async move {
+        let resp = rx.recv().await.unwrap().unwrap();
+        let reply_id = resp.mailbox_message.unwrap().id;
+        mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+    });
+}
+
+/// Generates a [PersistentContext].
+pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> PersistentContext {
+    PersistentContext {
+        from_peer: Peer::empty(from),
+        to_peer: Peer::empty(to),
+        region_id,
+        cluster_id: 0,
     }
 }

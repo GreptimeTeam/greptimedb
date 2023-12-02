@@ -33,20 +33,22 @@ impl<'a> ParserContext<'a> {
         let parser = &mut self.parser;
         parser.expect_keywords(&[Keyword::ALTER, Keyword::TABLE])?;
 
-        let table_name = parser.parse_object_name()?;
+        let raw_table_name = parser.parse_object_name()?;
+        let table_name = Self::canonicalize_object_name(raw_table_name);
 
         let alter_operation = if parser.parse_keyword(Keyword::ADD) {
             if let Some(constraint) = parser.parse_optional_table_constraint()? {
                 AlterTableOperation::AddConstraint(constraint)
             } else {
                 let _ = parser.parse_keyword(Keyword::COLUMN);
-                let column_def = parser.parse_column_def()?;
+                let mut column_def = parser.parse_column_def()?;
+                column_def.name = Self::canonicalize_identifier(column_def.name);
                 let location = if parser.parse_keyword(Keyword::FIRST) {
                     Some(AddColumnLocation::First)
                 } else if let Token::Word(word) = parser.peek_token().token {
                     if word.value.to_ascii_uppercase() == "AFTER" {
                         let _ = parser.next_token();
-                        let name = parser.parse_identifier()?;
+                        let name = Self::canonicalize_identifier(parser.parse_identifier()?);
                         Some(AddColumnLocation::After {
                             column_name: name.value,
                         })
@@ -63,7 +65,7 @@ impl<'a> ParserContext<'a> {
             }
         } else if parser.parse_keyword(Keyword::DROP) {
             if parser.parse_keyword(Keyword::COLUMN) {
-                let name = self.parser.parse_identifier()?;
+                let name = Self::canonicalize_identifier(self.parser.parse_identifier()?);
                 AlterTableOperation::DropColumn { name }
             } else {
                 return Err(ParserError::ParserError(format!(
@@ -72,7 +74,8 @@ impl<'a> ParserContext<'a> {
                 )));
             }
         } else if parser.parse_keyword(Keyword::RENAME) {
-            let new_table_name_obj = parser.parse_object_name()?;
+            let new_table_name_obj_raw = parser.parse_object_name()?;
+            let new_table_name_obj = Self::canonicalize_object_name(new_table_name_obj_raw);
             let new_table_name = match &new_table_name_obj.0[..] {
                 [table] => table.value.clone(),
                 _ => {
