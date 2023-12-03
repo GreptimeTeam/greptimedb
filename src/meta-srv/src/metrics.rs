@@ -44,4 +44,9 @@ lazy_static! {
         "meta load leader regions metadata elapsed"
     )
     .unwrap();
+    pub static ref METRIC_META_KV_CACHE_BATCH_GET_HIT_RATE: Gauge = register_gauge!(
+        "meta_kv_cache_batch_get_hit_rate",
+        "meta kv cache batch get hit rate"
+    )
+    .unwrap();
 }
