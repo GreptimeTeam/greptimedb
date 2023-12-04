@@ -56,6 +56,14 @@ impl TableRouteValue {
             version: self.version + 1,
         }
     }
+
+    /// Returns the version.
+    ///
+    /// For test purpose.
+    #[cfg(any(tets, feature = "testing"))]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
 }
 
 impl TableMetaKey for TableRouteKey {

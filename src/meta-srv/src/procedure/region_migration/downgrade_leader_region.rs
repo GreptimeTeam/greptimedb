@@ -21,7 +21,7 @@ use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
 use common_procedure::Status;
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use tokio::time::sleep;
@@ -62,6 +62,10 @@ impl State for DowngradeLeaderRegion {
 
         // Safety: must exist.
         if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
+            info!(
+                "Running into the downgrade leader slow path, sleep until {:?}",
+                deadline
+            );
             tokio::time::sleep_until(*deadline).await;
         }
 
@@ -206,16 +210,14 @@ impl DowngradeLeaderRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::meta::mailbox_message::Payload;
     use common_meta::peer::Peer;
-    use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::test_util::{
-        new_close_region_reply, send_mock_reply, TestingEnv,
+        new_close_region_reply, new_downgrade_region_reply, send_mock_reply, TestingEnv,
     };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -225,29 +227,6 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
-        }
-    }
-
-    fn new_downgrade_region_reply(
-        id: u64,
-        last_entry_id: Option<u64>,
-        exist: bool,
-        error: Option<String>,
-    ) -> MailboxMessage {
-        MailboxMessage {
-            id,
-            subject: "mock".to_string(),
-            from: "datanode".to_string(),
-            to: "meta".to_string(),
-            timestamp_millis: current_time_millis(),
-            payload: Some(Payload::Json(
-                serde_json::to_string(&InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                    last_entry_id,
-                    exists: exist,
-                    error,
-                }))
-                .unwrap(),
-            )),
         }
     }
 

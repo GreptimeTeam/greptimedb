@@ -17,8 +17,6 @@ pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
 pub(crate) mod open_candidate_region;
-// TODO(weny): remove it.
-#[allow(unused)]
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod update_metadata;
@@ -366,11 +364,17 @@ impl Procedure for RegionMigrationProcedure {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::Arc;
+
+    use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::rpc::router::{Region, RegionRoute};
 
     use super::migration_end::RegionMigrationEnd;
+    use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::*;
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
@@ -500,5 +504,146 @@ mod tests {
 
         let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
         assert_matches!(instruction, Instruction::InvalidateTableIdCache(1024));
+    }
+
+    fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
+        vec![
+            // MigrationStart
+            Step::next(
+                "Should be the update metadata for downgrading",
+                None,
+                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Candidate
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the update metadata for upgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+                )),
+                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the region migration end",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+            // RegionMigrationEnd
+            Step::next(
+                "Should be the region migration end again",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps)
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+
+        runner.suite.verify_table_metadata().await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow_idempotent() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to UpdateMetadata::Downgrade",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+
+        runner.suite.verify_table_metadata().await;
     }
 }

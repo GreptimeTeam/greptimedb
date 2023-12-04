@@ -76,6 +76,40 @@ impl UpdateMetadata {
         Ok(region_routes)
     }
 
+    /// Returns true if region metadata has been updated.
+    async fn check_metadata_updated(&self, ctx: &mut Context) -> Result<bool> {
+        let region_id = ctx.region_id();
+        let table_route_value = ctx.get_table_route_value().await?.clone();
+
+        let region_routes = table_route_value.region_routes.clone();
+        let region_route = region_routes
+            .into_iter()
+            .find(|route| route.region.id == region_id)
+            .context(error::RegionRouteNotFoundSnafu { region_id })?;
+
+        let leader_peer = region_route
+            .leader_peer
+            .as_ref()
+            .context(error::UnexpectedSnafu {
+                violated: format!("The leader peer of region {region_id} is not found during the update metadata for upgrading"),
+            })?;
+
+        let candidate_peer_id = ctx.persistent_ctx.to_peer.id;
+
+        if leader_peer.id == candidate_peer_id {
+            ensure!(
+                !region_route.is_leader_downgraded(),
+                error::UnexpectedSnafu {
+                    violated: "Unexpected intermediate state is found during the update metadata for upgrading",
+                }
+            );
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Upgrades the candidate region.
     ///
     /// Abort(non-retry):
@@ -88,6 +122,10 @@ impl UpdateMetadata {
     pub async fn upgrade_candidate_region(&self, ctx: &mut Context) -> Result<()> {
         let region_id = ctx.region_id();
         let table_metadata_manager = ctx.table_metadata_manager.clone();
+
+        if self.check_metadata_updated(ctx).await? {
+            return Ok(());
+        }
 
         let region_routes = self.build_upgrade_candidate_region_metadata(ctx).await?;
         let table_info_value = ctx.get_table_info_value().await?;
@@ -323,6 +361,85 @@ mod tests {
 
         assert!(err.is_retryable());
         assert!(err.to_string().contains("Failed to update the table route"));
+    }
+
+    #[tokio::test]
+    async fn test_check_metadata() {
+        let state = UpdateMetadata::Upgrade;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let leader_peer = persistent_context.from_peer.clone();
+
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(leader_peer),
+            follower_peers: vec![Peer::empty(2), Peer::empty(3)],
+            leader_status: None,
+        }];
+
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
+            .await
+            .unwrap();
+
+        let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
+        assert!(!updated);
+    }
+
+    #[tokio::test]
+    async fn test_check_metadata_updated() {
+        let state = UpdateMetadata::Upgrade;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let candidate_peer = persistent_context.to_peer.clone();
+
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(candidate_peer),
+            follower_peers: vec![Peer::empty(2), Peer::empty(3)],
+            leader_status: None,
+        }];
+
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
+            .await
+            .unwrap();
+
+        let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
+        assert!(updated);
+    }
+
+    #[tokio::test]
+    async fn test_check_metadata_intermediate_state() {
+        let state = UpdateMetadata::Upgrade;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let candidate_peer = persistent_context.to_peer.clone();
+
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(candidate_peer),
+            follower_peers: vec![Peer::empty(2), Peer::empty(3)],
+            leader_status: Some(RegionStatus::Downgraded),
+        }];
+
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
+            .await
+            .unwrap();
+
+        let err = state.check_metadata_updated(&mut ctx).await.unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("intermediate state"));
     }
 
     #[tokio::test]

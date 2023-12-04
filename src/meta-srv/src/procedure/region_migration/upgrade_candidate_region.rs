@@ -220,15 +220,13 @@ impl UpgradeCandidateRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::meta::mailbox_message::Payload;
     use common_meta::peer::Peer;
-    use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::test_util::{
-        new_close_region_reply, send_mock_reply, TestingEnv,
+        new_close_region_reply, new_upgrade_region_reply, send_mock_reply, TestingEnv,
     };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -238,31 +236,6 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
-        }
-    }
-
-    fn new_upgrade_region_reply(
-        id: u64,
-        ready: bool,
-
-        exists: bool,
-
-        error: Option<String>,
-    ) -> MailboxMessage {
-        MailboxMessage {
-            id,
-            subject: "mock".to_string(),
-            from: "datanode".to_string(),
-            to: "meta".to_string(),
-            timestamp_millis: current_time_millis(),
-            payload: Some(Payload::Json(
-                serde_json::to_string(&InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready,
-                    exists,
-                    error,
-                }))
-                .unwrap(),
-            )),
         }
     }
 
