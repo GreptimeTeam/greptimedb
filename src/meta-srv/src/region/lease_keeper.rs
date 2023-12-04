@@ -21,11 +21,13 @@ use std::sync::{Arc, RwLock};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::DatanodeId;
+use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 
 use self::mito::find_staled_leader_regions;
 use crate::error::{self, Result};
+use crate::metrics;
 use crate::region::lease_keeper::utils::find_staled_follower_regions;
 
 pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
@@ -89,7 +91,11 @@ impl RegionLeaseKeeper {
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
         let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
+
+        let metadata_subset = {
+            let _timer = metrics::METRIC_META_LOAD_LEADER_METADATA.start_timer();
+            self.collect_tables_metadata(&table_ids).await?
+        };
 
         let mut closable_set = HashSet::new();
         let mut downgradable_set = HashSet::new();
@@ -104,6 +110,10 @@ impl RegionLeaseKeeper {
                 downgradable_set.extend(downgradable);
                 closable_set.extend(closable);
             } else {
+                warn!(
+                    "The table {} metadata is not found, appends closable leader regions: {:?}",
+                    table_id, regions
+                );
                 // If table metadata is not found.
                 closable_set.extend(regions);
             }
@@ -128,7 +138,11 @@ impl RegionLeaseKeeper {
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
         let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
+
+        let metadata_subset = {
+            let _timer = metrics::METRIC_META_LOAD_FOLLOWER_METADATA.start_timer();
+            self.collect_tables_metadata(&table_ids).await?
+        };
 
         let mut upgradable_set = HashSet::new();
         let mut closable_set = HashSet::new();
@@ -143,6 +157,10 @@ impl RegionLeaseKeeper {
                 upgradable_set.extend(upgradable);
                 closable_set.extend(closable);
             } else {
+                warn!(
+                    "The table {} metadata is not found, appends closable followers regions: {:?}",
+                    table_id, regions
+                );
                 // If table metadata is not found.
                 closable_set.extend(regions);
             }

@@ -68,6 +68,9 @@ impl EtcdStore {
     async fn do_multi_txn(&self, txn_ops: Vec<TxnOp>) -> Result<Vec<TxnResponse>> {
         if txn_ops.len() < MAX_TXN_SIZE {
             // fast path
+            let _timer = METRIC_META_TXN_REQUEST
+                .with_label_values(&["etcd", "txn"])
+                .start_timer();
             let txn = Txn::new().and_then(txn_ops);
             let txn_res = self
                 .client
@@ -81,6 +84,9 @@ impl EtcdStore {
         let txns = txn_ops
             .chunks(MAX_TXN_SIZE)
             .map(|part| async move {
+                let _timer = METRIC_META_TXN_REQUEST
+                    .with_label_values(&["etcd", "txn"])
+                    .start_timer();
                 let txn = Txn::new().and_then(part);
                 self.client.kv_client().txn(txn).await
             })

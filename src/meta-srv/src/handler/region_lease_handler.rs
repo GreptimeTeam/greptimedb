@@ -18,6 +18,7 @@ use std::sync::Arc;
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
+use common_telemetry::info;
 use store_api::region_engine::{GrantedRegion, RegionRole};
 use store_api::storage::RegionId;
 
@@ -123,6 +124,12 @@ impl HeartbeatHandler for RegionLeaseHandler {
             &leaders,
             RegionRole::Leader,
         );
+        if !closable.is_empty() {
+            info!(
+                "Granting region lease, found closable leader regions: {:?} on datanode {}",
+                closable, datanode_id
+            );
+        }
         inactive_regions.extend(closable);
 
         let followers = followers.into_iter().flatten().collect::<Vec<_>>();
@@ -144,6 +151,12 @@ impl HeartbeatHandler for RegionLeaseHandler {
             &followers,
             RegionRole::Follower,
         );
+        if !closable.is_empty() {
+            info!(
+                "Granting region lease, found closable follower regions {:?} on datanode {}",
+                closable, datanode_id
+            );
+        }
         inactive_regions.extend(closable);
 
         acc.inactive_region_ids = inactive_regions;
