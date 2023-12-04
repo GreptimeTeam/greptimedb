@@ -21,7 +21,6 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::sequence::Sequence;
-use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId};
 use common_procedure_test::MockContextProvider;
 use common_time::util::current_time_millis;
@@ -55,10 +54,10 @@ impl MailboxContext {
     /// Inserts a pusher for `datanode_id`
     pub async fn insert_heartbeat_response_receiver(
         &mut self,
-        datanode_id: DatanodeId,
+        channel: Channel,
         tx: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
     ) {
-        let pusher_id = Channel::Datanode(datanode_id).pusher_id();
+        let pusher_id = channel.pusher_id();
         let pusher = Pusher::new(tx, &RequestHeader::default());
         let _ = self.pushers.insert(pusher_id, pusher).await;
     }

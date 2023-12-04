@@ -129,8 +129,12 @@ impl RegionAliveKeeper {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
                 handle.reset_deadline(role, deadline).await;
+            } else {
+                warn!(
+                    "Trying to renew the lease for region {region_id}, the keeper handler is not found!"
+                );
+                // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
             }
-            // Else the region alive keeper might be triggered by lagging messages, we can safely ignore it.
         }
     }
 

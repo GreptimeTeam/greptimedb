@@ -16,7 +16,7 @@ use std::any::Any;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+use common_meta::distributed_time_constants::{MAILBOX_RTT_SECS, REGION_LEASE_SECS};
 use common_meta::instruction::{
     DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply,
 };
@@ -31,7 +31,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
-const DOWNGRADE_LEADER_REGION_TIMEOUT: Duration = Duration::from_secs(1);
+const DOWNGRADE_LEADER_REGION_TIMEOUT: Duration = Duration::from_secs(MAILBOX_RTT_SECS);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DowngradeLeaderRegion {
@@ -64,7 +64,7 @@ impl State for DowngradeLeaderRegion {
             tokio::time::sleep_until(*deadline).await;
         }
 
-        Ok(Box::new(UpgradeCandidateRegion))
+        Ok(Box::<UpgradeCandidateRegion>::default())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -159,7 +159,7 @@ impl DowngradeLeaderRegion {
             }
             Err(error::Error::MailboxTimeout { .. }) => {
                 let reason = format!(
-                    "Mailbox received timeout for downgrade leader region {region_id} on Datanode {:?}", 
+                    "Mailbox received timeout for downgrade leader region {region_id} on datanode {:?}", 
                     leader,
                 );
                 error::RetryLaterSnafu { reason }.fail()
@@ -277,7 +277,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         drop(rx);
@@ -306,7 +306,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         // Sends an incorrect reply.
@@ -336,7 +336,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
@@ -367,7 +367,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
@@ -404,7 +404,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         common_runtime::spawn_bg(async move {
@@ -453,7 +453,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         common_runtime::spawn_bg(async move {
@@ -496,7 +496,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
 
         mailbox_ctx
-            .insert_heartbeat_response_receiver(from_peer_id, tx)
+            .insert_heartbeat_response_receiver(Channel::Datanode(from_peer_id), tx)
             .await;
 
         send_mock_reply(mailbox, rx, |id| {
