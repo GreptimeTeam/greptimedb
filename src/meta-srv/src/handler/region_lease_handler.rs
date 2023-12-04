@@ -61,19 +61,19 @@ fn flip_role(role: RegionRole) -> RegionRole {
 ///
 /// - If a region is in an `operable` set, it will be granted an `flip_role(current)`([RegionRole]);
 /// otherwise, it will be granted a `current`([RegionRole]).
-/// - If a region is in a `closable` set, it won't be granted.
+/// - If a region is in a `closeable` set, it won't be granted.
 fn grant(
     granted_regions: &mut Vec<GrantedRegion>,
     operable: &HashSet<RegionId>,
-    closable: &HashSet<RegionId>,
+    closeable: &HashSet<RegionId>,
     regions: &[RegionId],
     current: RegionRole,
 ) {
     for region in regions {
         if operable.contains(region) {
             granted_regions.push(GrantedRegion::new(*region, flip_role(current)));
-        } else if closable.contains(region) {
-            // Filters out the closable regions.
+        } else if closeable.contains(region) {
+            // Filters out the closeable regions.
         } else {
             granted_regions.push(GrantedRegion::new(*region, current))
         }
@@ -112,7 +112,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
         let leaders = leaders.into_iter().flatten().collect::<Vec<_>>();
 
-        let (downgradable, closable) = self
+        let (downgradable, closeable) = self
             .region_lease_keeper
             .find_staled_leader_regions(cluster_id, datanode_id, &leaders)
             .await?;
@@ -120,44 +120,44 @@ impl HeartbeatHandler for RegionLeaseHandler {
         grant(
             &mut granted_regions,
             &downgradable,
-            &closable,
+            &closeable,
             &leaders,
             RegionRole::Leader,
         );
-        if !closable.is_empty() {
+        if !closeable.is_empty() {
             info!(
-                "Granting region lease, found closable leader regions: {:?} on datanode {}",
-                closable, datanode_id
+                "Granting region lease, found closeable leader regions: {:?} on datanode {}",
+                closeable, datanode_id
             );
         }
-        inactive_regions.extend(closable);
+        inactive_regions.extend(closeable);
 
         let followers = followers.into_iter().flatten().collect::<Vec<_>>();
 
-        let (upgradeable, closable) = self
+        let (upgradeable, closeable) = self
             .region_lease_keeper
             .find_staled_follower_regions(cluster_id, datanode_id, &followers)
             .await?;
 
-        // If a region is opening, it will be filtered out from the closable regions set.
-        let closable = self
+        // If a region is opening, it will be filtered out from the closeable regions set.
+        let closeable = self
             .opening_region_keeper
-            .filter_opening_regions(datanode_id, closable);
+            .filter_opening_regions(datanode_id, closeable);
 
         grant(
             &mut granted_regions,
             &upgradeable,
-            &closable,
+            &closeable,
             &followers,
             RegionRole::Follower,
         );
-        if !closable.is_empty() {
+        if !closeable.is_empty() {
             info!(
-                "Granting region lease, found closable follower regions {:?} on datanode {}",
-                closable, datanode_id
+                "Granting region lease, found closeable follower regions {:?} on datanode {}",
+                closeable, datanode_id
             );
         }
-        inactive_regions.extend(closable);
+        inactive_regions.extend(closeable);
 
         acc.inactive_region_ids = inactive_regions;
         acc.region_lease = Some(RegionLease {
