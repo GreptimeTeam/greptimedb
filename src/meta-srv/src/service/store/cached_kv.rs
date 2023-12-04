@@ -260,6 +260,10 @@ impl KvBackend for LeaderCachedKvBackend {
             .iter()
             .map(|kv| kv.key.clone())
             .collect::<HashSet<_>>();
+
+        let hit_rate = hit_keys.len() as f64 / req.keys.len() as f64;
+        metrics::METRIC_META_KV_CACHE_BATCH_GET_HIT_RATE.set(hit_rate);
+
         let missed_keys = req
             .keys
             .iter()

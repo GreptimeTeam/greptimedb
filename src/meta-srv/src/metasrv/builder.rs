@@ -19,12 +19,14 @@ use std::time::Duration;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_grpc::channel_manager::ChannelConfig;
+use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::TableMetadataAllocatorRef;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::sequence::{Sequence, SequenceRef};
+use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
@@ -70,8 +72,9 @@ pub struct MetaSrvBuilder {
     election: Option<ElectionRef>,
     meta_peer_client: Option<MetaPeerClientRef>,
     lock: Option<DistLockRef>,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_manager: Option<DatanodeManagerRef>,
     plugins: Option<Plugins>,
+    table_metadata_allocator: Option<TableMetadataAllocatorRef>,
 }
 
 impl MetaSrvBuilder {
@@ -85,8 +88,9 @@ impl MetaSrvBuilder {
             election: None,
             options: None,
             lock: None,
-            datanode_clients: None,
+            datanode_manager: None,
             plugins: None,
+            table_metadata_allocator: None,
         }
     }
 
@@ -130,13 +134,21 @@ impl MetaSrvBuilder {
         self
     }
 
-    pub fn datanode_clients(mut self, clients: Arc<DatanodeClients>) -> Self {
-        self.datanode_clients = Some(clients);
+    pub fn datanode_manager(mut self, datanode_manager: DatanodeManagerRef) -> Self {
+        self.datanode_manager = Some(datanode_manager);
         self
     }
 
     pub fn plugins(mut self, plugins: Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    pub fn table_metadata_allocator(
+        mut self,
+        table_metadata_allocator: TableMetadataAllocatorRef,
+    ) -> Self {
+        self.table_metadata_allocator = Some(table_metadata_allocator);
         self
     }
 
@@ -152,8 +164,9 @@ impl MetaSrvBuilder {
             selector,
             handler_group,
             lock,
-            datanode_clients,
+            datanode_manager,
             plugins,
+            table_metadata_allocator,
         } = self;
 
         let options = options.unwrap_or_default();
@@ -189,14 +202,22 @@ impl MetaSrvBuilder {
             meta_peer_client: meta_peer_client.clone(),
             table_id: None,
         };
+
+        let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
+            Arc::new(MetaSrvTableMetadataAllocator::new(
+                selector_ctx.clone(),
+                selector.clone(),
+                table_id_sequence.clone(),
+            ))
+        });
+
         let ddl_manager = build_ddl_manager(
             &options,
-            datanode_clients,
+            datanode_manager,
             &procedure_manager,
             &mailbox,
             &table_metadata_manager,
-            (&selector, &selector_ctx),
-            &table_id_sequence,
+            table_metadata_allocator,
         )?;
         let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
 
@@ -324,12 +345,11 @@ fn build_procedure_manager(
 
 fn build_ddl_manager(
     options: &MetaSrvOptions,
-    datanode_clients: Option<Arc<DatanodeClients>>,
+    datanode_clients: Option<DatanodeManagerRef>,
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    (selector, selector_ctx): (&SelectorRef, &SelectorContext),
-    table_id_sequence: &SequenceRef,
+    table_metadata_allocator: TableMetadataAllocatorRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
@@ -349,19 +369,13 @@ fn build_ddl_manager(
         },
     ));
 
-    let table_meta_allocator = Arc::new(MetaSrvTableMetadataAllocator::new(
-        selector_ctx.clone(),
-        selector.clone(),
-        table_id_sequence.clone(),
-    ));
-
     Ok(Arc::new(
         DdlManager::try_new(
             procedure_manager.clone(),
             datanode_clients,
             cache_invalidator,
             table_metadata_manager.clone(),
-            table_meta_allocator,
+            table_metadata_allocator,
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

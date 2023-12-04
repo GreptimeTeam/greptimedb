@@ -15,21 +15,23 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use catalog::kvbackend::KvBackendCatalogManager;
-use catalog::CatalogManagerRef;
 use clap::Parser;
-use common_base::Plugins;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
-use common_meta::cache_invalidator::DummyKvCacheInvalidator;
+use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::datanode_manager::DatanodeManagerRef;
+use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl_manager::DdlManager;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
-use datanode::region_server::RegionServer;
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
+use frontend::instance::builder::FrontendBuilder;
+use frontend::instance::standalone::StandaloneTableMetadataCreator;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
@@ -42,9 +44,9 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitMetadataSnafu, Result, ShutdownDatanodeSnafu,
-    ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu,
-    StopProcedureManagerSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
+    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{MixOptions, Options, TopLevelOptions};
 
@@ -156,6 +158,7 @@ impl StandaloneOptions {
             wal: self.wal,
             storage: self.storage,
             region_engine: self.region_engine,
+            rpc_addr: self.grpc.addr,
             ..Default::default()
         }
     }
@@ -347,35 +350,24 @@ impl StartCommand {
         .await
         .context(StartFrontendSnafu)?;
 
-        let datanode = DatanodeBuilder::new(dn_opts, fe_plugins.clone())
-            .with_kv_backend(kv_backend.clone())
-            .build()
-            .await
-            .context(StartDatanodeSnafu)?;
+        let builder =
+            DatanodeBuilder::new(dn_opts, fe_plugins.clone()).with_kv_backend(kv_backend.clone());
+        let datanode = builder.build().await.context(StartDatanodeSnafu)?;
 
-        let region_server = datanode.region_server();
+        let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
-        let catalog_manager = KvBackendCatalogManager::new(
+        let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
-            Arc::new(DummyKvCacheInvalidator),
-            Arc::new(StandaloneDatanodeManager(region_server.clone())),
-        );
-
-        catalog_manager
-            .table_metadata_manager_ref()
-            .init()
-            .await
-            .context(InitMetadataSnafu)?;
-
-        // TODO: build frontend instance like in distributed mode
-        let mut frontend = build_frontend(
-            fe_plugins,
-            kv_backend,
             procedure_manager.clone(),
-            catalog_manager,
-            region_server,
+            datanode_manager.clone(),
         )
         .await?;
+
+        let mut frontend = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
+            .with_plugin(fe_plugins)
+            .try_build()
+            .await
+            .context(StartFrontendSnafu)?;
 
         frontend
             .build_servers(opts)
@@ -388,26 +380,41 @@ impl StartCommand {
             procedure_manager,
         })
     }
-}
 
-/// Build frontend instance in standalone mode
-async fn build_frontend(
-    plugins: Plugins,
-    kv_backend: KvBackendRef,
-    procedure_manager: ProcedureManagerRef,
-    catalog_manager: CatalogManagerRef,
-    region_server: RegionServer,
-) -> Result<FeInstance> {
-    let frontend_instance = FeInstance::try_new_standalone(
-        kv_backend,
-        procedure_manager,
-        catalog_manager,
-        plugins,
-        region_server,
-    )
-    .await
-    .context(StartFrontendSnafu)?;
-    Ok(frontend_instance)
+    async fn create_ddl_task_executor(
+        kv_backend: KvBackendRef,
+        procedure_manager: ProcedureManagerRef,
+        datanode_manager: DatanodeManagerRef,
+    ) -> Result<DdlTaskExecutorRef> {
+        let table_metadata_manager =
+            Self::create_table_metadata_manager(kv_backend.clone()).await?;
+
+        let ddl_task_executor: DdlTaskExecutorRef = Arc::new(
+            DdlManager::try_new(
+                procedure_manager,
+                datanode_manager,
+                Arc::new(DummyCacheInvalidator),
+                table_metadata_manager,
+                Arc::new(StandaloneTableMetadataCreator::new(kv_backend)),
+            )
+            .context(InitDdlManagerSnafu)?,
+        );
+
+        Ok(ddl_task_executor)
+    }
+
+    async fn create_table_metadata_manager(
+        kv_backend: KvBackendRef,
+    ) -> Result<TableMetadataManagerRef> {
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend));
+
+        table_metadata_manager
+            .init()
+            .await
+            .context(InitMetadataSnafu)?;
+
+        Ok(table_metadata_manager)
+    }
 }
 
 #[cfg(test)]

@@ -21,11 +21,13 @@ use std::sync::{Arc, RwLock};
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::DatanodeId;
+use common_telemetry::warn;
 use snafu::ResultExt;
 use store_api::storage::{RegionId, TableId};
 
 use self::mito::find_staled_leader_regions;
 use crate::error::{self, Result};
+use crate::metrics;
 use crate::region::lease_keeper::utils::find_staled_follower_regions;
 
 pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
@@ -71,12 +73,12 @@ impl RegionLeaseKeeper {
         Ok(metadata_subset)
     }
 
-    /// Returns downgradable regions, and closable regions.
+    /// Returns downgradable regions, and closeable regions.
     ///
     /// - Downgradable regions:
     /// Region's peer(`datanode_id`) is the corresponding downgraded leader peer in `region_routes`.
     ///
-    /// - Closable regions:
+    /// - closeable regions:
     /// - It returns a region if it's peer(`datanode_id`) isn't the corresponding leader peer in `region_routes`.
     ///     - Expected as [RegionRole::Follower](store_api::region_engine::RegionRole::Follower) regions.
     ///     - Unexpected [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
@@ -89,35 +91,43 @@ impl RegionLeaseKeeper {
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
         let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
 
-        let mut closable_set = HashSet::new();
+        let metadata_subset = {
+            let _timer = metrics::METRIC_META_LOAD_LEADER_METADATA.start_timer();
+            self.collect_tables_metadata(&table_ids).await?
+        };
+
+        let mut closeable_set = HashSet::new();
         let mut downgradable_set = HashSet::new();
 
         for (table_id, regions) in tables {
             if let Some(metadata) = metadata_subset.get(&table_id) {
                 let region_routes = &metadata.region_routes;
 
-                let (downgradable, closable) =
+                let (downgradable, closeable) =
                     find_staled_leader_regions(datanode_id, &regions, region_routes);
 
                 downgradable_set.extend(downgradable);
-                closable_set.extend(closable);
+                closeable_set.extend(closeable);
             } else {
+                warn!(
+                    "The table {} metadata is not found, appends closeable leader regions: {:?}",
+                    table_id, regions
+                );
                 // If table metadata is not found.
-                closable_set.extend(regions);
+                closeable_set.extend(regions);
             }
         }
 
-        Ok((downgradable_set, closable_set))
+        Ok((downgradable_set, closeable_set))
     }
 
-    /// Returns upgradable regions, and closable regions.
+    /// Returns upgradable regions, and closeable regions.
     ///
     /// Upgradable regions:
     /// - Region's peer(`datanode_id`) is the corresponding leader peer in `region_routes`.
     ///
-    /// Closable regions:
+    /// closeable regions:
     /// - Region's peer(`datanode_id`) isn't the corresponding leader/follower peer in `region_routes`.
     /// - Region's table metadata is not found.
     pub async fn find_staled_follower_regions(
@@ -128,27 +138,35 @@ impl RegionLeaseKeeper {
     ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
         let tables = self.collect_tables(datanode_regions);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
-        let metadata_subset = self.collect_tables_metadata(&table_ids).await?;
+
+        let metadata_subset = {
+            let _timer = metrics::METRIC_META_LOAD_FOLLOWER_METADATA.start_timer();
+            self.collect_tables_metadata(&table_ids).await?
+        };
 
         let mut upgradable_set = HashSet::new();
-        let mut closable_set = HashSet::new();
+        let mut closeable_set = HashSet::new();
 
         for (table_id, regions) in tables {
             if let Some(metadata) = metadata_subset.get(&table_id) {
                 let region_routes = &metadata.region_routes;
 
-                let (upgradable, closable) =
+                let (upgradable, closeable) =
                     find_staled_follower_regions(datanode_id, &regions, region_routes);
 
                 upgradable_set.extend(upgradable);
-                closable_set.extend(closable);
+                closeable_set.extend(closeable);
             } else {
+                warn!(
+                    "The table {} metadata is not found, appends closeable followers regions: {:?}",
+                    table_id, regions
+                );
                 // If table metadata is not found.
-                closable_set.extend(regions);
+                closeable_set.extend(regions);
             }
         }
 
-        Ok((upgradable_set, closable_set))
+        Ok((upgradable_set, closeable_set))
     }
 
     #[cfg(test)]
@@ -272,27 +290,27 @@ mod tests {
 
         let datanode_regions = vec![region_id];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&region_id));
         assert!(downgradable.is_empty());
 
-        let (upgradable, closable) = keeper
+        let (upgradable, closeable) = keeper
             .find_staled_follower_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
         assert!(upgradable.is_empty());
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&region_id));
     }
 
     #[tokio::test]
-    async fn test_find_closable_regions_simple() {
+    async fn test_find_closeable_regions_simple() {
         let datanode_id = 1;
         let region_number = 1u32;
         let table_id = 10;
@@ -314,31 +332,31 @@ mod tests {
             .await
             .unwrap();
 
-        // `closable` should be empty.
+        // `closeable` should be empty.
         let datanode_regions = vec![region_id];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(closable.is_empty());
+        assert!(closeable.is_empty());
         assert!(downgradable.is_empty());
 
-        // `closable` should be empty.
+        // `closeable` should be empty.
         let datanode_regions = vec![];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(closable.is_empty());
+        assert!(closeable.is_empty());
         assert!(downgradable.is_empty());
     }
 
     #[tokio::test]
-    async fn test_find_closable_regions_2() {
+    async fn test_find_closeable_regions_2() {
         let datanode_id = 1;
         let region_number = 1u32;
         let table_id = 10;
@@ -375,29 +393,29 @@ mod tests {
             .unwrap();
 
         // Unexpected Leader region.
-        // `closable` should be vec![unknown_region_id].
+        // `closeable` should be vec![unknown_region_id].
         let datanode_regions = vec![region_id, unknown_region_id];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&unknown_region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&unknown_region_id));
         assert!(downgradable.is_empty());
 
         // Expected as Follower region.
-        // `closable` should be vec![another_region_id], because the `another_region_id` is a active region of `another_peer`.
+        // `closeable` should be vec![another_region_id], because the `another_region_id` is a active region of `another_peer`.
         let datanode_regions = vec![another_region_id];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&another_region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&another_region_id));
         assert!(downgradable.is_empty());
     }
 
@@ -424,16 +442,16 @@ mod tests {
             .await
             .unwrap();
 
-        // `upgradable` should be empty, `closable` should be empty.
+        // `upgradable` should be empty, `closeable` should be empty.
         let datanode_regions = vec![region_id, another_region_id];
 
-        let (downgradable, closable) = keeper
+        let (downgradable, closeable) = keeper
             .find_staled_leader_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&another_region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&another_region_id));
         assert_eq!(downgradable.len(), 1);
         assert!(downgradable.contains(&region_id));
     }
@@ -461,29 +479,29 @@ mod tests {
             .await
             .unwrap();
 
-        // `upgradable` should be vec![region_id], `closable` should be empty.
+        // `upgradable` should be vec![region_id], `closeable` should be empty.
         let datanode_regions = vec![region_id];
 
-        let (upgradable, closable) = keeper
+        let (upgradable, closeable) = keeper
             .find_staled_follower_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
 
-        assert!(closable.is_empty());
+        assert!(closeable.is_empty());
         assert_eq!(upgradable.len(), 1);
         assert!(upgradable.contains(&region_id));
 
-        // `upgradable` should be empty, `closable` should be vec![region_id].
+        // `upgradable` should be empty, `closeable` should be vec![region_id].
         let datanode_regions = vec![region_id];
 
-        let (upgradable, closable) = keeper
+        let (upgradable, closeable) = keeper
             .find_staled_follower_regions(0, datanode_id + 1, &datanode_regions)
             .await
             .unwrap();
 
         assert!(upgradable.is_empty());
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&region_id));
     }
 
     #[tokio::test]
@@ -510,12 +528,12 @@ mod tests {
             .await
             .unwrap();
 
-        let (upgradable, closable) = keeper
+        let (upgradable, closeable) = keeper
             .find_staled_follower_regions(0, datanode_id, &datanode_regions)
             .await
             .unwrap();
         assert!(upgradable.is_empty());
-        assert!(closable.is_empty());
+        assert!(closeable.is_empty());
     }
 
     #[test]
