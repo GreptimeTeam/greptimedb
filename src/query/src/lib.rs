@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #![feature(let_chains)]
+#![feature(int_roundings)]
 
 pub mod dataframe;
 pub mod datafusion;

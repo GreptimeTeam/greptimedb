@@ -1866,7 +1866,7 @@ dependencies = [
  "datatypes",
  "serde",
  "snafu",
- "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "statrs",
  "tokio",
@@ -3269,7 +3269,7 @@ dependencies = [
  "session",
  "snafu",
  "sql",
- "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "store-api",
  "strfmt",
  "substrait 0.4.4",
@@ -5562,7 +5562,7 @@ dependencies = [
  "session",
  "snafu",
  "sql",
- "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "store-api",
  "substrait 0.4.4",
  "table",
@@ -8562,7 +8562,7 @@ dependencies = [
  "once_cell",
  "regex",
  "snafu",
- "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
+ "sqlparser 0.38.0 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
  "sqlparser_derive 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "table",
 ]
@@ -8625,13 +8625,13 @@ dependencies = [
 [[package]]
 name = "sqlparser"
 version = "0.38.0"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd#0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef#6a93567ae38d42be5c8d08b13c8ff4dde26502ef"
 dependencies = [
  "lazy_static",
  "log",
  "regex",
  "sqlparser 0.38.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd)",
+ "sqlparser_derive 0.1.1 (git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef)",
 ]
 
 [[package]]
@@ -8648,7 +8648,7 @@ dependencies = [
 [[package]]
 name = "sqlparser_derive"
 version = "0.1.1"
-source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd#0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd"
+source = "git+https://github.com/GreptimeTeam/sqlparser-rs.git?rev=6a93567ae38d42be5c8d08b13c8ff4dde26502ef#6a93567ae38d42be5c8d08b13c8ff4dde26502ef"
 dependencies = [
  "proc-macro2",
  "quote",
