@@ -283,7 +283,7 @@ mod tests {
             },
         })];
         let result = KeysFstApplier::try_from(predicates);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::KeysApplierWithoutInList { .. })));
     }
 
     #[test]
