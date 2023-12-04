@@ -456,28 +456,6 @@ impl PromPlanner {
                 })
             }
             PromExpr::Call(Call { func, args }) => {
-                // TODO(ruihang): refactor this, transform the AST in advance to include an empty metric table.
-                // if func.name == SPECIAL_TIME_FUNCTION {
-                //     self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
-                //     self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
-                //     self.ctx.table_name = Some(String::new());
-                //     let time_expr = build_special_time_expr(SPECIAL_TIME_FUNCTION);
-
-                //     return Ok(LogicalPlan::Extension(Extension {
-                //         node: Arc::new(
-                //             EmptyMetric::new(
-                //                 self.ctx.start,
-                //                 self.ctx.end,
-                //                 self.ctx.interval,
-                //                 SPECIAL_TIME_FUNCTION.to_string(),
-                //                 DEFAULT_FIELD_COLUMN.to_string(),
-                //                 Some(time_expr),
-                //             )
-                //             .context(DataFusionPlanningSnafu)?,
-                //         ),
-                //     }));
-                // }
-
                 if func.name == SPECIAL_HISTOGRAM_QUANTILE {
                     if args.args.len() != 2 {
                         return FunctionInvalidArgumentSnafu {
@@ -530,12 +508,6 @@ impl PromPlanner {
                 }
 
                 let args = self.create_function_args(&args.args)?;
-                // let input = self
-                //     .prom_expr_to_plan(args.input.with_context(|| ExpectExprSnafu {
-                //         expr: prom_expr.clone(),
-                //     })?)
-                //     .await?;
-                // let input = args.input.map(|prom_expr|self.prom_expr_to_plan(prom_expr))
                 let input = if let Some(prom_expr) = args.input {
                     self.prom_expr_to_plan(prom_expr).await?
                 } else {
@@ -1337,7 +1309,6 @@ impl PromPlanner {
             }
             PromExpr::VectorSelector(_)
             | PromExpr::MatrixSelector(_)
-            // | PromExpr::Call(_)
             | PromExpr::Extension(_)
             | PromExpr::Aggregate(_)
             | PromExpr::Subquery(_) => None,
