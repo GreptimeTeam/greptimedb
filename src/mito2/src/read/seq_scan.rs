@@ -204,7 +204,7 @@ impl SeqScan {
                 builder.push_batch_reader(Box::new(reader));
             } else {
                 // They have different schema. We need to adapt the batch first so the
-                // mapper can convert the it.
+                // mapper can convert it.
                 let compat_reader =
                     CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
                 builder.push_batch_reader(Box::new(compat_reader));
@@ -251,7 +251,7 @@ impl SeqScan {
                 Source::Reader(Box::new(reader))
             } else {
                 // They have different schema. We need to adapt the batch first so the
-                // mapper can convert the it.
+                // mapper can convert it.
                 let compat_reader =
                     CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
                 Source::Reader(Box::new(compat_reader))
