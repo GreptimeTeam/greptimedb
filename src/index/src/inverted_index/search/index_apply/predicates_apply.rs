@@ -118,7 +118,11 @@ mod tests {
     use crate::inverted_index::search::fst_apply::MockFstApplier;
     use crate::inverted_index::FstMap;
 
-    fn mock_metas<'a>(tags: impl IntoIterator<Item = &'a str>) -> InvertedIndexMetas {
+    fn s(s: &'static str) -> String {
+        s.to_owned()
+    }
+
+    fn mock_metas(tags: impl IntoIterator<Item = &'static str>) -> InvertedIndexMetas {
         let mut metas = InvertedIndexMetas {
             total_row_count: 8,
             segment_row_count: 1,
@@ -126,10 +130,10 @@ mod tests {
         };
         for tag in tags.into_iter() {
             let meta = InvertedIndexMeta {
-                name: "".to_owned(),
+                name: s(tag),
                 ..Default::default()
             };
-            metas.metas.insert(tag.into(), meta);
+            metas.metas.insert(s(tag), meta);
         }
         metas
     }
@@ -146,46 +150,42 @@ mod tests {
         bytemuck::cast::<_, u64>([offset, size])
     }
 
-    fn s(s: &'static str) -> String {
-        s.to_owned()
-    }
-
     #[tokio::test]
     async fn test_index_applier_apply_point_get() {
-        // An index applier that point-gets "tag0_value0" on tag "tag0"
+        // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
         let applier = PredicatesIndexApplier {
-            fst_appliers: vec![(s("tag0"), key_fst_applier("tag0_value0"))],
+            fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
         };
 
-        // An index reader with a single tag "tag0" and a corresponding value "tag0_value0"
+        // An index reader with a single tag "tag-0" and a corresponding value "tag-0_value-0"
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag0"])));
+            .returning(|| Ok(mock_metas(["tag-0"])));
         mock_reader
             .expect_fst()
             .returning(|meta| match meta.name.as_str() {
-                "tag0" => Ok(FstMap::from_iter([(b"tag0_value0", fst_value(2, 1))]).unwrap()),
+                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
         mock_reader.expect_bitmap().returning(|meta, offset, size| {
             match (meta.name.as_str(), offset, size) {
-                ("tag0", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
+                ("tag-0", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
                 _ => unreachable!(),
             }
         });
         let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 2, 4, 6]);
 
-        // An index reader with a single tag "tag0" but without value "tag0_value0"
+        // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag0"])));
+            .returning(|| Ok(mock_metas(["tag-0"])));
         mock_reader
             .expect_fst()
             .returning(|meta| match meta.name.as_str() {
-                "tag0" => Ok(FstMap::from_iter([(b"tag0_value1", fst_value(2, 1))]).unwrap()),
+                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
         let indices = applier.apply(&mut mock_reader).await.unwrap();
@@ -194,30 +194,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_index_applier_apply_intersection_with_two_tags() {
-        // An index applier that intersects "tag0_value0" on tag "tag0" and "tag1_value0" on tag "tag1"
+        // An index applier that intersects "tag-0_value-0" on tag "tag-0" and "tag-1_value-a" on tag "tag-1"
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![
-                (s("tag0"), key_fst_applier("tag0_value0")),
-                (s("tag1"), key_fst_applier("tag1_value0")),
+                (s("tag-0"), key_fst_applier("tag-0_value-0")),
+                (s("tag-1"), key_fst_applier("tag-1_value-a")),
             ],
         };
 
-        // An index reader with two tags "tag0" and "tag1" and respective values "tag0_value0" and "tag1_value0"
+        // An index reader with two tags "tag-0" and "tag-1" and respective values "tag-0_value-0" and "tag-1_value-a"
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag0", "tag1"])));
+            .returning(|| Ok(mock_metas(["tag-0", "tag-1"])));
         mock_reader
             .expect_fst()
             .returning(|meta| match meta.name.as_str() {
-                "tag0" => Ok(FstMap::from_iter([(b"tag0_value0", fst_value(1, 1))]).unwrap()),
-                "tag1" => Ok(FstMap::from_iter([(b"tag1_value0", fst_value(2, 1))]).unwrap()),
+                "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
+                "tag-1" => Ok(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
         mock_reader.expect_bitmap().returning(|meta, offset, size| {
             match (meta.name.as_str(), offset, size) {
-                ("tag0", 1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
-                ("tag1", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
+                ("tag-0", 1, 1) => Ok(bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1, 0]),
+                ("tag-1", 2, 1) => Ok(bitvec![u8, Lsb0; 1, 1, 0, 1, 1, 0, 1, 1]),
                 _ => unreachable!(),
             }
         });
@@ -235,7 +235,7 @@ mod tests {
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
-            .returning(|| Ok(mock_metas(["tag0"])));
+            .returning(|| Ok(mock_metas(["tag-0"])));
 
         let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]); // full range to scan
@@ -256,7 +256,7 @@ mod tests {
         mock_fst_applier.expect_apply().never();
 
         let applier = PredicatesIndexApplier {
-            fst_appliers: vec![(s("tag0"), Box::new(mock_fst_applier))],
+            fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
         };
 
         let indices = applier.apply(&mut mock_reader).await.unwrap();
@@ -274,7 +274,7 @@ mod tests {
         mock_fst_applier.expect_apply().never();
 
         let applier = PredicatesIndexApplier {
-            fst_appliers: vec![(s("tag0"), Box::new(mock_fst_applier))],
+            fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
         };
 
         let result = applier.apply(&mut mock_reader).await;
