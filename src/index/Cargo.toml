@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytemuck.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

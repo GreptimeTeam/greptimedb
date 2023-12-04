@@ -44,8 +44,7 @@ impl<'a> FstValuesMapper<'a> {
 
         for value in values {
             // relative_offset (higher 32 bits), size (lower 32 bits)
-            let relative_offset = (value >> 32) as u32;
-            let size = *value as u32;
+            let [relative_offset, size] = bytemuck::cast::<u64, [u32; 2]>(*value);
 
             let bm = self
                 .reader
@@ -72,7 +71,7 @@ mod tests {
     use crate::inverted_index::format::reader::MockInvertedIndexReader;
 
     fn value(offset: u32, size: u32) -> u64 {
-        ((offset as u64) << 32) | (size as u64)
+        bytemuck::cast::<[u32; 2], u64>([offset, size])
     }
 
     #[tokio::test]
