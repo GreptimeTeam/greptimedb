@@ -24,7 +24,7 @@ use store_api::storage::{RegionId, RegionNumber};
 /// Returns Some(region_id) if it's not a leader region in `region_route`.
 ///
 /// It removes a leader region if its peer(`node_id`) isn't the corresponding leader peer in `region_routes`.
-pub fn closable_leader_region(
+pub fn closeable_leader_region(
     node_id: u64,
     region_id: RegionId,
     region_leader_map: &HashMap<RegionNumber, &Peer>,
@@ -63,12 +63,12 @@ pub fn downgradable_leader_regions(
     }
 }
 
-/// Returns upgradable regions, and closable regions.
+/// Returns upgradable regions, and closeable regions.
 ///
 /// Upgradable regions:
 /// - Region's peer(`datanode_id`) is the corresponding leader peer in `region_routes`.
 ///
-/// Closable regions:
+/// closeable regions:
 /// - Region's peer(`datanode_id`) isn't the corresponding leader/follower peer in `region_routes`.
 pub fn find_staled_follower_regions(
     datanode_id: u64,
@@ -79,7 +79,7 @@ pub fn find_staled_follower_regions(
     let region_leader_status_map = convert_to_region_leader_status_map(region_routes);
     let region_peer_map = convert_to_region_peer_map(region_routes);
 
-    let (upgradable, closable): (HashSet<Option<RegionId>>, HashSet<Option<RegionId>>) =
+    let (upgradable, closeable): (HashSet<Option<RegionId>>, HashSet<Option<RegionId>>) =
         datanode_regions
             .iter()
             .map(|region_id| {
@@ -90,15 +90,15 @@ pub fn find_staled_follower_regions(
                         &region_leader_map,
                         &region_leader_status_map,
                     ),
-                    closable_region(datanode_id, *region_id, &region_peer_map),
+                    closeable_region(datanode_id, *region_id, &region_peer_map),
                 )
             })
             .unzip();
 
     let upgradable = upgradable.into_iter().flatten().collect();
-    let closable = closable.into_iter().flatten().collect();
+    let closeable = closeable.into_iter().flatten().collect();
 
-    (upgradable, closable)
+    (upgradable, closeable)
 }
 
 /// Returns Some(region) if its peer(`node_id`) a leader region peer in `region_routes`.
@@ -124,7 +124,7 @@ pub fn upgradable_follower_region(
 }
 
 /// Returns Some(region) if its peer(`node_id) is't a leader or follower region peer in `region_routes`.
-pub fn closable_region(
+pub fn closeable_region(
     node_id: u64,
     region_id: RegionId,
     region_peer_map: &HashMap<RegionNumber, HashSet<u64>>,
@@ -149,7 +149,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_closable_leader_region() {
+    fn test_closeable_leader_region() {
         let datanode_id = 1u64;
         let region_number = 1u32;
         let region_id = RegionId::from_u64(region_number as u64);
@@ -160,19 +160,19 @@ mod tests {
         // Should be None, `region_id` is an active region of `peer`.
         assert_eq!(
             None,
-            closable_leader_region(datanode_id, region_id, &region_leader_map,)
+            closeable_leader_region(datanode_id, region_id, &region_leader_map,)
         );
 
         // Should be Some(`region_id`), incorrect datanode_id.
         assert_eq!(
             Some(region_id),
-            closable_leader_region(datanode_id + 1, region_id, &region_leader_map,)
+            closeable_leader_region(datanode_id + 1, region_id, &region_leader_map,)
         );
 
         // Should be Some(`region_id`), the inactive_leader_regions is empty.
         assert_eq!(
             Some(region_id),
-            closable_leader_region(datanode_id, region_id, &Default::default(),)
+            closeable_leader_region(datanode_id, region_id, &Default::default(),)
         );
 
         let another_peer = Peer::empty(datanode_id + 1);
@@ -181,7 +181,7 @@ mod tests {
         // Should be Some(`region_id`), `region_id` is active region of `another_peer`.
         assert_eq!(
             Some(region_id),
-            closable_leader_region(datanode_id, region_id, &region_leader_map,)
+            closeable_leader_region(datanode_id, region_id, &region_leader_map,)
         );
     }
 
@@ -241,31 +241,31 @@ mod tests {
     }
 
     #[test]
-    fn test_closable_follower_region() {
+    fn test_closeable_follower_region() {
         let region_number = 1u32;
         let region_id = RegionId::from_u64(region_number as u64);
         let another_region_id = RegionId::from_u64(region_number as u64 + 1);
         let region_peer_map = [(region_number, HashSet::from([1, 2, 3]))].into();
 
         // Should be None.
-        assert_eq!(None, closable_region(1, region_id, &region_peer_map));
+        assert_eq!(None, closeable_region(1, region_id, &region_peer_map));
 
         // Should be Some(`region_id`), incorrect `datanode_id`.
         assert_eq!(
             Some(region_id),
-            closable_region(4, region_id, &region_peer_map)
+            closeable_region(4, region_id, &region_peer_map)
         );
 
         // Should be Some(`another_region_id`), `another_region_id` doesn't exist.
         assert_eq!(
             Some(another_region_id),
-            closable_region(1, another_region_id, &region_peer_map)
+            closeable_region(1, another_region_id, &region_peer_map)
         );
 
         // Should be Some(`another_region_id`), `another_region_id` doesn't exist, incorrect `datanode_id`.
         assert_eq!(
             Some(another_region_id),
-            closable_region(4, another_region_id, &region_peer_map)
+            closeable_region(4, another_region_id, &region_peer_map)
         );
     }
 
