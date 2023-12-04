@@ -20,6 +20,8 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use snafu::{Location, Snafu};
 
+use crate::inverted_index::search::predicate::Predicate;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -75,6 +77,38 @@ pub enum Error {
         error: prost::DecodeError,
         location: Location,
     },
+
+    #[snafu(display("Failed to parse regex pattern: {pattern}"))]
+    ParseRegex {
+        #[snafu(source)]
+        error: regex::Error,
+        pattern: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse regex DFA"))]
+    ParseDFA {
+        #[snafu(source)]
+        error: regex_automata::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected empty predicates to construct fst applier"))]
+    EmptyPredicates { location: Location },
+
+    #[snafu(display("Failed to construct intersection fst applier with InList predicate"))]
+    IntersectionApplierWithInList { location: Location },
+
+    #[snafu(display("Failed to construct keys fst applier without InList predicate"))]
+    KeysApplierWithoutInList { location: Location },
+
+    #[snafu(display(
+        "Failed to construct keys fst applier with unexpected predicates: {predicates:?}"
+    ))]
+    KeysApplierUnexpectedPredicates {
+        location: Location,
+        predicates: Vec<Predicate>,
+    },
 }
 
 impl ErrorExt for Error {
@@ -87,7 +121,14 @@ impl ErrorExt for Error {
             | UnexpectedOffsetSize { .. }
             | UnexpectedBlobSize { .. }
             | DecodeProto { .. }
-            | DecodeFst { .. } => StatusCode::Unexpected,
+            | DecodeFst { .. }
+            | KeysApplierUnexpectedPredicates { .. } => StatusCode::Unexpected,
+
+            ParseRegex { .. }
+            | ParseDFA { .. }
+            | KeysApplierWithoutInList { .. }
+            | IntersectionApplierWithInList { .. }
+            | EmptyPredicates { .. } => StatusCode::InvalidArguments,
         }
     }
 

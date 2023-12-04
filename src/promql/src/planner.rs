@@ -2228,7 +2228,7 @@ mod test {
                     "some_metric.timestamp",
                 ],
             ),
-            // single not_eq mathcer
+            // single not_eq matcher
             (
                 r#"some_metric{__field__!="field_1"}"#,
                 vec![
@@ -2240,7 +2240,7 @@ mod test {
                     "some_metric.timestamp",
                 ],
             ),
-            // two not_eq mathcers
+            // two not_eq matchers
             (
                 r#"some_metric{__field__!="field_1", __field__!="field_2"}"#,
                 vec![

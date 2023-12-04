@@ -17,12 +17,10 @@ mod footer;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use fst::Map;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 
 use crate::inverted_index::error::Result;
-
-pub type FstMap = Map<Vec<u8>>;
+use crate::inverted_index::FstMap;
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[async_trait]

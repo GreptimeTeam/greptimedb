@@ -13,6 +13,8 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 prost.workspace = true
+regex-automata.workspace = true
+regex.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
