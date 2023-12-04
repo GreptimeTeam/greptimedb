@@ -179,6 +179,7 @@ pub struct DropTableTask {
     pub schema: String,
     pub table: String,
     pub table_id: TableId,
+    #[serde(default)]
     pub drop_if_exists: bool,
 }
 
