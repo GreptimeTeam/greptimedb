@@ -13,4 +13,5 @@
 // limitations under the License.
 
 pub mod fst_apply;
+pub mod fst_values_mapper;
 pub mod predicate;
