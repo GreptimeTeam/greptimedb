@@ -17,6 +17,7 @@ prost.workspace = true
 regex-automata.workspace = true
 regex.workspace = true
 snafu.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
 tokio-util.workspace = true

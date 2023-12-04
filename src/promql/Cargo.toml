@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 async-recursion = "1.0"
 async-trait.workspace = true
-bytemuck = "1.12"
+bytemuck.workspace = true
 catalog.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true

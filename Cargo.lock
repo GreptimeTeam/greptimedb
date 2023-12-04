@@ -3940,6 +3940,7 @@ name = "index"
 version = "0.4.4"
 dependencies = [
  "async-trait",
+ "bytemuck",
  "common-base",
  "common-error",
  "common-macro",
