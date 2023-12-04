@@ -202,7 +202,14 @@ impl PromPlanner {
                         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
                         self.ctx.table_name = Some(String::new());
                         let field_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
-                        let field_expr = field_expr_builder(lhs, rhs)?;
+                        let mut field_expr = field_expr_builder(lhs, rhs)?;
+
+                        if is_comparison_op && should_return_bool {
+                            field_expr = DfExpr::Cast(Cast {
+                                expr: Box::new(field_expr),
+                                data_type: ArrowDataType::Float64,
+                            });
+                        }
 
                         LogicalPlan::Extension(Extension {
                             node: Arc::new(
