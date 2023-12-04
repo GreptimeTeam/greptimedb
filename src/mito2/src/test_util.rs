@@ -379,7 +379,6 @@ impl CreateRequestBuilder {
         });
 
         RegionCreateRequest {
-            // We use empty engine name as we already locates the engine.
             engine: self.engine.to_string(),
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),

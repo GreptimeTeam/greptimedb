@@ -418,45 +418,66 @@ impl CountdownTask {
 
 #[cfg(test)]
 mod test {
-    use api::v1::meta::RegionRole;
+
+    use mito2::config::MitoConfig;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use store_api::region_engine::RegionEngine;
 
     use super::*;
     use crate::tests::mock_region_server;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn region_alive_keeper() {
-        let region_server = mock_region_server();
-        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server, 300));
-        let region_id = RegionId::new(1, 2);
+        common_telemetry::init_default_ut_logging();
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper");
+        let engine = Arc::new(engine_env.create_engine(MitoConfig::default()).await);
+        region_server.register_engine(engine.clone());
+
+        let alive_keeper = Arc::new(RegionAliveKeeper::new(region_server.clone(), 100));
+
+        let region_id = RegionId::new(1024, 1);
+        let builder = CreateRequestBuilder::new();
+        region_server
+            .handle_request(region_id, RegionRequest::Create(builder.build()))
+            .await
+            .unwrap();
+        region_server.set_writable(region_id, true).unwrap();
 
         // Register a region before starting.
         alive_keeper.register_region(region_id).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
 
+        info!("Start the keeper");
         alive_keeper.start(None).await.unwrap();
 
         // The started alive keeper should assign deadline to this region.
         let deadline = alive_keeper.deadline(region_id).await.unwrap();
         assert!(deadline >= Instant::now());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
 
+        info!("Wait for lease expired");
+        // Sleep to wait lease expired.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(alive_keeper.find_handle(region_id).await.is_some());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Follower);
+
+        info!("Renew the region lease");
         // Renew lease then sleep.
         alive_keeper
             .renew_region_leases(
                 &[GrantedRegion {
                     region_id: region_id.as_u64(),
-                    role: RegionRole::Leader.into(),
+                    role: api::v1::meta::RegionRole::Leader.into(),
                 }],
                 Instant::now() + Duration::from_millis(500),
             )
             .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(alive_keeper.find_handle(region_id).await.is_some());
         let deadline = alive_keeper.deadline(region_id).await.unwrap();
         assert!(deadline >= Instant::now());
-
-        // Sleep to wait lease expired.
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        assert!(alive_keeper.find_handle(region_id).await.is_some());
+        assert_eq!(engine.role(region_id).unwrap(), RegionRole::Leader);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -484,7 +505,7 @@ mod test {
         // A nearer deadline will be ignored.
         countdown_handle
             .reset_deadline(
-                RegionRole::Leader.into(),
+                RegionRole::Leader,
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis),
             )
             .await;
@@ -496,7 +517,7 @@ mod test {
         // Only a farther deadline will be accepted.
         countdown_handle
             .reset_deadline(
-                RegionRole::Leader.into(),
+                RegionRole::Leader,
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
             )
             .await;
