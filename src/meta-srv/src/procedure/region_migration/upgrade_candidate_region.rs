@@ -83,11 +83,11 @@ impl UpgradeCandidateRegion {
     fn build_upgrade_region_instruction(&self, ctx: &Context) -> Instruction {
         let pc = &ctx.persistent_ctx;
         let region_id = pc.region_id;
+        let last_entry_id = ctx.volatile_ctx.leader_region_last_entry_id;
 
         Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
-            // TODO(weny): Waits for https://github.com/GreptimeTeam/greptimedb/pull/2792
-            last_entry_id: None,
+            last_entry_id,
             wait_for_replay_secs: Some(self.replay_timeout.as_secs()),
         })
     }
