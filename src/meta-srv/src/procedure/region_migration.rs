@@ -17,6 +17,8 @@ pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
 pub(crate) mod open_candidate_region;
+// TODO(weny): remove it.
+#[allow(unused)]
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod update_metadata;
@@ -263,7 +265,7 @@ impl Context {
 
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
-trait State: Sync + Send + Debug {
+pub(crate) trait State: Sync + Send + Debug {
     /// Yields the next [State] and [Status].
     async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)>;
 
