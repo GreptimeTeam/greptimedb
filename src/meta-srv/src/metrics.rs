@@ -34,4 +34,19 @@ lazy_static! {
     pub static ref METRIC_META_LEADER_CACHED_KV_LOAD: HistogramVec =
         register_histogram_vec!("meta_leader_cache_kv_load", "meta load cache", &["prefix"])
             .unwrap();
+    pub static ref METRIC_META_LOAD_FOLLOWER_METADATA: Histogram = register_histogram!(
+        "meta_load_follower_metadata",
+        "meta load follower regions metadata elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_META_LOAD_LEADER_METADATA: Histogram = register_histogram!(
+        "meta_load_leader_metadata",
+        "meta load leader regions metadata elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_META_KV_CACHE_BATCH_GET_HIT_RATE: Gauge = register_gauge!(
+        "meta_kv_cache_batch_get_hit_rate",
+        "meta kv cache batch get hit rate"
+    )
+    .unwrap();
 }

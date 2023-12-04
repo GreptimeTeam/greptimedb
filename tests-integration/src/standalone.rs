@@ -14,16 +14,19 @@
 
 use std::sync::Arc;
 
-use catalog::kvbackend::KvBackendCatalogManager;
 use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_config::KvBackendConfig;
-use common_meta::cache_invalidator::DummyKvCacheInvalidator;
+use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::ddl_manager::DdlManager;
+use common_meta::key::TableMetadataManager;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
+use frontend::instance::builder::FrontendBuilder;
+use frontend::instance::standalone::StandaloneTableMetadataCreator;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -88,29 +91,28 @@ impl GreptimeDbStandaloneBuilder {
             .await
             .unwrap();
 
-        let catalog_manager = KvBackendCatalogManager::new(
-            kv_backend.clone(),
-            Arc::new(DummyKvCacheInvalidator),
-            Arc::new(StandaloneDatanodeManager(datanode.region_server())),
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_metadata_manager.init().await.unwrap();
+
+        let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
+
+        let ddl_task_executor = Arc::new(
+            DdlManager::try_new(
+                procedure_manager.clone(),
+                datanode_manager.clone(),
+                Arc::new(DummyCacheInvalidator),
+                table_metadata_manager,
+                Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+            )
+            .unwrap(),
         );
 
-        catalog_manager
-            .table_metadata_manager_ref()
-            .init()
+        let instance = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
+            .with_plugin(plugins)
+            .try_build()
             .await
             .unwrap();
 
-        let instance = Instance::try_new_standalone(
-            kv_backend,
-            procedure_manager.clone(),
-            catalog_manager,
-            plugins,
-            datanode.region_server(),
-        )
-        .await
-        .unwrap();
-
-        // Ensures all loaders are registered.
         procedure_manager.start().await.unwrap();
 
         test_util::prepare_another_catalog_and_schema(&instance).await;

@@ -20,14 +20,14 @@ use common_meta::rpc::router::{
 use store_api::storage::RegionId;
 
 use super::utils::downgradable_leader_regions;
-use crate::region::lease_keeper::utils::closable_leader_region;
+use crate::region::lease_keeper::utils::closeable_leader_region;
 
-/// Returns Downgradable regions and Closable regions.
+/// Returns Downgradable regions and closeable regions.
 ///
 /// - Downgradable regions:
 /// Region's peer(`datanode_id`) is the corresponding downgraded leader peer in `region_routes`.
 ///
-/// - Closable regions:
+/// - closeable regions:
 /// Region's peer(`datanode_id`) isn't the corresponding leader peer in `region_routes`.
 ///   - Expected as [RegionRole::Follower](store_api::region_engine::RegionRole::Follower) regions.
 ///   - Unexpected [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
@@ -39,7 +39,7 @@ pub fn find_staled_leader_regions(
     let region_leader_map = convert_to_region_leader_map(region_routes);
     let region_leader_status_map = convert_to_region_leader_status_map(region_routes);
 
-    let (downgradable, closable): (HashSet<_>, HashSet<_>) = datanode_regions
+    let (downgradable, closeable): (HashSet<_>, HashSet<_>) = datanode_regions
         .iter()
         .map(|region_id| {
             (
@@ -49,15 +49,15 @@ pub fn find_staled_leader_regions(
                     &region_leader_map,
                     &region_leader_status_map,
                 ),
-                closable_leader_region(datanode_id, *region_id, &region_leader_map),
+                closeable_leader_region(datanode_id, *region_id, &region_leader_map),
             )
         })
         .unzip();
 
     let downgradable = downgradable.into_iter().flatten().collect();
-    let closable = closable.into_iter().flatten().collect();
+    let closeable = closeable.into_iter().flatten().collect();
 
-    (downgradable, closable)
+    (downgradable, closeable)
 }
 
 #[cfg(test)]
@@ -85,20 +85,20 @@ mod tests {
         }];
 
         // Grants lease.
-        // `closable` should be empty, `region_id` is a active leader region of the `peer`
-        let (downgradable, closable) =
+        // `closeable` should be empty, `region_id` is a active leader region of the `peer`
+        let (downgradable, closeable) =
             find_staled_leader_regions(datanode_id, &datanode_regions, &region_routes);
 
-        assert!(closable.is_empty());
+        assert!(closeable.is_empty());
         assert!(downgradable.is_empty());
 
         // Unexpected Leader region.
-        // `closable` should be vec![`region_id`];
-        let (downgradable, closable) =
+        // `closeable` should be vec![`region_id`];
+        let (downgradable, closeable) =
             find_staled_leader_regions(datanode_id, &datanode_regions, &[]);
 
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&region_id));
         assert!(downgradable.is_empty());
 
         let region_routes = vec![RegionRoute {
@@ -111,12 +111,12 @@ mod tests {
         let retained_active_regions = datanode_regions.clone();
 
         // Expected as Follower region.
-        // `closable` should be vec![`region_id`], `region_id` is RegionRole::Leader.
-        let (downgradable, closable) =
+        // `closeable` should be vec![`region_id`], `region_id` is RegionRole::Leader.
+        let (downgradable, closeable) =
             find_staled_leader_regions(datanode_id, &retained_active_regions, &region_routes);
 
         assert!(downgradable.is_empty());
-        assert_eq!(closable.len(), 1);
-        assert!(closable.contains(&region_id));
+        assert_eq!(closeable.len(), 1);
+        assert!(closeable.contains(&region_id));
     }
 }

@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
-use client::client_manager::DatanodeClients;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_base::Plugins;
 use common_error::ext::ErrorExt;
@@ -250,13 +249,8 @@ async fn create_query_engine(meta_addr: &str) -> Result<DatafusionQueryEngine> {
 
     let cached_meta_backend = Arc::new(CachedMetaKvBackend::new(meta_client.clone()));
 
-    let datanode_clients = Arc::new(DatanodeClients::default());
-
-    let catalog_list = KvBackendCatalogManager::new(
-        cached_meta_backend.clone(),
-        cached_meta_backend.clone(),
-        datanode_clients,
-    );
+    let catalog_list =
+        KvBackendCatalogManager::new(cached_meta_backend.clone(), cached_meta_backend);
     let plugins: Plugins = Default::default();
     let state = Arc::new(QueryEngineState::new(
         catalog_list,

@@ -71,6 +71,10 @@ mod tests {
     use super::*;
     use crate::inverted_index::format::reader::MockInvertedIndexReader;
 
+    fn value(offset: u32, size: u32) -> u64 {
+        ((offset as u64) << 32) | (size as u64)
+    }
+
     #[tokio::test]
     async fn test_map_values() {
         let mut mock_reader = MockInvertedIndexReader::new();
@@ -88,20 +92,20 @@ mod tests {
         let result = values_mapper.map_values(&[]).await.unwrap();
         assert_eq!(result.count_ones(), 0);
 
-        let result = values_mapper.map_values(&[(1 << 32) | 1]).await.unwrap();
+        let result = values_mapper.map_values(&[value(1, 1)]).await.unwrap();
         assert_eq!(result, bitvec![u8, Lsb0; 1, 0, 1, 0, 1, 0, 1]);
 
-        let result = values_mapper.map_values(&[(2 << 32) | 1]).await.unwrap();
+        let result = values_mapper.map_values(&[value(2, 1)]).await.unwrap();
         assert_eq!(result, bitvec![u8, Lsb0; 0, 1, 0, 1, 0, 1, 0, 1]);
 
         let result = values_mapper
-            .map_values(&[(1 << 32) | 1, (2 << 32) | 1])
+            .map_values(&[value(1, 1), value(2, 1)])
             .await
             .unwrap();
         assert_eq!(result, bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);
 
         let result = values_mapper
-            .map_values(&[(2 << 32) | 1, (1 << 32) | 1])
+            .map_values(&[value(2, 1), value(1, 1)])
             .await
             .unwrap();
         assert_eq!(result, bitvec![u8, Lsb0; 1, 1, 1, 1, 1, 1, 1, 1]);

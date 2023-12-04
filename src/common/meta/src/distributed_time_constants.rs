@@ -33,5 +33,8 @@ pub const DATANODE_LEASE_SECS: u64 = REGION_LEASE_SECS;
 /// The lease seconds of metasrv leader.
 pub const META_LEASE_SECS: u64 = 3;
 
-// In a lease, there are two opportunities for renewal.
+/// In a lease, there are two opportunities for renewal.
 pub const META_KEEP_ALIVE_INTERVAL_SECS: u64 = META_LEASE_SECS / 2;
+
+/// The default mailbox round-trip timeout.
+pub const MAILBOX_RTT_SECS: u64 = 1;
