@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytemuck.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -17,7 +18,6 @@ prost.workspace = true
 regex-automata.workspace = true
 regex.workspace = true
 snafu.workspace = true
-bytemuck.workspace = true
 
 [dev-dependencies]
 tokio-util.workspace = true
