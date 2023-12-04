@@ -142,8 +142,8 @@ mod tests {
         Box::new(mock_fst_applier)
     }
 
-    fn fst_value(offset: u64, size: u64) -> u64 {
-        (offset << 32) | size
+    fn fst_value(offset: u32, size: u32) -> u64 {
+        bytemuck::cast::<_, u64>([offset, size])
     }
 
     fn s(s: &'static str) -> String {
