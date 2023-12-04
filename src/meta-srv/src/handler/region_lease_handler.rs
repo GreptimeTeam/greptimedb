@@ -159,7 +159,6 @@ impl HeartbeatHandler for RegionLeaseHandler {
         }
         inactive_regions.extend(closeable);
 
-        acc.inactive_region_ids = inactive_regions;
         acc.region_lease = Some(RegionLease {
             regions: granted_regions
                 .into_iter()
@@ -167,8 +166,12 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .collect::<Vec<_>>(),
             duration_since_epoch: req.duration_since_epoch,
             lease_seconds: self.region_lease_seconds,
-            closeable_region_ids: vec![],
+            closeable_region_ids: inactive_regions
+                .iter()
+                .map(|region| region.as_u64())
+                .collect(),
         });
+        acc.inactive_region_ids = inactive_regions;
 
         Ok(HandleControl::Continue)
     }
@@ -272,6 +275,10 @@ mod test {
 
         assert_region_lease(acc, vec![GrantedRegion::new(region_id, RegionRole::Leader)]);
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -297,6 +304,10 @@ mod test {
             vec![GrantedRegion::new(region_id, RegionRole::Follower)],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
 
         let opening_region_id = RegionId::new(table_id, region_number + 2);
         let _guard = opening_region_keeper
@@ -331,6 +342,10 @@ mod test {
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
     }
 
     #[tokio::test]
