@@ -121,7 +121,10 @@ mod tests {
     use super::*;
 
     fn create_test_payload(meta: InvertedIndexMeta) -> Vec<u8> {
-        let mut metas = InvertedIndexMetas::default();
+        let mut metas = InvertedIndexMetas {
+            segment_row_count: 1,
+            ..Default::default()
+        };
         metas.metas.insert("test".to_string(), meta);
 
         let mut payload_buf = vec![];
