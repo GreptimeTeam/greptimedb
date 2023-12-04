@@ -3570,7 +3570,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc/index-add-row-count#6ff29913b75179b0f212eb2bf53cece6229f1aaa"
+source = "git+https://github.com/zhongzc/greptime-proto.git?branch=zhongzc/index-add-row-count#a4f2b699b7b3b704c002d73833f66b3abe606c5f"
 dependencies = [
  "prost 0.12.2",
  "serde",

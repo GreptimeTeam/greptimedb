@@ -118,6 +118,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     schema_name: task.schema,
                     table_name: task.table,
                     table_id: Some(api::v1::TableId { id: task.table_id }),
+                    drop_if_exists: false,
                 }),
             }),
             DdlTask::AlterTable(task) => Task::AlterTableTask(PbAlterTableTask {
