@@ -4,6 +4,7 @@ CREATE TABLE decimals(d DECIMAL(3, 2), ts timestamp time index);
 
 INSERT INTO decimals VALUES ('0.1',1000), ('0.2',2000);
 
+-- SQLNESS SORT 3 1
 SELECT * FROM decimals;
 
 -- ORDER BY
@@ -16,6 +17,7 @@ SELECT * FROM decimals WHERE d = '0.1'::DECIMAL(3,2);
 
 -- greater than equals
 
+-- SQLNESS SORT 3 1
 SELECT * FROM decimals WHERE d >= '0.1'::DECIMAL(3,2);
 
 -- what about if we use different decimal scales?
@@ -194,8 +196,10 @@ CREATE TABLE tmp_table(i INTEGER, ts timestamp time index);
 
 INSERT INTO tmp_table VALUES (1, 1000), (2, 2000), (3, 3000);
 
+-- SQLNESS SORT 3 1
 SELECT * FROM tmp_table;
 
+-- SQLNESS SORT 3 1
 SELECT * FROM tmp_table JOIN decimals ON decimals.ts = tmp_table.ts;
 
 DROP TABLE decimals;
