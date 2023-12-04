@@ -7,6 +7,7 @@ INSERT INTO decimals VALUES ('0.1',1000), ('0.2',2000);
 
 Affected Rows: 2
 
+-- SQLNESS SORT 3 1
 SELECT * FROM decimals;
 
 +------+---------------------+
@@ -36,6 +37,7 @@ SELECT * FROM decimals WHERE d = '0.1'::DECIMAL(3,2);
 +------+---------------------+
 
 -- greater than equals
+-- SQLNESS SORT 3 1
 SELECT * FROM decimals WHERE d >= '0.1'::DECIMAL(3,2);
 
 +------+---------------------+
@@ -407,6 +409,7 @@ INSERT INTO tmp_table VALUES (1, 1000), (2, 2000), (3, 3000);
 
 Affected Rows: 3
 
+-- SQLNESS SORT 3 1
 SELECT * FROM tmp_table;
 
 +---+---------------------+
@@ -417,13 +420,14 @@ SELECT * FROM tmp_table;
 | 3 | 1970-01-01T00:00:03 |
 +---+---------------------+
 
+-- SQLNESS SORT 3 1
 SELECT * FROM tmp_table JOIN decimals ON decimals.ts = tmp_table.ts;
 
 +---+---------------------+------+---------------------+
 | i | ts                  | d    | ts                  |
 +---+---------------------+------+---------------------+
-| 2 | 1970-01-01T00:00:02 | 0.20 | 1970-01-01T00:00:02 |
 | 1 | 1970-01-01T00:00:01 | 0.10 | 1970-01-01T00:00:01 |
+| 2 | 1970-01-01T00:00:02 | 0.20 | 1970-01-01T00:00:02 |
 +---+---------------------+------+---------------------+
 
 DROP TABLE decimals;
