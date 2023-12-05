@@ -72,7 +72,7 @@ pub struct MitoConfig {
     pub sst_write_buffer_size: ReadableSize,
     /// Parallelism to scan a region (default: 1/4 of cpu cores).
     ///
-    /// 0 or 1 means no parallelism.
+    /// 0 or 1 to disable parallelism scan.
     pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,

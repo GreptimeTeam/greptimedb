@@ -152,7 +152,7 @@ page_cache_size = "512MB"
 # Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 # Parallelism to scan a region (default: 1/4 of cpu cores).
-# 0 or 1 means no parallelism.
+# 0 or 1 to disable parallelism scan.
 scan_parallelism = 0
 # Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
 parallel_scan_channel_size = 32
