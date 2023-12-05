@@ -22,4 +22,16 @@ lazy_static! {
         register_int_counter!("table_operator_ingest_rows", "table operator ingest rows").unwrap();
     pub static ref DIST_DELETE_ROW_COUNT: IntCounter =
         register_int_counter!("table_operator_delete_rows", "table operator delete rows").unwrap();
+    /// The elapsed time of COPY FROM statement stages.
+    pub static ref COPY_FROM_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "table_operator_copy_from_stage_elapsed",
+        "copy to stage elapsed",
+        &["stage", "file_format", "table"]
+    ).unwrap();
+    /// The elapsed time of COPY FROM statement.
+    pub static ref COPY_FROM_ELAPSED: HistogramVec = register_histogram_vec!(
+        "table_operator_copy_from_elapsed",
+        "copy to elapsed",
+        &["file_format", "table"]
+    ).unwrap();
 }
