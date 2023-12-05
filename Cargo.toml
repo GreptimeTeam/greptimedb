@@ -88,7 +88,7 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b1d403088f02136bcebde53d604f491c260ca8e2" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
@@ -197,6 +197,3 @@ strip = true
 lto = "thin"
 debug = false
 incremental = false
-
-[patch.'https://github.com/GreptimeTeam/greptime-proto.git']
-greptime-proto = { git = "https://github.com/zhongzc/greptime-proto.git", branch = "zhongzc/index-add-row-count" }
