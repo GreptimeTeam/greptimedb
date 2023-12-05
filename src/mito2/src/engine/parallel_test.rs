@@ -118,6 +118,8 @@ async fn test_parallel_scan() {
     delete_rows(&engine, region_id, rows).await;
 
     engine.stop().await.unwrap();
+    
+    scan_in_parallel(&mut env, region_id, &region_dir, 0, 1).await;
 
     scan_in_parallel(&mut env, region_id, &region_dir, 1, 1).await;
 
