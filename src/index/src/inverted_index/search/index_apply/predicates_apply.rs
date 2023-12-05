@@ -15,15 +15,16 @@
 use async_trait::async_trait;
 use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
-use snafu::OptionExt;
 
-use crate::inverted_index::error::{Result, TagNotFoundInIndexSnafu};
+use crate::inverted_index::error::{IndexNotFoundSnafu, Result};
 use crate::inverted_index::format::reader::InvertedIndexReader;
 use crate::inverted_index::search::fst_apply::{
     FstApplier, IntersectionFstApplier, KeysFstApplier,
 };
 use crate::inverted_index::search::fst_values_mapper::FstValuesMapper;
-use crate::inverted_index::search::index_apply::IndexApplier;
+use crate::inverted_index::search::index_apply::{
+    IndexApplier, IndexNotFoundStrategy, ReadOptions,
+};
 use crate::inverted_index::search::predicate::Predicate;
 
 /// `PredicatesIndexApplier` contains a collection of `FstApplier`s, each associated with a tag field,
@@ -37,23 +38,34 @@ pub struct PredicatesIndexApplier {
 impl IndexApplier for PredicatesIndexApplier {
     /// Applies all `FstApplier`s to the data in the index, intersecting the individual
     /// bitmaps obtained for each tag to result in a final set of indices.
-    async fn apply(&self, reader: &mut dyn InvertedIndexReader) -> Result<Vec<usize>> {
+    async fn apply(
+        &self,
+        reader: &mut dyn InvertedIndexReader,
+        options: ReadOptions,
+    ) -> Result<Vec<usize>> {
         let metadata = reader.metadata().await?;
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
-        // TODO(zhongzc): optimize the order of applying
-        for (tag_name, fst_applier) in &self.fst_appliers {
+        // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
+        for (name, fst_applier) in &self.fst_appliers {
             if bitmap.count_ones() == 0 {
                 break;
             }
 
-            // TODO(zhongzc): how to handle missing columns?
-            let meta = metadata
-                .metas
-                .get(tag_name)
-                .with_context(|| TagNotFoundInIndexSnafu {
-                    tag_name: tag_name.to_owned(),
-                })?;
+            let meta = match metadata.metas.get(name) {
+                Some(meta) => meta,
+                None => match options.index_not_found_strategy {
+                    IndexNotFoundStrategy::ReturnEmpty => {
+                        return Ok(vec![]);
+                    }
+                    IndexNotFoundStrategy::ReturnFullRange => {
+                        continue;
+                    }
+                    IndexNotFoundStrategy::ReturnError => {
+                        return IndexNotFoundSnafu { name }.fail();
+                    }
+                },
+            };
 
             let fst = reader.fst(meta).await?;
             let values = fst_applier.apply(&fst);
@@ -156,7 +168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_index_applier_apply_point_get() {
+    async fn test_index_applier_apply_get_key() {
         // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
@@ -179,7 +191,10 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        let indices = applier.apply(&mut mock_reader).await.unwrap();
+        let indices = applier
+            .apply(&mut mock_reader, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(indices, vec![0, 2, 4, 6]);
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
@@ -193,7 +208,10 @@ mod tests {
                 "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
-        let indices = applier.apply(&mut mock_reader).await.unwrap();
+        let indices = applier
+            .apply(&mut mock_reader, ReadOptions::default())
+            .await
+            .unwrap();
         assert!(indices.is_empty());
     }
 
@@ -227,7 +245,10 @@ mod tests {
             }
         });
 
-        let indices = applier.apply(&mut mock_reader).await.unwrap();
+        let indices = applier
+            .apply(&mut mock_reader, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(indices, vec![0, 4, 6]);
     }
 
@@ -242,7 +263,10 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas(["tag-0"])));
 
-        let indices = applier.apply(&mut mock_reader).await.unwrap();
+        let indices = applier
+            .apply(&mut mock_reader, ReadOptions::default())
+            .await
+            .unwrap();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]); // full range to scan
     }
 
@@ -264,12 +288,15 @@ mod tests {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
         };
 
-        let indices = applier.apply(&mut mock_reader).await.unwrap();
+        let indices = applier
+            .apply(&mut mock_reader, ReadOptions::default())
+            .await
+            .unwrap();
         assert!(indices.is_empty());
     }
 
     #[tokio::test]
-    async fn test_index_applier_with_nonexistent_tag() {
+    async fn test_index_applier_with_nonexistent_index() {
         let mut mock_reader = MockInvertedIndexReader::new();
         mock_reader
             .expect_metadata()
@@ -282,7 +309,36 @@ mod tests {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
         };
 
-        let result = applier.apply(&mut mock_reader).await;
-        assert!(matches!(result, Err(Error::TagNotFoundInIndex { .. })));
+        let result = applier
+            .apply(
+                &mut mock_reader,
+                ReadOptions {
+                    index_not_found_strategy: IndexNotFoundStrategy::ReturnError,
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(Error::IndexNotFound { .. })));
+
+        let indices = applier
+            .apply(
+                &mut mock_reader,
+                ReadOptions {
+                    index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(indices.is_empty());
+
+        let indices = applier
+            .apply(
+                &mut mock_reader,
+                ReadOptions {
+                    index_not_found_strategy: IndexNotFoundStrategy::ReturnFullRange,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 }

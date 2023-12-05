@@ -28,5 +28,32 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 pub trait IndexApplier {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
-    async fn apply(&self, reader: &mut dyn InvertedIndexReader) -> Result<Vec<usize>>;
+    ///
+    /// The `options` parameter controls the behavior of the applier.
+    async fn apply(
+        &self,
+        reader: &mut dyn InvertedIndexReader,
+        options: ReadOptions,
+    ) -> Result<Vec<usize>>;
+}
+
+/// Options for reading an inverted index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub struct ReadOptions {
+    /// `index_not_found_strategy` controls the behavior of the applier when the index is not found.
+    pub index_not_found_strategy: IndexNotFoundStrategy,
+}
+
+/// Defines the behavior of an applier when the index is not found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum IndexNotFoundStrategy {
+    /// If the index is not found, the applier will return an empty list of indices.
+    #[default]
+    ReturnEmpty,
+
+    /// If the index is not found, the applier will return a list of all indices.
+    ReturnFullRange,
+
+    /// If the index is not found, the applier will return an error.
+    ReturnError,
 }
