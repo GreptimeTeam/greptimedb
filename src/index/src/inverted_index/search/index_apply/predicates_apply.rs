@@ -71,21 +71,25 @@ impl IndexApplier for PredicatesIndexApplier {
 impl PredicatesIndexApplier {
     /// Constructs an instance of `PredicatesIndexApplier` based on a list of tag predicates.
     /// Chooses an appropriate `FstApplier` for each tag based on the nature of its predicates.
-    pub fn try_from(predicates: Vec<(String, Vec<Predicate>)>) -> Result<Self> {
+    pub fn try_from(mut predicates: Vec<(String, Vec<Predicate>)>) -> Result<Self> {
         let mut fst_appliers = Vec::with_capacity(predicates.len());
 
-        for (tag_name, predicates) in predicates {
+        // InList predicates are applied first to benefit from higher selectivity.
+        let in_list_index = predicates
+            .iter_mut()
+            .partition_in_place(|(_, ps)| ps.iter().any(|p| matches!(p, Predicate::InList(_))));
+        let mut iter = predicates.into_iter();
+        for _ in 0..in_list_index {
+            let (tag_name, predicates) = iter.next().unwrap();
+            let fst_applier = Box::new(KeysFstApplier::try_from(predicates)?) as _;
+            fst_appliers.push((tag_name, fst_applier));
+        }
+
+        for (tag_name, predicates) in iter {
             if predicates.is_empty() {
                 continue;
             }
-
-            let exists_in_list = predicates.iter().any(|p| matches!(p, Predicate::InList(_)));
-            let fst_applier = if exists_in_list {
-                Box::new(KeysFstApplier::try_from(predicates)?) as _
-            } else {
-                Box::new(IntersectionFstApplier::try_from(predicates)?) as _
-            };
-
+            let fst_applier = Box::new(IntersectionFstApplier::try_from(predicates)?) as _;
             fst_appliers.push((tag_name, fst_applier));
         }
 
