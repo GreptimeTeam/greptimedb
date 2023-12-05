@@ -22,9 +22,7 @@ use crate::inverted_index::search::fst_apply::{
     FstApplier, IntersectionFstApplier, KeysFstApplier,
 };
 use crate::inverted_index::search::fst_values_mapper::FstValuesMapper;
-use crate::inverted_index::search::index_apply::{
-    IndexApplier, IndexNotFoundStrategy, ReadOptions,
-};
+use crate::inverted_index::search::index_apply::IndexApplier;
 use crate::inverted_index::search::predicate::Predicate;
 
 /// `PredicatesIndexApplier` contains a collection of `FstApplier`s, each associated with a tag field,
@@ -32,17 +30,16 @@ use crate::inverted_index::search::predicate::Predicate;
 pub struct PredicatesIndexApplier {
     /// A list of `FstApplier`s, each associated with a tag field.
     fst_appliers: Vec<(String, Box<dyn FstApplier>)>,
+
+    /// Options for reading an inverted index (e.g., how to handle missing index).
+    options: ReadOptions,
 }
 
 #[async_trait]
 impl IndexApplier for PredicatesIndexApplier {
     /// Applies all `FstApplier`s to the data in the index, intersecting the individual
     /// bitmaps obtained for each tag to result in a final set of indices.
-    async fn apply(
-        &self,
-        reader: &mut dyn InvertedIndexReader,
-        options: ReadOptions,
-    ) -> Result<Vec<usize>> {
+    async fn apply(&self, reader: &mut dyn InvertedIndexReader) -> Result<Vec<usize>> {
         let metadata = reader.metadata().await?;
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
@@ -53,14 +50,14 @@ impl IndexApplier for PredicatesIndexApplier {
             }
 
             let Some(meta) = metadata.metas.get(name) else {
-                match options.index_not_found_strategy {
+                match self.options.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
                         return Ok(vec![]);
                     }
                     IndexNotFoundStrategy::ReturnFullRange => {
                         continue;
                     }
-                    IndexNotFoundStrategy::ReturnError => {
+                    IndexNotFoundStrategy::ThrowError => {
                         return IndexNotFoundSnafu { name }.fail();
                     }
                 }
@@ -82,7 +79,13 @@ impl IndexApplier for PredicatesIndexApplier {
 impl PredicatesIndexApplier {
     /// Constructs an instance of `PredicatesIndexApplier` based on a list of tag predicates.
     /// Chooses an appropriate `FstApplier` for each tag based on the nature of its predicates.
-    pub fn try_from(mut predicates: Vec<(String, Vec<Predicate>)>) -> Result<Self> {
+    ///
+    /// * `predicates`: A list of tag predicates.
+    /// * `options`: Options for reading an inverted index (e.g., how to handle missing index).
+    pub fn try_new(
+        mut predicates: Vec<(String, Vec<Predicate>)>,
+        options: ReadOptions,
+    ) -> Result<Self> {
         let mut fst_appliers = Vec::with_capacity(predicates.len());
 
         // InList predicates are applied first to benefit from higher selectivity.
@@ -104,7 +107,10 @@ impl PredicatesIndexApplier {
             fst_appliers.push((tag_name, fst_applier));
         }
 
-        Ok(PredicatesIndexApplier { fst_appliers })
+        Ok(PredicatesIndexApplier {
+            fst_appliers,
+            options,
+        })
     }
 
     /// Creates a `BitVec` representing the full range of data in the index for initial scanning.
@@ -116,11 +122,25 @@ impl PredicatesIndexApplier {
     }
 }
 
-impl TryFrom<Vec<(String, Vec<Predicate>)>> for PredicatesIndexApplier {
-    type Error = crate::inverted_index::error::Error;
-    fn try_from(predicates: Vec<(String, Vec<Predicate>)>) -> Result<Self> {
-        Self::try_from(predicates)
-    }
+/// Options for reading an inverted index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub struct ReadOptions {
+    /// `index_not_found_strategy` controls the behavior of the applier when the index is not found.
+    pub index_not_found_strategy: IndexNotFoundStrategy,
+}
+
+/// Defines the behavior of an applier when the index is not found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum IndexNotFoundStrategy {
+    /// If the index is not found, the applier will return an empty list of indices.
+    #[default]
+    ReturnEmpty,
+
+    /// If the index is not found, the applier will return a list of all indices.
+    ReturnFullRange,
+
+    /// If the index is not found, the applier will throw an error.
+    ThrowError,
 }
 
 #[cfg(test)]
@@ -171,6 +191,7 @@ mod tests {
         // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
+            options: ReadOptions::default(),
         };
 
         // An index reader with a single tag "tag-0" and a corresponding value "tag-0_value-0"
@@ -190,10 +211,7 @@ mod tests {
                 _ => unreachable!(),
             }
         });
-        let indices = applier
-            .apply(&mut mock_reader, ReadOptions::default())
-            .await
-            .unwrap();
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 2, 4, 6]);
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
@@ -207,10 +225,7 @@ mod tests {
                 "tag-0" => Ok(FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap()),
                 _ => unreachable!(),
             });
-        let indices = applier
-            .apply(&mut mock_reader, ReadOptions::default())
-            .await
-            .unwrap();
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert!(indices.is_empty());
     }
 
@@ -222,6 +237,7 @@ mod tests {
                 (s("tag-0"), key_fst_applier("tag-0_value-0")),
                 (s("tag-1"), key_fst_applier("tag-1_value-a")),
             ],
+            options: ReadOptions::default(),
         };
 
         // An index reader with two tags "tag-0" and "tag-1" and respective values "tag-0_value-0" and "tag-1_value-a"
@@ -244,10 +260,7 @@ mod tests {
             }
         });
 
-        let indices = applier
-            .apply(&mut mock_reader, ReadOptions::default())
-            .await
-            .unwrap();
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 4, 6]);
     }
 
@@ -255,6 +268,7 @@ mod tests {
     async fn test_index_applier_without_predicates() {
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![],
+            options: ReadOptions::default(),
         };
 
         let mut mock_reader: MockInvertedIndexReader = MockInvertedIndexReader::new();
@@ -262,10 +276,7 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas(["tag-0"])));
 
-        let indices = applier
-            .apply(&mut mock_reader, ReadOptions::default())
-            .await
-            .unwrap();
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]); // full range to scan
     }
 
@@ -285,12 +296,10 @@ mod tests {
 
         let applier = PredicatesIndexApplier {
             fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+            options: ReadOptions::default(),
         };
 
-        let indices = applier
-            .apply(&mut mock_reader, ReadOptions::default())
-            .await
-            .unwrap();
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert!(indices.is_empty());
     }
 
@@ -301,43 +310,32 @@ mod tests {
             .expect_metadata()
             .returning(|| Ok(mock_metas(vec![])));
 
-        let mut mock_fst_applier = MockFstApplier::new();
-        mock_fst_applier.expect_apply().never();
-
         let applier = PredicatesIndexApplier {
-            fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+            fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
+            options: ReadOptions {
+                index_not_found_strategy: IndexNotFoundStrategy::ThrowError,
+            },
         };
 
-        let result = applier
-            .apply(
-                &mut mock_reader,
-                ReadOptions {
-                    index_not_found_strategy: IndexNotFoundStrategy::ReturnError,
-                },
-            )
-            .await;
+        let result = applier.apply(&mut mock_reader).await;
         assert!(matches!(result, Err(Error::IndexNotFound { .. })));
 
-        let indices = applier
-            .apply(
-                &mut mock_reader,
-                ReadOptions {
-                    index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
-                },
-            )
-            .await
-            .unwrap();
+        let applier = PredicatesIndexApplier {
+            fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
+            options: ReadOptions {
+                index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
+            },
+        };
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert!(indices.is_empty());
 
-        let indices = applier
-            .apply(
-                &mut mock_reader,
-                ReadOptions {
-                    index_not_found_strategy: IndexNotFoundStrategy::ReturnFullRange,
-                },
-            )
-            .await
-            .unwrap();
+        let applier = PredicatesIndexApplier {
+            fst_appliers: vec![(s("tag-0"), key_fst_applier("tag-0_value-0"))],
+            options: ReadOptions {
+                index_not_found_strategy: IndexNotFoundStrategy::ReturnFullRange,
+            },
+        };
+        let indices = applier.apply(&mut mock_reader).await.unwrap();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 }
