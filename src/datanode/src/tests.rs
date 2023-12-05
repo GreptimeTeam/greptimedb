@@ -111,8 +111,7 @@ impl RegionEngine for MockRegionEngine {
         request: RegionRequest,
     ) -> Result<usize, BoxedError> {
         let _ = self.sender.send((region_id, request)).await;
-
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 
     async fn handle_query(

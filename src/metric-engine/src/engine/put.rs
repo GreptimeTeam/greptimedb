@@ -38,7 +38,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionPutRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         let is_putting_physical_region = self
             .state
             .read()
@@ -62,7 +62,7 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         mut request: RegionPutRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         let physical_region_id = *self
             .state
             .read()

@@ -149,7 +149,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<Output> {
+    ) -> EngineResult<usize> {
         match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
@@ -187,7 +187,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> EngineResult<Output> {
+    ) -> EngineResult<usize> {
         ensure!(
             request.engine == FILE_ENGINE,
             UnexpectedEngineSnafu {
@@ -196,7 +196,7 @@ impl EngineInner {
         );
 
         if self.exists(region_id).await {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         info!("Try to create region, region_id: {}", region_id);
@@ -204,7 +204,7 @@ impl EngineInner {
         let _lock = self.region_mutex.lock().await;
         // Check again after acquiring the lock
         if self.exists(region_id).await {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         let res = FileRegion::create(region_id, request, &self.object_store).await;
@@ -217,16 +217,16 @@ impl EngineInner {
         self.regions.write().unwrap().insert(region_id, region);
 
         info!("A new region is created, region_id: {}", region_id);
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 
     async fn handle_open(
         &self,
         region_id: RegionId,
         request: RegionOpenRequest,
-    ) -> EngineResult<Output> {
+    ) -> EngineResult<usize> {
         if self.exists(region_id).await {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         info!("Try to open region, region_id: {}", region_id);
@@ -234,7 +234,7 @@ impl EngineInner {
         let _lock = self.region_mutex.lock().await;
         // Check again after acquiring the lock
         if self.exists(region_id).await {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         let res = FileRegion::open(region_id, request, &self.object_store).await;
@@ -247,14 +247,14 @@ impl EngineInner {
         self.regions.write().unwrap().insert(region_id, region);
 
         info!("Region opened, region_id: {}", region_id);
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 
     async fn handle_close(
         &self,
         region_id: RegionId,
         _request: RegionCloseRequest,
-    ) -> EngineResult<Output> {
+    ) -> EngineResult<usize> {
         let _lock = self.region_mutex.lock().await;
 
         let mut regions = self.regions.write().unwrap();
@@ -262,14 +262,14 @@ impl EngineInner {
             info!("Region closed, region_id: {}", region_id);
         }
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 
     async fn handle_drop(
         &self,
         region_id: RegionId,
         _request: RegionDropRequest,
-    ) -> EngineResult<Output> {
+    ) -> EngineResult<usize> {
         if !self.exists(region_id).await {
             return RegionNotFoundSnafu { region_id }.fail();
         }
@@ -291,7 +291,7 @@ impl EngineInner {
         let _ = self.regions.write().unwrap().remove(&region_id);
 
         info!("Region dropped, region_id: {}", region_id);
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 
     async fn get_region(&self, region_id: RegionId) -> Option<FileRegionRef> {

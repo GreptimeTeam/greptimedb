@@ -108,9 +108,7 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
-    /// Handles request to the region.
-    ///
-    /// Only query is not included, which is handled in `handle_query`
+    /// Handles non-query execution to the region. Returns the count of affected rows.
     async fn handle_execution(
         &self,
         region_id: RegionId,
@@ -119,19 +117,15 @@ impl RegionEngine for MetricEngine {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),
-            RegionRequest::Create(create) => self
-                .inner
-                .create_region(region_id, create)
-                .await
-                .map(|_| Output::AffectedRows(0)),
+            RegionRequest::Create(create) => {
+                self.inner.create_region(region_id, create).await.map(|_| 0)
+            }
             RegionRequest::Drop(_) => todo!(),
             RegionRequest::Open(_) => todo!(),
             RegionRequest::Close(_) => todo!(),
-            RegionRequest::Alter(alter) => self
-                .inner
-                .alter_region(region_id, alter)
-                .await
-                .map(|_| Output::AffectedRows(0)),
+            RegionRequest::Alter(alter) => {
+                self.inner.alter_region(region_id, alter).await.map(|_| 0)
+            }
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),

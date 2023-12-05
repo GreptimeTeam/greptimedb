@@ -137,7 +137,7 @@ impl DataRegion {
         &self,
         region_id: RegionId,
         request: RegionPutRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         let region_id = utils::to_data_region_id(region_id);
         self.mito
             .handle_execution(region_id, RegionRequest::Put(request))

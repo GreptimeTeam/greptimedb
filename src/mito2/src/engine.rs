@@ -147,7 +147,7 @@ impl EngineInner {
     }
 
     /// Handles [RegionRequest] and return its executed result.
-    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
+    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<usize> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&[request.type_name()])
             .start_timer();
