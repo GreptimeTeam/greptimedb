@@ -15,3 +15,12 @@ create database monitor;
 create database if not exists monitor;
 
 show databases;
+
+use monitor;
+
+create table cpus(
+    id int,
+    ts timestamp time index,
+);
+
+show tables;

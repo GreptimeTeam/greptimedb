@@ -45,3 +45,22 @@ show databases;
 | public             |
 +--------------------+
 
+use monitor;
+
+Affected Rows: 0
+
+create table cpus(
+    id int,
+    ts timestamp time index,
+);
+
+Affected Rows: 0
+
+show tables;
+
++--------+
+| Tables |
++--------+
+| cpus   |
++--------+
+
