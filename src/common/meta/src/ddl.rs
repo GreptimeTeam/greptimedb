@@ -27,6 +27,7 @@ use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
 
 pub mod alter_table;
+pub mod create_database;
 pub mod create_table;
 pub mod drop_table;
 pub mod truncate_table;

@@ -12,15 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::result;
 
 use api::v1::meta::submit_ddl_task_request::Task;
 use api::v1::meta::{
-    AlterTableTask as PbAlterTableTask, CreateTableTask as PbCreateTableTask,
-    DropTableTask as PbDropTableTask, Partition, SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
+    AlterTableTask as PbAlterTableTask, CreateDatabaseTask as PbCreateDatabaseTask,
+    CreateTableTask as PbCreateTableTask, DropTableTask as PbDropTableTask, Partition,
+    SubmitDdlTaskRequest as PbSubmitDdlTaskRequest,
     SubmitDdlTaskResponse as PbSubmitDdlTaskResponse, TruncateTableTask as PbTruncateTableTask,
 };
-use api::v1::{AlterExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
+use api::v1::{AlterExpr, CreateDatabaseExpr, CreateTableExpr, DropTableExpr, TruncateTableExpr};
 use base64::engine::general_purpose;
 use base64::Engine as _;
 use prost::Message;
@@ -32,12 +34,15 @@ use table::metadata::{RawTableInfo, TableId};
 use crate::error::{self, Result};
 use crate::table_name::TableName;
 
+const OPT_KEY_CATALOG: &str = "catalog";
+
 #[derive(Debug)]
 pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
+    CreateDatabase(CreateDatabaseTask),
 }
 
 impl DdlTask {
@@ -82,6 +87,18 @@ impl DdlTask {
             table_id,
         })
     }
+
+    pub fn new_create_database(
+        catalog: String,
+        database_name: String,
+        create_if_not_exists: bool,
+    ) -> Self {
+        DdlTask::CreateDatabase(CreateDatabaseTask {
+            catalog,
+            database_name,
+            create_if_not_exists,
+        })
+    }
 }
 
 impl TryFrom<Task> for DdlTask {
@@ -95,6 +112,9 @@ impl TryFrom<Task> for DdlTask {
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
             Task::TruncateTableTask(truncate_table) => {
                 Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
+            }
+            Task::CreateDatabaseTask(create_database) => {
+                Ok(DdlTask::CreateDatabase(create_database.try_into()?))
             }
         }
     }
@@ -134,6 +154,17 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     table_id: Some(api::v1::TableId { id: task.table_id }),
                 }),
             }),
+            DdlTask::CreateDatabase(task) => {
+                let mut options = HashMap::new();
+                options.insert(OPT_KEY_CATALOG.to_string(), task.catalog);
+                Task::CreateDatabaseTask(PbCreateDatabaseTask {
+                    create_database: Some(CreateDatabaseExpr {
+                        database_name: task.database_name,
+                        create_if_not_exists: task.create_if_not_exists,
+                        options,
+                    }),
+                })
+            }
         };
 
         Ok(Self {
@@ -433,6 +464,36 @@ impl TryFrom<PbTruncateTableTask> for TruncateTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateDatabaseTask {
+    pub catalog: String,
+    pub database_name: String,
+    pub create_if_not_exists: bool,
+}
+
+impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbCreateDatabaseTask) -> Result<Self> {
+        let create_database = pb.create_database.context(error::InvalidProtoMsgSnafu {
+            err_msg: "expected create database",
+        })?;
+        // get catalog name
+        let catalog =
+            create_database
+                .options
+                .get(OPT_KEY_CATALOG)
+                .context(error::CatalogNotFoundSnafu {
+                    catalog_name: OPT_KEY_CATALOG.to_string(),
+                })?;
+        Ok(Self {
+            catalog: catalog.to_string(),
+            database_name: create_database.database_name,
+            create_if_not_exists: create_database.create_if_not_exists,
         })
     }
 }

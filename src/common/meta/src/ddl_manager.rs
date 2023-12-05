@@ -22,6 +22,7 @@ use snafu::{OptionExt, ResultExt};
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
+use crate::ddl::create_database::CreateDatabaseProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
@@ -37,10 +38,10 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
-use crate::rpc::ddl::DdlTask::{AlterTable, CreateTable, DropTable, TruncateTable};
+use crate::rpc::ddl::DdlTask::{AlterTable, CreateDatabase, CreateTable, DropTable, TruncateTable};
 use crate::rpc::ddl::{
-    AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
-    TruncateTableTask,
+    AlterTableTask, CreateDatabaseTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse, TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
 pub type DdlManagerRef = Arc<DdlManager>;
@@ -183,6 +184,26 @@ impl DdlManager {
     }
 
     #[tracing::instrument(skip_all)]
+    /// Submits and executes a create database task.
+    pub async fn submit_create_database_task(
+        &self,
+        cluster_id: u64,
+        create_database_task: CreateDatabaseTask,
+    ) -> Result<ProcedureId> {
+        info!(
+            "{cluster_id}: submit create database task: {:?}",
+            create_database_task
+        );
+        let context = self.create_context();
+
+        let procedure = CreateDatabaseProcedure::new(cluster_id, create_database_task, context);
+
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.submit_procedure(procedure_with_id).await
+    }
+
+    #[tracing::instrument(skip_all)]
     /// Submits and executes a drop table task.
     pub async fn submit_drop_table_task(
         &self,
@@ -278,6 +299,24 @@ async fn handle_truncate_table_task(
         .await?;
 
     info!("Table: {table_id} is truncated via procedure_id {id:?}");
+
+    Ok(SubmitDdlTaskResponse {
+        key: id.to_string().into(),
+        ..Default::default()
+    })
+}
+
+/// create database task and submit it.
+async fn handle_create_database_task(
+    ddl_manager: &DdlManager,
+    cluster_id: u64,
+    create_database_task: CreateDatabaseTask,
+) -> Result<SubmitDdlTaskResponse> {
+    let id = ddl_manager
+        .submit_create_database_task(cluster_id, create_database_task)
+        .await?;
+
+    info!("Database is created via procedure_id {id:?}");
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -418,6 +457,9 @@ impl DdlTaskExecutor for DdlManager {
                 }
                 TruncateTable(truncate_table_task) => {
                     handle_truncate_table_task(self, cluster_id, truncate_table_task).await
+                }
+                CreateDatabase(create_database_task) => {
+                    handle_create_database_task(self, cluster_id, create_database_task).await
                 }
             }
         }

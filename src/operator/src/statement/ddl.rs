@@ -72,6 +72,34 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn create_database(
+        &self,
+        catalog: &str,
+        database: &str,
+        create_if_not_exists: bool,
+    ) -> Result<Output> {
+        ensure!(
+            NAME_PATTERN_REG.is_match(catalog),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid catalog name: {}", catalog)
+            }
+        );
+
+        ensure!(
+            NAME_PATTERN_REG.is_match(database),
+            error::UnexpectedSnafu {
+                violated: format!("Invalid database name: {}", database)
+            }
+        );
+        self.create_database_procedure(catalog, database, create_if_not_exists)
+            .await?;
+
+        info!("Successfully created database '{database}' in catalog '{catalog}'");
+
+        Ok(Output::AffectedRows(1))
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn create_external_table(
         &self,
         create_expr: CreateExternalTable,
@@ -389,51 +417,24 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)
     }
 
-    #[tracing::instrument(skip_all)]
-    pub async fn create_database(
+    async fn create_database_procedure(
         &self,
         catalog: &str,
         database: &str,
         create_if_not_exists: bool,
-    ) -> Result<Output> {
-        ensure!(
-            NAME_PATTERN_REG.is_match(catalog),
-            error::UnexpectedSnafu {
-                violated: format!("Invalid catalog name: {}", catalog)
-            }
-        );
+    ) -> Result<SubmitDdlTaskResponse> {
+        let request = SubmitDdlTaskRequest {
+            task: DdlTask::new_create_database(
+                catalog.to_string(),
+                database.to_string(),
+                create_if_not_exists,
+            ),
+        };
 
-        ensure!(
-            NAME_PATTERN_REG.is_match(database),
-            error::UnexpectedSnafu {
-                violated: format!("Invalid database name: {}", database)
-            }
-        );
-
-        // TODO(weny): considers executing it in the procedures.
-        let schema_key = SchemaNameKey::new(catalog, database);
-        let exists = self
-            .table_metadata_manager
-            .schema_manager()
-            .exists(schema_key)
+        self.ddl_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
             .await
-            .context(TableMetadataManagerSnafu)?;
-
-        if exists {
-            return if create_if_not_exists {
-                Ok(Output::AffectedRows(1))
-            } else {
-                error::SchemaExistsSnafu { name: database }.fail()
-            };
-        }
-
-        self.table_metadata_manager
-            .schema_manager()
-            .create(schema_key, None, false)
-            .await
-            .context(TableMetadataManagerSnafu)?;
-
-        Ok(Output::AffectedRows(1))
+            .context(error::ExecuteDdlSnafu)
     }
 }
 

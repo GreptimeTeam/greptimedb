@@ -50,4 +50,10 @@ lazy_static! {
         &["step"]
     )
     .unwrap();
+    pub static ref METRIC_META_PROCEDURE_CREATE_DATABASE: HistogramVec = register_histogram_vec!(
+        "meta_procedure_create_database",
+        "meta procedure create database",
+        &["step"]
+    )
+    .unwrap();
 }

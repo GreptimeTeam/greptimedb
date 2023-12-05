@@ -18,6 +18,30 @@ show databases;
 | illegal-database   |
 | information_schema |
 | public             |
-| test_public_schema |
++--------------------+
+
+create database monitor;
+
+Affected Rows: 1
+
+-- error: database already exists
+create database monitor;
+
+Error: 4008(DatabaseAlreadyExists), Database monitor already exists, 
+
+-- nothing happens
+create database if not exists monitor;
+
+Affected Rows: 1
+
+show databases;
+
++--------------------+
+| Schemas            |
++--------------------+
+| illegal-database   |
+| information_schema |
+| monitor            |
+| public             |
 +--------------------+
 

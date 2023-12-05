@@ -59,6 +59,7 @@ pub enum StatusCode {
     RegionNotFound = 4005,
     RegionAlreadyExists = 4006,
     RegionReadonly = 4007,
+    DatabaseAlreadyExists = 4008,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -122,6 +123,7 @@ impl StatusCode {
             | StatusCode::TableColumnNotFound
             | StatusCode::TableColumnExists
             | StatusCode::DatabaseNotFound
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::RateLimited
             | StatusCode::UserNotFound
             | StatusCode::UnsupportedPasswordType
@@ -150,6 +152,7 @@ impl StatusCode {
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
+            | StatusCode::DatabaseAlreadyExists
             | StatusCode::TableNotFound
             | StatusCode::RegionNotFound
             | StatusCode::RegionAlreadyExists
@@ -181,6 +184,9 @@ impl StatusCode {
             v if v == StatusCode::PlanQuery as u32 => Some(StatusCode::PlanQuery),
             v if v == StatusCode::EngineExecuteQuery as u32 => Some(StatusCode::EngineExecuteQuery),
             v if v == StatusCode::TableAlreadyExists as u32 => Some(StatusCode::TableAlreadyExists),
+            v if v == StatusCode::DatabaseAlreadyExists as u32 => {
+                Some(StatusCode::DatabaseAlreadyExists)
+            }
             v if v == StatusCode::TableNotFound as u32 => Some(StatusCode::TableNotFound),
             v if v == StatusCode::RegionNotFound as u32 => Some(StatusCode::RegionNotFound),
             v if v == StatusCode::RegionAlreadyExists as u32 => {
@@ -232,6 +238,7 @@ mod tests {
     fn test_display_status_code() {
         assert_status_code_display(StatusCode::Unknown, "Unknown");
         assert_status_code_display(StatusCode::TableAlreadyExists, "TableAlreadyExists");
+        assert_status_code_display(StatusCode::DatabaseAlreadyExists, "DatabaseAlreadyExists")
     }
 
     #[test]

@@ -266,6 +266,18 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display("Failed to get catalog by name: {}", catalog_name))]
+    CatalogNotFound {
+        catalog_name: String,
+        location: Location,
+    },
+
+    #[snafu(display("Database {} already exists, ", database))]
+    DatabaseAlreadyExists {
+        database: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -289,6 +301,7 @@ impl ErrorExt for Error {
             | TableInfoNotFound { .. }
             | NextSequence { .. }
             | SequenceOutOfRange { .. }
+            | CatalogNotFound { .. }
             | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. }
             | InvalidTxnResult { .. } => StatusCode::Unexpected,
@@ -305,6 +318,8 @@ impl ErrorExt for Error {
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+
+            DatabaseAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
             EncodeJson { .. }
             | DecodeJson { .. }
