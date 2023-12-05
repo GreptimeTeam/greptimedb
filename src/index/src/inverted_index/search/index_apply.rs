@@ -49,8 +49,8 @@ pub enum IndexNotFoundStrategy {
     #[default]
     ReturnEmpty,
 
-    /// Return the full range of indices.
-    ReturnFullRange,
+    /// Ignore the index and continue.
+    Ignore,
 
     /// Throw an error.
     ThrowError,

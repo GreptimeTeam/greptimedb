@@ -60,7 +60,7 @@ impl IndexApplier for PredicatesIndexApplier {
                     IndexNotFoundStrategy::ReturnEmpty => {
                         return Ok(vec![]);
                     }
-                    IndexNotFoundStrategy::ReturnFullRange => {
+                    IndexNotFoundStrategy::Ignore => {
                         continue;
                     }
                     IndexNotFoundStrategy::ThrowError => {
@@ -335,7 +335,7 @@ mod tests {
         let indices = applier
             .apply(
                 SearchContext {
-                    index_not_found_strategy: IndexNotFoundStrategy::ReturnFullRange,
+                    index_not_found_strategy: IndexNotFoundStrategy::Ignore,
                 },
                 &mut mock_reader,
             )
