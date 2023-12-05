@@ -146,7 +146,7 @@ impl EngineInner {
     }
 
     /// Handles [RegionRequest] and return its executed result.
-    async fn handle_execution(&self, region_id: RegionId, request: RegionRequest) -> Result<usize> {
+    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<usize> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&[request.type_name()])
             .start_timer();
@@ -215,13 +215,13 @@ impl RegionEngine for MitoEngine {
         MITO_ENGINE_NAME
     }
 
-    async fn handle_execution(
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<usize, BoxedError> {
         self.inner
-            .handle_execution(region_id, request)
+            .handle_request(region_id, request)
             .await
             .map_err(BoxedError::new)
     }

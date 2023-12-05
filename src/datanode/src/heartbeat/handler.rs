@@ -62,7 +62,7 @@ impl RegionHeartbeatResponseHandler {
                         region_dir: region_dir(&region_storage_path, region_id),
                         options,
                     });
-                    let result = region_server.handle_execution(region_id, request).await;
+                    let result = region_server.handle_request(region_id, request).await;
 
                     let success = result.is_ok();
                     let error = result.as_ref().map_err(|e| e.to_string()).err();
@@ -77,7 +77,7 @@ impl RegionHeartbeatResponseHandler {
                 Box::pin(async move {
                     let region_id = Self::region_ident_to_region_id(&region_ident);
                     let request = RegionRequest::Close(RegionCloseRequest {});
-                    let result = region_server.handle_execution(region_id, request).await;
+                    let result = region_server.handle_request(region_id, request).await;
 
                     match result {
                         Ok(_) => InstructionReply::CloseRegion(SimpleReply {
@@ -257,7 +257,7 @@ mod tests {
         let builder = CreateRequestBuilder::new();
         let create_req = builder.build();
         region_server
-            .handle_execution(region_id, RegionRequest::Create(create_req))
+            .handle_request(region_id, RegionRequest::Create(create_req))
             .await
             .unwrap();
 
@@ -306,12 +306,12 @@ mod tests {
         create_req.region_dir = region_dir(storage_path, region_id);
 
         region_server
-            .handle_execution(region_id, RegionRequest::Create(create_req))
+            .handle_request(region_id, RegionRequest::Create(create_req))
             .await
             .unwrap();
 
         region_server
-            .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
             .await
             .unwrap();
         let mut heartbeat_env = HeartbeatResponseTestEnv::new();
@@ -386,7 +386,7 @@ mod tests {
         create_req.region_dir = region_dir(storage_path, region_id);
 
         region_server
-            .handle_execution(region_id, RegionRequest::Create(create_req))
+            .handle_request(region_id, RegionRequest::Create(create_req))
             .await
             .unwrap();
 

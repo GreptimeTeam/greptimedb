@@ -37,7 +37,7 @@ async fn check_prune_row_groups(expr: DfExpr, expected: &str) {
     let column_schemas = rows_schema(&request);
 
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -163,7 +163,7 @@ async fn test_prune_memtable() {
     let column_schemas = rows_schema(&request);
 
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -225,7 +225,7 @@ async fn test_prune_memtable_complex_expr() {
     let column_schemas = rows_schema(&request);
 
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
     // 0 ~ 10 in memtable

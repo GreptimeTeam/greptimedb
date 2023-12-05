@@ -427,7 +427,7 @@ impl CountdownTask {
             let request = RegionRequest::Close(RegionCloseRequest {});
             match self
                 .region_server
-                .handle_execution(self.region_id, request)
+                .handle_request(self.region_id, request)
                 .await
             {
                 Ok(_) => return true,

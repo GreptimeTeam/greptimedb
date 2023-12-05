@@ -74,7 +74,7 @@ impl MetricEngineInner {
         let create_metadata_region_request =
             self.create_request_for_metadata_region(&request.region_dir);
         self.mito
-            .handle_execution(
+            .handle_request(
                 metadata_region_id,
                 RegionRequest::Create(create_metadata_region_request),
             )
@@ -91,7 +91,7 @@ impl MetricEngineInner {
             .map(|metadata| metadata.column_schema.name.clone())
             .collect::<HashSet<_>>();
         self.mito
-            .handle_execution(
+            .handle_request(
                 data_region_id,
                 RegionRequest::Create(create_data_region_request),
             )

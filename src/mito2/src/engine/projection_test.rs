@@ -62,7 +62,7 @@ async fn test_scan_projection() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 

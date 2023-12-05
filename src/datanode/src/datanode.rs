@@ -365,7 +365,7 @@ impl DatanodeBuilder {
             tasks.push(async move {
                 let _permit = semaphore_moved.acquire().await;
                 region_server
-                    .handle_execution(
+                    .handle_request(
                         region_id,
                         RegionRequest::Open(RegionOpenRequest {
                             engine: engine.clone(),

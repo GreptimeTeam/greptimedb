@@ -40,7 +40,7 @@ async fn test_engine_new_stop() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -50,7 +50,7 @@ async fn test_engine_new_stop() {
 
     let request = CreateRequestBuilder::new().build();
     let err = engine
-        .handle_execution(RegionId::new(1, 2), RegionRequest::Create(request))
+        .handle_request(RegionId::new(1, 2), RegionRequest::Create(request))
         .await
         .unwrap_err();
     assert!(
@@ -69,7 +69,7 @@ async fn test_write_to_region() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -92,7 +92,7 @@ async fn test_region_replay() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -111,7 +111,7 @@ async fn test_region_replay() {
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
     let rows = engine
-        .handle_execution(
+        .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -151,7 +151,7 @@ async fn test_write_query_region() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -186,7 +186,7 @@ async fn test_different_order() {
     // tag_0, tag_1, field_0, field_1, ts,
     let mut column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -249,7 +249,7 @@ async fn test_different_order_and_type() {
 
     let mut column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -309,7 +309,7 @@ async fn test_put_delete() {
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -362,7 +362,7 @@ async fn test_delete_not_null_fields() {
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -409,7 +409,7 @@ async fn test_put_overwrite() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -470,7 +470,7 @@ async fn test_absent_and_invalid_columns() {
 
     let mut column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -498,7 +498,7 @@ async fn test_absent_and_invalid_columns() {
         rows,
     };
     let err = engine
-        .handle_execution(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
         .await
         .unwrap_err();
     assert_eq!(StatusCode::InvalidArguments, err.status_code());
@@ -515,7 +515,7 @@ async fn test_region_usage() {
     let column_schemas = rows_schema(&request);
     let delete_schema = delete_rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
     // region is empty now, check manifest size

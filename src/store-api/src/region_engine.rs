@@ -113,8 +113,8 @@ pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
-    /// Handles non-query execution to the region. Returns the count of affected rows.
-    async fn handle_execution(
+    /// Handles non-query request to the region. Returns the count of affected rows.
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,

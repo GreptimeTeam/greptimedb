@@ -105,7 +105,7 @@ impl RegionEngine for MockRegionEngine {
         "mock"
     }
 
-    async fn handle_execution(
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,

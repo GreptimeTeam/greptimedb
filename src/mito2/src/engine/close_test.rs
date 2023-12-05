@@ -27,26 +27,26 @@ async fn test_engine_close_region() {
     let region_id = RegionId::new(1, 1);
     // It's okay to close a region doesn't exist.
     engine
-        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
 
     let request = CreateRequestBuilder::new().build();
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
     // Close the created region.
     engine
-        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
     assert!(!engine.is_region_exists(region_id));
 
     // It's okay to close this region again.
     engine
-        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
 }

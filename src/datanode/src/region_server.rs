@@ -108,12 +108,12 @@ impl RegionServer {
         self.inner.register_engine(engine);
     }
 
-    pub async fn handle_execution(
+    pub async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<usize> {
-        self.inner.handle_execution(region_id, request).await
+        self.inner.handle_request(region_id, request).await
     }
 
     #[tracing::instrument(skip_all)]
@@ -194,7 +194,7 @@ impl RegionServerHandler for RegionServer {
             ));
             async move {
                 self_to_move
-                    .handle_execution(region_id, req)
+                    .handle_request(region_id, req)
                     .trace(span)
                     .await
             }
@@ -284,7 +284,7 @@ impl RegionServerInner {
             .insert(engine_name.to_string(), engine);
     }
 
-    pub async fn handle_execution(
+    pub async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
@@ -323,7 +323,7 @@ impl RegionServerInner {
         let engine_type = engine.name();
 
         let result = engine
-            .handle_execution(region_id, request)
+            .handle_request(region_id, request)
             .trace(info_span!(
                 "RegionEngine::handle_region_request",
                 engine_type
@@ -403,7 +403,7 @@ impl RegionServerInner {
             let region_id = *region.key();
             let engine = region.value();
             let closed = engine
-                .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
                 .await;
             match closed {
                 Ok(_) => info!("Region {region_id} is closed"),

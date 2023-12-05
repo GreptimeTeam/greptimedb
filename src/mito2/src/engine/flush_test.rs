@@ -39,7 +39,7 @@ async fn test_manual_flush() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -86,7 +86,7 @@ async fn test_flush_engine() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -145,7 +145,7 @@ async fn test_write_stall() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -208,7 +208,7 @@ async fn test_flush_empty() {
     let request = CreateRequestBuilder::new().build();
 
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -237,7 +237,7 @@ async fn test_flush_reopen_region() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 

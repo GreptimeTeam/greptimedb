@@ -112,7 +112,7 @@ impl TestEnv {
 
         // create physical region
         self.metric()
-            .handle_execution(region_id, RegionRequest::Create(region_create_request))
+            .handle_request(region_id, RegionRequest::Create(region_create_request))
             .await
             .unwrap();
 
@@ -124,7 +124,7 @@ impl TestEnv {
             "test_metric_logical_region",
         );
         self.metric()
-            .handle_execution(region_id, RegionRequest::Create(region_create_request))
+            .handle_request(region_id, RegionRequest::Create(region_create_request))
             .await
             .unwrap();
     }

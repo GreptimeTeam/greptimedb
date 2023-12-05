@@ -43,7 +43,7 @@ async fn put_and_flush(
     put_rows(engine, region_id, rows).await;
 
     let rows = engine
-        .handle_execution(
+        .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
                 row_group_size: None,
@@ -67,7 +67,7 @@ async fn delete_and_flush(
     };
 
     let rows_affected = engine
-        .handle_execution(
+        .handle_request(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
@@ -76,7 +76,7 @@ async fn delete_and_flush(
     assert_eq!(row_cnt, rows_affected);
 
     let rows = engine
-        .handle_execution(
+        .handle_request(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
                 row_group_size: None,
@@ -117,7 +117,7 @@ async fn test_compaction_region() {
         .map(column_metadata_to_column_schema)
         .collect::<Vec<_>>();
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
     // Flush 5 SSTs for compaction.
@@ -128,7 +128,7 @@ async fn test_compaction_region() {
     put_and_flush(&engine, region_id, &column_schemas, 15..25).await;
 
     let output = engine
-        .handle_execution(region_id, RegionRequest::Compact(RegionCompactRequest {}))
+        .handle_request(region_id, RegionRequest::Compact(RegionCompactRequest {}))
         .await
         .unwrap();
     assert_eq!(output, 0);

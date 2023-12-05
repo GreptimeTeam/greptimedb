@@ -108,8 +108,8 @@ impl RegionEngine for MetricEngine {
         METRIC_ENGINE_NAME
     }
 
-    /// Handles non-query execution to the region. Returns the count of affected rows.
-    async fn handle_execution(
+    /// Handles non-query request to the region. Returns the count of affected rows.
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,

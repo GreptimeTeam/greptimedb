@@ -54,13 +54,13 @@ impl RegionEngine for FileRegionEngine {
         FILE_ENGINE
     }
 
-    async fn handle_execution(
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<usize, BoxedError> {
         self.inner
-            .handle_execution(region_id, request)
+            .handle_request(region_id, request)
             .await
             .map_err(BoxedError::new)
     }
@@ -144,7 +144,7 @@ impl EngineInner {
         }
     }
 
-    async fn handle_execution(
+    async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,

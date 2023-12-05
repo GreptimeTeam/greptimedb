@@ -42,14 +42,14 @@ async fn test_engine_drop_region() {
     let region_id = RegionId::new(1, 1);
     // It's okay to drop a region doesn't exist.
     engine
-        .handle_execution(region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
         .await
         .unwrap_err();
 
     let request = CreateRequestBuilder::new().build();
     let column_schemas = rows_schema(&request);
     engine
-        .handle_execution(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -72,7 +72,7 @@ async fn test_engine_drop_region() {
 
     // drop the created region.
     engine
-        .handle_execution(region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(region_id, RegionRequest::Drop(RegionDropRequest {}))
         .await
         .unwrap();
     assert!(!engine.is_region_exists(region_id));
@@ -94,7 +94,7 @@ async fn test_engine_drop_region_for_custom_store() {
             .build();
         let column_schema = rows_schema(&request);
         engine
-            .handle_execution(region_id, RegionRequest::Create(request))
+            .handle_request(region_id, RegionRequest::Create(request))
             .await
             .unwrap();
         let rows = Rows {
@@ -143,7 +143,7 @@ async fn test_engine_drop_region_for_custom_store() {
 
     // Drop the custom region.
     engine
-        .handle_execution(custom_region_id, RegionRequest::Drop(RegionDropRequest {}))
+        .handle_request(custom_region_id, RegionRequest::Drop(RegionDropRequest {}))
         .await
         .unwrap();
     assert!(!engine.is_region_exists(custom_region_id));
