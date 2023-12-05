@@ -111,11 +111,10 @@ impl WorkerGroup {
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start<S: LogStore>(
-        config: MitoConfig,
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> WorkerGroup {
-        let config = Arc::new(config);
         let write_buffer_manager = Arc::new(WriteBufferManagerImpl::new(
             config.global_write_buffer_size.as_bytes() as usize,
         ));
@@ -205,13 +204,12 @@ impl WorkerGroup {
     ///
     /// The number of workers should be power of two.
     pub(crate) fn start_for_test<S: LogStore>(
-        config: MitoConfig,
+        config: Arc<MitoConfig>,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
         write_buffer_manager: Option<WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerGroup {
-        let config = Arc::new(config);
         let write_buffer_manager = write_buffer_manager.unwrap_or_else(|| {
             Arc::new(WriteBufferManagerImpl::new(
                 config.global_write_buffer_size.as_bytes() as usize,

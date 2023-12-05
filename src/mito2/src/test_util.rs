@@ -215,7 +215,11 @@ impl TestEnv {
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), Arc::new(object_store_manager))
+        WorkerGroup::start(
+            Arc::new(config),
+            Arc::new(log_store),
+            Arc::new(object_store_manager),
+        )
     }
 
     async fn create_log_and_object_store_manager(

@@ -118,8 +118,8 @@ impl MitoEngine {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
-    /// Parallelism to scan data.
-    scan_parallelism: ScanParallism,
+    /// Config of the engine.
+    config: Arc<MitoConfig>,
 }
 
 impl EngineInner {
@@ -129,13 +129,10 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
-        let scan_parallelism = ScanParallism {
-            parallelism: config.scan_parallelism,
-            channel_size: config.parallel_scan_channel_size,
-        };
+        let config = Arc::new(config);
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store_manager),
-            scan_parallelism,
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager),
+            config,
         }
     }
 
@@ -178,13 +175,18 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
+        let scan_parallelism = ScanParallism {
+            parallelism: self.config.scan_parallelism,
+            channel_size: self.config.parallel_scan_channel_size,
+        };
+
         let scan_region = ScanRegion::new(
             version,
             region.access_layer.clone(),
             request,
             Some(cache_manager),
         )
-        .parallelism(self.scan_parallelism);
+        .parallelism(scan_parallelism);
 
         scan_region.scanner()
     }
@@ -310,21 +312,18 @@ impl MitoEngine {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> MitoEngine {
         config.sanitize();
-        let scan_parallelism = ScanParallism {
-            parallelism: config.scan_parallelism,
-            channel_size: config.parallel_scan_channel_size,
-        };
 
+        let config = Arc::new(config);
         MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
-                    config,
+                    config.clone(),
                     log_store,
                     object_store_manager,
                     write_buffer_manager,
                     listener,
                 ),
-                scan_parallelism,
+                config,
             }),
         }
     }
