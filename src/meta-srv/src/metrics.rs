@@ -39,18 +39,6 @@ lazy_static! {
     pub static ref METRIC_META_LEADER_CACHED_KV_LOAD_ELAPSED: HistogramVec =
         register_histogram_vec!("meta_leader_cache_kv_load", "meta load cache", &["prefix"])
             .unwrap();
-    /// Elapsed time to load follower region metadata.
-    pub static ref METRIC_META_LOAD_FOLLOWER_METADATA_ELAPSED: Histogram = register_histogram!(
-        "meta_load_follower_metadata_elapsed",
-        "meta load follower regions metadata elapsed"
-    )
-    .unwrap();
-    /// Elapsed time to load leader region metadata.
-    pub static ref METRIC_META_LOAD_LEADER_METADATA_ELAPSED: Histogram = register_histogram!(
-        "meta_load_leader_metadata_elapsed",
-        "meta load leader regions metadata elapsed"
-    )
-    .unwrap();
     /// Meta kv cache hit counter.
     pub static ref METRIC_META_KV_CACHE_HIT: IntCounterVec =
         register_int_counter_vec!("meta_kv_cache_hit", "meta kv cache hit", &["op"]).unwrap();

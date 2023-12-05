@@ -18,6 +18,7 @@ use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, Table as PbTable,
     TableRoute as PbTableRoute,
 };
+use derive_builder::Builder;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
@@ -231,12 +232,15 @@ impl From<Table> for PbTable {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Builder)]
 pub struct RegionRoute {
     pub region: Region,
+    #[builder(setter(into, strip_option))]
     pub leader_peer: Option<Peer>,
+    #[builder(setter(into, strip_option), default)]
     pub follower_peers: Vec<Peer>,
     /// `None` by default.
+    #[builder(setter(into, strip_option), default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_status: Option<RegionStatus>,
 }
