@@ -13,6 +13,8 @@
 // limitations under the License.
 
 mod lru_cache;
+mod prometheus;
 
 pub use lru_cache::*;
 pub use opendal::layers::*;
+pub use prometheus::PrometheusMetricsLayer;
