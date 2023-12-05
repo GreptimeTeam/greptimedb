@@ -270,7 +270,8 @@ impl GreptimeDbClusterBuilder {
             Arc::new(handlers_executor),
         );
 
-        let instance = FrontendBuilder::new(meta_backend, datanode_clients, meta_client)
+        let instance = FrontendBuilder::new(meta_backend.clone(), datanode_clients, meta_client)
+            .with_cache_invalidator(meta_backend)
             .with_heartbeat_task(heartbeat_task)
             .try_build()
             .await
