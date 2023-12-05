@@ -1017,7 +1017,8 @@ impl PromPlanner {
             }
             "predict_linear" => {
                 let t_expr = match other_input_exprs.pop_front() {
-                    Some(DfExpr::Literal(ScalarValue::Time64Microsecond(Some(t)))) => t,
+                    Some(DfExpr::Literal(ScalarValue::Float64(Some(t)))) => t as i64,
+                    Some(DfExpr::Literal(ScalarValue::Int64(Some(t)))) => t,
                     other => UnexpectedPlanExprSnafu {
                         desc: format!("expect i64 literal as t, but found {:?}", other),
                     }
