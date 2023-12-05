@@ -383,13 +383,23 @@ pub fn sql_column_def_to_grpc_column_def(col: &ColumnDef) -> Result<api::v1::Col
         .context(ConvertToGrpcDataTypeSnafu)?
         .to_parts();
 
+    let is_primary_key = col
+        .options
+        .iter()
+        .any(|o| matches!(o.option, ColumnOption::Unique { is_primary: true }));
+
+    let semantic_type = if is_primary_key {
+        SemanticType::Tag
+    } else {
+        SemanticType::Field
+    };
+
     Ok(api::v1::ColumnDef {
         name,
         data_type: datatype as i32,
         is_nullable,
         default_constraint: default_constraint.unwrap_or_default(),
-        // TODO(#1308): support adding new primary key columns
-        semantic_type: SemanticType::Field as _,
+        semantic_type: semantic_type as _,
         comment: String::new(),
         datatype_extension: datatype_ext,
     })
@@ -826,6 +836,7 @@ mod tests {
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(ColumnDataType::Float64 as i32, grpc_column_def.data_type);
         assert!(grpc_column_def.default_constraint.is_empty());
+        assert_eq!(grpc_column_def.semantic_type, SemanticType::Field as i32);
 
         // test not null
         let column_def = ColumnDef {
@@ -840,6 +851,20 @@ mod tests {
 
         let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
         assert!(!grpc_column_def.is_nullable);
+
+        // test primary key
+        let column_def = ColumnDef {
+            name: "col".into(),
+            data_type: SqlDataType::Double,
+            collation: None,
+            options: vec![ColumnOptionDef {
+                name: None,
+                option: ColumnOption::Unique { is_primary: true },
+            }],
+        };
+
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def).unwrap();
+        assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
     #[test]
