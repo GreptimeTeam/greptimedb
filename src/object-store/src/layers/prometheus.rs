@@ -68,6 +68,24 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
     );
 }
 
+/// Please refer to [prometheus](https://docs.rs/prometheus) for every operations.
+///
+/// # Prometheus Metrics
+///
+/// In this section, we will introduce three metrics that are currently being exported by opendal. These metrics are essential for understanding the behavior and performance of opendal.
+///
+///
+/// | Metric Name             | Type     | Description                                       | Labels              |
+/// |-------------------------|----------|---------------------------------------------------|---------------------|
+/// | opendal_requests_total          | Counter  | Total times of 'create' operation being called   | scheme, operation   |
+/// | opendal_requests_duration_seconds | Histogram | Histogram of the time spent on specific operation | scheme, operation   |
+/// | opendal_bytes_total             | Histogram | Total size                                        | scheme, operation   |
+///
+/// For a more detailed explanation of these metrics and how they are used, please refer to the [Prometheus documentation](https://prometheus.io/docs/introduction/overview/).
+///
+/// # Histogram Configuration
+///
+/// The metric buckets for these histograms are automatically generated based on the `exponential_buckets(0.01, 2.0, 16)` configuration.
 #[derive(Default, Debug, Clone)]
 pub struct PrometheusMetricsLayer;
 
