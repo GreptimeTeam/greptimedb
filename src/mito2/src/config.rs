@@ -32,7 +32,7 @@ const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 #[serde(default)]
 pub struct MitoConfig {
     // Worker configs:
-    /// Number of region workers (default 1).
+    /// Number of region workers (default: 1/2 of cpu cores).
     pub num_workers: usize,
     /// Request channel size of each worker (default 128).
     pub worker_channel_size: usize,
@@ -70,16 +70,18 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
-    /// Parallelism to scan a region (default 0).
+    /// Parallelism to scan a region (default: 1/4 of cpu cores).
+    ///
+    /// 0 or 1 means no parallelism.
     pub scan_parallelism: usize,
-    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 64).
+    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
 }
 
 impl Default for MitoConfig {
     fn default() -> Self {
         MitoConfig {
-            num_workers: num_cpus::get() / 2,
+            num_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
@@ -92,7 +94,7 @@ impl Default for MitoConfig {
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
-            scan_parallelism: 0,
+            scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
         }
     }
@@ -104,7 +106,7 @@ impl MitoConfig {
         // Sanitize worker num.
         let num_workers_before = self.num_workers;
         if self.num_workers == 0 {
-            self.num_workers = (num_cpus::get() / 2).max(1);
+            self.num_workers = divide_num_cpus(2);
         }
         if num_workers_before != self.num_workers {
             warn!(
@@ -148,4 +150,13 @@ impl MitoConfig {
             );
         }
     }
+}
+
+/// Divide cpu num by a non-zero `divisor` and returns at least 1.
+fn divide_num_cpus(divisor: usize) -> usize {
+    debug_assert!(divisor > 0);
+    let cores = num_cpus::get();
+    debug_assert!(cores > 0);
+
+    (cores + divisor - 1) / divisor
 }
