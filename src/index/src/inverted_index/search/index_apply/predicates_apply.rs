@@ -41,6 +41,7 @@ impl IndexApplier for PredicatesIndexApplier {
         let metadata = reader.metadata().await?;
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
+        // TODO(zhongzc): optimize the order of applying
         for (tag_name, fst_applier) in &self.fst_appliers {
             if bitmap.count_ones() == 0 {
                 break;
