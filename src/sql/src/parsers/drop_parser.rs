@@ -29,6 +29,7 @@ impl<'a> ParserContext<'a> {
         }
         let _ = self.parser.next_token();
 
+        let if_exists = self.parser.parse_keywords(&[Keyword::IF, Keyword::EXISTS]);
         let raw_table_ident =
             self.parser
                 .parse_object_name()
@@ -45,7 +46,7 @@ impl<'a> ParserContext<'a> {
             }
         );
 
-        Ok(Statement::DropTable(DropTable::new(table_ident)))
+        Ok(Statement::DropTable(DropTable::new(table_ident, if_exists)))
     }
 }
 
@@ -63,7 +64,15 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")])))
+            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")]), false))
+        );
+
+        let sql = "DROP TABLE IF EXISTS foo";
+        let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {});
+        let mut stmts = result.unwrap();
+        assert_eq!(
+            stmts.pop().unwrap(),
+            Statement::DropTable(DropTable::new(ObjectName(vec![Ident::new("foo")]), true))
         );
 
         let sql = "DROP TABLE my_schema.foo";
@@ -71,10 +80,10 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(ObjectName(vec![
-                Ident::new("my_schema"),
-                Ident::new("foo")
-            ])))
+            Statement::DropTable(DropTable::new(
+                ObjectName(vec![Ident::new("my_schema"), Ident::new("foo")]),
+                false
+            ))
         );
 
         let sql = "DROP TABLE my_catalog.my_schema.foo";
@@ -82,11 +91,14 @@ mod tests {
         let mut stmts = result.unwrap();
         assert_eq!(
             stmts.pop().unwrap(),
-            Statement::DropTable(DropTable::new(ObjectName(vec![
-                Ident::new("my_catalog"),
-                Ident::new("my_schema"),
-                Ident::new("foo")
-            ])))
+            Statement::DropTable(DropTable::new(
+                ObjectName(vec![
+                    Ident::new("my_catalog"),
+                    Ident::new("my_schema"),
+                    Ident::new("foo")
+                ]),
+                false
+            ))
         )
     }
 }

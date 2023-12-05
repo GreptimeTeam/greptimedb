@@ -151,7 +151,7 @@ impl StatementExecutor {
                         .map_err(BoxedError::new)
                         .context(error::ExternalSnafu)?;
                 let table_name = TableName::new(catalog, schema, table);
-                self.drop_table(table_name).await
+                self.drop_table(table_name, stmt.drop_if_exists()).await
             }
             Statement::TruncateTable(stmt) => {
                 let (catalog, schema, table) =
