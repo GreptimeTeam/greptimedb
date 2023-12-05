@@ -167,6 +167,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
                 .collect::<Vec<_>>(),
             duration_since_epoch: req.duration_since_epoch,
             lease_seconds: self.region_lease_seconds,
+            closeable_region_ids: vec![],
         });
 
         Ok(HandleControl::Continue)

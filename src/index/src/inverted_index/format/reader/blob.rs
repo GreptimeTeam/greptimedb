@@ -143,7 +143,11 @@ mod tests {
         };
 
         // metas
-        let mut metas = InvertedIndexMetas::default();
+        let mut metas = InvertedIndexMetas {
+            total_row_count: 10,
+            segment_row_count: 1,
+            ..Default::default()
+        };
         metas.metas.insert(meta.name.clone(), meta);
         metas.metas.insert(meta1.name.clone(), meta1);
         let mut meta_buf = Vec::new();

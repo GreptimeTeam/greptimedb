@@ -14,4 +14,5 @@
 
 pub mod fst_apply;
 pub mod fst_values_mapper;
+pub mod index_apply;
 pub mod predicate;
