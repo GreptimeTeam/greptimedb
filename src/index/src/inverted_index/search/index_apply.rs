@@ -20,6 +20,10 @@ pub use predicates_apply::PredicatesIndexApplier;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 
+/// A context for searching the inverted index.
+#[derive(Clone, Debug, Default)]
+pub struct SearchContext {}
+
 /// A trait for processing and transforming indices obtained from an inverted index.
 ///
 /// Applier instances are reusable and work with various `InvertedIndexReader` instances,
@@ -28,5 +32,9 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 pub trait IndexApplier {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
-    async fn apply(&self, reader: &mut dyn InvertedIndexReader) -> Result<Vec<usize>>;
+    async fn apply(
+        &self,
+        context: SearchContext,
+        reader: &mut dyn InvertedIndexReader,
+    ) -> Result<Vec<usize>>;
 }
