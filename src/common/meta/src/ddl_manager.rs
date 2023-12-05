@@ -144,6 +144,20 @@ impl DdlManager {
             )
             .context(RegisterProcedureLoaderSnafu {
                 type_name: TruncateTableProcedure::TYPE_NAME,
+            })?;
+
+        let context = self.create_context();
+
+        self.procedure_manager
+            .register_loader(
+                CreateDatabaseProcedure::TYPE_NAME,
+                Box::new(move |json| {
+                    let context = context.clone();
+                    CreateDatabaseProcedure::from_json(json, context).map(|p| Box::new(p) as _)
+                }),
+            )
+            .context(RegisterProcedureLoaderSnafu {
+                type_name: CreateDatabaseProcedure::TYPE_NAME,
             })
     }
 
@@ -190,10 +204,6 @@ impl DdlManager {
         cluster_id: u64,
         create_database_task: CreateDatabaseTask,
     ) -> Result<ProcedureId> {
-        info!(
-            "{cluster_id}: submit create database task: {:?}",
-            create_database_task
-        );
         let context = self.create_context();
 
         let procedure = CreateDatabaseProcedure::new(cluster_id, create_database_task, context);

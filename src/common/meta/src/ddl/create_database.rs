@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_catalog::build_db_string;
-use common_procedure::error::ToJsonSnafu;
+use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
@@ -37,7 +37,7 @@ pub struct CreateDatabaseProcedure {
 impl CreateDatabaseProcedure {
     pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::CreateDatabase";
 
-    pub fn new(cluster_id: u64, task: CreateDatabaseTask, context: DdlContext) -> Self {
+    pub(crate) fn new(cluster_id: u64, task: CreateDatabaseTask, context: DdlContext) -> Self {
         Self {
             context,
             data: CreateDatabaseData {
@@ -48,14 +48,18 @@ impl CreateDatabaseProcedure {
         }
     }
 
+    pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
+        let data = serde_json::from_str(json).context(FromJsonSnafu)?;
+        Ok(Self { context, data })
+    }
+
     /// Check if the database already exists
     async fn on_prepare(&mut self) -> Result<Status> {
         let catalog = &self.data.task.catalog;
         let database_name = &self.data.task.database_name;
         let schema_key = SchemaNameKey::new(catalog, database_name);
 
-        let schema_manger = self.context.table_metadata_manager.schema_manager();
-        let exists = schema_manger.exists(schema_key).await?;
+        let exists = self.schema_manager().exists(schema_key).await?;
 
         if exists {
             ensure!(
