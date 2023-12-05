@@ -26,7 +26,7 @@ use common_time::Timestamp;
 use crate::error::Result;
 use crate::memtable::BoxedBatchIterator;
 use crate::metrics::{MERGE_FILTER_ROWS_TOTAL, READ_STAGE_ELAPSED};
-use crate::read::{Batch, BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
+use crate::read::{Batch, BatchReader, BoxedBatchReader, Source};
 
 /// Reader to merge sorted batches.
 ///
@@ -329,6 +329,11 @@ impl MergeReaderBuilder {
         MergeReaderBuilder::default()
     }
 
+    /// Creates a builder from sources.
+    pub fn from_sources(sources: Vec<Source>) -> MergeReaderBuilder {
+        MergeReaderBuilder { sources }
+    }
+
     /// Pushes a batch reader to sources.
     pub fn push_batch_reader(&mut self, reader: BoxedBatchReader) -> &mut Self {
         self.sources.push(Source::Reader(reader));
@@ -338,12 +343,6 @@ impl MergeReaderBuilder {
     /// Pushes a batch iterator to sources.
     pub fn push_batch_iter(&mut self, iter: BoxedBatchIterator) -> &mut Self {
         self.sources.push(Source::Iter(iter));
-        self
-    }
-
-    /// Pushes a batch stream to sources.
-    pub fn push_batch_stream(&mut self, stream: BoxedBatchStream) -> &mut Self {
-        self.sources.push(Source::Stream(stream));
         self
     }
 

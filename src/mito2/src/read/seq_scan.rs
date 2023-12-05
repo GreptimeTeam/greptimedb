@@ -174,10 +174,35 @@ impl SeqScan {
     /// Builds a [BoxedBatchReader] from sequential scan.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let mut builder = MergeReaderBuilder::new();
+        let sources = self.build_sources().await?;
+        let mut builder = MergeReaderBuilder::from_sources(sources);
+        Ok(Box::new(builder.build().await?))
+    }
+
+    /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
+    async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
+        assert!(self.parallelism.allow_parallel_scan());
+        // Scall all memtables and SSTs.
+        let sources = self.build_sources().await?;
+        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let stream = self.spawn_scan_task(source, semaphore.clone());
+                Source::Stream(stream)
+            })
+            .collect();
+        let mut builder = MergeReaderBuilder::from_sources(sources);
+        Ok(Box::new(builder.build().await?))
+    }
+
+    /// Builds and returns sources to read.
+    async fn build_sources(&self) -> Result<Vec<Source>> {
+        let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
         for mem in &self.memtables {
             let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
-            builder.push_batch_iter(iter);
+            sources.push(Source::Iter(iter));
         }
         for file in &self.files {
             let maybe_reader = self
@@ -201,66 +226,17 @@ impl SeqScan {
                 }
             };
             if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
-                builder.push_batch_reader(Box::new(reader));
+                sources.push(Source::Reader(Box::new(reader)));
             } else {
                 // They have different schema. We need to adapt the batch first so the
                 // mapper can convert it.
                 let compat_reader =
                     CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
-                builder.push_batch_reader(Box::new(compat_reader));
+                sources.push(Source::Reader(Box::new(compat_reader)));
             }
         }
-        Ok(Box::new(builder.build().await?))
-    }
 
-    /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
-    async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
-        assert!(self.parallelism.allow_parallel_scan());
-        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
-
-        // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let mut builder = MergeReaderBuilder::new();
-        for mem in &self.memtables {
-            let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
-            let stream = self.spawn_scan_task(Source::Iter(iter), semaphore.clone());
-
-            builder.push_batch_stream(stream);
-        }
-        for file in &self.files {
-            let maybe_reader = self
-                .access_layer
-                .read_sst(file.clone())
-                .predicate(self.predicate.clone())
-                .time_range(self.time_range)
-                .projection(Some(self.mapper.column_ids().to_vec()))
-                .cache(self.cache_manager.clone())
-                .build()
-                .await;
-            let reader = match maybe_reader {
-                Ok(reader) => reader,
-                Err(e) => {
-                    if e.is_object_not_found() && self.ignore_file_not_found {
-                        error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
-                        continue;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            };
-            let reader = if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
-                Source::Reader(Box::new(reader))
-            } else {
-                // They have different schema. We need to adapt the batch first so the
-                // mapper can convert it.
-                let compat_reader =
-                    CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
-                Source::Reader(Box::new(compat_reader))
-            };
-
-            let stream = self.spawn_scan_task(reader, semaphore.clone());
-            builder.push_batch_stream(stream);
-        }
-        Ok(Box::new(builder.build().await?))
+        Ok(sources)
     }
 
     /// Returns whether to use a parallel reader.
