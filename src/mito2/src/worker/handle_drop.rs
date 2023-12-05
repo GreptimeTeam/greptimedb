@@ -34,7 +34,7 @@ const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<Output> {
+    pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<usize> {
         let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}", region_id);
@@ -86,7 +86,7 @@ impl<S> RegionWorkerLoop<S> {
             listener.on_later_drop_end(region_id, removed);
         });
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }
 

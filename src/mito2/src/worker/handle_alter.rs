@@ -54,7 +54,7 @@ impl<S> RegionWorkerLoop<S> {
                 region_id, version.metadata.schema_version, request.schema_version
             );
             // Returns if it altered.
-            sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(0));
             return;
         }
         // Validate request.
@@ -69,7 +69,7 @@ impl<S> RegionWorkerLoop<S> {
                 "Ignores alter request as it alters nothing, region_id: {}, request: {:?}",
                 region_id, request
             );
-            sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(0));
             return;
         }
 
@@ -118,7 +118,7 @@ impl<S> RegionWorkerLoop<S> {
         );
 
         // Notifies waiters.
-        sender.send(Ok(Output::AffectedRows(0)));
+        sender.send(Ok(0));
     }
 }
 

@@ -34,7 +34,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         // Checks whether the table exists.
         if let Some(region) = self.regions.get_region(region_id) {
             // Region already exists.
@@ -45,7 +45,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &request.primary_key,
             )?;
 
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         // Convert the request into a RegionMetadata and validate it.
@@ -76,6 +76,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

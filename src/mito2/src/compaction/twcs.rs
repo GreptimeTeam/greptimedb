@@ -158,7 +158,7 @@ impl Picker for TwcsPicker {
         if outputs.is_empty() && expired_ssts.is_empty() {
             // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
             for waiter in waiters {
-                waiter.send(Ok(Output::AffectedRows(0)));
+                waiter.send(Ok(0));
             }
             return None;
         }

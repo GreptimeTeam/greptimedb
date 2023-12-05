@@ -17,9 +17,7 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use ahash::RandomState;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
-use common_query::Output;
 use common_telemetry::{error, info};
-use datatypes::data_type::ConcreteDataType;
 use snafu::OptionExt;
 use store_api::region_request::RegionPutRequest;
 use store_api::storage::{RegionId, TableId};
@@ -208,7 +206,6 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod tests {
-
     use common_recordbatch::RecordBatches;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::RegionRequest;
@@ -231,14 +228,11 @@ mod tests {
 
         // write data
         let logical_region_id = env.default_logical_region_id();
-        let Output::AffectedRows(count) = env
+        let count = env
             .metric()
             .handle_execution(logical_region_id, request)
             .await
-            .unwrap()
-        else {
-            panic!()
-        };
+            .unwrap();
         assert_eq!(count, 5);
 
         // read data from physical region
@@ -306,13 +300,10 @@ mod tests {
         });
 
         // write data
-        let Output::AffectedRows(count) = engine
+        let count = engine
             .handle_execution(logical_region_id, request)
             .await
-            .unwrap()
-        else {
-            panic!()
-        };
+            .unwrap();
         assert_eq!(100, count);
     }
 

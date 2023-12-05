@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
 use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
@@ -35,9 +34,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionOpenRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         if self.regions.is_region_exists(region_id) {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
         let object_store = if let Some(storage_name) = request.options.get("storage") {
             self.object_store_manager
@@ -82,6 +81,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

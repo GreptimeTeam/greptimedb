@@ -15,7 +15,6 @@
 use std::ops::Range;
 
 use api::v1::{ColumnSchema, Rows};
-use common_query::Output;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::prelude::ScalarVector;
 use datatypes::vectors::TimestampMillisecondVector;
@@ -43,7 +42,7 @@ async fn put_and_flush(
     };
     put_rows(engine, region_id, rows).await;
 
-    let Output::AffectedRows(rows) = engine
+    let rows = engine
         .handle_execution(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
@@ -51,10 +50,7 @@ async fn put_and_flush(
             }),
         )
         .await
-        .unwrap()
-    else {
-        unreachable!()
-    };
+        .unwrap();
     assert_eq!(0, rows);
 }
 
@@ -70,20 +66,16 @@ async fn delete_and_flush(
         rows: build_rows_for_key("a", rows.start, rows.end, 0),
     };
 
-    let deleted = engine
+    let rows_affected = engine
         .handle_execution(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
         .await
         .unwrap();
-
-    let Output::AffectedRows(rows_affected) = deleted else {
-        unreachable!()
-    };
     assert_eq!(row_cnt, rows_affected);
 
-    let Output::AffectedRows(rows) = engine
+    let rows = engine
         .handle_execution(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
@@ -91,10 +83,7 @@ async fn delete_and_flush(
             }),
         )
         .await
-        .unwrap()
-    else {
-        unreachable!()
-    };
+        .unwrap();
     assert_eq!(0, rows);
 }
 
@@ -142,7 +131,7 @@ async fn test_compaction_region() {
         .handle_execution(region_id, RegionRequest::Compact(RegionCompactRequest {}))
         .await
         .unwrap();
-    assert!(matches!(output, Output::AffectedRows(0)));
+    assert_eq!(output, 0);
 
     let scanner = engine.scanner(region_id, ScanRequest::default()).unwrap();
     assert_eq!(

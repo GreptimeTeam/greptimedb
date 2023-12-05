@@ -340,7 +340,6 @@ impl CompactionStatus {
 mod tests {
     use std::sync::Mutex;
 
-    use common_query::Output;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -371,7 +370,7 @@ mod tests {
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
 
         // Only one file, picker won't compact it.
@@ -389,7 +388,7 @@ mod tests {
             )
             .unwrap();
         let output = output_rx.await.unwrap().unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
     }
 

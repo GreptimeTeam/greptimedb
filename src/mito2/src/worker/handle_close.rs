@@ -14,7 +14,6 @@
 
 //! Handling close request.
 
-use common_query::Output;
 use common_telemetry::info;
 use store_api::storage::RegionId;
 
@@ -23,9 +22,9 @@ use crate::metrics::REGION_COUNT;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_close_request(&mut self, region_id: RegionId) -> Result<Output> {
+    pub(crate) async fn handle_close_request(&mut self, region_id: RegionId) -> Result<usize> {
         let Some(region) = self.regions.get_region(region_id) else {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         };
 
         info!("Try to close region {}", region_id);
@@ -41,6 +40,6 @@ impl<S> RegionWorkerLoop<S> {
 
         REGION_COUNT.dec();
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

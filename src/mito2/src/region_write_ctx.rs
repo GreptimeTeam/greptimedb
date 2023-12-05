@@ -16,7 +16,6 @@ use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry};
-use common_query::Output;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -57,8 +56,7 @@ impl WriteNotify {
                 .send_mut(Err(err.clone()).context(WriteGroupSnafu));
         } else {
             // Send success result.
-            self.sender
-                .send_mut(Ok(Output::AffectedRows(self.num_rows)));
+            self.sender.send_mut(Ok(self.num_rows));
         }
     }
 }

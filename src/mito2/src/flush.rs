@@ -214,7 +214,7 @@ impl RegionFlushTask {
     /// Consumes the task and notify the sender the job is success.
     fn on_success(self) {
         for sender in self.senders {
-            sender.send(Ok(Output::AffectedRows(0)));
+            sender.send(Ok(0));
         }
     }
 
@@ -736,7 +736,7 @@ mod tests {
             .unwrap();
         assert!(scheduler.region_status.is_empty());
         let output = output_rx.await.unwrap().unwrap();
-        assert!(matches!(output, Output::AffectedRows(0)));
+        assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
     }
 }

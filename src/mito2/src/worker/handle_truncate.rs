@@ -24,7 +24,7 @@ use crate::manifest::action::{RegionMetaAction, RegionMetaActionList, RegionTrun
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_truncate_request(&mut self, region_id: RegionId) -> Result<Output> {
+    pub(crate) async fn handle_truncate_request(&mut self, region_id: RegionId) -> Result<usize> {
         let region = self.regions.writable_region(region_id)?;
 
         info!("Try to truncate region {}", region_id);
@@ -62,6 +62,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             region_id, truncated_entry_id, truncated_sequence
         );
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

@@ -18,7 +18,6 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use common_catalog::consts::FILE_ENGINE;
 use common_error::ext::BoxedError;
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info};
 use object_store::ObjectStore;

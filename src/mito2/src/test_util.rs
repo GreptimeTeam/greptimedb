@@ -596,13 +596,10 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 /// Put rows into the engine.
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let output = engine
+    let rows_inserted = engine
         .handle_execution(region_id, RegionRequest::Put(RegionPutRequest { rows }))
         .await
         .unwrap();
-    let Output::AffectedRows(rows_inserted) = output else {
-        unreachable!()
-    };
     assert_eq!(num_rows, rows_inserted);
 }
 
@@ -645,31 +642,25 @@ pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row
 /// Delete rows from the engine.
 pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
-    let output = engine
+    let rows_inserted = engine
         .handle_execution(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
         .await
         .unwrap();
-    let Output::AffectedRows(rows_inserted) = output else {
-        unreachable!()
-    };
     assert_eq!(num_rows, rows_inserted);
 }
 
 /// Flush a region manually.
 pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_size: Option<usize>) {
-    let Output::AffectedRows(rows) = engine
+    let rows = engine
         .handle_execution(
             region_id,
             RegionRequest::Flush(RegionFlushRequest { row_group_size }),
         )
         .await
-        .unwrap()
-    else {
-        unreachable!()
-    };
+        .unwrap();
     assert_eq!(0, rows);
 }
 
