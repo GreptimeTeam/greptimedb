@@ -33,7 +33,7 @@ use tonic::{Request, Response};
 
 use crate::error::{self, MissingRequestHeaderSnafu};
 use crate::metasrv::MetaSrv;
-use crate::metrics::METRIC_META_KV_REQUEST;
+use crate::metrics::METRIC_META_KV_REQUEST_ELAPSED;
 use crate::service::GrpcResult;
 
 #[async_trait::async_trait]
@@ -48,7 +48,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[self.kv_backend().name(), "range", cluster_id_str.as_str()])
             .start_timer();
 
@@ -74,7 +74,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[self.kv_backend().name(), "put", cluster_id_str.as_str()])
             .start_timer();
 
@@ -100,7 +100,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_get",
@@ -130,7 +130,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_pub",
@@ -163,7 +163,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "batch_delete",
@@ -196,7 +196,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "compare_and_put",
@@ -229,7 +229,7 @@ impl store_server::Store for MetaSrv {
             .cluster_id;
         let cluster_id_str = cluster_id.to_string();
 
-        let _timer = METRIC_META_KV_REQUEST
+        let _timer = METRIC_META_KV_REQUEST_ELAPSED
             .with_label_values(&[
                 self.kv_backend().name(),
                 "delete_range",

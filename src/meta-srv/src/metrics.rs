@@ -17,8 +17,8 @@ use prometheus::*;
 
 lazy_static! {
     /// Elapsed time to responding kv requests.
-    pub static ref METRIC_META_KV_REQUEST: HistogramVec = register_histogram_vec!(
-        "meta_kv_request",
+    pub static ref METRIC_META_KV_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
+        "meta_kv_request_elapsed",
         "meta kv request",
         &["target", "op", "cluster_id"]
     )
