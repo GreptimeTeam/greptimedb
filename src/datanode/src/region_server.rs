@@ -108,12 +108,12 @@ impl RegionServer {
         self.inner.register_engine(engine);
     }
 
-    pub async fn handle_request(
+    pub async fn handle_execution(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output> {
-        self.inner.handle_request(region_id, request).await
+    ) -> Result<usize> {
+        self.inner.handle_execution(region_id, request).await
     }
 
     #[tracing::instrument(skip_all)]
@@ -194,7 +194,7 @@ impl RegionServerHandler for RegionServer {
             ));
             async move {
                 self_to_move
-                    .handle_request(region_id, req)
+                    .handle_execution(region_id, req)
                     .trace(span)
                     .await
             }
@@ -209,13 +209,7 @@ impl RegionServerHandler for RegionServer {
         // only insert/delete will have multiple results.
         let mut affected_rows = 0;
         for result in results {
-            match result {
-                Output::AffectedRows(rows) => affected_rows += rows,
-                Output::Stream(_) | Output::RecordBatches(_) => {
-                    // TODO: change the output type to only contains `affected_rows`
-                    unreachable!()
-                }
-            }
+            affected_rows += result;
         }
 
         Ok(RegionResponse {
@@ -290,11 +284,11 @@ impl RegionServerInner {
             .insert(engine_name.to_string(), engine);
     }
 
-    pub async fn handle_request(
+    pub async fn handle_execution(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output> {
+    ) -> Result<usize> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])
