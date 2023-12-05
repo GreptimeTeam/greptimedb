@@ -34,7 +34,7 @@ pub fn deriv(times: &TimestampMillisecondArray, values: &Float64Array) -> Option
     if values.len() < 2 {
         None
     } else {
-        let intercept_time = times.value(0);
+        let intercept_time = times.value(0) / 1000;
         let (slope, _) = linear_regression(times, values, intercept_time);
         slope
     }
