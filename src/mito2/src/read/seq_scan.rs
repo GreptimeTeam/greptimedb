@@ -148,6 +148,7 @@ impl SeqScan {
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
         let cache_manager = self.cache_manager.clone();
+        let parallelism = self.parallelism.parallelism;
         let stream = try_stream! {
             let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
             while let Some(batch) =
@@ -157,8 +158,8 @@ impl SeqScan {
             }
 
             debug!(
-                "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}",
-                mapper.metadata().region_id, metrics, use_parallel
+                "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
+                mapper.metadata().region_id, metrics, use_parallel, parallelism,
             );
             // Update metrics.
             READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.scan_cost.as_secs_f64());
