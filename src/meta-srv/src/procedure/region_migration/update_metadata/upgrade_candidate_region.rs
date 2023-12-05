@@ -100,7 +100,7 @@ impl UpdateMetadata {
             ensure!(
                 !region_route.is_leader_downgraded(),
                 error::UnexpectedSnafu {
-                    violated: "Unexpected intermediate state is found during the update metadata for upgrading",
+                    violated: format!("Unexpected intermediate state is found during the update metadata for upgrading region {region_id}"),
                 }
             );
 

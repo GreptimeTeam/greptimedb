@@ -60,7 +60,6 @@ impl State for DowngradeLeaderRegion {
             .set_leader_region_lease_deadline(Duration::from_secs(REGION_LEASE_SECS));
         self.downgrade_region_with_retry(ctx).await;
 
-        // Safety: must exist.
         if let Some(deadline) = ctx.volatile_ctx.leader_region_lease_deadline.as_ref() {
             info!(
                 "Running into the downgrade leader slow path, sleep until {:?}",
