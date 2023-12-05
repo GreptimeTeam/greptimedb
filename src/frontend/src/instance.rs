@@ -356,7 +356,7 @@ impl Instance {
             inserter.clone(),
         ));
 
-        let addr = std::env::var("FLOW_ADDR").unwrap_or("[::1]:14514".to_string());
+        let addr = std::env::var("FLOW_ADDR").unwrap_or("http://[::1]:14514".to_string());
         let conn = tonic::transport::Endpoint::new(addr)
             .unwrap()
             .connect_lazy();
