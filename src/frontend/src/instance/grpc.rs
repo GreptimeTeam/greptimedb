@@ -217,13 +217,8 @@ impl Instance {
         };
 
         if let Some(flow_proxy) = &self.flow {
-            flow_proxy
-                .flow_client
-                .lock()
-                .await
-                .handle(full_req)
-                .await
-                .unwrap();
+            let mut client = flow_proxy.flow_client.lock().await.clone();
+            client.handle(full_req).await.unwrap();
         } else {
             info!("flow proxy is not initialized");
         }
