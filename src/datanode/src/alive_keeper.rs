@@ -126,6 +126,7 @@ impl RegionAliveKeeper {
     }
 
     async fn close_staled_region(&self, region_id: RegionId) {
+        info!("Closing staled regions: {region_id}");
         let request = RegionRequest::Close(RegionCloseRequest {});
         if let Err(e) = self.region_server.handle_request(region_id, request).await {
             if e.status_code() != StatusCode::RegionNotFound {
@@ -137,7 +138,6 @@ impl RegionAliveKeeper {
 
     /// Closes staled regions.
     async fn close_staled_regions(&self, regions: &[u64]) {
-        info!("Closing staled regions: {regions:?}");
         for region_id in regions {
             self.close_staled_region(RegionId::from_u64(*region_id))
                 .await;
@@ -404,7 +404,7 @@ impl CountdownTask {
                     }
                 }
                 () = &mut countdown => {
-                    info!("The region lease expired, set region {region_id} to readonly.");
+                    warn!("The region {region_id} lease is expired, set region to readonly.");
                     let _ = self.region_server.set_writable(self.region_id, false);
                     metrics::LEASE_EXPIRED_REGION
                         .with_label_values(&[&format!("{}", self.region_id)])
