@@ -229,11 +229,11 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
 
     async fn delete(&self, path: &str, args: OpDelete) -> Result<RpDelete> {
         REQUESTS_TOTAL
-            .with_label_values(&[&self.scheme, Operation::Stat.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Delete.into_static()])
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme, Operation::Stat.into_static()])
+            .with_label_values(&[&self.scheme, Operation::Delete.into_static()])
             .start_timer();
 
         let delete_res = self.inner.delete(path, args).await;
