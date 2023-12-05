@@ -35,7 +35,7 @@ type Result<T> = std::result::Result<T, opendal::Error>;
 lazy_static! {
     static ref REQUESTS_TOTAL: IntCounterVec = register_int_counter_vec!(
         "opendal_requests_total",
-        "Total times of create be called",
+        "Total times of all kinds of operation being called",
         &["scheme", "operation"],
     )
     .unwrap();
@@ -51,7 +51,7 @@ lazy_static! {
     static ref BYTES_TOTAL: HistogramVec = register_histogram_vec!(
         histogram_opts!(
             "opendal_bytes_total",
-            "Total size of ",
+            "Total size of sync or async Read/Write",
             exponential_buckets(0.01, 2.0, 16).unwrap()
         ),
         &["scheme", "operation"]
@@ -75,11 +75,11 @@ fn increment_errors_total(op: Operation, kind: ErrorKind) {
 /// In this section, we will introduce three metrics that are currently being exported by opendal. These metrics are essential for understanding the behavior and performance of opendal.
 ///
 ///
-/// | Metric Name             | Type     | Description                                       | Labels              |
-/// |-------------------------|----------|---------------------------------------------------|---------------------|
-/// | opendal_requests_total          | Counter  | Total times of 'create' operation being called   | scheme, operation   |
-/// | opendal_requests_duration_seconds | Histogram | Histogram of the time spent on specific operation | scheme, operation   |
-/// | opendal_bytes_total             | Histogram | Total size                                        | scheme, operation   |
+/// | Metric Name                       | Type      | Description                                          | Labels              |
+/// |-----------------------------------|-----------|------------------------------------------------------|---------------------|
+/// | opendal_requests_total            | Counter   | Total times of all kinds of operation being called   | scheme, operation   |
+/// | opendal_requests_duration_seconds | Histogram | Histogram of the time spent on specific operation    | scheme, operation   |
+/// | opendal_bytes_total               | Histogram | Total size of sync or async Read/Write               | scheme, operation   |
 ///
 /// For a more detailed explanation of these metrics and how they are used, please refer to the [Prometheus documentation](https://prometheus.io/docs/introduction/overview/).
 ///
@@ -132,7 +132,9 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
     }
 
     async fn create_dir(&self, path: &str, args: OpCreateDir) -> Result<RpCreateDir> {
-        REQUESTS_TOTAL.with_label_values(&[&self.scheme]).inc();
+        REQUESTS_TOTAL
+            .with_label_values(&[&self.scheme, Operation::CreateDir.into_static()])
+            .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
             .with_label_values(&[&self.scheme, Operation::CreateDir.into_static()])
@@ -160,9 +162,6 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .read(path, args)
             .map(|v| {
                 v.map(|(rp, r)| {
-                    BYTES_TOTAL
-                        .with_label_values(&[&self.scheme, Operation::Read.into_static()])
-                        .observe(rp.metadata().content_length() as f64);
                     (
                         rp,
                         PrometheusMetricWrapper::new(r, Operation::Read, &self.scheme),
@@ -323,9 +322,6 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .with_label_values(&[&self.scheme])
             .start_timer();
         let result = self.inner.blocking_read(path, args).map(|(rp, r)| {
-            BYTES_TOTAL
-                .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
-                .observe(rp.metadata().content_length() as f64);
             (
                 rp,
                 PrometheusMetricWrapper::new(r, Operation::BlockingRead, &self.scheme),
