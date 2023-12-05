@@ -20,10 +20,6 @@ pub use predicates_apply::PredicatesIndexApplier;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::reader::InvertedIndexReader;
 
-/// A context for searching the inverted index.
-#[derive(Clone, Debug, Default)]
-pub struct SearchContext {}
-
 /// A trait for processing and transforming indices obtained from an inverted index.
 ///
 /// Applier instances are reusable and work with various `InvertedIndexReader` instances,
@@ -37,4 +33,25 @@ pub trait IndexApplier {
         context: SearchContext,
         reader: &mut dyn InvertedIndexReader,
     ) -> Result<Vec<usize>>;
+}
+
+/// A context for searching the inverted index.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct SearchContext {
+    /// `index_not_found_strategy` controls the behavior of the applier when the index is not found.
+    pub index_not_found_strategy: IndexNotFoundStrategy,
+}
+
+/// Defines the behavior of an applier when the index is not found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum IndexNotFoundStrategy {
+    /// Return an empty list of indices.
+    #[default]
+    ReturnEmpty,
+
+    /// Return the full range of indices.
+    ReturnFullRange,
+
+    /// Throw an error.
+    ThrowError,
 }
