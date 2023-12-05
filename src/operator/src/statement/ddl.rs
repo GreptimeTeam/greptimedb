@@ -36,7 +36,7 @@ use lazy_static::lazy_static;
 use partition::partition::{PartitionBound, PartitionDef};
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{ensure, IntoError, OptionExt, ResultExt};
 use sql::ast::Value as SqlValue;
 use sql::statements::alter::AlterTable;
 use sql::statements::create::{CreateExternalTable, CreateTable, Partitions};
@@ -168,8 +168,8 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn drop_table(&self, table_name: TableName) -> Result<Output> {
-        let table = self
+    pub async fn drop_table(&self, table_name: TableName, drop_if_exists: bool) -> Result<Output> {
+        if let Some(table) = self
             .catalog_manager
             .table(
                 &table_name.catalog_name,
@@ -178,24 +178,32 @@ impl StatementExecutor {
             )
             .await
             .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
+        {
+            let table_id = table.table_info().table_id();
+            self.drop_table_procedure(&table_name, table_id, drop_if_exists)
+                .await?;
+
+            // Invalidates local cache ASAP.
+            self.cache_invalidator
+                .invalidate_table_id(&Context::default(), table_id)
+                .await
+                .context(error::InvalidateTableCacheSnafu)?;
+
+            self.cache_invalidator
+                .invalidate_table_name(&Context::default(), table_name.clone())
+                .await
+                .context(error::InvalidateTableCacheSnafu)?;
+
+            Ok(Output::AffectedRows(0))
+        } else if drop_if_exists {
+            // DROP TABLE IF EXISTS meets table not found - ignored
+            Ok(Output::AffectedRows(0))
+        } else {
+            Err(TableNotFoundSnafu {
                 table_name: table_name.to_string(),
-            })?;
-        let table_id = table.table_info().table_id();
-        self.drop_table_procedure(&table_name, table_id).await?;
-
-        // Invalidates local cache ASAP.
-        self.cache_invalidator
-            .invalidate_table_id(&Context::default(), table_id)
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
-
-        self.cache_invalidator
-            .invalidate_table_name(&Context::default(), table_name.clone())
-            .await
-            .context(error::InvalidateTableCacheSnafu)?;
-
-        Ok(Output::AffectedRows(0))
+            }
+            .into_error(snafu::NoneError))
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -343,6 +351,7 @@ impl StatementExecutor {
         &self,
         table_name: &TableName,
         table_id: TableId,
+        drop_if_exists: bool,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest {
             task: DdlTask::new_drop_table(
@@ -350,6 +359,7 @@ impl StatementExecutor {
                 table_name.schema_name.to_string(),
                 table_name.table_name.to_string(),
                 table_id,
+                drop_if_exists,
             ),
         };
 

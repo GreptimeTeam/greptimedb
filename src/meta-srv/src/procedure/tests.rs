@@ -235,6 +235,7 @@ async fn test_on_datanode_drop_regions() {
         schema: "my_schema".to_string(),
         table: "my_table".to_string(),
         table_id: 42,
+        drop_if_exists: false,
     };
 
     let (region_server, mut rx) = EchoRegionServer::new();
