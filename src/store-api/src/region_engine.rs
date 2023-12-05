@@ -114,16 +114,14 @@ pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
-    /// Handles request to the region.
-    ///
-    /// Only query is not included, which is handled in `handle_query`
-    async fn handle_request(
+    /// Handles non-query execution to the region. Returns the count of affected rows.
+    async fn handle_execution(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output, BoxedError>;
+    ) -> Result<usize, BoxedError>;
 
-    /// Handles substrait query and return a stream of record batches
+    /// Handles substrate query and return a stream of record batches
     async fn handle_query(
         &self,
         region_id: RegionId,

@@ -75,7 +75,7 @@ async fn test_alter_region() {
     let column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -87,7 +87,7 @@ async fn test_alter_region() {
 
     let request = add_tag1();
     engine
-        .handle_request(region_id, RegionRequest::Alter(request))
+        .handle_execution(region_id, RegionRequest::Alter(request))
         .await
         .unwrap();
 
@@ -113,7 +113,7 @@ async fn test_alter_region() {
     // Reopen region.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -167,7 +167,7 @@ async fn test_put_after_alter() {
     let mut column_schemas = rows_schema(&request);
     let region_dir = request.region_dir.clone();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -179,7 +179,7 @@ async fn test_put_after_alter() {
 
     let request = add_tag1();
     engine
-        .handle_request(region_id, RegionRequest::Alter(request))
+        .handle_execution(region_id, RegionRequest::Alter(request))
         .await
         .unwrap();
 
@@ -195,7 +195,7 @@ async fn test_put_after_alter() {
     // Reopen region.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -258,7 +258,7 @@ async fn test_alter_region_retry() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -270,13 +270,13 @@ async fn test_alter_region_retry() {
 
     let request = add_tag1();
     engine
-        .handle_request(region_id, RegionRequest::Alter(request))
+        .handle_execution(region_id, RegionRequest::Alter(request))
         .await
         .unwrap();
     // Retries request.
     let request = add_tag1();
     engine
-        .handle_request(region_id, RegionRequest::Alter(request))
+        .handle_execution(region_id, RegionRequest::Alter(request))
         .await
         .unwrap();
 

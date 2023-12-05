@@ -42,7 +42,7 @@ async fn test_engine_truncate_region_basic() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -69,7 +69,7 @@ async fn test_engine_truncate_region_basic() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_execution(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
@@ -91,7 +91,7 @@ async fn test_engine_put_data_after_truncate() {
     let request = CreateRequestBuilder::new().build();
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn test_engine_put_data_after_truncate() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_execution(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
@@ -154,7 +154,7 @@ async fn test_engine_truncate_after_flush() {
     let request = CreateRequestBuilder::new().build();
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -167,7 +167,7 @@ async fn test_engine_truncate_after_flush() {
 
     // Flush the region.
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Flush(RegionFlushRequest {
                 row_group_size: None,
@@ -182,7 +182,7 @@ async fn test_engine_truncate_after_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_execution(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
@@ -221,7 +221,7 @@ async fn test_engine_truncate_reopen() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -237,14 +237,14 @@ async fn test_engine_truncate_reopen() {
 
     // Truncate the region
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_execution(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
     // Reopen the region again.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -287,7 +287,7 @@ async fn test_engine_truncate_during_flush() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -309,7 +309,7 @@ async fn test_engine_truncate_during_flush() {
     let flush_task = tokio::spawn(async move {
         info!("do flush task!!!!");
         engine_cloned
-            .handle_request(
+            .handle_execution(
                 region_id,
                 RegionRequest::Flush(RegionFlushRequest {
                     row_group_size: None,
@@ -323,7 +323,7 @@ async fn test_engine_truncate_during_flush() {
 
     // Truncate the region.
     engine
-        .handle_request(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
+        .handle_execution(region_id, RegionRequest::Truncate(RegionTruncateRequest {}))
         .await
         .unwrap();
 
@@ -347,7 +347,7 @@ async fn test_engine_truncate_during_flush() {
     // Reopen the engine.
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),

@@ -200,14 +200,14 @@ mod test {
         let create_request =
             create_logical_region_request(&["123", "456", "789"], physical_region_id, "blabla");
         env.metric()
-            .handle_request(logical_region_id2, RegionRequest::Create(create_request))
+            .handle_execution(logical_region_id2, RegionRequest::Create(create_request))
             .await
             .unwrap();
 
         // add columns to the first logical region
         let alter_request = alter_logical_region_add_tag_columns(&["987", "789", "654", "321"]);
         env.metric()
-            .handle_request(logical_region_id, RegionRequest::Alter(alter_request))
+            .handle_execution(logical_region_id, RegionRequest::Alter(alter_request))
             .await
             .unwrap();
 

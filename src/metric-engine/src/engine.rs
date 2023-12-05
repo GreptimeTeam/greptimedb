@@ -111,11 +111,11 @@ impl RegionEngine for MetricEngine {
     /// Handles request to the region.
     ///
     /// Only query is not included, which is handled in `handle_query`
-    async fn handle_request(
+    async fn handle_execution(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output, BoxedError> {
+    ) -> Result<usize, BoxedError> {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),

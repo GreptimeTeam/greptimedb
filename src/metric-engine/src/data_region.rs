@@ -125,7 +125,7 @@ impl DataRegion {
         {
             let _timer = MITO_DDL_DURATION.start_timer();
             self.mito
-                .handle_request(region_id, alter_request)
+                .handle_execution(region_id, alter_request)
                 .await
                 .context(MitoWriteOperationSnafu)?;
         }
@@ -140,7 +140,7 @@ impl DataRegion {
     ) -> Result<Output> {
         let region_id = utils::to_data_region_id(region_id);
         self.mito
-            .handle_request(region_id, RegionRequest::Put(request))
+            .handle_execution(region_id, RegionRequest::Put(request))
             .await
             .context(MitoWriteOperationSnafu)
     }

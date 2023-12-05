@@ -233,7 +233,7 @@ mod tests {
         let logical_region_id = env.default_logical_region_id();
         let Output::AffectedRows(count) = env
             .metric()
-            .handle_request(logical_region_id, request)
+            .handle_execution(logical_region_id, request)
             .await
             .unwrap()
         else {
@@ -294,7 +294,7 @@ mod tests {
         let columns = &["odd", "even", "Ev_En"];
         let alter_request = test_util::alter_logical_region_add_tag_columns(columns);
         engine
-            .handle_request(logical_region_id, RegionRequest::Alter(alter_request))
+            .handle_execution(logical_region_id, RegionRequest::Alter(alter_request))
             .await
             .unwrap();
 
@@ -307,7 +307,7 @@ mod tests {
 
         // write data
         let Output::AffectedRows(count) = engine
-            .handle_request(logical_region_id, request)
+            .handle_execution(logical_region_id, request)
             .await
             .unwrap()
         else {
@@ -330,7 +330,7 @@ mod tests {
         });
 
         engine
-            .handle_request(physical_region_id, request)
+            .handle_execution(physical_region_id, request)
             .await
             .unwrap_err();
     }
@@ -349,7 +349,7 @@ mod tests {
         });
 
         engine
-            .handle_request(logical_region_id, request)
+            .handle_execution(logical_region_id, request)
             .await
             .unwrap_err();
     }

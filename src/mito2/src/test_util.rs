@@ -597,7 +597,7 @@ pub fn delete_rows_schema(request: &RegionCreateRequest) -> Vec<api::v1::ColumnS
 pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
     let output = engine
-        .handle_request(region_id, RegionRequest::Put(RegionPutRequest { rows }))
+        .handle_execution(region_id, RegionRequest::Put(RegionPutRequest { rows }))
         .await
         .unwrap();
     let Output::AffectedRows(rows_inserted) = output else {
@@ -646,7 +646,7 @@ pub fn build_delete_rows_for_key(key: &str, start: usize, end: usize) -> Vec<Row
 pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     let num_rows = rows.rows.len();
     let output = engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Delete(RegionDeleteRequest { rows }),
         )
@@ -661,7 +661,7 @@ pub async fn delete_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
 /// Flush a region manually.
 pub async fn flush_region(engine: &MitoEngine, region_id: RegionId, row_group_size: Option<usize>) {
     let Output::AffectedRows(rows) = engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Flush(RegionFlushRequest { row_group_size }),
         )
@@ -682,13 +682,13 @@ pub async fn reopen_region(
 ) {
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
 
     // Open the region again.
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),

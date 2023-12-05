@@ -36,7 +36,7 @@ async fn test_engine_open_empty() {
 
     let region_id = RegionId::new(1, 1);
     let err = engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -62,12 +62,12 @@ async fn test_engine_open_existing() {
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -88,7 +88,7 @@ async fn test_engine_reopen_region() {
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -106,7 +106,7 @@ async fn test_engine_open_readonly() {
     let region_dir = request.region_dir.clone();
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn test_engine_open_readonly() {
         rows: build_rows(0, 2),
     };
     let err = engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
         )
@@ -143,19 +143,19 @@ async fn test_engine_region_open_with_options() {
     let request = CreateRequestBuilder::new().build();
     let region_dir = request.region_dir.clone();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
 
     // Open the region again with options.
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),
@@ -187,19 +187,19 @@ async fn test_engine_region_open_with_custom_store() {
 
     // Create a custom region.
     engine
-        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .handle_execution(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
 
     // Close the custom region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
 
     // Open the custom region.
     engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
                 engine: String::new(),

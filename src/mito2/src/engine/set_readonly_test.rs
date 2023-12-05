@@ -33,7 +33,7 @@ async fn test_set_readonly_gracefully() {
 
     let column_schemas = rows_schema(&request);
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -60,7 +60,7 @@ async fn test_set_readonly_gracefully() {
     };
 
     let error = engine
-        .handle_request(
+        .handle_execution(
             region_id,
             RegionRequest::Put(RegionPutRequest { rows: rows.clone() }),
         )

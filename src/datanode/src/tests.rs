@@ -105,11 +105,11 @@ impl RegionEngine for MockRegionEngine {
         "mock"
     }
 
-    async fn handle_request(
+    async fn handle_execution(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output, BoxedError> {
+    ) -> Result<usize, BoxedError> {
         let _ = self.sender.send((region_id, request)).await;
 
         Ok(Output::AffectedRows(0))

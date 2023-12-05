@@ -233,7 +233,7 @@ impl MetadataRegion {
 
         let put_request = Self::build_put_request(&key, &value);
         self.mito
-            .handle_request(
+            .handle_execution(
                 region_id,
                 store_api::region_request::RegionRequest::Put(put_request),
             )
@@ -527,7 +527,7 @@ mod test {
         let put_request = MetadataRegion::build_put_request(&key, &value);
         metadata_region
             .mito
-            .handle_request(region_id, RegionRequest::Put(put_request))
+            .handle_execution(region_id, RegionRequest::Put(put_request))
             .await
             .unwrap();
         let result = metadata_region.exists(region_id, &key).await;
@@ -553,7 +553,7 @@ mod test {
         let put_request = MetadataRegion::build_put_request(&key, &value);
         metadata_region
             .mito
-            .handle_request(region_id, RegionRequest::Put(put_request))
+            .handle_execution(region_id, RegionRequest::Put(put_request))
             .await
             .unwrap();
         let result = metadata_region.get(region_id, &key).await;

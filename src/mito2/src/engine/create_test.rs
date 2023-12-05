@@ -29,7 +29,7 @@ async fn test_engine_create_new_region() {
     let region_id = RegionId::new(1, 1);
     let request = CreateRequestBuilder::new().build();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -44,13 +44,13 @@ async fn test_engine_create_existing_region() {
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new();
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 
     // Create the same region again.
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 }
@@ -65,17 +65,17 @@ async fn test_engine_create_close_create_region() {
     let builder = CreateRequestBuilder::new();
     // Create a region with id 1.
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_execution(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
     // Create the same region id again.
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 
@@ -94,13 +94,13 @@ async fn test_engine_create_with_different_id() {
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new();
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 
     // Creates with different id.
     engine
-        .handle_request(RegionId::new(2, 1), RegionRequest::Create(builder.build()))
+        .handle_execution(RegionId::new(2, 1), RegionRequest::Create(builder.build()))
         .await
         .unwrap_err();
 }
@@ -113,14 +113,14 @@ async fn test_engine_create_with_different_schema() {
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new();
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 
     // Creates with different schema.
     let builder = builder.tag_num(2);
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap_err();
 }
@@ -133,14 +133,14 @@ async fn test_engine_create_with_different_primary_key() {
     let region_id = RegionId::new(1, 1);
     let builder = CreateRequestBuilder::new().tag_num(2);
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap();
 
     // Creates with different schema.
     let builder = builder.primary_key(vec![1]);
     engine
-        .handle_request(region_id, RegionRequest::Create(builder.build()))
+        .handle_execution(region_id, RegionRequest::Create(builder.build()))
         .await
         .unwrap_err();
 }
@@ -155,7 +155,7 @@ async fn test_engine_create_with_options() {
         .insert_option("ttl", "10d")
         .build();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
@@ -178,7 +178,7 @@ async fn test_engine_create_with_custom_store() {
         .insert_option("storage", "Gcs")
         .build();
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_execution(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
     assert!(engine.is_region_exists(region_id));
