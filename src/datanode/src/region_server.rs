@@ -49,7 +49,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::{RegionEngineRef, RegionRole};
+use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -146,6 +146,19 @@ impl RegionServer {
         engine
             .set_writable(region_id, writable)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
+    pub async fn set_readonly_gracefully(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SetReadonlyResponse> {
+        match self.inner.region_map.get(&region_id) {
+            Some(engine) => Ok(engine
+                .set_readonly_gracefully(region_id)
+                .await
+                .with_context(|_| HandleRegionRequestSnafu { region_id })?),
+            None => Ok(SetReadonlyResponse::NotFound),
+        }
     }
 
     pub fn runtime(&self) -> Arc<Runtime> {

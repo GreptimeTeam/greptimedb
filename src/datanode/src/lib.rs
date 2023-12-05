@@ -26,5 +26,4 @@ pub mod metrics;
 pub mod region_server;
 mod store;
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests;

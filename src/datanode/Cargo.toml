@@ -77,7 +77,9 @@ uuid.workspace = true
 [dev-dependencies]
 axum-test-helper = { git = "https://github.com/sunng87/axum-test-helper.git", branch = "patch-1" }
 client.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true
 common-test-util.workspace = true
 datafusion-common.workspace = true
+mito2 = { workspace = true, features = ["test"] }
 session.workspace = true

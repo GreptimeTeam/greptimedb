@@ -37,7 +37,7 @@ pub struct HeartbeatResponseHandlerContext {
 /// HandleControl
 ///
 /// Controls process of handling heartbeat response.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum HandleControl {
     Continue,
     Done,
