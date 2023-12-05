@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-
 use common_telemetry::info;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;

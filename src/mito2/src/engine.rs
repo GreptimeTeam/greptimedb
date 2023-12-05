@@ -44,7 +44,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-
 use common_recordbatch::SendableRecordBatchStream;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};

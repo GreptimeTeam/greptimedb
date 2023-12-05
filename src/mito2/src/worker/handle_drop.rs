@@ -16,7 +16,6 @@
 
 use std::time::Duration;
 
-
 use common_telemetry::{info, warn};
 use futures::TryStreamExt;
 use object_store::util::join_path;
