@@ -24,6 +24,7 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, TableId};
 
 use crate::error::{self, Result};
+use crate::metrics;
 
 pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
 
@@ -144,7 +145,7 @@ impl RegionLeaseKeeper {
     /// and corresponding regions will be added to `non_exists` of [RenewRegionLeasesResponse].
     pub async fn renew_region_leases(
         &self,
-        _cluster_id: u64,
+        cluster_id: u64,
         datanode_id: DatanodeId,
         regions: &[(RegionId, RegionRole)],
     ) -> Result<RenewRegionLeasesResponse> {
@@ -159,12 +160,25 @@ impl RegionLeaseKeeper {
         let mut renewed = HashMap::new();
         let mut non_exists = HashSet::new();
 
+        let datanode_ident = format!("{}-{}", cluster_id, datanode_id);
+
         for &(region, role) in regions {
             match self.renew_region_lease(&table_metadata, datanode_id, region, role) {
-                Some((region, role)) => {
-                    let _ = renewed.insert(region, role);
+                Some((region, renewed_role)) => {
+                    let _ = renewed.insert(region, renewed_role);
+                    // Metrics for role changes.
+                    if renewed_role != role {
+                        let region_id = format!("{region}");
+                        let op = format!("{role} -> {renewed_role}");
+                        metrics::METRIC_META_LEASE_KEEPER_REGION_ROLE_CHANGE_NUM
+                            .with_label_values(&[&datanode_ident, &region_id, &op])
+                            .inc()
+                    }
                 }
                 None => {
+                    metrics::METRIC_META_LEASE_KEEPER_NON_EXISTING_REGION_NUM
+                        .with_label_values(&[&datanode_ident])
+                        .inc();
                     let _ = non_exists.insert(region);
                 }
             }

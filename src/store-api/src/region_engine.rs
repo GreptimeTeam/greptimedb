@@ -14,6 +14,7 @@
 
 //! Region Engine's definition
 
+use std::fmt::Display;
 use std::sync::Arc;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -82,6 +83,15 @@ pub enum RegionRole {
     Follower,
     // Writable region(mito2).
     Leader,
+}
+
+impl Display for RegionRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegionRole::Follower => write!(f, "Follower"),
+            RegionRole::Leader => write!(f, "Leader"),
+        }
+    }
 }
 
 impl RegionRole {
