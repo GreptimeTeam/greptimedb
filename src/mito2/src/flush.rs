@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common_query::Output;
+
 use common_telemetry::{error, info};
 use snafu::ResultExt;
 use store_api::storage::RegionId;

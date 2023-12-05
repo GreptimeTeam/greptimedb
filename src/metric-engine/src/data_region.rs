@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
-use common_query::Output;
+
 use common_telemetry::tracing::warn;
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;

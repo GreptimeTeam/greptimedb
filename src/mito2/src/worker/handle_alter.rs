@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
+
 use common_telemetry::{debug, error, info, warn};
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};

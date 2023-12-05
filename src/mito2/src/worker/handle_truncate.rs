@@ -14,7 +14,7 @@
 
 //! Handling truncate related requests.
 
-use common_query::Output;
+
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::storage::RegionId;

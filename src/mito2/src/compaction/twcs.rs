@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::readable_size::ReadableSize;
-use common_query::Output;
+
 use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
