@@ -68,7 +68,7 @@ impl CreateDatabaseProcedure {
             return Ok(Status::Done);
         }
 
-        self.data.state = CreateDatabaseState::CreateMetadata;
+        self.data.state = CreateDatabaseState::CreateDatabase;
 
         Ok(Status::executing(true))
     }
@@ -98,9 +98,6 @@ impl Procedure for CreateDatabaseProcedure {
         Self::TYPE_NAME
     }
 
-    /// Execute the procedure:
-    /// step 1: check if the database already exists.
-    /// step 2: create database in schema manager.
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &self.data.state;
 
@@ -110,7 +107,7 @@ impl Procedure for CreateDatabaseProcedure {
 
         match state {
             CreateDatabaseState::Prepare => self.on_prepare().await,
-            CreateDatabaseState::CreateMetadata => self.on_create_database().await,
+            CreateDatabaseState::CreateDatabase => self.on_create_database().await,
         }
         .map_err(handle_retry_error)
     }
@@ -132,8 +129,8 @@ impl Procedure for CreateDatabaseProcedure {
 pub enum CreateDatabaseState {
     /// Prepares to create the table
     Prepare,
-    /// Creates metadata
-    CreateMetadata,
+    /// Creates database
+    CreateDatabase,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
