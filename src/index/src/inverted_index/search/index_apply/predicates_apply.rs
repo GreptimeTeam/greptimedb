@@ -52,9 +52,8 @@ impl IndexApplier for PredicatesIndexApplier {
                 break;
             }
 
-            let meta = match metadata.metas.get(name) {
-                Some(meta) => meta,
-                None => match options.index_not_found_strategy {
+            let Some(meta) = metadata.metas.get(name) else {
+                match options.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
                         return Ok(vec![]);
                     }
@@ -64,7 +63,7 @@ impl IndexApplier for PredicatesIndexApplier {
                     IndexNotFoundStrategy::ReturnError => {
                         return IndexNotFoundSnafu { name }.fail();
                     }
-                },
+                }
             };
 
             let fst = reader.fst(meta).await?;
