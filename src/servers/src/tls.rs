@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_option_verifiy_ca() {
+    fn test_tls_option_verify_ca() {
         let s = r#"
         {
             "mode": "verify_ca",
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_option_verifiy_full() {
+    fn test_tls_option_verify_full() {
         let s = r#"
         {
             "mode": "verify_full",

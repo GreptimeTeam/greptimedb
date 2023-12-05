@@ -240,7 +240,7 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g) http_re
 -- NOT SUPPORTED: `vector()`
 tql eval (3000, 3000, '1s') http_requests AND ON (dummy) vector(1);
 
-Error: 1004(InvalidArguments), Expect a PromQL expr but not found, input expr: Call(Call { func: Function { name: "vector", arg_types: [Scalar], variadic: false, return_type: Vector }, args: FunctionArgs { args: [NumberLiteral(NumberLiteral { val: 1.0 })] } })
+Error: 1004(InvalidArguments), Unsupported expr type: vector
 
 -- eval instant at 50m http_requests AND IGNORING (group, instance, job) vector(1)
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300
@@ -254,7 +254,7 @@ Error: 1004(InvalidArguments), Expect a PromQL expr but not found, input expr: C
 -- NOT SUPPORTED: `vector()`
 tql eval (3000, 3000, '1s') http_requests AND IGNORING (g, instance, job) vector(1);
 
-Error: 1004(InvalidArguments), Expect a PromQL expr but not found, input expr: Call(Call { func: Function { name: "vector", arg_types: [Scalar], variadic: false, return_type: Vector }, args: FunctionArgs { args: [NumberLiteral(NumberLiteral { val: 1.0 })] } })
+Error: 1004(InvalidArguments), Unsupported expr type: vector
 
 drop table http_requests;
 

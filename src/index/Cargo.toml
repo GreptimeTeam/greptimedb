@@ -6,13 +6,17 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+bytemuck.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
+mockall.workspace = true
 prost.workspace = true
+regex-automata.workspace = true
+regex.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

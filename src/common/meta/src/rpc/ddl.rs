@@ -54,12 +54,14 @@ impl DdlTask {
         schema: String,
         table: String,
         table_id: TableId,
+        drop_if_exists: bool,
     ) -> Self {
         DdlTask::DropTable(DropTableTask {
             catalog,
             schema,
             table,
             table_id,
+            drop_if_exists,
         })
     }
 
@@ -118,6 +120,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbSubmitDdlTaskRequest {
                     schema_name: task.schema,
                     table_name: task.table,
                     table_id: Some(api::v1::TableId { id: task.table_id }),
+                    drop_if_exists: task.drop_if_exists,
                 }),
             }),
             DdlTask::AlterTable(task) => Task::AlterTableTask(PbAlterTableTask {
@@ -176,6 +179,8 @@ pub struct DropTableTask {
     pub schema: String,
     pub table: String,
     pub table_id: TableId,
+    #[serde(default)]
+    pub drop_if_exists: bool,
 }
 
 impl DropTableTask {
@@ -214,6 +219,7 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
                     err_msg: "expected table_id",
                 })?
                 .id,
+            drop_if_exists: drop_table.drop_if_exists,
         })
     }
 }

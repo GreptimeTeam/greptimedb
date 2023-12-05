@@ -86,6 +86,10 @@ impl DropTableProcedure {
             ))
             .await?;
 
+        if !exist && self.data.task.drop_if_exists {
+            return Ok(Status::Done);
+        }
+
         ensure!(
             exist,
             error::TableNotFoundSnafu {

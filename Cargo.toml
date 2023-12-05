@@ -74,6 +74,7 @@ async-trait = "0.1"
 base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
+bytemuck = "1.12"
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
@@ -87,11 +88,12 @@ etcd-client = "0.12"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2b3ae45740a49ec6a0830d71fc09c3093aeb5fe7" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "2aaee38de81047537dfa42af9df63bcfb866e06c" }
 humantime-serde = "1.1"
 itertools = "0.10"
 lazy_static = "1.4"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "abbd357c1e193cd270ea65ee7652334a150b628f" }
+mockall = "0.11.4"
 moka = "0.12"
 once_cell = "1.18"
 opentelemetry-proto = { git = "https://github.com/waynexia/opentelemetry-rust.git", rev = "33841b38dda79b15f2024952be5f32533325ca02", features = [
@@ -107,6 +109,7 @@ prost = "0.12"
 raft-engine = { git = "https://github.com/tikv/raft-engine.git", rev = "22dfb426cd994602b57725ef080287d3e53db479" }
 rand = "0.8"
 regex = "1.8"
+regex-automata = { version = "0.1", features = ["transducer"] }
 reqwest = { version = "0.11", default-features = false, features = [
     "json",
     "rustls-tls-native-roots",
@@ -118,7 +121,7 @@ serde_json = "1.0"
 smallvec = "1"
 snafu = "0.7"
 # on branch v0.38.x
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "0fbae07d0c46dc18e3381c406d8b9b8abef6b1fd", features = [
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6a93567ae38d42be5c8d08b13c8ff4dde26502ef", features = [
     "visitor",
 ] }
 strum = { version = "0.25", features = ["derive"] }

@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod error;
-pub mod format;
-pub mod search;
-
-pub type FstMap = fst::Map<Vec<u8>>;
-pub type Bytes = Vec<u8>;
+pub mod fst_apply;
+pub mod fst_values_mapper;
+pub mod predicate;

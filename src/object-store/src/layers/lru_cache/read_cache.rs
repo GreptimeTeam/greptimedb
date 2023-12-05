@@ -114,7 +114,7 @@ impl<C: Accessor + Clone> ReadCache<C> {
         (self.mem_cache.entry_count(), self.mem_cache.weighted_size())
     }
 
-    /// Invalidte all cache items which key starts with `prefix`.
+    /// Invalidate all cache items which key starts with `prefix`.
     pub(crate) async fn invalidate_entries_with_prefix(&self, prefix: String) {
         // Safety: always ok when building cache with `support_invalidation_closures`.
         self.mem_cache

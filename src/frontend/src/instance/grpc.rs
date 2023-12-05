@@ -122,7 +122,9 @@ impl GrpcQueryHandler for Instance {
                     DdlExpr::DropTable(expr) => {
                         let table_name =
                             TableName::new(&expr.catalog_name, &expr.schema_name, &expr.table_name);
-                        self.statement_executor.drop_table(table_name).await?
+                        self.statement_executor
+                            .drop_table(table_name, expr.drop_if_exists)
+                            .await?
                     }
                     DdlExpr::TruncateTable(expr) => {
                         let table_name =
