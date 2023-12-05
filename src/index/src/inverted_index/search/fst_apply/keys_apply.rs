@@ -89,7 +89,7 @@ impl KeysFstApplier {
         fn get_list(p: &Predicate) -> &HashSet<Bytes> {
             match p {
                 Predicate::InList(i) => &i.list,
-                _ => unreachable!(), // `in_lists` is filtered by `split_at_in_lists
+                _ => unreachable!(), // `in_lists` is filtered by `split_at_in_lists`
             }
         }
 

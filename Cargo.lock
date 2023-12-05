@@ -3570,7 +3570,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=2aaee38de81047537dfa42af9df63bcfb866e06c#2aaee38de81047537dfa42af9df63bcfb866e06c"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b1d403088f02136bcebde53d604f491c260ca8e2#b1d403088f02136bcebde53d604f491c260ca8e2"
 dependencies = [
  "prost 0.12.2",
  "serde",
@@ -5414,7 +5414,6 @@ dependencies = [
  "parking_lot 0.12.1",
  "percent-encoding",
  "pin-project",
- "prometheus",
  "quick-xml 0.29.0",
  "reqsign",
  "reqwest",

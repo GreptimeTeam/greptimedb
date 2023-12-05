@@ -21,7 +21,7 @@ use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
     DecodeProtoSnafu, ReadSnafu, Result, SeekSnafu, UnexpectedFooterPayloadSizeSnafu,
-    UnexpectedOffsetSizeSnafu,
+    UnexpectedOffsetSizeSnafu, UnexpectedZeroSegmentRowCountSnafu,
 };
 use crate::inverted_index::format::FOOTER_PAYLOAD_SIZE_SIZE;
 
@@ -85,6 +85,11 @@ impl<R: AsyncRead + AsyncSeek + Unpin> InvertedIndeFooterReader<R> {
 
     /// Check if the read metadata is consistent with expected sizes and offsets.
     fn validate_metas(&self, metas: &InvertedIndexMetas, payload_size: u64) -> Result<()> {
+        ensure!(
+            metas.segment_row_count > 0,
+            UnexpectedZeroSegmentRowCountSnafu
+        );
+
         for meta in metas.metas.values() {
             let InvertedIndexMeta {
                 base_offset,
@@ -116,7 +121,10 @@ mod tests {
     use super::*;
 
     fn create_test_payload(meta: InvertedIndexMeta) -> Vec<u8> {
-        let mut metas = InvertedIndexMetas::default();
+        let mut metas = InvertedIndexMetas {
+            segment_row_count: 1,
+            ..Default::default()
+        };
         metas.metas.insert("test".to_string(), meta);
 
         let mut payload_buf = vec![];
@@ -131,7 +139,6 @@ mod tests {
     async fn test_read_payload() {
         let meta = InvertedIndexMeta {
             name: "test".to_string(),
-            segment_row_count: 4096,
             ..Default::default()
         };
 
@@ -145,14 +152,12 @@ mod tests {
         assert_eq!(metas.metas.len(), 1);
         let index_meta = &metas.metas.get("test").unwrap();
         assert_eq!(index_meta.name, "test");
-        assert_eq!(index_meta.segment_row_count, 4096);
     }
 
     #[tokio::test]
     async fn test_invalid_footer_payload_size() {
         let meta = InvertedIndexMeta {
             name: "test".to_string(),
-            segment_row_count: 4096,
             ..Default::default()
         };
 
@@ -171,7 +176,6 @@ mod tests {
             name: "test".to_string(),
             base_offset: 0,
             inverted_index_size: 1, // Set size to 1 to make ecceed the blob size
-            segment_row_count: 4096,
             ..Default::default()
         };
 

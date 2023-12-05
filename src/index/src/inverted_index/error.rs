@@ -64,6 +64,9 @@ pub enum Error {
         payload_size: u64,
     },
 
+    #[snafu(display("Unexpected zero segment row count"))]
+    UnexpectedZeroSegmentRowCount { location: Location },
+
     #[snafu(display("Failed to decode fst"))]
     DecodeFst {
         #[snafu(source)]
@@ -109,6 +112,9 @@ pub enum Error {
         location: Location,
         predicates: Vec<Predicate>,
     },
+
+    #[snafu(display("index not found, name: {name}"))]
+    IndexNotFound { name: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -118,6 +124,7 @@ impl ErrorExt for Error {
             Seek { .. }
             | Read { .. }
             | UnexpectedFooterPayloadSize { .. }
+            | UnexpectedZeroSegmentRowCount { .. }
             | UnexpectedOffsetSize { .. }
             | UnexpectedBlobSize { .. }
             | DecodeProto { .. }
@@ -128,7 +135,8 @@ impl ErrorExt for Error {
             | ParseDFA { .. }
             | KeysApplierWithoutInList { .. }
             | IntersectionApplierWithInList { .. }
-            | EmptyPredicates { .. } => StatusCode::InvalidArguments,
+            | EmptyPredicates { .. }
+            | IndexNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
 

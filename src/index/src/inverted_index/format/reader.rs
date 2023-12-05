@@ -25,7 +25,7 @@ use crate::inverted_index::FstMap;
 /// InvertedIndexReader defines an asynchronous reader of inverted index data
 #[mockall::automock]
 #[async_trait]
-pub trait InvertedIndexReader {
+pub trait InvertedIndexReader: Send {
     /// Retrieve metadata of all inverted indices stored within the blob.
     async fn metadata(&mut self) -> Result<InvertedIndexMetas>;
 

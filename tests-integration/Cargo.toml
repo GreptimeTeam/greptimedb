@@ -29,7 +29,7 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-test-util.workspace = true
-datanode = { workspace = true, features = ["testing"] }
+datanode = { workspace = true }
 datatypes.workspace = true
 dotenv = "0.15"
 frontend = { workspace = true, features = ["testing"] }

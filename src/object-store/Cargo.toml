@@ -17,7 +17,6 @@ md5 = "0.7"
 moka = { workspace = true, features = ["future"] }
 opendal = { version = "0.40", features = [
     "layers-tracing",
-    "layers-prometheus",
 ] }
 prometheus.workspace = true
 snafu.workspace = true

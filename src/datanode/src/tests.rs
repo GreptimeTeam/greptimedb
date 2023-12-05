@@ -13,19 +13,12 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::meta::HeartbeatResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::FunctionRef;
-use common_meta::heartbeat::handler::{
-    HeartbeatResponseHandlerContext, HeartbeatResponseHandlerExecutor,
-};
-use common_meta::heartbeat::mailbox::{HeartbeatMailbox, MessageMeta};
-use common_meta::instruction::{Instruction, OpenRegion, RegionIdent};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
@@ -45,51 +38,6 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
-
-pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {
-    MessageMeta {
-        id,
-        subject: subject.to_string(),
-        to: to.to_string(),
-        from: from.to_string(),
-    }
-}
-
-async fn handle_instruction(
-    executor: Arc<dyn HeartbeatResponseHandlerExecutor>,
-    mailbox: Arc<HeartbeatMailbox>,
-    instruction: Instruction,
-) {
-    let response = HeartbeatResponse::default();
-    let mut ctx: HeartbeatResponseHandlerContext =
-        HeartbeatResponseHandlerContext::new(mailbox, response);
-    ctx.incoming_message = Some((test_message_meta(1, "hi", "foo", "bar"), instruction));
-    executor.handle(ctx).await.unwrap();
-}
-
-fn close_region_instruction() -> Instruction {
-    Instruction::CloseRegion(RegionIdent {
-        table_id: 1024,
-        region_number: 0,
-        cluster_id: 1,
-        datanode_id: 2,
-        engine: "mito2".to_string(),
-    })
-}
-
-fn open_region_instruction() -> Instruction {
-    Instruction::OpenRegion(OpenRegion::new(
-        RegionIdent {
-            table_id: 1024,
-            region_number: 0,
-            cluster_id: 1,
-            datanode_id: 2,
-            engine: "mito2".to_string(),
-        },
-        "path/dir",
-        HashMap::new(),
-    ))
-}
 
 pub struct MockQueryEngine;
 
