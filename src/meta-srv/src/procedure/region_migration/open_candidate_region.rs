@@ -112,17 +112,19 @@ impl OpenCandidateRegion {
         let region_id = pc.region_id;
         let candidate = &pc.to_peer;
 
-        // Registers the opening region.
-        let guard = ctx
-            .opening_region_keeper
-            .register(candidate.id, region_id)
-            .context(error::RegionOpeningRaceSnafu {
-                peer_id: candidate.id,
-                region_id,
-            })?;
-
-        debug_assert!(vc.opening_region_guard.is_none());
-        vc.opening_region_guard = Some(guard);
+        // This method might be invoked multiple times.
+        // Only registers the guard if `opening_region_guard` is absent.
+        if vc.opening_region_guard.is_none() {
+            // Registers the opening region.
+            let guard = ctx
+                .opening_region_keeper
+                .register(candidate.id, region_id)
+                .context(error::RegionOpeningRaceSnafu {
+                    peer_id: candidate.id,
+                    region_id,
+                })?;
+            vc.opening_region_guard = Some(guard);
+        }
 
         let msg = MailboxMessage::json_message(
             &format!("Open candidate region: {}", region_id),

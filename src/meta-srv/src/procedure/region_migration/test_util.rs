@@ -37,10 +37,11 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
+use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::PersistentContext;
 use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
@@ -257,12 +258,16 @@ pub(crate) type StateAssertion = Arc<dyn Fn(&dyn State) + Send + Sync>;
 /// Status assertion function.
 pub(crate) type StatusAssertion = Arc<dyn Fn(Status) + Send + Sync>;
 
+/// Error assertion function.
+pub(crate) type ErrorAssertion = Arc<dyn Fn(Error) + Send + Sync>;
+
 // TODO(weny): Remove it.
 #[allow(dead_code)]
 /// The type of assertion.
 #[derive(Clone)]
 pub(crate) enum Assertion {
     Simple(StateAssertion, StatusAssertion),
+    Error(ErrorAssertion),
     Custom(CustomAssertion),
 }
 
@@ -276,6 +281,11 @@ impl Assertion {
         status: U,
     ) -> Self {
         Self::Simple(Arc::new(state), Arc::new(status))
+    }
+
+    /// Returns an [Assertion::Error].
+    pub(crate) fn error<T: Fn(Error) + Send + Sync + 'static>(error_assert: T) -> Self {
+        Self::Error(Arc::new(error_assert))
     }
 }
 
@@ -315,8 +325,12 @@ impl ProcedureMigrationTestSuite {
                 status_assert(status);
                 self.state = next;
             }
+            Assertion::Error(error_assert) => {
+                let error = result.unwrap_err();
+                error_assert(error);
+            }
             Assertion::Custom(assert_fn) => {
-                assert_fn(self, result);
+                assert_fn(self, result).await?;
             }
         }
 
@@ -425,6 +439,11 @@ impl ProcedureMigrationSuiteRunner {
 
         self
     }
+
+    /// Returns [TestingEnv] of [ProcedureMigrationTestSuite].
+    pub(crate) fn env(&self) -> &TestingEnv {
+        &self.suite.env
+    }
 }
 
 /// Asserts the [Status] needs to be persistent.
@@ -440,6 +459,11 @@ pub(crate) fn assert_no_persist(status: Status) {
 /// Asserts the [Status] should be [Status::Done].
 pub(crate) fn assert_done(status: Status) {
     assert_matches!(status, Status::Done)
+}
+
+/// Asserts the [State] should be [OpenCandidateRegion].
+pub(crate) fn assert_open_candidate_region(next: &dyn State) {
+    let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
 }
 
 /// Asserts the [State] should be [UpdateMetadata::Downgrade].
