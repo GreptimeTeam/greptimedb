@@ -138,7 +138,7 @@ impl ScanRegion {
 
     /// Sets parallelism.
     #[must_use]
-    pub(crate) fn parallelism(mut self, parallelism: ScanParallism) -> Self {
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
         self.parallelism = parallelism;
         self
     }

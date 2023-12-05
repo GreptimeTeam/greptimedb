@@ -186,7 +186,7 @@ impl EngineInner {
             request,
             Some(cache_manager),
         )
-        .parallelism(scan_parallelism);
+        .with_parallelism(scan_parallelism);
 
         scan_region.scanner()
     }
