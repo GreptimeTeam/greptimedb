@@ -20,6 +20,10 @@ use std::hash::{Hash, Hasher};
 use arrow::datatypes::IntervalUnit as ArrowIntervalUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use snafu::ResultExt;
+
+use crate::duration::Duration;
+use crate::error::{Result, TimestampOverflowSnafu};
 
 #[derive(
     Debug, Default, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
@@ -63,7 +67,7 @@ impl From<ArrowIntervalUnit> for IntervalUnit {
 /// month-day-nano, which will be stored in the following format.
 /// Interval data format:
 /// | months | days   | nsecs      |
-/// | 4bytes | 4bytes | 8bytes     |  
+/// | 4bytes | 4bytes | 8bytes     |
 #[derive(Debug, Clone, Default, Copy, Serialize, Deserialize)]
 pub struct Interval {
     months: i32,
@@ -112,6 +116,15 @@ impl Interval {
             nsecs: (millis as i64) * NANOS_PER_MILLI,
             unit: IntervalUnit::DayTime,
         }
+    }
+
+    /// Return a `[Duration]` from the interval
+    pub fn to_duration(&self) -> Result<Duration> {
+        Ok(Duration::new_nanosecond(
+            self.to_nanosecond()
+                .try_into()
+                .context(TimestampOverflowSnafu)?,
+        ))
     }
 
     /// Return a tuple(months, days, nanoseconds) from the interval.
@@ -558,6 +571,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::timestamp::TimeUnit;
 
     #[test]
     fn test_from_year_month() {
@@ -570,6 +584,21 @@ mod tests {
         let interval = Interval::from_day_time(1, 2);
         assert_eq!(interval.days, 1);
         assert_eq!(interval.nsecs, 2_000_000);
+    }
+
+    #[test]
+    fn test_to_duration() {
+        let interval = Interval::from_day_time(1, 2);
+
+        let duration = interval.to_duration().unwrap();
+        assert_eq!(86400002000000, duration.value());
+        assert_eq!(TimeUnit::Nanosecond, duration.unit());
+
+        let interval = Interval::from_year_month(12);
+
+        let duration = interval.to_duration().unwrap();
+        assert_eq!(31104000000000000, duration.value());
+        assert_eq!(TimeUnit::Nanosecond, duration.unit());
     }
 
     #[test]

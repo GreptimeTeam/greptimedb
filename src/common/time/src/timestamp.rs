@@ -104,6 +104,42 @@ impl Timestamp {
         })
     }
 
+    /// Adds a duration to timestamp.
+    /// # Note
+    /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
+    /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
+    /// and the result is still 1 second.
+    pub fn add_duration(&self, duration: Duration) -> error::Result<Self> {
+        let duration: i64 = match self.unit {
+            TimeUnit::Second => {
+                i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Millisecond => {
+                i64::try_from(duration.as_millis()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Microsecond => {
+                i64::try_from(duration.as_micros()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Nanosecond => {
+                i64::try_from(duration.as_nanos()).context(TimestampOverflowSnafu)?
+            }
+        };
+
+        let value = self
+            .value
+            .checked_add(duration)
+            .with_context(|| ArithmeticOverflowSnafu {
+                msg: format!(
+                    "Try to add timestamp: {:?} with duration: {:?}",
+                    self, duration
+                ),
+            })?;
+        Ok(Timestamp {
+            value,
+            unit: self.unit,
+        })
+    }
+
     /// Subtracts current timestamp with another timestamp, yielding a duration.
     pub fn sub(&self, rhs: &Self) -> Option<chrono::Duration> {
         let lhs = self.to_chrono_datetime()?;
@@ -1003,6 +1039,33 @@ mod tests {
             .sub_duration(Duration::from_millis(1))
             .unwrap();
         assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+    }
+
+    #[test]
+    fn test_timestamp_add() {
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(2, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(0, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(100, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1000))
+            .unwrap();
+        assert_eq!(101, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
     }
 

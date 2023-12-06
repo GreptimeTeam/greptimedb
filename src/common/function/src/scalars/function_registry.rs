@@ -19,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use once_cell::sync::Lazy;
 
 use crate::scalars::aggregate::{AggregateFunctionMetaRef, AggregateFunctions};
+use crate::scalars::date::DateFunction;
 use crate::scalars::function::FunctionRef;
 use crate::scalars::math::MathFunction;
 use crate::scalars::numpy::NumpyFunction;
@@ -75,6 +76,7 @@ pub static FUNCTION_REGISTRY: Lazy<Arc<FunctionRegistry>> = Lazy::new(|| {
     MathFunction::register(&function_registry);
     NumpyFunction::register(&function_registry);
     TimestampFunction::register(&function_registry);
+    DateFunction::register(&function_registry);
 
     AggregateFunctions::register(&function_registry);
 

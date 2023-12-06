@@ -210,6 +210,14 @@ impl Value {
         }
     }
 
+    /// Cast Value to Interval. Return None if value is not a valid interval data type.
+    pub fn as_interval(&self) -> Option<Interval> {
+        match self {
+            Value::Interval(i) => Some(*i),
+            _ => None,
+        }
+    }
+
     /// Cast Value to Date. Return None if value is not a valid date data type.
     pub fn as_date(&self) -> Option<Date> {
         match self {
