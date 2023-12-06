@@ -119,8 +119,8 @@ impl Function for DateAddFunction {
                     let date = date
                         .map(|date| {
                             if let Some(interval) = interval {
-                                let days = interval.to_nanosecond() as i64
-                                    / common_time::interval::NANOS_PER_DAY;
+                                let days = interval.to_nanosecond()
+                                    / common_time::interval::NANOS_PER_DAY as i128;
                                 let days: i32 = days.try_into().map_err(|e| {
                                     ExecuteSnafu {
                                         msg: format!("{e}"),
