@@ -93,7 +93,7 @@ impl RegionLeaseKeeper {
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
 
         let metadata_subset = {
-            let _timer = metrics::METRIC_META_LOAD_LEADER_METADATA.start_timer();
+            let _timer = metrics::METRIC_META_LOAD_LEADER_METADATA_ELAPSED.start_timer();
             self.collect_tables_metadata(&table_ids).await?
         };
 
@@ -140,7 +140,7 @@ impl RegionLeaseKeeper {
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
 
         let metadata_subset = {
-            let _timer = metrics::METRIC_META_LOAD_FOLLOWER_METADATA.start_timer();
+            let _timer = metrics::METRIC_META_LOAD_FOLLOWER_METADATA_ELAPSED.start_timer();
             self.collect_tables_metadata(&table_ids).await?
         };
 

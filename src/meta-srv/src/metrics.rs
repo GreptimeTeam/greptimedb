@@ -16,37 +16,45 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref METRIC_META_KV_REQUEST: HistogramVec = register_histogram_vec!(
-        "meta_kv_request",
+    /// Elapsed time to responding kv requests.
+    pub static ref METRIC_META_KV_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
+        "meta_kv_request_elapsed",
         "meta kv request",
         &["target", "op", "cluster_id"]
     )
     .unwrap();
+    /// The heartbeat connection gauge.
     pub static ref METRIC_META_HEARTBEAT_CONNECTION_NUM: IntGauge = register_int_gauge!(
         "meta_heartbeat_connection_num",
         "meta heartbeat connection num"
     )
     .unwrap();
+    /// Elapsed time to execution of heartbeat handlers.
     pub static ref METRIC_META_HANDLER_EXECUTE: HistogramVec =
         register_histogram_vec!("meta_handler_execute", "meta handler execute", &["name"]).unwrap();
+    /// Inactive region gauge.
     pub static ref METRIC_META_INACTIVE_REGIONS: IntGauge =
         register_int_gauge!("meta_inactive_regions", "meta inactive regions").unwrap();
-    pub static ref METRIC_META_LEADER_CACHED_KV_LOAD: HistogramVec =
+    /// Elapsed time to leader cache kv.
+    pub static ref METRIC_META_LEADER_CACHED_KV_LOAD_ELAPSED: HistogramVec =
         register_histogram_vec!("meta_leader_cache_kv_load", "meta load cache", &["prefix"])
             .unwrap();
-    pub static ref METRIC_META_LOAD_FOLLOWER_METADATA: Histogram = register_histogram!(
-        "meta_load_follower_metadata",
+    /// Elapsed time to load follower region metadata.
+    pub static ref METRIC_META_LOAD_FOLLOWER_METADATA_ELAPSED: Histogram = register_histogram!(
+        "meta_load_follower_metadata_elapsed",
         "meta load follower regions metadata elapsed"
     )
     .unwrap();
-    pub static ref METRIC_META_LOAD_LEADER_METADATA: Histogram = register_histogram!(
-        "meta_load_leader_metadata",
+    /// Elapsed time to load leader region metadata.
+    pub static ref METRIC_META_LOAD_LEADER_METADATA_ELAPSED: Histogram = register_histogram!(
+        "meta_load_leader_metadata_elapsed",
         "meta load leader regions metadata elapsed"
     )
     .unwrap();
-    pub static ref METRIC_META_KV_CACHE_BATCH_GET_HIT_RATE: Gauge = register_gauge!(
-        "meta_kv_cache_batch_get_hit_rate",
-        "meta kv cache batch get hit rate"
-    )
-    .unwrap();
+    /// Meta kv cache hit counter.
+    pub static ref METRIC_META_KV_CACHE_HIT: IntCounterVec =
+        register_int_counter_vec!("meta_kv_cache_hit", "meta kv cache hit", &["op"]).unwrap();
+    /// Meta kv cache miss counter.
+    pub static ref METRIC_META_KV_CACHE_MISS: IntCounterVec =
+        register_int_counter_vec!("meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
 }
