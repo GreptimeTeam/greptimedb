@@ -119,16 +119,16 @@ impl Function for DateSubFunction {
                     let date = date
                         .map(|date| {
                             if let Some(interval) = interval {
-                                let secs = interval.to_nanosecond() as i64
-                                    / common_time::interval::NANOS_PER_SEC;
-                                let secs: i32 = secs.try_into().map_err(|e| {
+                                let days = interval.to_nanosecond() as i64
+                                    / common_time::interval::NANOS_PER_DAY;
+                                let days: i32 = days.try_into().map_err(|e| {
                                     ExecuteSnafu {
                                         msg: format!("{e}"),
                                     }
                                     .build()
                                 })?;
 
-                                Ok(Date::new(date.val() - secs))
+                                Ok(Date::new(date.val() - days))
                             } else {
                                 Ok(date)
                             }
@@ -253,20 +253,20 @@ mod tests {
     #[test]
     fn test_date_date_sub() {
         let f = DateSubFunction;
-        let seconds_in_month = 3600 * 24 * 30;
+        let days_per_month = 30;
 
         let dates = vec![
-            Some(123 * seconds_in_month),
+            Some(123 * days_per_month),
             None,
-            Some(42 * seconds_in_month),
+            Some(42 * days_per_month),
             None,
         ];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
         let results = [
-            Some(122 * seconds_in_month),
+            Some(122 * days_per_month),
             None,
-            Some(39 * seconds_in_month),
+            Some(39 * days_per_month),
             None,
         ];
 
@@ -296,20 +296,20 @@ mod tests {
     #[test]
     fn test_datetime_date_sub() {
         let f = DateSubFunction;
-        let millis_in_month = 3600 * 24 * 30 * 1000;
+        let millis_per_month = 3600 * 24 * 30 * 1000;
 
         let dates = vec![
-            Some(123 * millis_in_month),
+            Some(123 * millis_per_month),
             None,
-            Some(42 * millis_in_month),
+            Some(42 * millis_per_month),
             None,
         ];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
         let results = [
-            Some(122 * millis_in_month),
+            Some(122 * millis_per_month),
             None,
-            Some(39 * millis_in_month),
+            Some(39 * millis_per_month),
             None,
         ];
 

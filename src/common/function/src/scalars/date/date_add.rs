@@ -119,16 +119,16 @@ impl Function for DateAddFunction {
                     let date = date
                         .map(|date| {
                             if let Some(interval) = interval {
-                                let secs = interval.to_nanosecond() as i64
-                                    / common_time::interval::NANOS_PER_SEC;
-                                let secs: i32 = secs.try_into().map_err(|e| {
+                                let days = interval.to_nanosecond() as i64
+                                    / common_time::interval::NANOS_PER_DAY;
+                                let days: i32 = days.try_into().map_err(|e| {
                                     ExecuteSnafu {
                                         msg: format!("{e}"),
                                     }
                                     .build()
                                 })?;
 
-                                Ok(Date::new(date.val() + secs))
+                                Ok(Date::new(date.val() + days))
                             } else {
                                 Ok(date)
                             }
@@ -253,15 +253,15 @@ mod tests {
     #[test]
     fn test_date_date_add() {
         let f = DateAddFunction;
-        let seconds_in_month = 3600 * 24 * 30;
+        let days_per_month = 30;
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
         let results = [
-            Some(seconds_in_month + 123),
+            Some(days_per_month + 123),
             None,
-            Some(3 * seconds_in_month + 42),
+            Some(3 * days_per_month + 42),
             None,
         ];
 
@@ -291,15 +291,15 @@ mod tests {
     #[test]
     fn test_datetime_date_add() {
         let f = DateAddFunction;
-        let millis_in_month = 3600 * 24 * 30 * 1000;
+        let millis_per_month = 3600 * 24 * 30 * 1000;
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
         let results = [
-            Some(millis_in_month + 123),
+            Some(millis_per_month + 123),
             None,
-            Some(3 * millis_in_month + 42),
+            Some(3 * millis_per_month + 42),
             None,
         ];
 
