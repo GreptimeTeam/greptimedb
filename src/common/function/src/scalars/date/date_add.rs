@@ -28,7 +28,7 @@ use snafu::ensure;
 use crate::helper;
 use crate::scalars::function::{Function, FunctionContext};
 
-/// A function adds a interval value to Timestamp, Date or DateTime, and return the result.
+/// A function adds an interval value to Timestamp, Date or DateTime, and return the result.
 #[derive(Clone, Debug, Default)]
 pub struct DateAddFunction;
 
