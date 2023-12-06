@@ -490,6 +490,7 @@ mod tests {
     use crate::cache_invalidator::DummyCacheInvalidator;
     use crate::datanode_manager::{DatanodeManager, DatanodeRef};
     use crate::ddl::alter_table::AlterTableProcedure;
+    use crate::ddl::create_database::CreateDatabaseProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::truncate_table::TruncateTableProcedure;
@@ -547,6 +548,7 @@ mod tests {
             AlterTableProcedure::TYPE_NAME,
             DropTableProcedure::TYPE_NAME,
             TruncateTableProcedure::TYPE_NAME,
+            CreateDatabaseProcedure::TYPE_NAME,
         ];
 
         for loader in expected_loaders {
