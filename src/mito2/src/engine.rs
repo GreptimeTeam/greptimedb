@@ -44,14 +44,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use object_store::manager::ObjectStoreManagerRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
@@ -147,7 +146,11 @@ impl EngineInner {
     }
 
     /// Handles [RegionRequest] and return its executed result.
-    async fn handle_request(&self, region_id: RegionId, request: RegionRequest) -> Result<Output> {
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<AffectedRows> {
         let _timer = HANDLE_REQUEST_ELAPSED
             .with_label_values(&[request.type_name()])
             .start_timer();
@@ -220,7 +223,7 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> std::result::Result<Output, BoxedError> {
+    ) -> Result<AffectedRows, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await

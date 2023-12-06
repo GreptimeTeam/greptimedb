@@ -16,12 +16,11 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
 use common_telemetry::info;
 use object_store::util::join_path;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{AffectedRows, RegionOpenRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{ObjectStoreNotFoundSnafu, OpenDalSnafu, RegionNotFoundSnafu, Result};
@@ -35,9 +34,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionOpenRequest,
-    ) -> Result<Output> {
+    ) -> Result<AffectedRows> {
         if self.regions.is_region_exists(region_id) {
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
         let object_store = if let Some(storage_name) = request.options.get("storage") {
             self.object_store_manager
@@ -82,6 +81,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

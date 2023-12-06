@@ -14,7 +14,7 @@
 
 use common_telemetry::{error, info};
 use snafu::OptionExt;
-use store_api::region_request::{AlterKind, RegionAlterRequest};
+use store_api::region_request::{AffectedRows, AlterKind, RegionAlterRequest};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
@@ -28,18 +28,21 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionAlterRequest,
-    ) -> Result<()> {
+    ) -> Result<AffectedRows> {
         let is_altering_logical_region = self
             .state
             .read()
             .await
             .physical_regions()
             .contains_key(&region_id);
-        if is_altering_logical_region {
+
+        let result = if is_altering_logical_region {
             self.alter_physical_region(region_id, request).await
         } else {
             self.alter_logical_region(region_id, request).await
-        }
+        };
+
+        result.map(|_| 0)
     }
 
     async fn alter_logical_region(

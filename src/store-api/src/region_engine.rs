@@ -19,13 +19,12 @@ use std::sync::Arc;
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use serde::{Deserialize, Serialize};
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::RegionRequest;
+use crate::region_request::{AffectedRows, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -114,14 +113,12 @@ pub trait RegionEngine: Send + Sync {
     /// Name of this engine
     fn name(&self) -> &str;
 
-    /// Handles request to the region.
-    ///
-    /// Only query is not included, which is handled in `handle_query`
+    /// Handles non-query request to the region. Returns the count of affected rows.
     async fn handle_request(
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output, BoxedError>;
+    ) -> Result<AffectedRows, BoxedError>;
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(

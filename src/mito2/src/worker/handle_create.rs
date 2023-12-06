@@ -16,12 +16,11 @@
 
 use std::sync::Arc;
 
-use common_query::Output;
 use common_telemetry::info;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
-use store_api::region_request::RegionCreateRequest;
+use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidMetadataSnafu, Result};
@@ -34,7 +33,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> Result<Output> {
+    ) -> Result<AffectedRows> {
         // Checks whether the table exists.
         if let Some(region) = self.regions.get_region(region_id) {
             // Region already exists.
@@ -45,7 +44,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 &request.primary_key,
             )?;
 
-            return Ok(Output::AffectedRows(0));
+            return Ok(0);
         }
 
         // Convert the request into a RegionMetadata and validate it.
@@ -76,6 +75,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // Insert the MitoRegion into the RegionMap.
         self.regions.insert_region(Arc::new(region));
 
-        Ok(Output::AffectedRows(0))
+        Ok(0)
     }
 }

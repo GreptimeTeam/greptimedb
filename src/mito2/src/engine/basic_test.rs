@@ -110,7 +110,7 @@ async fn test_region_replay() {
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
 
-    let open_region = engine
+    let rows = engine
         .handle_request(
             region_id,
             RegionRequest::Open(RegionOpenRequest {
@@ -121,9 +121,6 @@ async fn test_region_replay() {
         )
         .await
         .unwrap();
-    let Output::AffectedRows(rows) = open_region else {
-        unreachable!()
-    };
     assert_eq!(0, rows);
 
     let request = ScanRequest::default();

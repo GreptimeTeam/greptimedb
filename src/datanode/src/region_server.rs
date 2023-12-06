@@ -50,7 +50,7 @@ use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::scan::StreamScanAdapter;
@@ -112,7 +112,7 @@ impl RegionServer {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output> {
+    ) -> Result<AffectedRows> {
         self.inner.handle_request(region_id, request).await
     }
 
@@ -209,13 +209,7 @@ impl RegionServerHandler for RegionServer {
         // only insert/delete will have multiple results.
         let mut affected_rows = 0;
         for result in results {
-            match result {
-                Output::AffectedRows(rows) => affected_rows += rows,
-                Output::Stream(_) | Output::RecordBatches(_) => {
-                    // TODO: change the output type to only contains `affected_rows`
-                    unreachable!()
-                }
-            }
+            affected_rows += result;
         }
 
         Ok(RegionResponse {
@@ -294,7 +288,7 @@ impl RegionServerInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<Output> {
+    ) -> Result<AffectedRows> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])

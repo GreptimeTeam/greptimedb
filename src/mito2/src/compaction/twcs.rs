@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::readable_size::ReadableSize;
-use common_query::Output;
 use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -158,7 +157,7 @@ impl Picker for TwcsPicker {
         if outputs.is_empty() && expired_ssts.is_empty() {
             // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
             for waiter in waiters {
-                waiter.send(Ok(Output::AffectedRows(0)));
+                waiter.send(Ok(0));
             }
             return None;
         }

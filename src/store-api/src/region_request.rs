@@ -28,6 +28,8 @@ use crate::metadata::{
 use crate::path_utils::region_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
 
+pub type AffectedRows = usize;
+
 #[derive(Debug, IntoStaticStr)]
 pub enum RegionRequest {
     Put(RegionPutRequest),
