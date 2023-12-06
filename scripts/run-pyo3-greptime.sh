@@ -48,8 +48,7 @@ setup_conda_env() {
 get_optional_args(){
     # if not set by --path path-of-greptime-executable
     # default to search local folder for greptime executable
-    ARGS=$(getopt -o "p:" -l "path:" -- "$@")
-
+    ARGS=$(getopt -o "p:y::e:" -l "path:,yes::,env:" -- "$@")
     # assign ARGS to positional parameters $1, $2, etc...
     eval set -- "$ARGS"
     unset ARGS
@@ -58,9 +57,19 @@ get_optional_args(){
     # parse for path
     while true; do
         case "$1" in
-            -p)
+            -p|--path)
                 shift
                 exec_path="$1"
+                shift
+                ;;
+            -y|--yes)
+                shift
+                export YESMAN=1
+                shift
+                ;;
+            -e|--env)
+                shift
+                export USE_ENV="$1"
                 shift
                 ;;
             --)
@@ -68,6 +77,7 @@ get_optional_args(){
                 break
                 ;;
             *)
+                echo "Error parsing arguments: $1"
                 break
                 ;;
         esac
@@ -87,8 +97,8 @@ execute_greptime() {
 
 main() {
     get_optional_args $@
-    echo GREPTIME_EXEC_PATH: $GREPTIME_EXEC_PATH
-    echo REST_OF_ARGS: $REST_OF_ARGS
+    echo Path of greptime executable: $GREPTIME_EXEC_PATH
+    echo Args passed to greptime executable: $REST_OF_ARGS
     local req_py_version
     req_py_version=$(get_python_version)
     readonly req_py_version
@@ -98,6 +108,7 @@ main() {
             $GREPTIME_EXEC_PATH $REST_OF_ARGS
         else
             echo "The 'greptime' binary is not valid or encountered an error."
+            $GREPTIME_EXEC_PATH --version
             exit 1
         fi
         return
@@ -105,20 +116,27 @@ main() {
 
     echo "The required version of Python shared library is $req_py_version"
 
-    echo "Now this script will try to install or find correct Python Version"
-    echo "Do you want to continue? (yes/no): "
-    read -r yn
+    # if YESMAN exist, assign it to yn, else read from stdin
+    if [[ -z "$YESMAN" ]]; then
+        echo "Now this script will try to install or find correct Python Version"
+        echo "Do you want to continue? (yes/no): "
+        read -r yn
+    else
+        yn="y"
+    fi
     case $yn in
         [Yy]* ) ;;
         [Nn]* ) exit;;
         * ) echo "Please answer yes or no.";;
     esac
-    
-    echo "choose your perfered way to install python"
-    echo "1. virtualenv"
-    echo "2. conda"
-    echo "Input your choice [1/2]: "
-    read -r option
+    # if USE_ENV exist, assign it to option
+    # else read from stdin
+    if [[ -z "$USE_ENV" ]]; then
+        echo "Do you want to use virtualenv or conda? (virtualenv(1)/conda(2)): "
+        read -r option
+    else
+        option="$USE_ENV"
+    fi
     case $option in 
         1) 
         setup_virtualenv "$req_py_version"
@@ -126,7 +144,9 @@ main() {
         2) 
         setup_conda_env "$req_py_version"
         ;;
-        *) echo "Please input 1 or 2"; exit 1;;
+        *) 
+        echo "Please input 1 or 2"; exit 1
+        ;;
     esac
 
     execute_greptime $REST_OF_ARGS
