@@ -716,7 +716,6 @@ type = "{}"
 [[datanode.region_engine]]
 
 [datanode.region_engine.mito]
-num_workers = {}
 worker_channel_size = 128
 worker_request_batch_size = 64
 manifest_checkpoint_distance = 10
@@ -729,6 +728,7 @@ sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
 page_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
+parallel_scan_channel_size = 32
 
 [[datanode.region_engine]]
 
@@ -740,27 +740,38 @@ enable_otlp_tracing = false
 [logging]
 enable_otlp_tracing = false"#,
         store_type,
-        num_cpus::get() / 2
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
     assert_eq!(body_text, expected_toml_str);
 }
 
 fn drop_lines_with_inconsistent_results(input: String) -> String {
+    let inconsistent_results = [
+        "dir =",
+        "data_home =",
+        "bucket =",
+        "root =",
+        "endpoint =",
+        "region =",
+        "cache_path =",
+        "cache_capacity =",
+        "sas_token =",
+        "scope =",
+        "num_workers =",
+        "scan_parallelism =",
+    ];
+
     input
         .lines()
         .filter(|line| {
             // ignores
-            !line.trim().starts_with("dir =")
-                && !line.trim().starts_with("data_home =")
-                && !line.trim().starts_with("bucket =")
-                && !line.trim().starts_with("root =")
-                && !line.trim().starts_with("endpoint =")
-                && !line.trim().starts_with("region =")
-                && !line.trim().starts_with("cache_path =")
-                && !line.trim().starts_with("cache_capacity =")
-                && !line.trim().starts_with("sas_token =")
-                && !line.trim().starts_with("scope =")
+            let line = line.trim();
+            for prefix in inconsistent_results {
+                if line.starts_with(prefix) {
+                    return false;
+                }
+            }
+            true
         })
         .collect::<Vec<&str>>()
         .join(
