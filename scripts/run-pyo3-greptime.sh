@@ -41,12 +41,44 @@ setup_conda_env() {
     conda activate "GreptimeTmpPyO3Env$req_py_version"
 }
 
+get_optional_args(){
+    # if not set by --path path-of-greptime-executable
+    # default to search local folder for greptime executable
+    ARGS=$(getopt -o "p:" -l "path:" -- "$@")
+
+    # assign ARGS to positional parameters $1, $2, etc...
+    eval set -- "$ARGS"
+    unset ARGS
+    # default path to executable
+    exec_path="./greptime"
+    # parse for path
+    while true; do
+        case "$1" in
+            -p)
+                shift
+                exec_path="$1"
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+    export GREPTIME_EXEC_PATH=$exec_path
+    export REST_OF_ARGS=$@
+}
+
 # Set library path and pass all arguments to greptime to run it
 execute_greptime() {
+    get_optional_args $@
     if [[ "$OS_TYPE" == "Darwin" ]]; then
-        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" ./greptime "$@"
+        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH "$REST_OF_ARGS"
     elif [[ "$OS_TYPE" == "Linux" ]]; then
-        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" ./greptime "$@"
+        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH "$REST_OF_ARGS"
     fi
 }
 
