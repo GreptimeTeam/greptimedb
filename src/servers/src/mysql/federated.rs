@@ -323,10 +323,7 @@ pub(crate) fn check(
 
 // get GreptimeDB's version.
 fn get_version() -> String {
-    format!(
-        "{}-greptime",
-        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-    )
+    format!("{}-greptime", env!("CARGO_PKG_VERSION"))
 }
 #[cfg(test)]
 mod test {
