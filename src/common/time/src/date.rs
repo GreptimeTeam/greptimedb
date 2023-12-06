@@ -15,12 +15,13 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::ResultExt;
 
 use crate::error::{Error, ParseDateStrSnafu, Result};
+use crate::interval::Interval;
 
 const UNIX_EPOCH_FROM_CE: i32 = 719_163;
 
@@ -85,6 +86,34 @@ impl Date {
 
     pub fn to_secs(&self) -> i64 {
         (self.0 as i64) * 24 * 3600
+    }
+
+    /// Adds given Interval to the current date.
+    /// Returns None if the resulting date would be out of range.
+    pub fn add_interval(&self, interval: Interval) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
+
+        let (months, days, _) = interval.to_month_day_nano();
+
+        let naive_date = naive_date.checked_add_months(Months::new(months as u32))?;
+
+        naive_date
+            .checked_add_days(Days::new(days as u64))
+            .map(Into::into)
+    }
+
+    /// Subtracts given Interval to the current date.
+    /// Returns None if the resulting date would be out of range.
+    pub fn sub_interval(&self, interval: Interval) -> Option<Date> {
+        let naive_date = self.to_chrono_date()?;
+
+        let (months, days, _) = interval.to_month_day_nano();
+
+        let naive_date = naive_date.checked_sub_months(Months::new(months as u32))?;
+
+        naive_date
+            .checked_sub_days(Days::new(days as u64))
+            .map(Into::into)
     }
 }
 

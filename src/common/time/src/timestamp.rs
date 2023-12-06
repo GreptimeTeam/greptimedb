@@ -21,15 +21,16 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
+    TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
 use crate::timezone::TimeZone;
 use crate::util::{div_ceil, format_utc_datetime, local_datetime_to_utc};
+use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
 /// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC time zone):
@@ -138,6 +139,39 @@ impl Timestamp {
             value,
             unit: self.unit,
         })
+    }
+
+    /// Adds given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime.checked_add_months(Months::new(months as u32))?;
+        let naive_datetime = naive_datetime.checked_add_days(Days::new(days as u64))?;
+        let naive_datetime = naive_datetime + Duration::from_nanos(nsecs as u64);
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
+    }
+
+    /// Subtracts given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime.checked_sub_months(Months::new(months as u32))?;
+
+        let naive_datetime = naive_datetime.checked_sub_days(Days::new(days as u64))?;
+        let naive_datetime = naive_datetime - Duration::from_nanos(nsecs as u64);
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
     }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.

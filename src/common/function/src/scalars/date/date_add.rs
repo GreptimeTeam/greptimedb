@@ -14,11 +14,8 @@
 
 use std::fmt;
 
-use common_query::error::{
-    ExecuteSnafu, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu,
-};
+use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::Signature;
-use common_time::{Date, DateTime};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
@@ -46,12 +43,12 @@ impl Function for DateAddFunction {
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
             vec![
+                ConcreteDataType::date_datatype(),
+                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 ConcreteDataType::timestamp_nanosecond_datatype(),
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
             ],
             vec![
                 ConcreteDataType::interval_month_day_nano_datatype(),
@@ -83,30 +80,13 @@ impl Function for DateAddFunction {
                 for i in 0..size {
                     let ts = left.get(i).as_timestamp();
                     let interval = right.get(i).as_interval();
-                    let ts = ts
-                        .map(|ts| {
-                            if let Some(interval) = interval {
-                                let duration = interval
-                                    .to_duration()
-                                    .map_err(|e| {
-                                        ExecuteSnafu {
-                                            msg: format!("{e}"),
-                                        }
-                                        .build()
-                                    })?
-                                    .into();
-                                ts.add_duration(duration).map_err(|e| {
-                                    ExecuteSnafu {
-                                        msg: format!("{e}"),
-                                    }
-                                    .build()
-                                })
-                            } else {
-                                Ok(ts)
-                            }
-                        })
-                        .transpose()?;
-                    result.push_value_ref(ValueRef::from(ts));
+
+                    let new_ts = match (ts, interval) {
+                        (Some(ts), Some(interval)) => ts.add_interval(interval),
+                        _ => ts,
+                    };
+
+                    result.push_value_ref(ValueRef::from(new_ts));
                 }
 
                 Ok(result.to_vector())
@@ -116,25 +96,12 @@ impl Function for DateAddFunction {
                 for i in 0..size {
                     let date = left.get(i).as_date();
                     let interval = right.get(i).as_interval();
-                    let date = date
-                        .map(|date| {
-                            if let Some(interval) = interval {
-                                let days = interval.to_nanosecond()
-                                    / common_time::interval::NANOS_PER_DAY as i128;
-                                let days: i32 = days.try_into().map_err(|e| {
-                                    ExecuteSnafu {
-                                        msg: format!("{e}"),
-                                    }
-                                    .build()
-                                })?;
+                    let new_date = match (date, interval) {
+                        (Some(date), Some(interval)) => date.add_interval(interval),
+                        _ => date,
+                    };
 
-                                Ok(Date::new(date.val() + days))
-                            } else {
-                                Ok(date)
-                            }
-                        })
-                        .transpose()?;
-                    result.push_value_ref(ValueRef::from(date));
+                    result.push_value_ref(ValueRef::from(new_date));
                 }
 
                 Ok(result.to_vector())
@@ -144,16 +111,12 @@ impl Function for DateAddFunction {
                 for i in 0..size {
                     let datetime = left.get(i).as_datetime();
                     let interval = right.get(i).as_interval();
-                    let datetime = datetime.map(|datetime| {
-                        if let Some(interval) = interval {
-                            let millis = interval.to_nanosecond() as i64
-                                / common_time::interval::NANOS_PER_MILLI;
-                            DateTime::new(datetime.val() + millis)
-                        } else {
-                            datetime
-                        }
-                    });
-                    result.push_value_ref(ValueRef::from(datetime));
+                    let new_datetime = match (datetime, interval) {
+                        (Some(datetime), Some(interval)) => datetime.add_interval(interval),
+                        _ => datetime,
+                    };
+
+                    result.push_value_ref(ValueRef::from(new_datetime));
                 }
 
                 Ok(result.to_vector())
@@ -253,17 +216,11 @@ mod tests {
     #[test]
     fn test_date_date_add() {
         let f = DateAddFunction;
-        let days_per_month = 30;
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
-        let results = [
-            Some(days_per_month + 123),
-            None,
-            Some(3 * days_per_month + 42),
-            None,
-        ];
+        let results = [Some(154), None, Some(131), None];
 
         let date_vector = DateVector::from(dates.clone());
         let interval_vector = IntervalYearMonthVector::from_vec(intervals);
@@ -291,17 +248,11 @@ mod tests {
     #[test]
     fn test_datetime_date_add() {
         let f = DateAddFunction;
-        let millis_per_month = 3600 * 24 * 30 * 1000;
 
         let dates = vec![Some(123), None, Some(42), None];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
-        let results = [
-            Some(millis_per_month + 123),
-            None,
-            Some(3 * millis_per_month + 42),
-            None,
-        ];
+        let results = [Some(2678400123), None, Some(7776000042), None];
 
         let date_vector = DateTimeVector::from(dates.clone());
         let interval_vector = IntervalYearMonthVector::from_vec(intervals);

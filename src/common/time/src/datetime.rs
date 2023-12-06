@@ -14,14 +14,15 @@
 
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
+use std::time::Duration;
 
-use chrono::{LocalResult, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
+use chrono::{Days, LocalResult, Months, NaiveDateTime, TimeZone as ChronoTimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
 use crate::timezone::TimeZone;
 use crate::util::{format_utc_datetime, local_datetime_to_utc};
-use crate::Date;
+use crate::{Date, Interval};
 
 const DATETIME_FORMAT: &str = "%F %T";
 const DATETIME_FORMAT_WITH_TZ: &str = "%F %T%z";
@@ -116,6 +117,31 @@ impl DateTime {
             Some(TimeZone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
             None => Utc.from_utc_datetime(&v).naive_local(),
         })
+    }
+    /// Adds given Interval to the current datetime.
+    /// Returns None if the resulting datetime would be out of range.
+    pub fn add_interval(&self, interval: Interval) -> Option<Self> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime.checked_add_months(Months::new(months as u32))?;
+        let naive_datetime = naive_datetime + Duration::from_nanos(nsecs as u64);
+        naive_datetime
+            .checked_add_days(Days::new(days as u64))
+            .map(Into::into)
+    }
+
+    /// Subtracts given Interval to the current datetime.
+    /// Returns None if the resulting datetime would be out of range.
+    pub fn sub_interval(&self, interval: Interval) -> Option<Self> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime.checked_sub_months(Months::new(months as u32))?;
+        let naive_datetime = naive_datetime - Duration::from_nanos(nsecs as u64);
+        naive_datetime
+            .checked_sub_days(Days::new(days as u64))
+            .map(Into::into)
     }
 
     /// Convert to [common_time::date].

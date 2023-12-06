@@ -118,7 +118,6 @@ impl Interval {
         }
     }
 
-    /// Return a `[Duration]` from the interval
     pub fn to_duration(&self) -> Result<Duration> {
         Ok(Duration::new_nanosecond(
             self.to_nanosecond()

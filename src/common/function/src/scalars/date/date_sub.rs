@@ -14,11 +14,8 @@
 
 use std::fmt;
 
-use common_query::error::{
-    ExecuteSnafu, InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu,
-};
+use common_query::error::{InvalidFuncArgsSnafu, Result, UnsupportedInputDataTypeSnafu};
 use common_query::prelude::Signature;
-use common_time::{Date, DateTime};
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
@@ -46,12 +43,12 @@ impl Function for DateSubFunction {
     fn signature(&self) -> Signature {
         helper::one_of_sigs2(
             vec![
+                ConcreteDataType::date_datatype(),
+                ConcreteDataType::datetime_datatype(),
                 ConcreteDataType::timestamp_second_datatype(),
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 ConcreteDataType::timestamp_microsecond_datatype(),
                 ConcreteDataType::timestamp_nanosecond_datatype(),
-                ConcreteDataType::date_datatype(),
-                ConcreteDataType::datetime_datatype(),
             ],
             vec![
                 ConcreteDataType::interval_month_day_nano_datatype(),
@@ -77,36 +74,20 @@ impl Function for DateSubFunction {
 
         let size = left.len();
         let left_datatype = columns[0].data_type();
+
         match left_datatype {
             ConcreteDataType::Timestamp(_) => {
                 let mut result = left_datatype.create_mutable_vector(size);
                 for i in 0..size {
                     let ts = left.get(i).as_timestamp();
                     let interval = right.get(i).as_interval();
-                    let ts = ts
-                        .map(|ts| {
-                            if let Some(interval) = interval {
-                                let duration = interval
-                                    .to_duration()
-                                    .map_err(|e| {
-                                        ExecuteSnafu {
-                                            msg: format!("{e}"),
-                                        }
-                                        .build()
-                                    })?
-                                    .into();
-                                ts.sub_duration(duration).map_err(|e| {
-                                    ExecuteSnafu {
-                                        msg: format!("{e}"),
-                                    }
-                                    .build()
-                                })
-                            } else {
-                                Ok(ts)
-                            }
-                        })
-                        .transpose()?;
-                    result.push_value_ref(ValueRef::from(ts));
+
+                    let new_ts = match (ts, interval) {
+                        (Some(ts), Some(interval)) => ts.sub_interval(interval),
+                        _ => ts,
+                    };
+
+                    result.push_value_ref(ValueRef::from(new_ts));
                 }
 
                 Ok(result.to_vector())
@@ -116,25 +97,12 @@ impl Function for DateSubFunction {
                 for i in 0..size {
                     let date = left.get(i).as_date();
                     let interval = right.get(i).as_interval();
-                    let date = date
-                        .map(|date| {
-                            if let Some(interval) = interval {
-                                let days = interval.to_nanosecond()
-                                    / common_time::interval::NANOS_PER_DAY as i128;
-                                let days: i32 = days.try_into().map_err(|e| {
-                                    ExecuteSnafu {
-                                        msg: format!("{e}"),
-                                    }
-                                    .build()
-                                })?;
+                    let new_date = match (date, interval) {
+                        (Some(date), Some(interval)) => date.sub_interval(interval),
+                        _ => date,
+                    };
 
-                                Ok(Date::new(date.val() - days))
-                            } else {
-                                Ok(date)
-                            }
-                        })
-                        .transpose()?;
-                    result.push_value_ref(ValueRef::from(date));
+                    result.push_value_ref(ValueRef::from(new_date));
                 }
 
                 Ok(result.to_vector())
@@ -144,16 +112,12 @@ impl Function for DateSubFunction {
                 for i in 0..size {
                     let datetime = left.get(i).as_datetime();
                     let interval = right.get(i).as_interval();
-                    let datetime = datetime.map(|datetime| {
-                        if let Some(interval) = interval {
-                            let millis = interval.to_nanosecond() as i64
-                                / common_time::interval::NANOS_PER_MILLI;
-                            DateTime::new(datetime.val() - millis)
-                        } else {
-                            datetime
-                        }
-                    });
-                    result.push_value_ref(ValueRef::from(datetime));
+                    let new_datetime = match (datetime, interval) {
+                        (Some(datetime), Some(interval)) => datetime.sub_interval(interval),
+                        _ => datetime,
+                    };
+
+                    result.push_value_ref(ValueRef::from(new_datetime));
                 }
 
                 Ok(result.to_vector())
@@ -263,12 +227,7 @@ mod tests {
         ];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
-        let results = [
-            Some(122 * days_per_month),
-            None,
-            Some(39 * days_per_month),
-            None,
-        ];
+        let results = [Some(3659), None, Some(1168), None];
 
         let date_vector = DateVector::from(dates.clone());
         let interval_vector = IntervalYearMonthVector::from_vec(intervals);
@@ -306,12 +265,7 @@ mod tests {
         ];
         // Intervals in months
         let intervals = vec![1, 2, 3, 1];
-        let results = [
-            Some(122 * millis_per_month),
-            None,
-            Some(39 * millis_per_month),
-            None,
-        ];
+        let results = [Some(316137600000), None, Some(100915200000), None];
 
         let date_vector = DateTimeVector::from(dates.clone());
         let interval_vector = IntervalYearMonthVector::from_vec(intervals);
