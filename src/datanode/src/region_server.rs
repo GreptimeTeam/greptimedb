@@ -50,7 +50,7 @@ use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
-use store_api::region_request::{RegionCloseRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::table::scan::StreamScanAdapter;
@@ -112,7 +112,7 @@ impl RegionServer {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         self.inner.handle_request(region_id, request).await
     }
 
@@ -288,7 +288,7 @@ impl RegionServerInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])

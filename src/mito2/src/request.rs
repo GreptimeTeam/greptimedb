@@ -32,8 +32,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
-    RegionAlterRequest, RegionCloseRequest, RegionCompactRequest, RegionCreateRequest,
-    RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
+    RegionCreateRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
+    RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -382,16 +383,16 @@ pub(crate) fn validate_proto_value(
 
 /// Oneshot output result sender.
 #[derive(Debug)]
-pub(crate) struct OutputTx(Sender<Result<usize>>);
+pub(crate) struct OutputTx(Sender<Result<AffectedRows>>);
 
 impl OutputTx {
     /// Creates a new output sender.
-    pub(crate) fn new(sender: Sender<Result<usize>>) -> OutputTx {
+    pub(crate) fn new(sender: Sender<Result<AffectedRows>>) -> OutputTx {
         OutputTx(sender)
     }
 
     /// Sends the `result`.
-    pub(crate) fn send(self, result: Result<usize>) {
+    pub(crate) fn send(self, result: Result<AffectedRows>) {
         // Ignores send result.
         let _ = self.0.send(result);
     }
@@ -413,14 +414,14 @@ impl OptionOutputTx {
     }
 
     /// Sends the `result` and consumes the inner sender.
-    pub(crate) fn send_mut(&mut self, result: Result<usize>) {
+    pub(crate) fn send_mut(&mut self, result: Result<AffectedRows>) {
         if let Some(sender) = self.0.take() {
             sender.send(result);
         }
     }
 
     /// Sends the `result` and consumes the sender.
-    pub(crate) fn send(mut self, result: Result<usize>) {
+    pub(crate) fn send(mut self, result: Result<AffectedRows>) {
         if let Some(sender) = self.0.take() {
             sender.send(result);
         }
@@ -432,8 +433,8 @@ impl OptionOutputTx {
     }
 }
 
-impl From<Sender<Result<usize>>> for OptionOutputTx {
-    fn from(sender: Sender<Result<usize>>) -> Self {
+impl From<Sender<Result<AffectedRows>>> for OptionOutputTx {
+    fn from(sender: Sender<Result<AffectedRows>>) -> Self {
         Self::new(Some(OutputTx::new(sender)))
     }
 }
@@ -492,7 +493,7 @@ impl WorkerRequest {
     pub(crate) fn try_from_region_request(
         region_id: RegionId,
         value: RegionRequest,
-    ) -> Result<(WorkerRequest, Receiver<Result<usize>>)> {
+    ) -> Result<(WorkerRequest, Receiver<Result<AffectedRows>>)> {
         let (sender, receiver) = oneshot::channel();
         let worker_request = match value {
             RegionRequest::Put(v) => {

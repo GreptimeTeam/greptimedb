@@ -19,7 +19,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
 use common_telemetry::{error, info};
 use snafu::OptionExt;
-use store_api::region_request::RegionPutRequest;
+use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};
 
 use crate::consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, RANDOM_STATE};
@@ -36,7 +36,7 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionPutRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let is_putting_physical_region = self
             .state
             .read()
@@ -60,7 +60,7 @@ impl MetricEngineInner {
         &self,
         logical_region_id: RegionId,
         mut request: RegionPutRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let physical_region_id = *self
             .state
             .read()

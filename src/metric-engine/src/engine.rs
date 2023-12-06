@@ -28,7 +28,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::RwLock;
 
@@ -113,7 +113,7 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize, BoxedError> {
+    ) -> Result<AffectedRows, BoxedError> {
         let result = match request {
             RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
             RegionRequest::Delete(_) => todo!(),

@@ -20,7 +20,7 @@ use common_telemetry::info;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadataBuilder;
-use store_api::region_request::RegionCreateRequest;
+use store_api::region_request::{AffectedRows, RegionCreateRequest};
 use store_api::storage::RegionId;
 
 use crate::error::{InvalidMetadataSnafu, Result};
@@ -33,7 +33,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         &mut self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         // Checks whether the table exists.
         if let Some(region) = self.regions.get_region(region_id) {
             // Region already exists.

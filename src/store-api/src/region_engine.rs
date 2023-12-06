@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
-use crate::region_request::RegionRequest;
+use crate::region_request::{AffectedRows, RegionRequest};
 use crate::storage::{RegionId, ScanRequest};
 
 /// The result of setting readonly for the region.
@@ -118,7 +118,7 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize, BoxedError>;
+    ) -> Result<AffectedRows, BoxedError>;
 
     /// Handles substrait query and return a stream of record batches
     async fn handle_query(

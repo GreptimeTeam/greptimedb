@@ -25,7 +25,8 @@ use snafu::{ensure, OptionExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{
-    RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
+    RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Mutex;
@@ -58,7 +59,7 @@ impl RegionEngine for FileRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize, BoxedError> {
+    ) -> Result<AffectedRows, BoxedError> {
         self.inner
             .handle_request(region_id, request)
             .await
@@ -148,7 +149,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> EngineResult<usize> {
+    ) -> EngineResult<AffectedRows> {
         match request {
             RegionRequest::Create(req) => self.handle_create(region_id, req).await,
             RegionRequest::Drop(req) => self.handle_drop(region_id, req).await,
@@ -186,7 +187,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> EngineResult<usize> {
+    ) -> EngineResult<AffectedRows> {
         ensure!(
             request.engine == FILE_ENGINE,
             UnexpectedEngineSnafu {
@@ -223,7 +224,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         request: RegionOpenRequest,
-    ) -> EngineResult<usize> {
+    ) -> EngineResult<AffectedRows> {
         if self.exists(region_id).await {
             return Ok(0);
         }
@@ -253,7 +254,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         _request: RegionCloseRequest,
-    ) -> EngineResult<usize> {
+    ) -> EngineResult<AffectedRows> {
         let _lock = self.region_mutex.lock().await;
 
         let mut regions = self.regions.write().unwrap();
@@ -268,7 +269,7 @@ impl EngineInner {
         &self,
         region_id: RegionId,
         _request: RegionDropRequest,
-    ) -> EngineResult<usize> {
+    ) -> EngineResult<AffectedRows> {
         if !self.exists(region_id).await {
             return RegionNotFoundSnafu { region_id }.fail();
         }

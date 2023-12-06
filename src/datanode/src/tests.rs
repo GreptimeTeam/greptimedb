@@ -31,7 +31,7 @@ use query::QueryEngine;
 use session::context::QueryContextRef;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
-use store_api::region_request::RegionRequest;
+use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -109,7 +109,7 @@ impl RegionEngine for MockRegionEngine {
         &self,
         region_id: RegionId,
         request: RegionRequest,
-    ) -> Result<usize, BoxedError> {
+    ) -> Result<AffectedRows, BoxedError> {
         let _ = self.sender.send((region_id, request)).await;
         Ok(0)
     }

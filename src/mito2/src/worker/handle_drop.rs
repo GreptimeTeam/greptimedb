@@ -21,6 +21,7 @@ use futures::TryStreamExt;
 use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
+use store_api::region_request::AffectedRows;
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
@@ -33,7 +34,10 @@ const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
 const MAX_RETRY_TIMES: u64 = 288; // 24 hours (5m * 288)
 
 impl<S> RegionWorkerLoop<S> {
-    pub(crate) async fn handle_drop_request(&mut self, region_id: RegionId) -> Result<usize> {
+    pub(crate) async fn handle_drop_request(
+        &mut self,
+        region_id: RegionId,
+    ) -> Result<AffectedRows> {
         let region = self.regions.writable_region(region_id)?;
 
         info!("Try to drop region: {}", region_id);

@@ -19,7 +19,7 @@ use snafu::ResultExt;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
-    AddColumn, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
+    AddColumn, AffectedRows, AlterKind, RegionAlterRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
@@ -136,7 +136,7 @@ impl DataRegion {
         &self,
         region_id: RegionId,
         request: RegionPutRequest,
-    ) -> Result<usize> {
+    ) -> Result<AffectedRows> {
         let region_id = utils::to_data_region_id(region_id);
         self.mito
             .handle_request(region_id, RegionRequest::Put(request))
