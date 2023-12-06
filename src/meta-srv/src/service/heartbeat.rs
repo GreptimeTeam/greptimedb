@@ -55,10 +55,12 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             Some(header) => header,
                             None => {
                                 let err = error::MissingRequestHeaderSnafu {}.build();
-                                tx.send(Err(err.into())).await.expect("working rx");
+                                // break either (1) malformed request (2) shutting down
+                                let _ = tx.send(Err(err.into())).await;
                                 break;
                             }
                         };
+
                         debug!("Receiving heartbeat request: {:?}", req);
 
                         if pusher_key.is_none() {
@@ -78,7 +80,10 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                         is_not_leader = res.as_ref().map_or(false, |r| r.is_not_leader());
 
                         debug!("Sending heartbeat response: {:?}", res);
-                        tx.send(res).await.expect("working rx");
+                        if tx.send(res).await.is_err() {
+                            // response was dropped; shutting down
+                            break;
+                        }
                     }
                     Err(err) => {
                         if let Some(io_err) = error::match_for_io_error(&err) {
@@ -89,9 +94,9 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             }
                         }
 
-                        match tx.send(Err(err)).await {
-                            Ok(_) => (),
-                            Err(_err) => break, // response was dropped
+                        if tx.send(Err(err)).await.is_err() {
+                            // response was dropped; shutting down
+                            break;
                         }
                     }
                 }
