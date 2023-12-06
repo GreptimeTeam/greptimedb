@@ -460,7 +460,6 @@ mod tests {
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
-            
             [storage]
             data_home = "/tmp/greptimedb/"
             type = "File"
