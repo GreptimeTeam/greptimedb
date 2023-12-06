@@ -122,6 +122,12 @@ type = "File"
 # The local file cache capacity in bytes.
 # cache_capacity = "256MB"
 
+# Custom storage options
+#[[storage.providers]]
+#type = "S3"
+#[[storage.providers]]
+#type = "Gcs"
+
 # Mito engine options
 [[region_engine]]
 [region_engine.mito]
