@@ -64,7 +64,7 @@ use crate::event_listener::{
 };
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::heartbeat::HeartbeatTask;
-use crate::region_server::{DummyTableProviderFactory, RegionServer};
+use crate::region_server::RegionServer;
 use crate::store;
 
 const OPEN_REGION_PARALLELISM: usize = 16;
