@@ -13,10 +13,14 @@ check_command_existence() {
 get_python_version() {
     case "$OS_TYPE" in
         Darwin)
-            otool -L greptime | grep -o 'Python.framework/Versions/3.[0-9]+/Python' | grep -o '3.[0-9]+'
+            otool -L $GREPTIME_EXEC_PATH | grep -o 'Python.framework/Versions/3.[0-9]\+/Python' | grep -o '3.[0-9]\+'
             ;;
         Linux)
-            ldd greptime | grep -o 'libpython[0-9]\.[0-9]+' | grep -o '[0-9]\.[0-9]+'
+            ldd $GREPTIME_EXEC_PATH | grep -o 'libpython3\.[0-9]\+' | grep -o '3\.[0-9]\+'
+            ;;
+        *)
+            echo "Unsupported OS type: $OS_TYPE"
+            exit 1
             ;;
     esac
 }
@@ -74,22 +78,24 @@ get_optional_args(){
 
 # Set library path and pass all arguments to greptime to run it
 execute_greptime() {
-    get_optional_args $@
     if [[ "$OS_TYPE" == "Darwin" ]]; then
-        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH "$REST_OF_ARGS"
+        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH $@
     elif [[ "$OS_TYPE" == "Linux" ]]; then
-        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH "$REST_OF_ARGS"
+        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH $@
     fi
 }
 
 main() {
+    get_optional_args $@
+    echo GREPTIME_EXEC_PATH: $GREPTIME_EXEC_PATH
+    echo REST_OF_ARGS: $REST_OF_ARGS
     local req_py_version
     req_py_version=$(get_python_version)
     readonly req_py_version
 
     if [[ -z "$req_py_version" ]]; then
-        if ./greptime --version &> /dev/null; then
-            ./greptime "$@"
+        if $GREPTIME_EXEC_PATH --version &> /dev/null; then
+            $GREPTIME_EXEC_PATH $REST_OF_ARGS
         else
             echo "The 'greptime' binary is not valid or encountered an error."
             exit 1
@@ -107,17 +113,23 @@ main() {
         [Nn]* ) exit;;
         * ) echo "Please answer yes or no.";;
     esac
-
-    if check_command_existence "virtualenv"; then
+    
+    echo "choose your perfered way to install python"
+    echo "1. virtualenv"
+    echo "2. conda"
+    echo "Input your choice [1/2]: "
+    read -r option
+    case $option in 
+        1) 
         setup_virtualenv "$req_py_version"
-    elif check_command_existence "conda"; then
+        ;;
+        2) 
         setup_conda_env "$req_py_version"
-    else
-        echo "Neither virtualenv nor conda is available."
-        exit 1
-    fi
+        ;;
+        *) echo "Please input 1 or 2"; exit 1;;
+    esac
 
-    execute_greptime "$@"
+    execute_greptime $REST_OF_ARGS
 }
 
 main "$@"
