@@ -165,9 +165,6 @@ pub enum Error {
 
     #[snafu(display("Invalid function args: {}", err_msg))]
     InvalidFuncArgs { err_msg: String, location: Location },
-
-    #[snafu(display("Execute function error: {msg}"))]
-    Execute { msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -186,7 +183,6 @@ impl ErrorExt for Error {
             | Error::BadAccumulatorImpl { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }
-            | Error::Execute { .. }
             | Error::ArrowCompute { .. } => StatusCode::EngineExecuteQuery,
 
             Error::InvalidInputType { source, .. }
