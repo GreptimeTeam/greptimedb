@@ -147,13 +147,12 @@ impl ErrorExt for Error {
             | Deserialize { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
-            | CombineTableColumnMismatch { .. } => StatusCode::InvalidArguments,
-
-            UnknownTable { .. }
+            | CombineTableColumnMismatch { .. }
             | DataFusionPlanning { .. }
             | UnexpectedPlanExpr { .. }
-            | IllegalRange { .. }
-            | EmptyRange { .. } => StatusCode::Internal,
+            | IllegalRange { .. } => StatusCode::InvalidArguments,
+
+            UnknownTable { .. } | EmptyRange { .. } => StatusCode::Internal,
 
             TableNameNotFound { .. } => StatusCode::TableNotFound,
 
