@@ -25,7 +25,7 @@ use object_store::util::join_dir;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
-use store_api::region_request::{RegionCreateRequest, RegionRequest};
+use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::RegionId;
 
@@ -50,16 +50,18 @@ impl MetricEngineInner {
         &self,
         region_id: RegionId,
         request: RegionCreateRequest,
-    ) -> Result<()> {
+    ) -> Result<AffectedRows> {
         Self::verify_region_create_request(&request)?;
 
-        if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
+        let result = if request.options.contains_key(PHYSICAL_TABLE_METADATA_KEY) {
             self.create_physical_region(region_id, request).await
         } else if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
             self.create_logical_region(region_id, request).await
         } else {
             MissingRegionOptionSnafu {}.fail()
-        }
+        };
+
+        result.map(|_| 0)
     }
 
     /// Initialize a physical metric region at given region id.
