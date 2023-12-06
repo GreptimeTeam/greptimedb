@@ -32,12 +32,15 @@ use object_store::util::normalize_dir;
 use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
-use crate::config::{DatanodeOptions, ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
+use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
 use crate::error::{self, Result};
 
-pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectStore> {
-    let data_home = normalize_dir(&opts.storage.data_home);
-    let object_store = match &opts.storage.store {
+pub(crate) async fn new_object_store(
+    store: ObjectStoreConfig,
+    data_home: &str,
+) -> Result<ObjectStore> {
+    let data_home = normalize_dir(data_home);
+    let object_store = match &store {
         ObjectStoreConfig::File(file_config) => {
             fs::new_fs_object_store(&data_home, file_config).await
         }
@@ -50,9 +53,8 @@ pub(crate) async fn new_object_store(opts: &DatanodeOptions) -> Result<ObjectSto
     }?;
 
     // Enable retry layer and cache layer for non-fs object storages
-    let object_store = if !matches!(opts.storage.store, ObjectStoreConfig::File(..)) {
-        let object_store =
-            create_object_store_with_cache(object_store, &opts.storage.store).await?;
+    let object_store = if !matches!(store, ObjectStoreConfig::File(..)) {
+        let object_store = create_object_store_with_cache(object_store, &store).await?;
         object_store.layer(RetryLayer::new().with_jitter())
     } else {
         object_store

@@ -712,6 +712,7 @@ sync_write = false
 
 [datanode.storage]
 type = "{}"
+providers = []
 
 [[datanode.region_engine]]
 

@@ -214,7 +214,7 @@ mod tests {
     use std::time::Duration;
 
     use common_test_util::temp_dir::create_named_temp_file;
-    use datanode::config::{FileConfig, ObjectStoreConfig};
+    use datanode::config::{FileConfig, GcsConfig, ObjectStoreConfig, S3Config};
     use servers::heartbeat_options::HeartbeatOptions;
     use servers::Mode;
 
@@ -251,8 +251,17 @@ mod tests {
             sync_write = false
 
             [storage]
-            type = "File"
             data_home = "/tmp/greptimedb/"
+            type = "File"
+
+            [[storage.providers]]
+            type = "Gcs"
+            bucket = "foo"
+            endpoint = "bar"
+
+            [[storage.providers]]
+            type = "S3"
+            bucket = "foo"
 
             [logging]
             level = "debug"
@@ -304,6 +313,15 @@ mod tests {
         assert!(matches!(
             &options.storage.store,
             ObjectStoreConfig::File(FileConfig { .. })
+        ));
+        assert_eq!(options.storage.providers.len(), 2);
+        assert!(matches!(
+            options.storage.providers[0],
+            ObjectStoreConfig::Gcs(GcsConfig { .. })
+        ));
+        assert!(matches!(
+            options.storage.providers[1],
+            ObjectStoreConfig::S3(S3Config { .. })
         ));
 
         assert_eq!("debug", options.logging.level.unwrap());

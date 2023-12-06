@@ -48,6 +48,18 @@ pub enum ObjectStoreConfig {
     Gcs(GcsConfig),
 }
 
+impl ObjectStoreConfig {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::File(_) => "File",
+            Self::S3(_) => "S3",
+            Self::Oss(_) => "Oss",
+            Self::Azblob(_) => "Azblob",
+            Self::Gcs(_) => "Gcs",
+        }
+    }
+}
+
 /// Storage engine config
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -63,6 +75,7 @@ pub struct StorageConfig {
     pub data_home: String,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
+    pub providers: Vec<ObjectStoreConfig>,
 }
 
 impl Default for StorageConfig {
@@ -71,6 +84,7 @@ impl Default for StorageConfig {
             global_ttl: None,
             data_home: DEFAULT_DATA_HOME.to_string(),
             store: ObjectStoreConfig::default(),
+            providers: vec![],
         }
     }
 }
@@ -295,7 +309,7 @@ mod tests {
             secret_access_key = "secret_access_key"
         "#;
         let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
-        match opts.storage.store {
+        match &opts.storage.store {
             ObjectStoreConfig::S3(cfg) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),

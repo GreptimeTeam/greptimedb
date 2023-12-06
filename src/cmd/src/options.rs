@@ -238,7 +238,7 @@ mod tests {
                 .unwrap();
 
                 // Check the configs from environment variables.
-                match opts.storage.store {
+                match &opts.storage.store {
                     ObjectStoreConfig::S3(s3_config) => {
                         assert_eq!(s3_config.bucket, "mybucket".to_string());
                     }

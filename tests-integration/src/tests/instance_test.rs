@@ -31,8 +31,9 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::test_util::check_output_stream;
 use crate::tests::test_util::{
-    both_instances_cases, check_unordered_output_stream, distributed, find_testing_resource,
-    prepare_path, standalone, standalone_instance_case, MockInstance,
+    both_instances_cases, both_instances_cases_with_custom_storages, check_unordered_output_stream,
+    distributed, distributed_with_multiple_object_stores, find_testing_resource, prepare_path,
+    standalone, standalone_instance_case, standalone_with_multiple_object_stores, MockInstance,
 };
 
 #[apply(both_instances_cases)]
@@ -1839,4 +1840,121 @@ async fn execute_sql_with(
     try_execute_sql_with(instance, sql, query_ctx)
         .await
         .unwrap()
+}
+
+#[apply(both_instances_cases_with_custom_storages)]
+async fn test_custom_storage(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    let custom_storages = [
+        ("S3", "GT_S3_BUCKET"),
+        ("Oss", "GT_OSS_BUCKET"),
+        ("Azblob", "GT_AZBLOB_CONTAINER"),
+        ("Gcs", "GT_GCS_BUCKET"),
+    ];
+    for (storage_name, custom_storage_env) in custom_storages {
+        if let Ok(env_value) = env::var(custom_storage_env) {
+            if env_value.is_empty() {
+                continue;
+            }
+            let sql = if instance.is_distributed_mode() {
+                format!(
+                    r#"create table test_table(
+                    a int null primary key,
+                    ts timestamp time index,
+                )
+                PARTITION BY RANGE COLUMNS (a) (
+                    PARTITION r0 VALUES LESS THAN (1),
+                    PARTITION r1 VALUES LESS THAN (10),
+                    PARTITION r2 VALUES LESS THAN (100),
+                    PARTITION r3 VALUES LESS THAN (MAXVALUE),
+                )
+                with(storage='{storage_name}')
+                "#
+                )
+            } else {
+                format!(
+                    r#"create table test_table(a int primary key, ts timestamp time index)with(storage='{storage_name}');"#
+                )
+            };
+
+            let output = execute_sql(&instance.frontend(), &sql).await;
+            assert!(matches!(output, Output::AffectedRows(0)));
+            let output = execute_sql(
+                &frontend,
+                r#"insert into test_table(a, ts) values
+                            (1, 1655276557000),
+                            (1000, 1655276558000)
+                            "#,
+            )
+            .await;
+            assert!(matches!(output, Output::AffectedRows(2)));
+
+            let output = execute_sql(&frontend, "select * from test_table").await;
+            let expected = "\
++------+---------------------+
+| a    | ts                  |
++------+---------------------+
+| 1    | 2022-06-15T07:02:37 |
+| 1000 | 2022-06-15T07:02:38 |
++------+---------------------+";
+
+            check_output_stream(output, expected).await;
+            let output = execute_sql(&frontend, "show create table test_table").await;
+            let Output::RecordBatches(record_batches) = output else {
+                unreachable!()
+            };
+
+            let record_batches = record_batches.iter().collect::<Vec<_>>();
+            let column = record_batches[0].column_by_name("Create Table").unwrap();
+            let actual = column.get(0);
+
+            let expect = if instance.is_distributed_mode() {
+                format!(
+                    r#"CREATE TABLE IF NOT EXISTS "test_table" (
+  "a" INT NULL,
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("a")
+)
+PARTITION BY RANGE COLUMNS ("a") (
+  PARTITION r0 VALUES LESS THAN (1),
+  PARTITION r1 VALUES LESS THAN (10),
+  PARTITION r2 VALUES LESS THAN (100),
+  PARTITION r3 VALUES LESS THAN (MAXVALUE)
+)
+ENGINE=mito
+WITH(
+  regions = 4,
+  storage = '{storage_name}'
+)"#
+                )
+            } else {
+                format!(
+                    r#"CREATE TABLE IF NOT EXISTS "test_table" (
+  "a" INT NULL,
+  "ts" TIMESTAMP(3) NOT NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("a")
+)
+
+ENGINE=mito
+WITH(
+  regions = 1,
+  storage = '{storage_name}'
+)"#
+                )
+            };
+            assert_eq!(actual.to_string(), expect);
+            let output = execute_sql(&frontend, "truncate test_table").await;
+            assert!(matches!(output, Output::AffectedRows(0)));
+            let output = execute_sql(&frontend, "select * from test_table").await;
+            let expected = "\
+++
+++";
+
+            check_output_stream(output, expected).await;
+            let output = execute_sql(&frontend, "drop table test_table").await;
+            assert!(matches!(output, Output::AffectedRows(0)));
+        }
+    }
 }

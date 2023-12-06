@@ -354,7 +354,6 @@ impl DatanodeBuilder {
                 ));
             }
         }
-
         info!("going to open {} regions", regions.len());
         let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
         let mut tasks = vec![];
@@ -417,7 +416,6 @@ impl DatanodeBuilder {
         );
 
         let table_provider_factory = Arc::new(DummyTableProviderFactory);
-
         let mut region_server = RegionServer::with_table_provider(
             query_engine,
             runtime,
@@ -425,13 +423,8 @@ impl DatanodeBuilder {
             table_provider_factory,
         );
 
-        let object_store = store::new_object_store(opts).await?;
-        let object_store_manager = ObjectStoreManager::new(
-            "default", // TODO: use a name which is set in the configuration when #919 is done.
-            object_store,
-        );
-        let engines =
-            Self::build_store_engines(opts, log_store, Arc::new(object_store_manager)).await?;
+        let object_store_manager = Self::build_object_store_manager(opts).await?;
+        let engines = Self::build_store_engines(opts, log_store, object_store_manager).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -495,6 +488,21 @@ impl DatanodeBuilder {
             }
         }
         Ok(engines)
+    }
+
+    /// Builds [ObjectStoreManager]
+    async fn build_object_store_manager(opts: &DatanodeOptions) -> Result<ObjectStoreManagerRef> {
+        let object_store =
+            store::new_object_store(opts.storage.store.clone(), &opts.storage.data_home).await?;
+        let default_name = opts.storage.store.name();
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for store in &opts.storage.providers {
+            object_store_manager.add(
+                store.name(),
+                store::new_object_store(store.clone(), &opts.storage.data_home).await?,
+            );
+        }
+        Ok(Arc::new(object_store_manager))
     }
 }
 

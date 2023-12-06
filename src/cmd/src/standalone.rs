@@ -426,6 +426,7 @@ mod tests {
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_named_temp_file;
+    use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
 
     use super::*;
@@ -473,8 +474,16 @@ mod tests {
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
-
             [storage]
+            data_home = "/tmp/greptimedb/"
+            type = "File"
+
+            [[storage.providers]]
+            type = "Gcs"
+            bucket = "foo"
+            endpoint = "bar"
+
+            [[storage.providers]]
             type = "S3"
             access_key_id = "access_key_id"
             secret_access_key = "secret_access_key"
@@ -524,7 +533,16 @@ mod tests {
 
         assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
 
-        match &dn_opts.storage.store {
+        assert!(matches!(
+            &dn_opts.storage.store,
+            datanode::config::ObjectStoreConfig::File(FileConfig { .. })
+        ));
+        assert_eq!(dn_opts.storage.providers.len(), 2);
+        assert!(matches!(
+            dn_opts.storage.providers[0],
+            datanode::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
+        ));
+        match &dn_opts.storage.providers[1] {
             datanode::config::ObjectStoreConfig::S3(s3_config) => {
                 assert_eq!(
                     "Secret([REDACTED alloc::string::String])".to_string(),

@@ -241,7 +241,7 @@ mod tests {
                          PARTITION r2 VALUES LESS THAN (MAXVALUE),
                        )
                        engine=mito
-                       with(regions=1, ttl='7d');
+                       with(regions=1, ttl='7d', storage='File');
          ";
         let result = ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}).unwrap();
         assert_eq!(1, result.len());
@@ -267,6 +267,7 @@ PARTITION BY RANGE COLUMNS (ts) (
 ENGINE=mito
 WITH(
   regions = 1,
+  storage = 'File',
   ttl = '7d'
 )"#,
                     &new_sql

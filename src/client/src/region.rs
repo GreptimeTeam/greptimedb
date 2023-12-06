@@ -29,7 +29,6 @@ use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
 use tokio_stream::StreamExt;
 
-use crate::error::Error::RegionServer;
 use crate::error::{
     self, ConvertFlightDataSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
     MissingFieldSnafu, Result, ServerSnafu,
@@ -45,7 +44,7 @@ pub struct RegionRequester {
 impl Datanode for RegionRequester {
     async fn handle(&self, request: RegionRequest) -> MetaResult<AffectedRows> {
         self.handle_inner(request).await.map_err(|err| {
-            if matches!(err, RegionServer { .. }) {
+            if err.should_retry() {
                 meta_error::Error::RetryLater {
                     source: BoxedError::new(err),
                 }
