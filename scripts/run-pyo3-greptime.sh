@@ -13,10 +13,10 @@ check_command_existence() {
 get_python_version() {
     case "$OS_TYPE" in
         Darwin)
-            otool -L $GREPTIME_EXEC_PATH | grep -o 'Python.framework/Versions/3.[0-9]\+/Python' | grep -o '3.[0-9]\+'
+            otool -L $GREPTIME_BIN_PATH | grep -o 'Python.framework/Versions/3.[0-9]\+/Python' | grep -o '3.[0-9]\+'
             ;;
         Linux)
-            ldd $GREPTIME_EXEC_PATH | grep -o 'libpython3\.[0-9]\+' | grep -o '3\.[0-9]\+'
+            ldd $GREPTIME_BIN_PATH | grep -o 'libpython3\.[0-9]\+' | grep -o '3\.[0-9]\+'
             ;;
         *)
             echo "Unsupported OS type: $OS_TYPE"
@@ -45,70 +45,69 @@ setup_conda_env() {
     conda activate "GreptimeTmpPyO3Env$req_py_version"
 }
 
-get_optional_args(){
-    # if not set by --path path-of-greptime-executable
-    # default to search local folder for greptime executable
-    ARGS=$(getopt -o "p:y::e:" -l "path:,yes::,env:" -- "$@")
-    # assign ARGS to positional parameters $1, $2, etc...
-    eval set -- "$ARGS"
-    unset ARGS
-    # default path to executable
-    exec_path="./greptime"
-    # parse for path
-    while true; do
-        case "$1" in
-            -p|--path)
-                shift
-                exec_path="$1"
-                shift
-                ;;
-            -y|--yes)
-                shift
-                export YESMAN=1
-                shift
-                ;;
-            -e|--env)
-                shift
-                export USE_ENV="$1"
-                shift
-                ;;
-            --)
-                shift
-                break
-                ;;
-            *)
-                echo "Error parsing arguments: $1"
-                break
-                ;;
-        esac
-    done
-    export GREPTIME_EXEC_PATH=$exec_path
-    export REST_OF_ARGS=$@
+GREPTIME_BIN_PATH="./greptime"
+YES="false"
+
+usage() {
+  echo "Usage:"
+  echo "  $0 -f <greptime-bin-path> [-y] <args-pass-to-greptime>"
+  exit 1
+}
+
+function parse_args() {
+  while getopts ":f:y" opt; do
+    case $opt in
+      f)
+        GREPTIME_BIN_PATH=$OPTARG
+        ;;
+      y)
+        YES="true"
+        ;;
+      \?)
+        echo "Invalid option: -$OPTARG" >&2
+        exit 1
+        ;;
+      :)
+        echo "Option -$OPTARG requires an argument." >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  shift $((OPTIND -1))
+
+  REST_ARGS=$*
+
+  if [ -z "$GREPTIME_BIN_PATH" ]; then
+    usage
+  fi
+
+  echo "Run greptime binary at '$GREPTIME_BIN_PATH' (yes=$YES)..."
+  echo "The args pass to greptime: '$REST_ARGS'"
 }
 
 # Set library path and pass all arguments to greptime to run it
 execute_greptime() {
     if [[ "$OS_TYPE" == "Darwin" ]]; then
-        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH $@
+        DYLD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_BIN_PATH $@
     elif [[ "$OS_TYPE" == "Linux" ]]; then
-        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_EXEC_PATH $@
+        LD_LIBRARY_PATH="${CONDA_PREFIX:-$PREFIX}/lib:${LD_LIBRARY_PATH:-}" $GREPTIME_BIN_PATH $@
     fi
 }
 
 main() {
-    get_optional_args $@
-    echo Path of greptime executable: $GREPTIME_EXEC_PATH
-    echo Args passed to greptime executable: $REST_OF_ARGS
+    parse_args $@
+
     local req_py_version
     req_py_version=$(get_python_version)
     readonly req_py_version
 
     if [[ -z "$req_py_version" ]]; then
-        if $GREPTIME_EXEC_PATH --version &> /dev/null; then
-            $GREPTIME_EXEC_PATH $REST_OF_ARGS
+        if $GREPTIME_BIN_PATH --version &> /dev/null; then
+            $GREPTIME_BIN_PATH $REST_ARGS
         else
             echo "The 'greptime' binary is not valid or encountered an error."
-            $GREPTIME_EXEC_PATH --version
+            $GREPTIME_BIN_PATH --version
             exit 1
         fi
         return
@@ -116,27 +115,23 @@ main() {
 
     echo "The required version of Python shared library is $req_py_version"
 
-    # if YESMAN exist, assign it to yn, else read from stdin
-    if [[ -z "$YESMAN" ]]; then
+    # if YES exist, assign it to yn, else read from stdin
+    if [[ -z "$YES" ]]; then
         echo "Now this script will try to install or find correct Python Version"
         echo "Do you want to continue? (yes/no): "
         read -r yn
     else
-        yn="y"
+        yn="$YES"
     fi
     case $yn in
         [Yy]* ) ;;
         [Nn]* ) exit;;
         * ) echo "Please answer yes or no.";;
     esac
-    # if USE_ENV exist, assign it to option
-    # else read from stdin
-    if [[ -z "$USE_ENV" ]]; then
-        echo "Do you want to use virtualenv or conda? (virtualenv(1)/conda(2)): "
-        read -r option
-    else
-        option="$USE_ENV"
-    fi
+
+    echo "Do you want to use virtualenv or conda? (virtualenv(1)/conda(2)): "
+    read -r option
+    
     case $option in 
         1) 
         setup_virtualenv "$req_py_version"
@@ -149,7 +144,7 @@ main() {
         ;;
     esac
 
-    execute_greptime $REST_OF_ARGS
+    execute_greptime $REST_ARGS
 }
 
 main "$@"

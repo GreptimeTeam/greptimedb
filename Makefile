@@ -77,8 +77,7 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 	TARGET_DIR=${TARGET_DIR} \
 	TARGET=${TARGET} \
 	RELEASE=${RELEASE} \
-	CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}" && \
-	./scripts/check_pyo3_link_script.sh
+	CARGO_BUILD_EXTRA_OPTS="${CARGO_BUILD_EXTRA_OPTS}"
 
 .PHONY: build-android-bin
 build-android-bin: ## Build greptime binary for android.
