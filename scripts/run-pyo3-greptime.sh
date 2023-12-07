@@ -51,6 +51,7 @@ YES="false"
 usage() {
   echo "Usage:"
   echo "  $0 -f <greptime-bin-path> [-y] <args-pass-to-greptime>"
+  echo "Set $PY_ENV_MAN to 1 to use virtualenv, 2 to use conda"
   exit 1
 }
 
@@ -61,7 +62,7 @@ function parse_args() {
         GREPTIME_BIN_PATH=$OPTARG
         ;;
       y)
-        YES="true"
+        YES="yes"
         ;;
       \?)
         echo "Invalid option: -$OPTARG" >&2
@@ -129,8 +130,14 @@ main() {
         * ) echo "Please answer yes or no.";;
     esac
 
-    echo "Do you want to use virtualenv or conda? (virtualenv(1)/conda(2)): "
-    read -r option
+    # if USE_ENV exist, assign it to option
+    # else read from stdin
+    if [[ -z "$PY_ENV_MAN" ]]; then
+        echo "Do you want to use virtualenv or conda? (virtualenv(1)/conda(2)): "
+        read -r option
+    else
+        option="$PY_ENV_MAN"
+    fi
     
     case $option in 
         1) 
