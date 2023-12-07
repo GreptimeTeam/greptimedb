@@ -147,9 +147,11 @@ impl Timestamp {
         let naive_datetime = self.to_chrono_datetime()?;
         let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime.checked_add_months(Months::new(months as u32))?;
-        let naive_datetime = naive_datetime.checked_add_days(Days::new(days as u64))?;
-        let naive_datetime = naive_datetime + Duration::from_nanos(nsecs as u64);
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(months as u32))?
+            .checked_add_days(Days::new(days as u64))?
+            + Duration::from_nanos(nsecs as u64);
+
         match Timestamp::from_chrono_datetime(naive_datetime) {
             // Have to convert the new timestamp by the current unit.
             Some(ts) => ts.convert_to(self.unit),
@@ -163,10 +165,11 @@ impl Timestamp {
         let naive_datetime = self.to_chrono_datetime()?;
         let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime.checked_sub_months(Months::new(months as u32))?;
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(months as u32))?
+            .checked_sub_days(Days::new(days as u64))?
+            - Duration::from_nanos(nsecs as u64);
 
-        let naive_datetime = naive_datetime.checked_sub_days(Days::new(days as u64))?;
-        let naive_datetime = naive_datetime - Duration::from_nanos(nsecs as u64);
         match Timestamp::from_chrono_datetime(naive_datetime) {
             // Have to convert the new timestamp by the current unit.
             Some(ts) => ts.convert_to(self.unit),
@@ -611,6 +614,19 @@ mod tests {
         let unit = units[unit_idx];
         let value: i64 = rng.gen();
         Timestamp::new(value, unit)
+    }
+
+    #[test]
+    fn test_add_sub_interval() {
+        let ts = Timestamp::new(1000, TimeUnit::Millisecond);
+
+        let interval = Interval::from_day_time(1, 200);
+
+        let new_ts = ts.add_interval(interval).unwrap();
+        assert_eq!(new_ts.unit(), TimeUnit::Millisecond);
+        assert_eq!(new_ts.value(), 1000 + 3600 * 24 * 1000 + 200);
+
+        assert_eq!(ts, new_ts.sub_interval(interval).unwrap());
     }
 
     #[test]

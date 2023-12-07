@@ -124,11 +124,12 @@ impl DateTime {
         let naive_datetime = self.to_chrono_datetime()?;
         let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime.checked_add_months(Months::new(months as u32))?;
-        let naive_datetime = naive_datetime + Duration::from_nanos(nsecs as u64);
-        naive_datetime
-            .checked_add_days(Days::new(days as u64))
-            .map(Into::into)
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(months as u32))?
+            .checked_add_days(Days::new(days as u64))?
+            + Duration::from_nanos(nsecs as u64);
+
+        Some(naive_datetime.into())
     }
 
     /// Subtracts given Interval to the current datetime.
@@ -137,11 +138,12 @@ impl DateTime {
         let naive_datetime = self.to_chrono_datetime()?;
         let (months, days, nsecs) = interval.to_month_day_nano();
 
-        let naive_datetime = naive_datetime.checked_sub_months(Months::new(months as u32))?;
-        let naive_datetime = naive_datetime - Duration::from_nanos(nsecs as u64);
-        naive_datetime
-            .checked_sub_days(Days::new(days as u64))
-            .map(Into::into)
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(months as u32))?
+            .checked_sub_days(Days::new(days as u64))?
+            - Duration::from_nanos(nsecs as u64);
+
+        Some(naive_datetime.into())
     }
 
     /// Convert to [common_time::date].
@@ -176,6 +178,18 @@ mod tests {
     pub fn test_from() {
         let d: DateTime = 42.into();
         assert_eq!(42, d.val());
+    }
+
+    #[test]
+    fn test_add_sub_interval() {
+        let datetime = DateTime::new(1000);
+
+        let interval = Interval::from_day_time(1, 200);
+
+        let new_datetime = datetime.add_interval(interval).unwrap();
+        assert_eq!(new_datetime.val(), 1000 + 3600 * 24 * 1000 + 200);
+
+        assert_eq!(datetime, new_datetime.sub_interval(interval).unwrap());
     }
 
     #[test]

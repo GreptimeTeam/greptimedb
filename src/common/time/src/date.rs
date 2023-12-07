@@ -95,9 +95,8 @@ impl Date {
 
         let (months, days, _) = interval.to_month_day_nano();
 
-        let naive_date = naive_date.checked_add_months(Months::new(months as u32))?;
-
         naive_date
+            .checked_add_months(Months::new(months as u32))?
             .checked_add_days(Days::new(days as u64))
             .map(Into::into)
     }
@@ -109,9 +108,8 @@ impl Date {
 
         let (months, days, _) = interval.to_month_day_nano();
 
-        let naive_date = naive_date.checked_sub_months(Months::new(months as u32))?;
-
         naive_date
+            .checked_sub_months(Months::new(months as u32))?
             .checked_sub_days(Days::new(days as u64))
             .map(Into::into)
     }
@@ -151,6 +149,18 @@ mod tests {
 
         let now = Utc::now().date_naive().format("%F").to_string();
         assert_eq!(now, Date::from_str(&now).unwrap().to_string());
+    }
+
+    #[test]
+    fn test_add_sub_interval() {
+        let date = Date::new(1000);
+
+        let interval = Interval::from_year_month(3);
+
+        let new_date = date.add_interval(interval).unwrap();
+        assert_eq!(new_date.val(), 1091);
+
+        assert_eq!(date, new_date.sub_interval(interval).unwrap());
     }
 
     #[test]
