@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-mod date;
-pub mod expression;
-pub mod function;
-pub mod function_registry;
-pub mod math;
-pub mod numpy;
-#[cfg(test)]
-pub(crate) mod test;
-mod timestamp;
-pub mod udf;
+use std::sync::Arc;
+mod date_add;
+mod date_sub;
 
-pub use function::{Function, FunctionRef};
-pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};
+use date_add::DateAddFunction;
+use date_sub::DateSubFunction;
+
+use crate::scalars::function_registry::FunctionRegistry;
+
+pub(crate) struct DateFunction;
+
+impl DateFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(DateAddFunction));
+        registry.register(Arc::new(DateSubFunction));
+    }
+}

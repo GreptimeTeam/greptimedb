@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-mod date;
-pub mod expression;
-pub mod function;
-pub mod function_registry;
-pub mod math;
-pub mod numpy;
-#[cfg(test)]
-pub(crate) mod test;
-mod timestamp;
-pub mod udf;
+use common_query::prelude::{Signature, TypeSignature, Volatility};
+use datatypes::prelude::ConcreteDataType;
 
-pub use function::{Function, FunctionRef};
-pub use function_registry::{FunctionRegistry, FUNCTION_REGISTRY};
+/// Create a function signature with oneof signatures of interleaving two arguments.
+pub fn one_of_sigs2(args1: Vec<ConcreteDataType>, args2: Vec<ConcreteDataType>) -> Signature {
+    let mut sigs = Vec::with_capacity(args1.len() * args2.len());
+
+    for arg1 in &args1 {
+        for arg2 in &args2 {
+            sigs.push(TypeSignature::Exact(vec![arg1.clone(), arg2.clone()]));
+        }
+    }
+
+    Signature::one_of(sigs, Volatility::Immutable)
+}

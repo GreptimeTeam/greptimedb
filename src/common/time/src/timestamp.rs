@@ -21,15 +21,16 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
+    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
+    TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
-use crate::error;
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
 use crate::timezone::TimeZone;
 use crate::util::{div_ceil, format_utc_datetime, local_datetime_to_utc};
+use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
 /// since UNIX epoch. The valid value range of [Timestamp] depends on it's unit (all in UTC time zone):
@@ -102,6 +103,78 @@ impl Timestamp {
             value,
             unit: self.unit,
         })
+    }
+
+    /// Adds a duration to timestamp.
+    /// # Note
+    /// The result time unit remains unchanged even if `duration` has a different unit with `self`.
+    /// For example, a timestamp with value 1 and time unit second, subtracted by 1 millisecond
+    /// and the result is still 1 second.
+    pub fn add_duration(&self, duration: Duration) -> error::Result<Self> {
+        let duration: i64 = match self.unit {
+            TimeUnit::Second => {
+                i64::try_from(duration.as_secs()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Millisecond => {
+                i64::try_from(duration.as_millis()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Microsecond => {
+                i64::try_from(duration.as_micros()).context(TimestampOverflowSnafu)?
+            }
+            TimeUnit::Nanosecond => {
+                i64::try_from(duration.as_nanos()).context(TimestampOverflowSnafu)?
+            }
+        };
+
+        let value = self
+            .value
+            .checked_add(duration)
+            .with_context(|| ArithmeticOverflowSnafu {
+                msg: format!(
+                    "Try to add timestamp: {:?} with duration: {:?}",
+                    self, duration
+                ),
+            })?;
+        Ok(Timestamp {
+            value,
+            unit: self.unit,
+        })
+    }
+
+    /// Adds given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn add_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime
+            .checked_add_months(Months::new(months as u32))?
+            .checked_add_days(Days::new(days as u64))?
+            + Duration::from_nanos(nsecs as u64);
+
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
+    }
+
+    /// Subtracts given Interval to the current timestamp.
+    /// Returns None if the resulting timestamp would be out of range.
+    pub fn sub_interval(&self, interval: Interval) -> Option<Timestamp> {
+        let naive_datetime = self.to_chrono_datetime()?;
+        let (months, days, nsecs) = interval.to_month_day_nano();
+
+        let naive_datetime = naive_datetime
+            .checked_sub_months(Months::new(months as u32))?
+            .checked_sub_days(Days::new(days as u64))?
+            - Duration::from_nanos(nsecs as u64);
+
+        match Timestamp::from_chrono_datetime(naive_datetime) {
+            // Have to convert the new timestamp by the current unit.
+            Some(ts) => ts.convert_to(self.unit),
+            None => None,
+        }
     }
 
     /// Subtracts current timestamp with another timestamp, yielding a duration.
@@ -541,6 +614,19 @@ mod tests {
         let unit = units[unit_idx];
         let value: i64 = rng.gen();
         Timestamp::new(value, unit)
+    }
+
+    #[test]
+    fn test_add_sub_interval() {
+        let ts = Timestamp::new(1000, TimeUnit::Millisecond);
+
+        let interval = Interval::from_day_time(1, 200);
+
+        let new_ts = ts.add_interval(interval).unwrap();
+        assert_eq!(new_ts.unit(), TimeUnit::Millisecond);
+        assert_eq!(new_ts.value(), 1000 + 3600 * 24 * 1000 + 200);
+
+        assert_eq!(ts, new_ts.sub_interval(interval).unwrap());
     }
 
     #[test]
@@ -1003,6 +1089,33 @@ mod tests {
             .sub_duration(Duration::from_millis(1))
             .unwrap();
         assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+    }
+
+    #[test]
+    fn test_timestamp_add() {
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(2, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(0, TimeUnit::Second)
+            .add_duration(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(1, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(1, res.value);
+        assert_eq!(TimeUnit::Second, res.unit);
+
+        let res = Timestamp::new(100, TimeUnit::Second)
+            .add_duration(Duration::from_millis(1000))
+            .unwrap();
+        assert_eq!(101, res.value);
         assert_eq!(TimeUnit::Second, res.unit);
     }
 
