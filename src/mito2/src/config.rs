@@ -33,6 +33,7 @@ const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 pub struct MitoConfig {
     // Worker configs:
     /// Number of region workers (default: 1/2 of cpu cores).
+    /// Sets to 0 to use the default value.
     pub num_workers: usize,
     /// Request channel size of each worker (default 128).
     pub worker_channel_size: usize,
@@ -71,8 +72,9 @@ pub struct MitoConfig {
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
     /// Parallelism to scan a region (default: 1/4 of cpu cores).
-    ///
-    /// Sets 0 or 1 to disable parallel scan (use single-threaded scan).
+    /// - 0: using the default value (1/4 of cpu cores).
+    /// - 1: scan in current thread.
+    /// - n: scan in parallelism n.
     pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
@@ -103,16 +105,9 @@ impl Default for MitoConfig {
 impl MitoConfig {
     /// Sanitize incorrect configurations.
     pub(crate) fn sanitize(&mut self) {
-        // Sanitize worker num.
-        let num_workers_before = self.num_workers;
+        // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
-        }
-        if num_workers_before != self.num_workers {
-            warn!(
-                "Sanitize worker num {} to {}",
-                num_workers_before, self.num_workers
-            );
         }
 
         // Sanitize channel size.
@@ -140,6 +135,11 @@ impl MitoConfig {
                 "Sanitize sst write buffer size to {}",
                 self.sst_write_buffer_size
             );
+        }
+
+        // Use default value if `scan_parallelism` is 0.
+        if self.scan_parallelism == 0 {
+            self.scan_parallelism = divide_num_cpus(4);
         }
 
         if self.parallel_scan_channel_size < 1 {
