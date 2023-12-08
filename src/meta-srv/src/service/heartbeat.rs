@@ -55,7 +55,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                             Some(header) => header,
                             None => {
                                 let err = error::MissingRequestHeaderSnafu {}.build();
-                                // break either (1) malformed request (2) shutting down
+                                error!("Exit on malformed request: MissingRequestHeader");
                                 let _ = tx.send(Err(err.into())).await;
                                 break;
                             }
@@ -81,7 +81,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         debug!("Sending heartbeat response: {:?}", res);
                         if tx.send(res).await.is_err() {
-                            // response was dropped; shutting down
+                            info!("ReceiverStream was dropped; shutting down");
                             break;
                         }
                     }
@@ -95,7 +95,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                         }
 
                         if tx.send(Err(err)).await.is_err() {
-                            // response was dropped; shutting down
+                            info!("ReceiverStream was dropped; shutting down");
                             break;
                         }
                     }
@@ -106,10 +106,12 @@ impl heartbeat_server::Heartbeat for MetaSrv {
                     break;
                 }
             }
+
             info!(
-                "Heartbeat stream broken: {:?}",
+                "Heartbeat stream closed: {:?}",
                 pusher_key.as_ref().unwrap_or(&"unknown".to_string())
             );
+
             if let Some(key) = pusher_key {
                 let _ = handler_group.unregister(&key).await;
             }
