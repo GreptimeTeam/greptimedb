@@ -37,7 +37,6 @@ use tokio::time::{Duration, Instant};
 
 use crate::error::{self, Result};
 use crate::event_listener::{RegionServerEvent, RegionServerEventReceiver};
-use crate::metrics;
 use crate::region_server::RegionServer;
 
 /// [RegionAliveKeeper] manages all [CountdownTaskHandle]s.
@@ -342,10 +341,6 @@ impl Drop for CountdownTaskHandle {
             "Aborting region alive countdown task for region {}",
             self.region_id
         );
-        // Resets the metric if the CountdownTask quits.
-        metrics::LEASE_EXPIRED_REGION
-            .with_label_values(&[&format!("{}", self.region_id)])
-            .set(0);
         self.handler.abort();
     }
 }
@@ -406,9 +401,6 @@ impl CountdownTask {
                 () = &mut countdown => {
                     warn!("The region {region_id} lease is expired, set region to readonly.");
                     let _ = self.region_server.set_writable(self.region_id, false);
-                    metrics::LEASE_EXPIRED_REGION
-                        .with_label_values(&[&format!("{}", self.region_id)])
-                        .inc();
                     // resets the countdown.
                     let far_future = Instant::now() + Duration::from_secs(86400 * 365 * 30);
                     countdown.as_mut().reset(far_future);

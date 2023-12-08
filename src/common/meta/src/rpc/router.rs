@@ -237,7 +237,7 @@ pub struct RegionRoute {
     pub region: Region,
     #[builder(setter(into, strip_option))]
     pub leader_peer: Option<Peer>,
-    #[builder(setter(into, strip_option), default)]
+    #[builder(setter(into), default)]
     pub follower_peers: Vec<Peer>,
     /// `None` by default.
     #[builder(setter(into, strip_option), default)]

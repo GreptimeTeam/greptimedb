@@ -45,20 +45,4 @@ lazy_static! {
     /// Meta kv cache miss counter.
     pub static ref METRIC_META_KV_CACHE_MISS: IntCounterVec =
         register_int_counter_vec!("meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
-    /// The number of non-existing regions detected by lease keeper.
-    pub static ref METRIC_META_LEASE_KEEPER_NON_EXISTING_REGION_NUM: IntGaugeVec =
-        register_int_gauge_vec!(
-            "meta_lease_keeper_non_existing_region_num",
-            "meta lease keeper non-existing region num",
-            &["datanode"]
-        )
-        .unwrap();
-    /// The number of region roles changes detected by the lease keeper.
-    pub static ref METRIC_META_LEASE_KEEPER_REGION_ROLE_CHANGE_NUM: IntGaugeVec =
-        register_int_gauge_vec!(
-            "meta_lease_keeper_region_role_change_num",
-            "meta lease keeper region role change num",
-            &["datanode","region_id","op"]
-        )
-        .unwrap();
 }
