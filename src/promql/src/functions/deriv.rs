@@ -42,6 +42,8 @@ pub fn deriv(times: &TimestampMillisecondArray, values: &Float64Array) -> Option
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
 
@@ -73,7 +75,32 @@ mod test {
             Deriv::scalar_udf(),
             ts_array,
             value_array,
-            vec![Some(0.010606060606060607), None],
+            vec![Some(10.606060606060607), None],
+        );
+    }
+
+    // From prometheus `promql/functions_test.go` case `TestDeriv`
+    #[test]
+    fn complicate_deriv() {
+        let start = 1493712816939;
+        let interval = 30 * 1000;
+        let mut ts_data = vec![];
+        for i in 0..15 {
+            let jitter = 12 * i % 2;
+            ts_data.push(Some(start + interval * i + jitter));
+        }
+        let val_data = vec![Some(1.0); 15];
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(ts_data));
+        let val_array = Arc::new(Float64Array::from_iter(val_data));
+        let range = [(0, 15)];
+        let ts_range_array = RangeArray::from_ranges(ts_array, range).unwrap();
+        let value_range_array = RangeArray::from_ranges(val_array, range).unwrap();
+
+        simple_range_udf_runner(
+            Deriv::scalar_udf(),
+            ts_range_array,
+            value_range_array,
+            vec![Some(0.0)],
         );
     }
 }

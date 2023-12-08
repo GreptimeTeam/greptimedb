@@ -30,6 +30,7 @@ use crate::functions::{extract_array, linear_regression};
 use crate::range_array::RangeArray;
 
 pub struct PredictLinear {
+    /// Duration. The second param of (`predict_linear(v range-vector, t scalar)`).
     t: i64,
 }
 
@@ -147,8 +148,9 @@ fn predict_linear_impl(
         return None;
     }
 
-    let intercept_time = timestamps.value(0);
-    let (slope, intercept) = linear_regression(timestamps, values, intercept_time);
+    // last timestamp is evaluation timestamp
+    let evaluate_ts = timestamps.value(timestamps.len() - 1);
+    let (slope, intercept) = linear_regression(timestamps, values, evaluate_ts);
 
     if slope.is_none() || intercept.is_none() {
         return None;
@@ -210,7 +212,7 @@ mod test {
             ts_array,
             value_array,
             // value at t = 0
-            vec![Some(6.818181818181818)],
+            vec![Some(38.63636363636364)],
         );
     }
 
@@ -222,7 +224,7 @@ mod test {
             ts_array,
             value_array,
             // value at t = 3000
-            vec![Some(38.63636363636364)],
+            vec![Some(31856.818181818187)],
         );
     }
 
@@ -234,7 +236,7 @@ mod test {
             ts_array,
             value_array,
             // value at t = 4200
-            vec![Some(51.36363636363637)],
+            vec![Some(44584.09090909091)],
         );
     }
 
@@ -246,7 +248,7 @@ mod test {
             ts_array,
             value_array,
             // value at t = 6600
-            vec![Some(76.81818181818181)],
+            vec![Some(70038.63636363638)],
         );
     }
 
@@ -258,7 +260,7 @@ mod test {
             ts_array,
             value_array,
             // value at t = 7800
-            vec![Some(89.54545454545455)],
+            vec![Some(82765.9090909091)],
         );
     }
 }

@@ -97,7 +97,7 @@ pub(crate) fn linear_regression(
             const_y = false;
         }
         count += 1.0;
-        let x = time - intercept_time as f64 / 1e3;
+        let x = (time - intercept_time as f64) / 1e3f64;
         (sum_x, comp_x) = compensated_sum_inc(x, sum_x, comp_x);
         (sum_y, comp_y) = compensated_sum_inc(value, sum_y, comp_y);
         (sum_xy, comp_xy) = compensated_sum_inc(x * value, sum_xy, comp_xy);
@@ -188,8 +188,12 @@ mod test {
             0.0, 10.0, 20.0, 30.0, 40.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0,
         ]);
         let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
-        assert_eq!(slope, Some(0.010606060606060607));
-        assert_eq!(intercept, Some(6.818181818181818));
+        assert_eq!(slope, Some(10.606060606060607));
+        assert_eq!(intercept, Some(6.818181818181815));
+
+        let (slope, intercept) = linear_regression(&ts_array, &values_array, 3000);
+        assert_eq!(slope, Some(10.606060606060607));
+        assert_eq!(intercept, Some(38.63636363636364));
     }
 
     #[test]
@@ -219,8 +223,8 @@ mod test {
         .into_iter()
         .collect();
         let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
-        assert_eq!(slope, Some(0.010606060606060607));
-        assert_eq!(intercept, Some(6.818181818181818));
+        assert_eq!(slope, Some(10.606060606060607));
+        assert_eq!(intercept, Some(6.818181818181815));
     }
 
     #[test]
@@ -230,5 +234,19 @@ mod test {
         let (slope, intercept) = linear_regression(&ts_array, &values_array, ts_array.value(0));
         assert_eq!(slope, None);
         assert_eq!(intercept, None);
+    }
+
+    // From prometheus `promql/functions_test.go` case `TestKahanSum`
+    #[test]
+    fn test_kahan_sum() {
+        let inputs = vec![1.0, 10.0f64.powf(100.0), 1.0, -1.0 * 10.0f64.powf(100.0)];
+
+        let mut sum = 0.0;
+        let mut c = 0f64;
+
+        for v in inputs {
+            (sum, c) = compensated_sum_inc(v, sum, c);
+        }
+        assert_eq!(sum + c, 2.0)
     }
 }
