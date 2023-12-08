@@ -25,9 +25,9 @@ use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
+use super::update_metadata::UpdateMetadata;
 use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
-use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::{Context, State};
 use crate::service::mailbox::Channel;
 
@@ -44,7 +44,7 @@ impl State for OpenCandidateRegion {
         self.open_candidate_region(ctx, instruction).await?;
 
         Ok((
-            Box::<DowngradeLeaderRegion>::default(),
+            Box::new(UpdateMetadata::Downgrade),
             Status::executing(false),
         ))
     }
@@ -182,20 +182,17 @@ impl OpenCandidateRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::meta::mailbox_message::Payload;
     use common_catalog::consts::MITO2_ENGINE;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::DatanodeId;
-    use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
     use crate::procedure::region_migration::test_util::{
-        self, new_close_region_reply, send_mock_reply, TestingEnv,
+        self, new_close_region_reply, new_open_region_reply, send_mock_reply, TestingEnv,
     };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -215,20 +212,6 @@ mod tests {
             region_storage_path: "/bar/foo/region/".to_string(),
             options: Default::default(),
         })
-    }
-
-    fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
-        MailboxMessage {
-            id,
-            subject: "mock".to_string(),
-            from: "datanode".to_string(),
-            to: "meta".to_string(),
-            timestamp_millis: current_time_millis(),
-            payload: Some(Payload::Json(
-                serde_json::to_string(&InstructionReply::OpenRegion(SimpleReply { result, error }))
-                    .unwrap(),
-            )),
-        }
     }
 
     #[tokio::test]
@@ -402,7 +385,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_downgrade_leader_region_state() {
+    async fn test_next_update_metadata_downgrade_state() {
         let mut state = Box::new(OpenCandidateRegion);
         // from_peer: 1
         // to_peer: 2
@@ -443,9 +426,8 @@ mod tests {
             (to_peer_id, region_id)
         );
 
-        let _ = next
-            .as_any()
-            .downcast_ref::<DowngradeLeaderRegion>()
-            .unwrap();
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+
+        assert_matches!(update_metadata, UpdateMetadata::Downgrade);
     }
 }

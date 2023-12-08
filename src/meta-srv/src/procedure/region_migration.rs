@@ -829,4 +829,126 @@ mod tests {
             .run_once()
             .await;
     }
+
+    #[tokio::test]
+    async fn test_procedure_flow_upgrade_candidate_with_retry() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer_id = persistent_context.from_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = vec![
+            // Migration Start
+            Step::next(
+                "Should be the open candidate region",
+                None,
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be throwing a retryable error",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, false, None))),
+                )),
+                Assertion::error(|error| assert!(error.is_retryable())),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the update metadata for downgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Leader
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    merge_mailbox_messages(vec![
+                        Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                        Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                    ]),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the update metadata for upgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    merge_mailbox_messages(vec![
+                        Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                        Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+                    ]),
+                )),
+                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the region migration end",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+            // RegionMigrationEnd
+            Step::next(
+                "Should be the region migration end again",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+        ];
+
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to OpenCandidateRegion",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS);
+        runner.suite.verify_table_metadata().await;
+    }
 }

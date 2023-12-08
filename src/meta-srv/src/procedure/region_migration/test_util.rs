@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::mailbox_message::Payload;
@@ -38,7 +39,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
@@ -143,6 +144,25 @@ impl TestingEnv {
     }
 }
 
+/// Generates a [InstructionReply::OpenRegion] reply.
+pub(crate) fn new_open_region_reply(
+    id: u64,
+    result: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::OpenRegion(SimpleReply { result, error }))
+                .unwrap(),
+        )),
+    }
+}
+
 /// Generates a [InstructionReply::CloseRegion] reply.
 pub fn new_close_region_reply(id: u64) -> MailboxMessage {
     MailboxMessage {
@@ -216,9 +236,10 @@ pub fn send_mock_reply(
     msg: impl Fn(u64) -> Result<MailboxMessage> + Send + 'static,
 ) {
     common_runtime::spawn_bg(async move {
-        let resp = rx.recv().await.unwrap().unwrap();
-        let reply_id = resp.mailbox_message.unwrap().id;
-        mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+        while let Some(Ok(resp)) = rx.recv().await {
+            let reply_id = resp.mailbox_message.unwrap().id;
+            mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+        }
     });
 }
 
@@ -564,4 +585,40 @@ pub(crate) fn merge_before_test_fn(hooks: Vec<BeforeTest>) -> BeforeTest {
             }
         })
     })
+}
+
+/// The factory of [MailboxMessage].
+type MailboxMessageFactory = Arc<dyn Fn(u64) -> Result<MailboxMessage> + Send + Sync>;
+
+/// Merges the batch of [MailboxMessageFactory] and all [MailboxMessageFactory] only will be executed once.
+pub(crate) fn merge_mailbox_messages(msgs: Vec<MailboxMessageFactory>) -> MailboxMessageFactory {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let l = msgs.len();
+
+    Arc::new(move |id| {
+        let cur = counter.fetch_add(1, Ordering::Relaxed) % l;
+
+        debug!("Sending message id: {id} use message[{cur}]");
+        msgs[cur](id)
+    })
+}
+
+#[test]
+fn test_merge_mailbox_messages() {
+    let merged_factory = merge_mailbox_messages(vec![
+        Arc::new(|_| error::UnexpectedSnafu { violated: "first" }.fail()),
+        Arc::new(|_| error::UnexpectedSnafu { violated: "second" }.fail()),
+    ]);
+
+    if let error::Error::Unexpected { violated, .. } = merged_factory(0).unwrap_err() {
+        assert_eq!(violated, "first");
+    } else {
+        unreachable!()
+    }
+
+    if let error::Error::Unexpected { violated, .. } = merged_factory(0).unwrap_err() {
+        assert_eq!(violated, "second");
+    } else {
+        unreachable!()
+    }
 }
