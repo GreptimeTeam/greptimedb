@@ -126,12 +126,12 @@ impl RegionAliveKeeper {
     }
 
     async fn close_staled_region(&self, region_id: RegionId) {
-        info!("Closing staled regions: {region_id}");
+        info!("Closing staled region: {region_id}");
         let request = RegionRequest::Close(RegionCloseRequest {});
         if let Err(e) = self.region_server.handle_request(region_id, request).await {
             if e.status_code() != StatusCode::RegionNotFound {
-                // TODO(weny): Consider setting region to readonly.
-                error!(e; "Failed to close staled region {}",region_id);
+                let _ = self.region_server.set_writable(region_id, false);
+                error!(e; "Failed to close staled region {}, set region to readonly.",region_id);
             }
         }
     }
