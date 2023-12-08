@@ -35,6 +35,7 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
 use crate::error::{Error, Result};
@@ -478,9 +479,23 @@ pub(crate) fn assert_update_metadata_upgrade(next: &dyn State) {
     assert_matches!(state, UpdateMetadata::Upgrade);
 }
 
+/// Asserts the [State] should be [UpdateMetadata::Rollback].
+pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
+    let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+    assert_matches!(state, UpdateMetadata::Rollback);
+}
+
 /// Asserts the [State] should be [RegionMigrationEnd].
 pub(crate) fn assert_region_migration_end(next: &dyn State) {
     let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+}
+
+/// Asserts the [State] should be [RegionMigrationAbort].
+pub(crate) fn assert_region_migration_abort(next: &dyn State) {
+    let _ = next
+        .as_any()
+        .downcast_ref::<RegionMigrationAbort>()
+        .unwrap();
 }
 
 /// Asserts the [State] should be [DowngradeLeaderRegion].
