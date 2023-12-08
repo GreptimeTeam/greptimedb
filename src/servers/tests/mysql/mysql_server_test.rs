@@ -451,7 +451,6 @@ async fn test_query_concurrently() -> Result<()> {
     Ok(())
 }
 
-#[ignore = "https://github.com/GreptimeTeam/greptimedb/issues/1385"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_query_prepared() -> Result<()> {
     common_telemetry::init_default_ut_logging();
