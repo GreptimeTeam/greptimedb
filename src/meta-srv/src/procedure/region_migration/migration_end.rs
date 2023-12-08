@@ -26,12 +26,8 @@ pub struct RegionMigrationEnd;
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationEnd {
-    async fn next(&mut self, _: &mut Context) -> Result<Box<dyn State>> {
-        Ok(Box::new(RegionMigrationEnd))
-    }
-
-    fn status(&self) -> Status {
-        Status::Done
+    async fn next(&mut self, _: &mut Context) -> Result<(Box<dyn State>, Status)> {
+        Ok((Box::new(RegionMigrationEnd), Status::Done))
     }
 
     fn as_any(&self) -> &dyn Any {

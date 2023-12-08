@@ -37,15 +37,11 @@ impl RegionMigrationAbort {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for RegionMigrationAbort {
-    async fn next(&mut self, _: &mut Context) -> Result<Box<dyn State>> {
+    async fn next(&mut self, _: &mut Context) -> Result<(Box<dyn State>, Status)> {
         error::MigrationAbortSnafu {
             reason: &self.reason,
         }
         .fail()
-    }
-
-    fn status(&self) -> Status {
-        Status::Done
     }
 
     fn as_any(&self) -> &dyn Any {

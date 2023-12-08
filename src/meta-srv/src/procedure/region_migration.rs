@@ -53,7 +53,7 @@ use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 /// It will only be updated/stored after the Red node has succeeded.
 ///
 /// **Notes: Stores with too large data in the context might incur replication overhead.**
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentContext {
     /// The Id of the cluster.
     cluster_id: ClusterId,
@@ -263,14 +263,9 @@ impl Context {
 
 #[async_trait::async_trait]
 #[typetag::serde(tag = "region_migration_state")]
-trait State: Sync + Send + Debug {
-    /// Yields the next state.
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>>;
-
-    /// Indicates the procedure execution status of the `State`.
-    fn status(&self) -> Status {
-        Status::Executing { persist: true }
-    }
+pub(crate) trait State: Sync + Send + Debug {
+    /// Yields the next [State] and [Status].
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)>;
 
     /// Returns as [Any](std::any::Any).
     fn as_any(&self) -> &dyn Any;
@@ -340,14 +335,16 @@ impl Procedure for RegionMigrationProcedure {
     async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
         let state = &mut self.state;
 
-        *state = state.next(&mut self.context).await.map_err(|e| {
+        let (next, status) = state.next(&mut self.context).await.map_err(|e| {
             if matches!(e, Error::RetryLater { .. }) {
                 ProcedureError::retry_later(e)
             } else {
                 ProcedureError::external(e)
             }
         })?;
-        Ok(state.status())
+
+        *state = next;
+        Ok(status)
     }
 
     fn dump(&self) -> ProcedureResult<String> {
@@ -367,20 +364,21 @@ impl Procedure for RegionMigrationProcedure {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::sync::Arc;
+
+    use common_meta::distributed_time_constants::REGION_LEASE_SECS;
+    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::rpc::router::{Region, RegionRoute};
 
     use super::migration_end::RegionMigrationEnd;
+    use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
-    use crate::procedure::region_migration::test_util::TestingEnv;
+    use crate::procedure::region_migration::test_util::*;
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
-        PersistentContext {
-            from_peer: Peer::empty(1),
-            to_peer: Peer::empty(2),
-            region_id: RegionId::new(1024, 1),
-            cluster_id: 0,
-        }
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
     }
 
     #[test]
@@ -414,20 +412,30 @@ mod tests {
         assert_eq!(expected, serialized);
     }
 
+    #[test]
+    fn test_backward_compatibility() {
+        let persistent_ctx = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        // NOTES: Changes it will break backward compatibility.
+        let serialized = r#"{"cluster_id":0,"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_id":4398046511105}"#;
+        let deserialized: PersistentContext = serde_json::from_str(serialized).unwrap();
+
+        assert_eq!(persistent_ctx, deserialized);
+    }
+
     #[derive(Debug, Serialize, Deserialize, Default)]
     pub struct MockState;
 
     #[async_trait::async_trait]
     #[typetag::serde]
     impl State for MockState {
-        async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+        async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
             let pc = &mut ctx.persistent_ctx;
 
             if pc.cluster_id == 2 {
-                Ok(Box::new(RegionMigrationEnd))
+                Ok((Box::new(RegionMigrationEnd), Status::Done))
             } else {
                 pc.cluster_id += 1;
-                Ok(Box::new(MockState))
+                Ok((Box::new(MockState), Status::executing(false)))
             }
         }
 
@@ -496,5 +504,146 @@ mod tests {
 
         let instruction = HeartbeatMailbox::json_instruction(&msg).unwrap();
         assert_matches!(instruction, Instruction::InvalidateTableIdCache(1024));
+    }
+
+    fn procedure_flow_steps(from_peer_id: u64, to_peer_id: u64) -> Vec<Step> {
+        vec![
+            // MigrationStart
+            Step::next(
+                "Should be the update metadata for downgrading",
+                None,
+                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Candidate
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the update metadata for upgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+                )),
+                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the region migration end",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+            // RegionMigrationEnd
+            Step::next(
+                "Should be the region migration end again",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps)
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+
+        runner.suite.verify_table_metadata().await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow_idempotent() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = procedure_flow_steps(from_peer_id, to_peer_id);
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to UpdateMetadata::Downgrade",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
+
+        runner.suite.verify_table_metadata().await;
     }
 }

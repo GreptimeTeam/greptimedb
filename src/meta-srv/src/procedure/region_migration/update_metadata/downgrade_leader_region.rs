@@ -38,13 +38,19 @@ impl UpdateMetadata {
     /// - There is no other DDL procedure executed concurrently for the current table.
     pub async fn downgrade_leader_region(&self, ctx: &mut Context) -> Result<()> {
         let table_metadata_manager = ctx.table_metadata_manager.clone();
+        let from_peer_id = ctx.persistent_ctx.from_peer.id;
         let region_id = ctx.region_id();
         let table_id = region_id.table_id();
         let current_table_route_value = ctx.get_table_route_value().await?;
 
         if let Err(err) = table_metadata_manager
             .update_leader_region_status(table_id, current_table_route_value, |route| {
-                if route.region.id == region_id {
+                if route.region.id == region_id
+                    && route
+                        .leader_peer
+                        .as_ref()
+                        .is_some_and(|leader_peer| leader_peer.id == from_peer_id)
+                {
                     Some(Some(RegionStatus::Downgraded))
                 } else {
                     None
@@ -168,6 +174,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_only_downgrade_from_peer() {
+        let mut state = Box::new(UpdateMetadata::Downgrade);
+        let persistent_context = new_persistent_context();
+
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let table_id = ctx.region_id().table_id();
+
+        let table_info = new_test_table_info(1024, vec![1, 2]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(RegionId::new(1024, 1)),
+            leader_peer: Some(Peer::empty(1024)),
+            ..Default::default()
+        }];
+
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes)
+            .await
+            .unwrap();
+
+        let (next, _) = state.next(&mut ctx).await.unwrap();
+
+        let _ = next
+            .as_any()
+            .downcast_ref::<DowngradeLeaderRegion>()
+            .unwrap();
+
+        let latest_table_route = table_metadata_manager
+            .table_route_manager()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // It should remain unchanged.
+        assert_eq!(latest_table_route.version(), 0);
+        assert!(!latest_table_route.region_routes[0].is_leader_downgraded());
+        assert!(ctx.volatile_ctx.table_route.is_none());
+    }
+
+    #[tokio::test]
     async fn test_next_downgrade_leader_region_state() {
         let mut state = Box::new(UpdateMetadata::Downgrade);
         let persistent_context = new_persistent_context();
@@ -190,7 +238,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let _ = next
             .as_any()

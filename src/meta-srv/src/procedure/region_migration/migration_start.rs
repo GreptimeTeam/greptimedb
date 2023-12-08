@@ -16,16 +16,24 @@ use std::any::Any;
 
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
+use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use store_api::storage::RegionId;
 
-use super::downgrade_leader_region::DowngradeLeaderRegion;
 use super::migration_end::RegionMigrationEnd;
 use super::open_candidate_region::OpenCandidateRegion;
+use super::update_metadata::UpdateMetadata;
 use crate::error::{self, Result};
 use crate::procedure::region_migration::{Context, State};
 
+/// The behaviors:
+///
+/// If the expected leader region has been opened on `to_peer`, go to the [RegionMigrationEnd] state.
+///
+/// If the candidate region has been opened on `to_peer`, go to the [UpdateMetadata::Downgrade] state.
+///
+/// Otherwise go to the [OpenCandidateRegion] state.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegionMigrationStart;
 
@@ -34,22 +42,22 @@ pub struct RegionMigrationStart;
 impl State for RegionMigrationStart {
     /// Yields next [State].
     ///
-    /// If the expected leader region has been opened on `to_peer`, go to the MigrationEnd state.
+    /// If the expected leader region has been opened on `to_peer`, go to the [RegionMigrationEnd] state.
     ///
-    /// If the candidate region has been opened on `to_peer`, go to the DowngradeLeader state.
+    /// If the candidate region has been opened on `to_peer`, go to the [UpdateMetadata::Downgrade] state.
     ///
-    /// Otherwise go to the OpenCandidateRegion state.
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+    /// Otherwise go to the [OpenCandidateRegion] state.
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         let region_id = ctx.persistent_ctx.region_id;
         let region_route = self.retrieve_region_route(ctx, region_id).await?;
         let to_peer = &ctx.persistent_ctx.to_peer;
 
         if self.check_leader_region_on_peer(&region_route, to_peer)? {
-            Ok(Box::new(RegionMigrationEnd))
+            Ok((Box::new(RegionMigrationEnd), Status::Done))
         } else if self.check_candidate_region_on_peer(&region_route, to_peer) {
-            Ok(Box::<DowngradeLeaderRegion>::default())
+            Ok((Box::new(UpdateMetadata::Downgrade), Status::executing(true)))
         } else {
-            Ok(Box::new(OpenCandidateRegion))
+            Ok((Box::new(OpenCandidateRegion), Status::executing(true)))
         }
     }
 
@@ -138,6 +146,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::test_util::{self, TestingEnv};
+    use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
     fn new_persistent_context() -> PersistentContext {
@@ -216,12 +225,11 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
-        let _ = next
-            .as_any()
-            .downcast_ref::<DowngradeLeaderRegion>()
-            .unwrap();
+        let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+
+        assert_matches!(update_metadata, UpdateMetadata::Downgrade);
     }
 
     #[tokio::test]
@@ -250,7 +258,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
     }
@@ -277,7 +285,7 @@ mod tests {
             .await
             .unwrap();
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
     }

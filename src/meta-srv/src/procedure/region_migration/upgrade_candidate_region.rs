@@ -18,6 +18,7 @@ use std::time::Duration;
 use api::v1::meta::MailboxMessage;
 use common_meta::distributed_time_constants::MAILBOX_RTT_SECS;
 use common_meta::instruction::{Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_procedure::Status;
 use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -56,11 +57,11 @@ impl Default for UpgradeCandidateRegion {
 #[async_trait::async_trait]
 #[typetag::serde]
 impl State for UpgradeCandidateRegion {
-    async fn next(&mut self, ctx: &mut Context) -> Result<Box<dyn State>> {
+    async fn next(&mut self, ctx: &mut Context) -> Result<(Box<dyn State>, Status)> {
         if self.upgrade_region_with_retry(ctx).await {
-            Ok(Box::new(UpdateMetadata::Upgrade))
+            Ok((Box::new(UpdateMetadata::Upgrade), Status::executing(false)))
         } else {
-            Ok(Box::new(UpdateMetadata::Rollback))
+            Ok((Box::new(UpdateMetadata::Rollback), Status::executing(false)))
         }
     }
 
@@ -219,15 +220,13 @@ impl UpgradeCandidateRegion {
 mod tests {
     use std::assert_matches::assert_matches;
 
-    use api::v1::meta::mailbox_message::Payload;
     use common_meta::peer::Peer;
-    use common_time::util::current_time_millis;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::error::Error;
     use crate::procedure::region_migration::test_util::{
-        new_close_region_reply, send_mock_reply, TestingEnv,
+        new_close_region_reply, new_upgrade_region_reply, send_mock_reply, TestingEnv,
     };
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
 
@@ -237,31 +236,6 @@ mod tests {
             to_peer: Peer::empty(2),
             region_id: RegionId::new(1024, 1),
             cluster_id: 0,
-        }
-    }
-
-    fn new_upgrade_region_reply(
-        id: u64,
-        ready: bool,
-
-        exists: bool,
-
-        error: Option<String>,
-    ) -> MailboxMessage {
-        MailboxMessage {
-            id,
-            subject: "mock".to_string(),
-            from: "datanode".to_string(),
-            to: "meta".to_string(),
-            timestamp_millis: current_time_millis(),
-            payload: Some(Payload::Json(
-                serde_json::to_string(&InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                    ready,
-                    exists,
-                    error,
-                }))
-                .unwrap(),
-            )),
         }
     }
 
@@ -495,7 +469,7 @@ mod tests {
                 .unwrap();
         });
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
 
@@ -554,7 +528,7 @@ mod tests {
                 .unwrap();
         });
 
-        let next = state.next(&mut ctx).await.unwrap();
+        let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let update_metadata = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
         assert_matches!(update_metadata, UpdateMetadata::Rollback);
