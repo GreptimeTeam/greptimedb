@@ -34,4 +34,4 @@ pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
-pub use self::types::{SequenceNumber, MIN_OP_TYPE};
+pub use self::types::SequenceNumber;
