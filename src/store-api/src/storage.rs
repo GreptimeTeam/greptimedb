@@ -17,7 +17,6 @@
 pub mod consts;
 mod descriptors;
 mod requests;
-mod responses;
 mod types;
 
 pub use datatypes::data_type::ConcreteDataType;
@@ -27,5 +26,4 @@ pub use datatypes::schema::{
 
 pub use self::descriptors::*;
 pub use self::requests::ScanRequest;
-pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::types::SequenceNumber;
