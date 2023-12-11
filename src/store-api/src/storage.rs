@@ -16,7 +16,6 @@
 
 pub mod consts;
 mod descriptors;
-mod engine;
 mod region;
 mod requests;
 mod responses;
@@ -28,10 +27,6 @@ pub use datatypes::schema::{
 };
 
 pub use self::descriptors::*;
-pub use self::engine::{
-    CloseOptions, CompactionStrategy, CreateOptions, EngineContext, OpenOptions, StorageEngine,
-    TwcsOptions,
-};
 pub use self::region::{
     CloseContext, CompactContext, FlushContext, FlushReason, Region, RegionStat, WriteContext,
 };
