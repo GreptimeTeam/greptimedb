@@ -26,8 +26,6 @@ pub use datatypes::schema::{
 };
 
 pub use self::descriptors::*;
-pub use self::requests::{
-    AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
-};
+pub use self::requests::ScanRequest;
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
 pub use self::types::SequenceNumber;

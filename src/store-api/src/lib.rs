@@ -16,7 +16,6 @@
 //! Storage related APIs
 
 pub mod data_source;
-mod error;
 pub mod logstore;
 pub mod manifest;
 pub mod metadata;
