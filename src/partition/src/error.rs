@@ -36,12 +36,6 @@ pub enum Error {
     #[snafu(display("Failed to get meta info from cache, error: {}", err_msg))]
     GetCache { err_msg: String, location: Location },
 
-    #[snafu(display("Failed to request Meta"))]
-    RequestMeta {
-        location: Location,
-        source: meta_client::error::Error,
-    },
-
     #[snafu(display("Failed to find Datanode, table id: {}, region: {}", table_id, region))]
     FindDatanode {
         table_id: TableId,
@@ -133,7 +127,6 @@ impl ErrorExt for Error {
             Error::GetCache { .. } | Error::FindLeader { .. } => StatusCode::StorageUnavailable,
             Error::FindRegionRoutes { .. } => StatusCode::InvalidArguments,
             Error::FindTableRoutes { .. } => StatusCode::InvalidArguments,
-            Error::RequestMeta { source, .. } => source.status_code(),
             Error::FindRegion { .. }
             | Error::FindRegions { .. }
             | Error::RegionKeysSize { .. }
