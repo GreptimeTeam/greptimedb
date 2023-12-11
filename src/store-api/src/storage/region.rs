@@ -38,7 +38,6 @@ use common_error::ext::ErrorExt;
 use crate::storage::engine::OpenOptions;
 use crate::storage::requests::{AlterRequest, WriteRequest};
 use crate::storage::responses::WriteResponse;
-use crate::storage::snapshot::{ReadContext, Snapshot};
 use crate::storage::RegionId;
 
 /// Chunks of rows in storage engine.
@@ -46,7 +45,6 @@ use crate::storage::RegionId;
 pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     type Error: ErrorExt + Send + Sync;
     type WriteRequest: WriteRequest;
-    type Snapshot: Snapshot;
 
     fn id(&self) -> RegionId;
 
@@ -59,9 +57,6 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
         ctx: &WriteContext,
         request: Self::WriteRequest,
     ) -> Result<WriteResponse, Self::Error>;
-
-    /// Create a snapshot for read.
-    fn snapshot(&self, ctx: &ReadContext) -> Result<Self::Snapshot, Self::Error>;
 
     /// Create write request
     fn write_request(&self) -> Self::WriteRequest;

@@ -21,7 +21,6 @@ mod engine;
 mod region;
 mod requests;
 mod responses;
-mod snapshot;
 mod types;
 
 pub use datatypes::data_type::ConcreteDataType;
@@ -42,5 +41,4 @@ pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
 pub use self::responses::{GetResponse, ScanResponse, WriteResponse};
-pub use self::snapshot::{ReadContext, Snapshot};
 pub use self::types::{SequenceNumber, MIN_OP_TYPE};
