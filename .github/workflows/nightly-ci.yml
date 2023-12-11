@@ -17,6 +17,7 @@ env:
 jobs:
   sqlness:
     name: Sqlness Test
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -51,6 +52,7 @@ jobs:
           retention-days: 3
 
   test-on-windows:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: windows-latest-8-cores
     timeout-minutes: 60
     steps:
