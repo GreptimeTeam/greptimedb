@@ -17,7 +17,7 @@ use std::fmt;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::storage::{consts, ColumnDefaultConstraint, ColumnSchema, ConcreteDataType};
+use crate::storage::{ColumnDefaultConstraint, ColumnSchema, ConcreteDataType};
 
 /// Id of column. Unique in each region.
 pub type ColumnId = u32;
@@ -224,68 +224,6 @@ impl ColumnDescriptorBuilder {
     }
 }
 
-/// A [RowKeyDescriptor] contains information about row key.
-#[derive(Debug, Clone, PartialEq, Eq, Builder)]
-#[builder(pattern = "owned")]
-pub struct RowKeyDescriptor {
-    #[builder(default, setter(each(name = "push_column")))]
-    pub columns: Vec<ColumnDescriptor>,
-    /// Timestamp key column.
-    pub timestamp: ColumnDescriptor,
-}
-
-/// A [ColumnFamilyDescriptor] contains information to create a column family.
-#[derive(Debug, Clone, PartialEq, Eq, Builder)]
-#[builder(pattern = "owned")]
-pub struct ColumnFamilyDescriptor {
-    #[builder(default = "consts::DEFAULT_CF_ID")]
-    pub cf_id: ColumnFamilyId,
-    #[builder(default = "consts::DEFAULT_CF_NAME.to_string()", setter(into))]
-    pub name: String,
-    /// Descriptors of columns in this column family.
-    #[builder(default, setter(each(name = "push_column")))]
-    pub columns: Vec<ColumnDescriptor>,
-}
-
-/// A [RegionDescriptor] contains information to create a region.
-#[derive(Debug, Clone, PartialEq, Eq, Builder)]
-#[builder(pattern = "owned")]
-pub struct RegionDescriptor {
-    #[builder(setter(into))]
-    pub id: RegionId,
-    /// Region name.
-    #[builder(setter(into))]
-    pub name: String,
-    /// Row key descriptor of this region.
-    pub row_key: RowKeyDescriptor,
-    /// Default column family.
-    pub default_cf: ColumnFamilyDescriptor,
-    /// Extra column families defined by user.
-    #[builder(default, setter(each(name = "push_extra_column_family")))]
-    pub extra_cfs: Vec<ColumnFamilyDescriptor>,
-}
-
-impl RowKeyDescriptorBuilder {
-    pub fn new(timestamp: ColumnDescriptor) -> Self {
-        Self {
-            timestamp: Some(timestamp),
-            ..Default::default()
-        }
-    }
-
-    pub fn columns_capacity(mut self, capacity: usize) -> Self {
-        self.columns = Some(Vec::with_capacity(capacity));
-        self
-    }
-}
-
-impl ColumnFamilyDescriptorBuilder {
-    pub fn columns_capacity(mut self, capacity: usize) -> Self {
-        self.columns = Some(Vec::with_capacity(capacity));
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use datatypes::value::Value;
@@ -358,71 +296,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(expected, column_schema);
-    }
-
-    fn new_timestamp_desc() -> ColumnDescriptor {
-        ColumnDescriptorBuilder::new(5, "timestamp", ConcreteDataType::int64_datatype())
-            .is_time_index(true)
-            .build()
-            .unwrap()
-    }
-
-    #[test]
-    fn test_row_key_descriptor_builder() {
-        let timestamp = new_timestamp_desc();
-
-        let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
-            .build()
-            .unwrap();
-        assert!(desc.columns.is_empty());
-
-        let desc = RowKeyDescriptorBuilder::new(timestamp.clone())
-            .columns_capacity(1)
-            .push_column(
-                ColumnDescriptorBuilder::new(6, "c1", ConcreteDataType::int32_datatype())
-                    .build()
-                    .unwrap(),
-            )
-            .push_column(
-                ColumnDescriptorBuilder::new(7, "c2", ConcreteDataType::int32_datatype())
-                    .build()
-                    .unwrap(),
-            )
-            .build()
-            .unwrap();
-        assert_eq!(2, desc.columns.len());
-
-        let desc = RowKeyDescriptorBuilder::new(timestamp).build().unwrap();
-        assert!(desc.columns.is_empty());
-    }
-
-    #[test]
-    fn test_cf_descriptor_builder() {
-        let desc = ColumnFamilyDescriptorBuilder::default().build().unwrap();
-        assert_eq!(consts::DEFAULT_CF_ID, desc.cf_id);
-        assert_eq!(consts::DEFAULT_CF_NAME, desc.name);
-        assert!(desc.columns.is_empty());
-
-        let desc = ColumnFamilyDescriptorBuilder::default()
-            .cf_id(32)
-            .name("cf1")
-            .build()
-            .unwrap();
-        assert_eq!(32, desc.cf_id);
-        assert_eq!("cf1", desc.name);
-
-        let desc = ColumnFamilyDescriptorBuilder::default()
-            .push_column(
-                ColumnDescriptorBuilder::default()
-                    .id(6)
-                    .name("c1")
-                    .data_type(ConcreteDataType::int32_datatype())
-                    .build()
-                    .unwrap(),
-            )
-            .build()
-            .unwrap();
-        assert_eq!(1, desc.columns.len());
     }
 
     #[test]
