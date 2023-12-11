@@ -23,6 +23,7 @@ use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
+use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
 
@@ -70,4 +71,5 @@ pub struct DdlContext {
     pub datanode_manager: DatanodeManagerRef,
     pub cache_invalidator: CacheInvalidatorRef,
     pub table_metadata_manager: TableMetadataManagerRef,
+    pub memory_region_keeper: MemoryRegionKeeperRef,
 }

@@ -20,6 +20,7 @@ use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
+use common_meta::region_keeper::MemoryRegionKeeper;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -115,6 +116,7 @@ impl GreptimeDbStandaloneBuilder {
                 Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
                 Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+                Arc::new(MemoryRegionKeeper::default()),
             )
             .unwrap(),
         );

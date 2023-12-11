@@ -503,7 +503,7 @@ mod test {
             countdown_handle.deadline().await.unwrap()
                 > Instant::now() + Duration::from_millis(heartbeat_interval_millis * 3)
         );
-        tokio::time::sleep(Duration::from_millis(heartbeat_interval_millis * 4)).await;
+        tokio::time::sleep(Duration::from_millis(heartbeat_interval_millis * 5)).await;
 
         // No effect.
         countdown_handle.start(heartbeat_interval_millis).await;

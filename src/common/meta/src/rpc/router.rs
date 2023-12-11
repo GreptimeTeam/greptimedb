@@ -28,6 +28,7 @@ use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::table_name::TableName;
+use crate::DatanodeId;
 
 pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
@@ -57,6 +58,19 @@ pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
         .flat_map(|x| &x.leader_peer)
         .cloned()
         .collect()
+}
+
+/// Returns the operating leader regions with corresponding [DatanodeId].
+pub fn operating_leader_regions(region_routes: &[RegionRoute]) -> Vec<(RegionId, DatanodeId)> {
+    region_routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .leader_peer
+                .as_ref()
+                .map(|leader| (route.region.id, leader.id))
+        })
+        .collect::<Vec<_>>()
 }
 
 /// Returns the HashMap<[RegionNumber], &[Peer]>;

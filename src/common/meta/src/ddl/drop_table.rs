@@ -26,7 +26,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::engine::TableReference;
@@ -42,12 +42,19 @@ use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
+use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::rpc::router::{
+    find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
+};
 
 pub struct DropTableProcedure {
+    /// The context of procedure runtime.
     pub context: DdlContext,
+    /// The serializable data.
     pub data: DropTableData,
+    /// The guards of opening regions.
+    pub dropping_regions: Vec<OperatingRegionGuard>,
 }
 
 #[allow(dead_code)]
@@ -64,12 +71,17 @@ impl DropTableProcedure {
         Self {
             context,
             data: DropTableData::new(cluster_id, task, table_route_value, table_info_value),
+            dropping_regions: vec![],
         }
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
-        Ok(Self { context, data })
+        Ok(Self {
+            context,
+            data,
+            dropping_regions: vec![],
+        })
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
@@ -102,8 +114,42 @@ impl DropTableProcedure {
         Ok(Status::executing(true))
     }
 
+    /// Register dropping regions if doesn't exist.
+    fn register_dropping_regions(&mut self) -> Result<()> {
+        let region_routes = self.data.region_routes();
+
+        let dropping_regions = operating_leader_regions(region_routes);
+
+        if self.dropping_regions.len() == dropping_regions.len() {
+            return Ok(());
+        }
+
+        let mut dropping_region_guards = Vec::with_capacity(dropping_regions.len());
+
+        for (region_id, datanode_id) in dropping_regions {
+            let guard = self
+                .context
+                .memory_region_keeper
+                .register(datanode_id, region_id)
+                .context(error::RegionOperatingRaceSnafu {
+                    region_id,
+                    peer_id: datanode_id,
+                })?;
+            dropping_region_guards.push(guard);
+        }
+
+        self.dropping_regions = dropping_region_guards;
+        Ok(())
+    }
+
     /// Removes the table metadata.
     async fn on_remove_metadata(&mut self) -> Result<Status> {
+        // NOTES: If the meta server is crashed after the `RemoveMetadata`,
+        // Corresponding regions of this table on the Datanode will be closed automatically.
+        // Then any future dropping operation will fail.
+
+        // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
+
         let table_metadata_manager = &self.context.table_metadata_manager;
         let table_info_value = &self.data.table_info_value;
         let table_route_value = &self.data.table_route_value;

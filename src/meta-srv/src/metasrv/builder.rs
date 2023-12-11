@@ -26,7 +26,7 @@ use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
-use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -211,6 +211,8 @@ impl MetaSrvBuilder {
             ))
         });
 
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+
         let ddl_manager = build_ddl_manager(
             &options,
             datanode_manager,
@@ -218,8 +220,8 @@ impl MetaSrvBuilder {
             &mailbox,
             &table_metadata_manager,
             table_metadata_allocator,
+            &opening_region_keeper,
         )?;
-        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -350,6 +352,7 @@ fn build_ddl_manager(
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
     table_metadata_allocator: TableMetadataAllocatorRef,
+    memory_region_keeper: &MemoryRegionKeeperRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {
         let datanode_client_channel_config = ChannelConfig::new()
@@ -376,6 +379,7 @@ fn build_ddl_manager(
             cache_invalidator,
             table_metadata_manager.clone(),
             table_metadata_allocator,
+            memory_region_keeper.clone(),
         )
         .context(error::InitDdlManagerSnafu)?,
     ))

@@ -37,6 +37,7 @@ use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
+use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::DdlTask::{AlterTable, CreateTable, DropTable, TruncateTable};
 use crate::rpc::ddl::{
     AlterTableTask, CreateTableTask, DropTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse,
@@ -52,6 +53,7 @@ pub struct DdlManager {
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     table_meta_allocator: TableMetadataAllocatorRef,
+    memory_region_keeper: MemoryRegionKeeperRef,
 }
 
 impl DdlManager {
@@ -62,6 +64,7 @@ impl DdlManager {
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
         table_meta_allocator: TableMetadataAllocatorRef,
+        memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Result<Self> {
         let manager = Self {
             procedure_manager,
@@ -69,6 +72,7 @@ impl DdlManager {
             cache_invalidator,
             table_metadata_manager,
             table_meta_allocator,
+            memory_region_keeper,
         };
         manager.register_loaders()?;
         Ok(manager)
@@ -85,6 +89,7 @@ impl DdlManager {
             datanode_manager: self.datanode_manager.clone(),
             cache_invalidator: self.cache_invalidator.clone(),
             table_metadata_manager: self.table_metadata_manager.clone(),
+            memory_region_keeper: self.memory_region_keeper.clone(),
         }
     }
 
@@ -446,6 +451,7 @@ mod tests {
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
+    use crate::region_keeper::MemoryRegionKeeper;
     use crate::rpc::router::RegionRoute;
     use crate::state_store::KvStateStore;
 
@@ -488,6 +494,7 @@ mod tests {
             Arc::new(DummyCacheInvalidator),
             table_metadata_manager,
             Arc::new(DummyTableMetadataAllocator),
+            Arc::new(MemoryRegionKeeper::default()),
         );
 
         let expected_loaders = vec![
