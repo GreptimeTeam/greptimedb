@@ -36,7 +36,6 @@ use async_trait::async_trait;
 use common_error::ext::ErrorExt;
 
 use crate::storage::engine::OpenOptions;
-use crate::storage::metadata::RegionMeta;
 use crate::storage::requests::{AlterRequest, WriteRequest};
 use crate::storage::responses::WriteResponse;
 use crate::storage::snapshot::{ReadContext, Snapshot};
@@ -46,7 +45,6 @@ use crate::storage::RegionId;
 #[async_trait]
 pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
     type Error: ErrorExt + Send + Sync;
-    type Meta: RegionMeta;
     type WriteRequest: WriteRequest;
     type Snapshot: Snapshot;
 
@@ -54,9 +52,6 @@ pub trait Region: Send + Sync + Clone + std::fmt::Debug + 'static {
 
     /// Returns name of the region.
     fn name(&self) -> &str;
-
-    /// Returns the in memory metadata of this region.
-    fn in_memory_metadata(&self) -> Self::Meta;
 
     /// Write updates to region.
     async fn write(

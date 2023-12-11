@@ -18,7 +18,6 @@ mod chunk;
 pub mod consts;
 mod descriptors;
 mod engine;
-mod metadata;
 mod region;
 mod requests;
 mod responses;
@@ -36,7 +35,6 @@ pub use self::engine::{
     CloseOptions, CompactionStrategy, CreateOptions, EngineContext, OpenOptions, StorageEngine,
     TwcsOptions,
 };
-pub use self::metadata::RegionMeta;
 pub use self::region::{
     CloseContext, CompactContext, FlushContext, FlushReason, Region, RegionStat, WriteContext,
 };
