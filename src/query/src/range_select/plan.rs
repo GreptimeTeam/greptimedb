@@ -1420,10 +1420,6 @@ mod test {
         ];
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
-    }
-
-    #[test]
-    fn test_fill_linear1() {
         let ts = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let mut test = vec![
             ScalarValue::Float32(Some(1.0)),
@@ -1441,12 +1437,28 @@ mod test {
             ScalarValue::Float32(None),
             ScalarValue::Float32(Some(3.0)),
             ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(5.0)),
             ScalarValue::Float32(None),
             ScalarValue::Float32(None),
+            ScalarValue::Float32(Some(7.0)),
             ScalarValue::Float32(None),
         ];
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
+    }
+
+    #[test]
+    fn test_fill_linear1() {
+        let ts = vec![1, 3, 11];
+        let mut test = vec![
+            ScalarValue::Float32(Some(1.0)),
+            ScalarValue::Float32(None),
+            ScalarValue::Float32(Some(3.0)),
+        ];
+        Fill::Linear.apply_fill_strategy(&ts, &mut test).unwrap();
+        assert_eq!(ScalarValue::Float32(Some(1.4)), test[1]);
+        let ts = vec![1];
+        let mut test = vec![ScalarValue::Float32(None)];
+        Fill::Linear.apply_fill_strategy(&ts, &mut test).unwrap();
+        assert_eq!(ScalarValue::Float32(None), test[0]);
     }
 }
