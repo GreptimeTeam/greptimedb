@@ -82,3 +82,31 @@ DROP TABLE timestamp_with_precision;
 
 Affected Rows: 0
 
+CREATE TABLE plain_timestamp (ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO plain_timestamp VALUES (1);
+
+Affected Rows: 1
+
+SELECT * FROM plain_timestamp;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT * FROM plain_timestamp where ts = '1970-01-01 00:00:00.001000';
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+DROP TABLE plain_timestamp;
+
+Affected Rows: 0
+

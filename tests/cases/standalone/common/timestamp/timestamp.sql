@@ -29,3 +29,13 @@ INSERT INTO timestamp_with_precision(ts,cnt) VALUES ('2262-04-11 23:47:16.854775
 SELECT * FROM timestamp_with_precision ORDER BY ts ASC;
 
 DROP TABLE timestamp_with_precision;
+
+CREATE TABLE plain_timestamp (ts TIMESTAMP TIME INDEX);
+
+INSERT INTO plain_timestamp VALUES (1);
+
+SELECT * FROM plain_timestamp;
+
+SELECT * FROM plain_timestamp where ts = '1970-01-01 00:00:00.001000';
+
+DROP TABLE plain_timestamp;
