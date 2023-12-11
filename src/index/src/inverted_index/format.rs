@@ -27,10 +27,10 @@
 //!
 //! An inverted index comprises a collection of bitmaps, a null bitmap, and a finite state transducer (FST) indicating tag values' positions:
 //!
-//! `bitmap₀ bitmap₁ bitmap₂ ... bitmapₙ null_bitmap fst`
+//! `null_bitmap bitmap₀ bitmap₁ bitmap₂ ... bitmapₙ fst`
 //!
-//! - `bitmapᵢ`: Bitset indicating the presence of tag values within a row group.
 //! - `null_bitmap`: Bitset tracking the presence of null values within the tag column.
+//! - `bitmapᵢ`: Bitset indicating the presence of tag values within a row group.
 //! - `fst`: Finite State Transducer providing an ordered map of bytes, representing the tag values.
 //!
 //! ## Footer Details
@@ -51,6 +51,7 @@
 //! [RFC]: https://github.com/GreptimeTeam/greptimedb/blob/develop/docs/rfcs/2023-11-03-inverted-index.md
 
 pub mod reader;
+pub mod writer;
 
 const FOOTER_PAYLOAD_SIZE_SIZE: u64 = 4;
 const MIN_BLOB_SIZE: u64 = FOOTER_PAYLOAD_SIZE_SIZE;
