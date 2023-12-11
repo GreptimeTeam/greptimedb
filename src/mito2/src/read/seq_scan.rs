@@ -25,6 +25,8 @@ use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
 use table::predicate::Predicate;
+use tokio::sync::{mpsc, Semaphore};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::access_layer::AccessLayerRef;
 use crate::cache::{CacheManager, CacheManagerRef};
@@ -34,7 +36,8 @@ use crate::metrics::READ_STAGE_ELAPSED;
 use crate::read::compat::{self, CompatReader};
 use crate::read::merge::MergeReaderBuilder;
 use crate::read::projection::ProjectionMapper;
-use crate::read::{BatchReader, BoxedBatchReader};
+use crate::read::scan_region::ScanParallism;
+use crate::read::{BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
 use crate::sst::file::FileHandle;
 
 /// Scans a region and returns rows in a sorted sequence.
@@ -57,6 +60,8 @@ pub struct SeqScan {
     cache_manager: Option<CacheManagerRef>,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
+    /// Parallelism to scan data.
+    parallelism: ScanParallism,
 }
 
 impl SeqScan {
@@ -72,6 +77,7 @@ impl SeqScan {
             files: Vec::new(),
             cache_manager: None,
             ignore_file_not_found: false,
+            parallelism: ScanParallism::default(),
         }
     }
 
@@ -117,18 +123,32 @@ impl SeqScan {
         self
     }
 
+    /// Sets scan parallelism.
+    #[must_use]
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
     /// Builds a stream for the query.
     pub async fn build_stream(&self) -> Result<SendableRecordBatchStream> {
         let start = Instant::now();
+        let mut metrics = Metrics::default();
+        let use_parallel = self.use_parallel_reader();
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let mut reader = self.build_reader().await?;
-        let mut metrics = Metrics {
-            scan_cost: start.elapsed(),
+        let mut reader = if use_parallel {
+            self.build_parallel_reader().await?
+        } else {
+            self.build_reader().await?
         };
+        let elapsed = start.elapsed();
+        metrics.build_reader_cost = elapsed;
+        metrics.scan_cost = elapsed;
 
         // Creates a stream to poll the batch reader and convert batch into record batch.
         let mapper = self.mapper.clone();
         let cache_manager = self.cache_manager.clone();
+        let parallelism = self.parallelism.parallelism;
         let stream = try_stream! {
             let cache = cache_manager.as_ref().map(|cache| cache.as_ref());
             while let Some(batch) =
@@ -137,7 +157,10 @@ impl SeqScan {
                 yield batch;
             }
 
-            debug!("Seq scan finished, region_id: {:?}, metrics: {:?}", mapper.metadata().region_id, metrics);
+            debug!(
+                "Seq scan finished, region_id: {:?}, metrics: {:?}, use_parallel: {}, parallelism: {}",
+                mapper.metadata().region_id, metrics, use_parallel, parallelism,
+            );
             // Update metrics.
             READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.scan_cost.as_secs_f64());
         };
@@ -152,10 +175,35 @@ impl SeqScan {
     /// Builds a [BoxedBatchReader] from sequential scan.
     pub async fn build_reader(&self) -> Result<BoxedBatchReader> {
         // Scans all memtables and SSTs. Builds a merge reader to merge results.
-        let mut builder = MergeReaderBuilder::new();
+        let sources = self.build_sources().await?;
+        let mut builder = MergeReaderBuilder::from_sources(sources);
+        Ok(Box::new(builder.build().await?))
+    }
+
+    /// Builds a [BoxedBatchReader] that can scan memtables and SSTs in parallel.
+    async fn build_parallel_reader(&self) -> Result<BoxedBatchReader> {
+        assert!(self.parallelism.allow_parallel_scan());
+        // Scall all memtables and SSTs.
+        let sources = self.build_sources().await?;
+        let semaphore = Arc::new(Semaphore::new(self.parallelism.parallelism));
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let stream = self.spawn_scan_task(source, semaphore.clone());
+                Source::Stream(stream)
+            })
+            .collect();
+        let mut builder = MergeReaderBuilder::from_sources(sources);
+        Ok(Box::new(builder.build().await?))
+    }
+
+    /// Builds and returns sources to read.
+    async fn build_sources(&self) -> Result<Vec<Source>> {
+        let mut sources = Vec::with_capacity(self.memtables.len() + self.files.len());
         for mem in &self.memtables {
             let iter = mem.iter(Some(self.mapper.column_ids()), self.predicate.clone());
-            builder.push_batch_iter(iter);
+            sources.push(Source::Iter(iter));
         }
         for file in &self.files {
             let maybe_reader = self
@@ -179,16 +227,50 @@ impl SeqScan {
                 }
             };
             if compat::has_same_columns(self.mapper.metadata(), reader.metadata()) {
-                builder.push_batch_reader(Box::new(reader));
+                sources.push(Source::Reader(Box::new(reader)));
             } else {
                 // They have different schema. We need to adapt the batch first so the
-                // mapper can convert the it.
+                // mapper can convert it.
                 let compat_reader =
                     CompatReader::new(&self.mapper, reader.metadata().clone(), reader)?;
-                builder.push_batch_reader(Box::new(compat_reader));
+                sources.push(Source::Reader(Box::new(compat_reader)));
             }
         }
-        Ok(Box::new(builder.build().await?))
+
+        Ok(sources)
+    }
+
+    /// Returns whether to use a parallel reader.
+    fn use_parallel_reader(&self) -> bool {
+        self.parallelism.allow_parallel_scan() && (self.files.len() + self.memtables.len()) > 1
+    }
+
+    /// Scan the input source in another task.
+    fn spawn_scan_task(&self, mut input: Source, semaphore: Arc<Semaphore>) -> BoxedBatchStream {
+        let (sender, receiver) = mpsc::channel(self.parallelism.channel_size);
+        tokio::spawn(async move {
+            loop {
+                // We release the permit before sending result to avoid the task waiting on
+                // the channel with the permit holded
+                let maybe_batch = {
+                    // Safety: We never close the semaphore.
+                    let _permit = semaphore.acquire().await.unwrap();
+                    input.next_batch().await
+                };
+                match maybe_batch {
+                    Ok(Some(batch)) => {
+                        let _ = sender.send(Ok(batch)).await;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = sender.send(Err(e)).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Box::pin(ReceiverStream::new(receiver))
     }
 
     /// Fetch a batch from the reader and convert it into a record batch.
@@ -211,7 +293,9 @@ impl SeqScan {
             return Ok(None);
         };
 
+        let convert_start = Instant::now();
         let record_batch = mapper.convert(&batch, cache)?;
+        metrics.convert_cost += convert_start.elapsed();
         metrics.scan_cost += start.elapsed();
 
         Ok(Some(record_batch))
@@ -221,8 +305,12 @@ impl SeqScan {
 /// Metrics for [SeqScan].
 #[derive(Debug, Default)]
 struct Metrics {
+    /// Duration to build the reader.
+    build_reader_cost: Duration,
     /// Duration to scan data.
     scan_cost: Duration,
+    /// Duration to convert batches.
+    convert_cost: Duration,
 }
 
 #[cfg(test)]

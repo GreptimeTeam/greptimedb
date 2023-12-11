@@ -4898,6 +4898,7 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "uuid",
 ]

@@ -127,6 +127,7 @@ sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "6
 strum = { version = "0.25", features = ["derive"] }
 tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
+tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.7"
 tonic = { version = "0.10", features = ["tls"] }
@@ -168,7 +169,6 @@ frontend = { path = "src/frontend" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
-mito = { path = "src/mito" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }

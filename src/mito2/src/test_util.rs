@@ -196,6 +196,15 @@ impl TestEnv {
         )
     }
 
+    /// Open the engine.
+    pub async fn open_engine(&mut self, config: MitoConfig) -> MitoEngine {
+        MitoEngine::new(
+            config,
+            self.logstore.clone().unwrap(),
+            self.object_store_manager.clone().unwrap(),
+        )
+    }
+
     /// Only initializes the object store manager, returns the default object store.
     pub fn init_object_store_manager(&mut self) -> ObjectStore {
         self.object_store_manager = Some(Arc::new(self.create_object_store_manager()));
@@ -206,7 +215,11 @@ impl TestEnv {
     pub(crate) async fn create_worker_group(&self, config: MitoConfig) -> WorkerGroup {
         let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
 
-        WorkerGroup::start(config, Arc::new(log_store), Arc::new(object_store_manager))
+        WorkerGroup::start(
+            Arc::new(config),
+            Arc::new(log_store),
+            Arc::new(object_store_manager),
+        )
     }
 
     async fn create_log_and_object_store_manager(

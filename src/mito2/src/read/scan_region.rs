@@ -115,6 +115,8 @@ pub(crate) struct ScanRegion {
     request: ScanRequest,
     /// Cache.
     cache_manager: Option<CacheManagerRef>,
+    /// Parallelism to scan.
+    parallelism: ScanParallism,
 }
 
 impl ScanRegion {
@@ -130,7 +132,15 @@ impl ScanRegion {
             access_layer,
             request,
             cache_manager,
+            parallelism: ScanParallism::default(),
         }
+    }
+
+    /// Sets parallelism.
+    #[must_use]
+    pub(crate) fn with_parallelism(mut self, parallelism: ScanParallism) -> Self {
+        self.parallelism = parallelism;
+        self
     }
 
     /// Returns a [Scanner] to scan the region.
@@ -196,7 +206,8 @@ impl ScanRegion {
             .with_predicate(Some(predicate))
             .with_memtables(memtables)
             .with_files(files)
-            .with_cache(self.cache_manager);
+            .with_cache(self.cache_manager)
+            .with_parallelism(self.parallelism);
 
         Ok(seq_scan)
     }
@@ -212,6 +223,22 @@ impl ScanRegion {
             .unit();
         TimeRangePredicateBuilder::new(&time_index.column_schema.name, unit, &self.request.filters)
             .build()
+    }
+}
+
+/// Config for parallel scan.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ScanParallism {
+    /// Number of tasks expect to spawn to read data.
+    pub(crate) parallelism: usize,
+    /// Channel size to send batches. Only takes effect when the parallelism > 1.
+    pub(crate) channel_size: usize,
+}
+
+impl ScanParallism {
+    /// Returns true if we allow parallel scan.
+    pub(crate) fn allow_parallel_scan(&self) -> bool {
+        self.parallelism > 1
     }
 }
 

@@ -24,13 +24,16 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MAX_BG_JOB: usize = 4;
 
 const MULTIPART_UPLOAD_MINIMUM_SIZE: ReadableSize = ReadableSize::mb(5);
+/// Default channel size for parallel scan task.
+const DEFAULT_SCAN_CHANNEL_SIZE: usize = 32;
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct MitoConfig {
     // Worker configs:
-    /// Number of region workers (default 1).
+    /// Number of region workers (default: 1/2 of cpu cores).
+    /// Sets to 0 to use the default value.
     pub num_workers: usize,
     /// Request channel size of each worker (default 128).
     pub worker_channel_size: usize,
@@ -68,12 +71,19 @@ pub struct MitoConfig {
     // Other configs:
     /// Buffer size for SST writing.
     pub sst_write_buffer_size: ReadableSize,
+    /// Parallelism to scan a region (default: 1/4 of cpu cores).
+    /// - 0: using the default value (1/4 of cpu cores).
+    /// - 1: scan in current thread.
+    /// - n: scan in parallelism n.
+    pub scan_parallelism: usize,
+    /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
+    pub parallel_scan_channel_size: usize,
 }
 
 impl Default for MitoConfig {
     fn default() -> Self {
         MitoConfig {
-            num_workers: num_cpus::get() / 2,
+            num_workers: divide_num_cpus(2),
             worker_channel_size: 128,
             worker_request_batch_size: 64,
             manifest_checkpoint_distance: 10,
@@ -86,6 +96,8 @@ impl Default for MitoConfig {
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
+            scan_parallelism: divide_num_cpus(4),
+            parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
         }
     }
 }
@@ -93,16 +105,9 @@ impl Default for MitoConfig {
 impl MitoConfig {
     /// Sanitize incorrect configurations.
     pub(crate) fn sanitize(&mut self) {
-        // Sanitize worker num.
-        let num_workers_before = self.num_workers;
+        // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
-            self.num_workers = (num_cpus::get() / 2).max(1);
-        }
-        if num_workers_before != self.num_workers {
-            warn!(
-                "Sanitize worker num {} to {}",
-                num_workers_before, self.num_workers
-            );
+            self.num_workers = divide_num_cpus(2);
         }
 
         // Sanitize channel size.
@@ -131,5 +136,27 @@ impl MitoConfig {
                 self.sst_write_buffer_size
             );
         }
+
+        // Use default value if `scan_parallelism` is 0.
+        if self.scan_parallelism == 0 {
+            self.scan_parallelism = divide_num_cpus(4);
+        }
+
+        if self.parallel_scan_channel_size < 1 {
+            self.parallel_scan_channel_size = DEFAULT_SCAN_CHANNEL_SIZE;
+            warn!(
+                "Sanitize scan channel size to {}",
+                self.parallel_scan_channel_size
+            );
+        }
     }
+}
+
+/// Divide cpu num by a non-zero `divisor` and returns at least 1.
+fn divide_num_cpus(divisor: usize) -> usize {
+    debug_assert!(divisor > 0);
+    let cores = num_cpus::get();
+    debug_assert!(cores > 0);
+
+    (cores + divisor - 1) / divisor
 }

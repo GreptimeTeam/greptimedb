@@ -35,7 +35,7 @@ prost.workspace = true
 rand.workspace = true
 session.workspace = true
 snafu.workspace = true
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
 tonic.workspace = true
 

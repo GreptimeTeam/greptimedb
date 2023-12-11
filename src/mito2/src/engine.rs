@@ -33,6 +33,8 @@ pub mod listener;
 #[cfg(test)]
 mod open_test;
 #[cfg(test)]
+mod parallel_test;
+#[cfg(test)]
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
@@ -40,6 +42,7 @@ mod prune_test;
 mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -56,7 +59,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::error::{RecvSnafu, RegionNotFoundSnafu, Result};
 use crate::metrics::HANDLE_REQUEST_ELAPSED;
-use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::scan_region::{ScanParallism, ScanRegion, Scanner};
 use crate::region::RegionUsage;
 use crate::request::WorkerRequest;
 use crate::worker::WorkerGroup;
@@ -114,6 +117,8 @@ impl MitoEngine {
 struct EngineInner {
     /// Region workers group.
     workers: WorkerGroup,
+    /// Config of the engine.
+    config: Arc<MitoConfig>,
 }
 
 impl EngineInner {
@@ -123,8 +128,10 @@ impl EngineInner {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> EngineInner {
+        let config = Arc::new(config);
         EngineInner {
-            workers: WorkerGroup::start(config, log_store, object_store_manager),
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager),
+            config,
         }
     }
 
@@ -171,12 +178,18 @@ impl EngineInner {
         let version = region.version();
         // Get cache.
         let cache_manager = self.workers.cache_manager();
+        let scan_parallelism = ScanParallism {
+            parallelism: self.config.scan_parallelism,
+            channel_size: self.config.parallel_scan_channel_size,
+        };
+
         let scan_region = ScanRegion::new(
             version,
             region.access_layer.clone(),
             request,
             Some(cache_manager),
-        );
+        )
+        .with_parallelism(scan_parallelism);
 
         scan_region.scanner()
     }
@@ -303,15 +316,17 @@ impl MitoEngine {
     ) -> MitoEngine {
         config.sanitize();
 
+        let config = Arc::new(config);
         MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
-                    config,
+                    config.clone(),
                     log_store,
                     object_store_manager,
                     write_buffer_manager,
                     listener,
                 ),
+                config,
             }),
         }
     }

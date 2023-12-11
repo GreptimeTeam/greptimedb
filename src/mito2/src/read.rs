@@ -39,6 +39,8 @@ use datatypes::vectors::{
     TimestampNanosecondVector, TimestampSecondVector, UInt32Vector, UInt64Vector, UInt8Vector,
     Vector, VectorRef,
 };
+use futures::stream::BoxStream;
+use futures::TryStreamExt;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{ColumnId, SequenceNumber};
@@ -668,6 +670,8 @@ pub enum Source {
     Reader(BoxedBatchReader),
     /// Source from a [BoxedBatchIterator].
     Iter(BoxedBatchIterator),
+    /// Source from a [BoxedBatchStream].
+    Stream(BoxedBatchStream),
 }
 
 impl Source {
@@ -676,6 +680,7 @@ impl Source {
         match self {
             Source::Reader(reader) => reader.next_batch().await,
             Source::Iter(iter) => iter.next().transpose(),
+            Source::Stream(stream) => stream.try_next().await,
         }
     }
 }
@@ -697,6 +702,9 @@ pub trait BatchReader: Send {
 
 /// Pointer to [BatchReader].
 pub type BoxedBatchReader = Box<dyn BatchReader>;
+
+/// Pointer to a stream that yields [Batch].
+pub type BoxedBatchStream = BoxStream<'static, Result<Batch>>;
 
 #[async_trait::async_trait]
 impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
