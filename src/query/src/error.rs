@@ -18,7 +18,6 @@ use std::time::Duration;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_meta::table_name::TableName;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -167,32 +166,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to route partition of table {}", table))]
-    RoutePartition {
-        table: TableName,
-        source: partition::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to parse SQL"))]
-    ParseSql {
-        source: sql::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Failed to request remote peer"))]
-    RemoteRequest {
-        source: client::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Unexpected query output. Expected: {}, Got: {}", expected, got))]
-    UnexpectedOutputKind {
-        expected: String,
-        got: String,
-        location: Location,
-    },
-
     #[snafu(display("Missing required field: {}", name))]
     MissingRequiredField { name: String, location: Location },
 
@@ -313,7 +286,6 @@ impl ErrorExt for Error {
             VectorComputation { source, .. } | ConvertDatafusionSchema { source, .. } => {
                 source.status_code()
             }
-            ParseSql { source, .. } => source.status_code(),
             CreateRecordBatch { source, .. } => source.status_code(),
             QueryExecution { source, .. } | QueryPlan { source, .. } => source.status_code(),
             DataFusion { error, .. } => match error {
@@ -322,12 +294,10 @@ impl ErrorExt for Error {
                 DataFusionError::Plan(_) => StatusCode::PlanQuery,
                 _ => StatusCode::EngineExecuteQuery,
             },
-            MissingTimestampColumn { .. } | RoutePartition { .. } => StatusCode::EngineExecuteQuery,
+            MissingTimestampColumn { .. } => StatusCode::EngineExecuteQuery,
             Sql { source, .. } => source.status_code(),
             PlanSql { .. } => StatusCode::PlanQuery,
             ConvertSqlType { source, .. } | ConvertSqlValue { source, .. } => source.status_code(),
-            RemoteRequest { source, .. } => source.status_code(),
-            UnexpectedOutputKind { .. } => StatusCode::Unexpected,
             CreateSchema { source, .. } => source.status_code(),
 
             RegionQuery { source, .. } => source.status_code(),

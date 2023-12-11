@@ -26,12 +26,6 @@ use store_api::storage::RegionNumber;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to init ddl manager"))]
-    InitDdlManager {
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
     #[snafu(display("Failed to invalidate table cache"))]
     InvalidateTableCache {
         location: Location,
@@ -243,12 +237,6 @@ pub enum Error {
     #[snafu(display("Unsupported format: {:?}", format))]
     UnsupportedFormat { location: Location, format: Format },
 
-    #[snafu(display("Table metadata manager error"))]
-    TableMetadataManager {
-        source: common_meta::error::Error,
-        location: Location,
-    },
-
     #[snafu(display("Failed to pass permission check"))]
     Permission {
         source: auth::error::Error,
@@ -308,8 +296,7 @@ impl ErrorExt for Error {
 
             Error::DescribeStatement { source, .. } => source.status_code(),
 
-            Error::HandleHeartbeatResponse { source, .. }
-            | Error::TableMetadataManager { source, .. } => source.status_code(),
+            Error::HandleHeartbeatResponse { source, .. } => source.status_code(),
 
             Error::RuntimeResource { source, .. } => source.status_code(),
             Error::PromStoreRemoteQueryPlan { source, .. }
@@ -321,9 +308,7 @@ impl ErrorExt for Error {
 
             Error::ParseSql { source, .. } => source.status_code(),
 
-            Error::InvalidateTableCache { source, .. } | Error::InitDdlManager { source, .. } => {
-                source.status_code()
-            }
+            Error::InvalidateTableCache { source, .. } => source.status_code(),
 
             Error::Table { source, .. }
             | Error::CopyTable { source, .. }
