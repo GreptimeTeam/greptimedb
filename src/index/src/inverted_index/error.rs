@@ -137,7 +137,7 @@ pub enum Error {
     #[snafu(display("index not found, name: {name}"))]
     IndexNotFound { name: String, location: Location },
 
-    #[snafu(display("Failed to invert value to FST"))]
+    #[snafu(display("Failed to insert value to FST"))]
     FstInsert {
         #[snafu(source)]
         error: fst::Error,
