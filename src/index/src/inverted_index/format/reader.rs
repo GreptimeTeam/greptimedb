@@ -20,6 +20,7 @@ use common_base::BitVec;
 use greptime_proto::v1::index::{InvertedIndexMeta, InvertedIndexMetas};
 
 use crate::inverted_index::error::Result;
+pub use crate::inverted_index::format::reader::blob::InvertedIndexBlobReader;
 use crate::inverted_index::FstMap;
 
 /// InvertedIndexReader defines an asynchronous reader of inverted index data

@@ -34,7 +34,6 @@ pub struct InvertedIndexBlobReader<R> {
 }
 
 impl<R> InvertedIndexBlobReader<R> {
-    #[allow(dead_code)]
     pub fn new(source: R) -> Self {
         Self { source }
     }

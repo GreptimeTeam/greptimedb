@@ -40,6 +40,27 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to write"))]
+    Write {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to flush"))]
+    Flush {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to close"))]
+    Close {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
     #[snafu(display(
         "Unexpected inverted index blob size, min: {min_blob_size}, actual: {actual_blob_size}"
     ))]
@@ -115,6 +136,20 @@ pub enum Error {
 
     #[snafu(display("index not found, name: {name}"))]
     IndexNotFound { name: String, location: Location },
+
+    #[snafu(display("Failed to insert value to FST"))]
+    FstInsert {
+        #[snafu(source)]
+        error: fst::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to compile FST"))]
+    FstCompile {
+        #[snafu(source)]
+        error: fst::Error,
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -123,19 +158,24 @@ impl ErrorExt for Error {
         match self {
             Seek { .. }
             | Read { .. }
+            | Write { .. }
+            | Flush { .. }
+            | Close { .. }
             | UnexpectedFooterPayloadSize { .. }
             | UnexpectedZeroSegmentRowCount { .. }
             | UnexpectedOffsetSize { .. }
             | UnexpectedBlobSize { .. }
             | DecodeProto { .. }
             | DecodeFst { .. }
-            | KeysApplierUnexpectedPredicates { .. } => StatusCode::Unexpected,
+            | KeysApplierUnexpectedPredicates { .. }
+            | FstCompile { .. } => StatusCode::Unexpected,
 
             ParseRegex { .. }
             | ParseDFA { .. }
             | KeysApplierWithoutInList { .. }
             | IntersectionApplierWithInList { .. }
             | EmptyPredicates { .. }
+            | FstInsert { .. }
             | IndexNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
