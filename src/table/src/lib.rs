@@ -25,8 +25,6 @@ pub mod table;
 pub mod test_util;
 pub mod thin_table;
 
-pub use store_api::storage::RegionStat;
-
 pub use crate::error::{Error, Result};
 pub use crate::stats::{ColumnStatistics, TableStatistics};
 pub use crate::table::{Table, TableRef};

@@ -16,7 +16,6 @@
 
 pub mod consts;
 mod descriptors;
-mod region;
 mod requests;
 mod responses;
 mod types;
@@ -27,9 +26,6 @@ pub use datatypes::schema::{
 };
 
 pub use self::descriptors::*;
-pub use self::region::{
-    CloseContext, CompactContext, FlushContext, FlushReason, Region, RegionStat, WriteContext,
-};
 pub use self::requests::{
     AddColumn, AlterOperation, AlterRequest, GetRequest, ScanRequest, WriteRequest,
 };
