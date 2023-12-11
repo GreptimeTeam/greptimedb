@@ -105,6 +105,7 @@ mod tests {
 
     use super::*;
 
+    // $TZ doesn't take effort
     #[test]
     fn test_date_cast() {
         std::env::set_var("TZ", "Asia/Shanghai");
@@ -113,8 +114,13 @@ mod tests {
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
         assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
 
-        // this case bind with local timezone.
+        // this case bind with Zulu timezone.
         let ts = Value::Timestamp(Timestamp::from_str("2000-01-02 07:59:59").unwrap());
+        let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
+        assert_eq!(date, Value::Date(Date::from_str("2000-01-02").unwrap()));
+
+        // while this case is offseted to Asia/Shanghai.
+        let ts = Value::Timestamp(Timestamp::from_str("2000-01-02 07:59:59+08:00").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();
         assert_eq!(date, Value::Date(Date::from_str("2000-01-01").unwrap()));
 

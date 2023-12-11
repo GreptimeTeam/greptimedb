@@ -21,15 +21,14 @@ use std::time::Duration;
 
 use arrow::datatypes::TimeUnit as ArrowTimeUnit;
 use chrono::{
-    DateTime, Days, LocalResult, Months, NaiveDate, NaiveDateTime, NaiveTime,
-    TimeZone as ChronoTimeZone, Utc,
+    DateTime, Days, Months, NaiveDate, NaiveDateTime, NaiveTime, TimeZone as ChronoTimeZone, Utc,
 };
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{ArithmeticOverflowSnafu, Error, ParseTimestampSnafu, TimestampOverflowSnafu};
 use crate::timezone::TimeZone;
-use crate::util::{div_ceil, format_utc_datetime, local_datetime_to_utc};
+use crate::util::{div_ceil, format_utc_datetime};
 use crate::{error, Interval};
 
 /// Timestamp represents the value of units(seconds/milliseconds/microseconds/nanoseconds) elapsed
@@ -364,11 +363,11 @@ impl FromStr for Timestamp {
     /// Supported format:
     /// - `2022-09-20T14:16:43.012345Z` (Zulu timezone)
     /// - `2022-09-20T14:16:43.012345+08:00` (Explicit offset)
-    /// - `2022-09-20T14:16:43.012345` (local timezone, with T)
-    /// - `2022-09-20T14:16:43` (local timezone, no fractional seconds, with T)
+    /// - `2022-09-20T14:16:43.012345` (Zulu timezone, with T)
+    /// - `2022-09-20T14:16:43` (Zulu timezone, no fractional seconds, with T)
     /// - `2022-09-20 14:16:43.012345Z` (Zulu timezone, without T)
-    /// - `2022-09-20 14:16:43` (local timezone, without T)
-    /// - `2022-09-20 14:16:43.012345` (local timezone, without T)
+    /// - `2022-09-20 14:16:43` (Zulu timezone, without T)
+    /// - `2022-09-20 14:16:43.012345` (Zulu timezone, without T)
     #[allow(deprecated)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // RFC3339 timestamp (with a T)
@@ -407,18 +406,13 @@ impl FromStr for Timestamp {
 }
 
 /// Converts the naive datetime (which has no specific timezone) to a
-/// nanosecond epoch timestamp relative to UTC.
-/// This code is copied from [arrow-datafusion](https://github.com/apache/arrow-datafusion/blob/arrow2/datafusion-physical-expr/src/arrow_temporal_util.rs#L137).
+/// nanosecond epoch timestamp in UTC.
 fn naive_datetime_to_timestamp(
     s: &str,
     datetime: NaiveDateTime,
 ) -> crate::error::Result<Timestamp> {
-    match local_datetime_to_utc(&datetime) {
-        LocalResult::None => ParseTimestampSnafu { raw: s }.fail(),
-        LocalResult::Single(utc) | LocalResult::Ambiguous(utc, _) => {
-            Timestamp::from_chrono_datetime(utc).context(ParseTimestampSnafu { raw: s })
-        }
-    }
+    Timestamp::from_chrono_datetime(Utc.from_utc_datetime(&datetime).naive_utc())
+        .context(ParseTimestampSnafu { raw: s })
 }
 
 impl From<i64> for Timestamp {
@@ -562,7 +556,6 @@ impl Hash for Timestamp {
 mod tests {
     use std::collections::hash_map::DefaultHasher;
 
-    use chrono::{Local, Offset};
     use rand::Rng;
     use serde_json::Value;
 
@@ -783,71 +776,11 @@ mod tests {
         check_from_str("2020-09-08 13:42:29Z", "2020-09-08 13:42:29");
         check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
 
-        check_from_str(
-            "2020-09-08 13:42:29",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                0,
-            )
-            .unwrap()
-            .to_string(),
-        );
+        check_from_str("2020-09-08 13:42:29", "2020-09-08 13:42:29");
 
-        check_from_str(
-            "2020-09-08T13:42:29",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                0,
-            )
-            .unwrap()
-            .to_string(),
-        );
-
-        check_from_str(
-            "2020-09-08 13:42:29.042",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                42000000,
-            )
-            .unwrap()
-            .to_string(),
-        );
         check_from_str("2020-09-08 13:42:29.042Z", "2020-09-08 13:42:29.042");
         check_from_str("2020-09-08 13:42:29.042+08:00", "2020-09-08 05:42:29.042");
-        check_from_str(
-            "2020-09-08T13:42:29.042",
-            &NaiveDateTime::from_timestamp_opt(
-                1599572549
-                    - Local
-                        .timestamp_opt(0, 0)
-                        .unwrap()
-                        .offset()
-                        .fix()
-                        .local_minus_utc() as i64,
-                42000000,
-            )
-            .unwrap()
-            .to_string(),
-        );
-        check_from_str("2020-09-08T13:42:29+08:00", "2020-09-08 05:42:29");
+
         check_from_str(
             "2020-09-08T13:42:29.0042+08:00",
             "2020-09-08 05:42:29.004200",
@@ -1119,21 +1052,22 @@ mod tests {
         assert_eq!(TimeUnit::Second, res.unit);
     }
 
+    // $TZ doesn't take effort.
     #[test]
     fn test_parse_in_time_zone() {
         std::env::set_var("TZ", "Asia/Shanghai");
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Nanosecond),
+            Timestamp::new(28800, TimeUnit::Second),
             Timestamp::from_str("1970-01-01 08:00:00.000").unwrap()
         );
 
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(28800, TimeUnit::Second),
             Timestamp::from_str("1970-01-01 08:00:00").unwrap()
         );
 
         assert_eq!(
-            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(28800, TimeUnit::Second),
             Timestamp::from_str("      1970-01-01        08:00:00    ").unwrap()
         );
     }
