@@ -14,19 +14,7 @@
 
 //! Constants.
 
-use crate::storage::descriptors::{ColumnFamilyId, ColumnId};
-
-// ---------- Reserved column family ids ---------------------------------------
-
-/// Column family Id for row key columns.
-///
-/// This is a virtual column family, actually row key columns are not
-/// stored in any column family.
-pub const KEY_CF_ID: ColumnFamilyId = 0;
-/// Id for default column family.
-pub const DEFAULT_CF_ID: ColumnFamilyId = 1;
-
-// -----------------------------------------------------------------------------
+use crate::storage::descriptors::ColumnId;
 
 // ---------- Reserved column ids ----------------------------------------------
 
@@ -93,9 +81,6 @@ impl ReservedColumnId {
 
 // ---------- Names reserved for internal columns and engine -------------------
 
-/// Names for default column family.
-pub const DEFAULT_CF_NAME: &str = "default";
-
 /// Name for reserved column: sequence
 pub const SEQUENCE_COLUMN_NAME: &str = "__sequence";
 
@@ -115,14 +100,6 @@ static INTERNAL_COLUMN_VEC: [&str; 3] = [
 pub fn is_internal_column(name: &str) -> bool {
     INTERNAL_COLUMN_VEC.contains(&name)
 }
-
-// -----------------------------------------------------------------------------
-
-// ---------- Default options --------------------------------------------------
-
-pub const READ_BATCH_SIZE: usize = 256;
-
-pub const WRITE_ROW_GROUP_SIZE: usize = 4096;
 
 // -----------------------------------------------------------------------------
 
