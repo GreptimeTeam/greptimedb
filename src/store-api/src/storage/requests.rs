@@ -12,30 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use common_error::ext::ErrorExt;
 use common_query::logical_plan::Expr;
 use common_recordbatch::OrderOption;
-use datatypes::vectors::VectorRef;
-
-/// Write request holds a collection of updates to apply to a region.
-///
-/// The implementation of the write request should ensure all operations in
-/// the request follows the same schema restriction.
-pub trait WriteRequest: Send {
-    type Error: ErrorExt + Send + Sync;
-
-    /// Add put operation to the request.
-    ///
-    /// `data` is the columnar format of the data to put.
-    fn put(&mut self, data: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
-
-    /// Delete rows by `keys`.
-    ///
-    /// `keys` are the row keys, in columnar format, of the rows to delete.
-    fn delete(&mut self, keys: HashMap<String, VectorRef>) -> Result<(), Self::Error>;
-}
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct ScanRequest {
