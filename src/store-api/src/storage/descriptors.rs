@@ -21,7 +21,6 @@ use crate::storage::{ColumnDefaultConstraint, ColumnSchema, ConcreteDataType};
 
 /// Id of column. Unique in each region.
 pub type ColumnId = u32;
-/// Id of column family. Unique in each region.
 /// Group number of one region. Unique in each region.
 pub type RegionGroup = u8;
 /// Sequence number of region inside one table. Unique in each table.
