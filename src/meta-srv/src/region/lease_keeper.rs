@@ -13,10 +13,11 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::DatanodeId;
 use snafu::ResultExt;
@@ -30,7 +31,7 @@ pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
 /// Renews lease of regions.
 pub struct RegionLeaseKeeper {
     table_metadata_manager: TableMetadataManagerRef,
-    opening_region_keeper: OpeningRegionKeeperRef,
+    memory_region_keeper: MemoryRegionKeeperRef,
 }
 
 /// The result of region lease renewal,
@@ -43,11 +44,11 @@ pub struct RenewRegionLeasesResponse {
 impl RegionLeaseKeeper {
     pub fn new(
         table_metadata_manager: TableMetadataManagerRef,
-        opening_region_keeper: OpeningRegionKeeperRef,
+        memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Self {
         Self {
             table_metadata_manager,
-            opening_region_keeper,
+            memory_region_keeper,
         }
     }
 }
@@ -120,8 +121,8 @@ impl RegionLeaseKeeper {
         region_id: RegionId,
         role: RegionRole,
     ) -> Option<(RegionId, RegionRole)> {
-        // Renews the lease if it's a opening region.
-        if self.opening_region_keeper.contains(datanode_id, region_id) {
+        // Renews the lease if it's a opening region or deleting region.
+        if self.memory_region_keeper.contains(datanode_id, region_id) {
             return Some((region_id, role));
         }
 
@@ -182,88 +183,6 @@ impl RegionLeaseKeeper {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct OpeningRegionGuard {
-    datanode_id: DatanodeId,
-    region_id: RegionId,
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
-}
-
-impl Drop for OpeningRegionGuard {
-    fn drop(&mut self) {
-        let mut inner = self.inner.write().unwrap();
-        inner.remove(&(self.datanode_id, self.region_id));
-    }
-}
-
-impl OpeningRegionGuard {
-    /// Returns opening region info.
-    pub fn info(&self) -> (DatanodeId, RegionId) {
-        (self.datanode_id, self.region_id)
-    }
-}
-
-pub type OpeningRegionKeeperRef = Arc<OpeningRegionKeeper>;
-
-#[derive(Debug, Clone, Default)]
-///  Tracks opening regions.
-pub struct OpeningRegionKeeper {
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
-}
-
-impl OpeningRegionKeeper {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    /// Returns [OpeningRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
-    pub fn register(
-        &self,
-        datanode_id: DatanodeId,
-        region_id: RegionId,
-    ) -> Option<OpeningRegionGuard> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.insert((datanode_id, region_id)) {
-            Some(OpeningRegionGuard {
-                datanode_id,
-                region_id,
-                inner: self.inner.clone(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Returns true if the keeper contains a (`datanoe_id`, `region_id`) tuple.
-    pub fn contains(&self, datanode_id: DatanodeId, region_id: RegionId) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.contains(&(datanode_id, region_id))
-    }
-
-    /// Returns a set of filtered out regions that are opening.
-    pub fn filter_opening_regions(
-        &self,
-        datanode_id: DatanodeId,
-        mut region_ids: HashSet<RegionId>,
-    ) -> HashSet<RegionId> {
-        let inner = self.inner.read().unwrap();
-        region_ids.retain(|region_id| !inner.contains(&(datanode_id, *region_id)));
-
-        region_ids
-    }
-
-    /// Returns number of element in tracking set.
-    pub fn len(&self) -> usize {
-        let inner = self.inner.read().unwrap();
-        inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
@@ -273,12 +192,13 @@ mod tests {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{Region, RegionRouteBuilder, RegionStatus};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use table::metadata::RawTableInfo;
 
-    use super::{renew_region_lease_via_region_route, OpeningRegionKeeper, RegionLeaseKeeper};
+    use super::{renew_region_lease_via_region_route, RegionLeaseKeeper};
     use crate::region::lease_keeper::RenewRegionLeasesResponse;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
@@ -286,38 +206,8 @@ mod tests {
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(store));
 
-        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
         RegionLeaseKeeper::new(table_metadata_manager, opening_region_keeper)
-    }
-
-    #[test]
-    fn test_opening_region_keeper() {
-        let keeper = OpeningRegionKeeper::new();
-
-        let guard = keeper.register(1, RegionId::from_u64(1)).unwrap();
-        assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
-        let guard2 = keeper.register(1, RegionId::from_u64(2)).unwrap();
-
-        let output = keeper.filter_opening_regions(
-            1,
-            HashSet::from([
-                RegionId::from_u64(1),
-                RegionId::from_u64(2),
-                RegionId::from_u64(3),
-            ]),
-        );
-        assert_eq!(output.len(), 1);
-        assert!(output.contains(&RegionId::from_u64(3)));
-
-        assert_eq!(keeper.len(), 2);
-        drop(guard);
-
-        assert_eq!(keeper.len(), 1);
-
-        assert!(keeper.contains(1, RegionId::from_u64(2)));
-        drop(guard2);
-
-        assert!(keeper.is_empty());
     }
 
     #[test]
@@ -448,7 +338,7 @@ mod tests {
 
         let opening_region_id = RegionId::new(2048, 1);
         let _guard = keeper
-            .opening_region_keeper
+            .memory_region_keeper
             .register(leader_peer_id, opening_region_id)
             .unwrap();
 

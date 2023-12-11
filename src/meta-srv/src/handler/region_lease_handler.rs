@@ -17,14 +17,13 @@ use std::sync::Arc;
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::region_keeper::MemoryRegionKeeperRef;
 use store_api::region_engine::GrantedRegion;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::region::lease_keeper::{
-    OpeningRegionKeeperRef, RegionLeaseKeeperRef, RenewRegionLeasesResponse,
-};
+use crate::region::lease_keeper::{RegionLeaseKeeperRef, RenewRegionLeasesResponse};
 use crate::region::RegionLeaseKeeper;
 
 pub struct RegionLeaseHandler {
@@ -36,10 +35,10 @@ impl RegionLeaseHandler {
     pub fn new(
         region_lease_seconds: u64,
         table_metadata_manager: TableMetadataManagerRef,
-        opening_region_keeper: OpeningRegionKeeperRef,
+        memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Self {
         let region_lease_keeper =
-            RegionLeaseKeeper::new(table_metadata_manager, opening_region_keeper.clone());
+            RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper.clone());
 
         Self {
             region_lease_seconds,
@@ -109,6 +108,7 @@ mod test {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -116,15 +116,14 @@ mod test {
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::region::lease_keeper::OpeningRegionKeeper;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(store));
 
-        let opening_keeper = Arc::new(OpeningRegionKeeper::default());
-        RegionLeaseKeeper::new(table_metadata_manager, opening_keeper)
+        let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
+        RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper)
     }
 
     fn new_empty_region_stat(region_id: RegionId, role: RegionRole) -> RegionStat {
@@ -187,7 +186,7 @@ mod test {
             ..Default::default()
         };
 
-        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let handler = RegionLeaseHandler::new(
             distributed_time_constants::REGION_LEASE_SECS,

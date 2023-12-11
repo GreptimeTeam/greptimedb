@@ -25,6 +25,7 @@ use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
+use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::sequence::SequenceRef;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -46,7 +47,6 @@ use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
-use crate::region::lease_keeper::OpeningRegionKeeperRef;
 use crate::selector::{Selector, SelectorType};
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::LeaderCachedKvBackend;
@@ -233,7 +233,7 @@ pub struct MetaSrv {
     mailbox: MailboxRef,
     ddl_executor: DdlTaskExecutorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    opening_region_keeper: OpeningRegionKeeperRef,
+    memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
 
     plugins: Plugins,
@@ -396,8 +396,8 @@ impl MetaSrv {
         &self.table_metadata_manager
     }
 
-    pub fn opening_region_keeper(&self) -> &OpeningRegionKeeperRef {
-        &self.opening_region_keeper
+    pub fn memory_region_keeper(&self) -> &MemoryRegionKeeperRef {
+        &self.memory_region_keeper
     }
 
     pub fn publish(&self) -> Option<PublishRef> {

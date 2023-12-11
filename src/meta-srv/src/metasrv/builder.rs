@@ -26,6 +26,7 @@ use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
@@ -55,7 +56,6 @@ use crate::metasrv::{
 };
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::pubsub::PublishRef;
-use crate::region::lease_keeper::OpeningRegionKeeper;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
@@ -219,7 +219,7 @@ impl MetaSrvBuilder {
             &table_metadata_manager,
             table_metadata_allocator,
         )?;
-        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -307,7 +307,7 @@ impl MetaSrvBuilder {
             )
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
-            opening_region_keeper,
+            memory_region_keeper: opening_region_keeper,
         })
     }
 }
