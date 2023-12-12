@@ -120,7 +120,7 @@ impl Fill {
                             data[i] = data[i - 1].clone()
                         }
                     }
-                    Fill::Linear => {}
+                    Fill::Linear => unreachable!(),
                     Fill::Const(v) => data[i] = v.clone(),
                 }
             }
@@ -137,8 +137,11 @@ impl Fill {
             return Ok(());
         }
         let mut index = 0;
+        let mut head: Option<usize> = None;
+        let mut tail: Option<usize> = None;
         while index < data.len() {
             // find null interval [start, end)
+            // start is null, end is not-null
             let start = data[index..]
                 .iter()
                 .position(ScalarValue::is_null)
@@ -153,20 +156,22 @@ impl Fill {
                 .unwrap_or(data.len() - start)
                 + start;
             index = end + 1;
-            // head or tail null dispose later
-            if start != 0 && end != data.len() {
+            // head or tail null dispose later, record start/end first
+            if start == 0 {
+                head = Some(end);
+            } else if end == data.len() {
+                tail = Some(start);
+            } else {
                 linear_interpolation(ts, data, start - 1, end, start, end)?;
             }
         }
         // dispose head null interval
-        if data[0].is_null() {
-            let start = data.iter().position(|r| !r.is_null()).unwrap();
-            linear_interpolation(ts, data, start, start + 1, 0, start)?;
+        if let Some(end) = head {
+            linear_interpolation(ts, data, end, end + 1, 0, end)?;
         }
         // dispose tail null interval
-        if data[data.len() - 1].is_null() {
-            let start = data.len() - 1 - data.iter().rev().position(|r| !r.is_null()).unwrap();
-            linear_interpolation(ts, data, start, start - 1, start + 1, data.len())?;
+        if let Some(start) = tail {
+            linear_interpolation(ts, data, start - 2, start - 1, start, data.len())?;
         }
         Ok(())
     }
@@ -193,6 +198,12 @@ fn linear_interpolation(
             ));
         }
     };
+    // To avoid divide zero error, kind of defensive programming
+    if x1 == x0 {
+        return Err(DataFusionError::Execution(
+            "RangePlan: Linear interpolation using the same coordinate points".to_string(),
+        ));
+    }
     for i in start..end {
         let val = y0 + (y1 - y0) / (x1 - x0) * (ts[i] as f64 - x0);
         data[i] = if is_float32 {
