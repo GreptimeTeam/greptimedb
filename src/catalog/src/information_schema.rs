@@ -20,7 +20,7 @@ use std::sync::{Arc, Weak};
 
 use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_error::ext::BoxedError;
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
@@ -171,7 +171,7 @@ impl DataSource for InformationTableDataSource {
                 None => batch,
             });
 
-        let stream = RecordBatchStreamAdaptor {
+        let stream = RecordBatchStreamWrapper {
             schema: projected_schema,
             stream: Box::pin(stream),
             output_ordering: None,

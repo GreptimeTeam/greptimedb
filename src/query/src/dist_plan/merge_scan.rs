@@ -25,7 +25,7 @@ use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{
-    DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream,
+    DfSendableRecordBatchStream, RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream,
 };
 use common_telemetry::tracing;
 use common_telemetry::tracing_context::TracingContext;
@@ -217,7 +217,7 @@ impl MergeScanExec {
             }
         }));
 
-        Ok(Box::pin(RecordBatchStreamAdaptor {
+        Ok(Box::pin(RecordBatchStreamWrapper {
             schema: self.schema.clone(),
             stream,
             output_ordering: None,

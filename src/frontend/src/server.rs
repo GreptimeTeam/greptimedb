@@ -25,8 +25,8 @@ use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::opentsdb::OpentsdbServer;
 use servers::postgres::PostgresServer;
-use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::ServerSqlQueryHandlerAdaptor;
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
+use servers::query_handler::sql::ServerSqlQueryHandlerAdapter;
 use servers::server::{Server, ServerHandler, ServerHandlers};
 use snafu::ResultExt;
 
@@ -70,7 +70,7 @@ impl Services {
             };
             let grpc_server = GrpcServer::new(
                 Some(grpc_config),
-                Some(ServerGrpcQueryHandlerAdaptor::arc(instance.clone())),
+                Some(ServerGrpcQueryHandlerAdapter::arc(instance.clone())),
                 Some(instance.clone()),
                 None,
                 None,
@@ -88,8 +88,8 @@ impl Services {
 
             let mut http_server_builder = HttpServerBuilder::new(http_options.clone());
             let _ = http_server_builder
-                .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.clone()))
-                .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(instance.clone()));
+                .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.clone()))
+                .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(instance.clone()));
 
             if let Some(user_provider) = user_provider.clone() {
                 let _ = http_server_builder.with_user_provider(user_provider);
@@ -137,7 +137,7 @@ impl Services {
             let mysql_server = MysqlServer::create_server(
                 mysql_io_runtime,
                 Arc::new(MysqlSpawnRef::new(
-                    ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                    ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                     user_provider.clone(),
                 )),
                 Arc::new(MysqlSpawnConfig::new(
@@ -167,7 +167,7 @@ impl Services {
             );
 
             let pg_server = Box::new(PostgresServer::new(
-                ServerSqlQueryHandlerAdaptor::arc(instance.clone()),
+                ServerSqlQueryHandlerAdapter::arc(instance.clone()),
                 opts.tls.clone(),
                 pg_io_runtime,
                 user_provider.clone(),

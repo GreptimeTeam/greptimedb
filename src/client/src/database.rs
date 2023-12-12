@@ -27,7 +27,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_query::Output;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::RecordBatchStreamAdaptor;
+use common_recordbatch::RecordBatchStreamWrapper;
 use common_telemetry::logging;
 use common_telemetry::tracing_context::W3cTrace;
 use futures_util::StreamExt;
@@ -315,7 +315,7 @@ impl Database {
                         yield Ok(record_batch);
                     }
                 }));
-                let record_batch_stream = RecordBatchStreamAdaptor {
+                let record_batch_stream = RecordBatchStreamWrapper {
                     schema,
                     stream,
                     output_ordering: None,

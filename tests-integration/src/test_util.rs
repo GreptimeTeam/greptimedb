@@ -45,8 +45,8 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::postgres::PostgresServer;
-use servers::query_handler::grpc::ServerGrpcQueryHandlerAdaptor;
-use servers::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler};
+use servers::query_handler::grpc::ServerGrpcQueryHandlerAdapter;
+use servers::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 use servers::server::Server;
 use servers::Mode;
 use session::context::QueryContext;
@@ -378,8 +378,8 @@ pub async fn setup_test_http_app(store_type: StorageType, name: &str) -> (Router
         ..Default::default()
     };
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
             instance.instance.clone(),
         ))
         .with_metrics_handler(MetricsHandler)
@@ -412,8 +412,8 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
     let mut http_server = HttpServerBuilder::new(http_opts);
 
     http_server
-        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(instance.instance.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(instance.instance.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(
             instance.instance.clone(),
         ))
         .with_script_handler(instance.instance.clone())
@@ -449,8 +449,8 @@ pub async fn setup_test_prom_app_with_frontend(
     };
     let frontend_ref = instance.instance.clone();
     let http_server = HttpServerBuilder::new(http_opts)
-        .with_sql_handler(ServerSqlQueryHandlerAdaptor::arc(frontend_ref.clone()))
-        .with_grpc_handler(ServerGrpcQueryHandlerAdaptor::arc(frontend_ref.clone()))
+        .with_sql_handler(ServerSqlQueryHandlerAdapter::arc(frontend_ref.clone()))
+        .with_grpc_handler(ServerGrpcQueryHandlerAdapter::arc(frontend_ref.clone()))
         .with_script_handler(frontend_ref.clone())
         .with_prom_handler(frontend_ref.clone())
         .with_prometheus_handler(frontend_ref)
@@ -493,14 +493,14 @@ pub async fn setup_grpc_server_with(
 
     let fe_instance_ref = instance.instance.clone();
     let flight_handler = Arc::new(GreptimeRequestHandler::new(
-        ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone()),
+        ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone()),
         user_provider.clone(),
         runtime.clone(),
     ));
 
     let fe_grpc_server = Arc::new(GrpcServer::new(
         grpc_config,
-        Some(ServerGrpcQueryHandlerAdaptor::arc(fe_instance_ref.clone())),
+        Some(ServerGrpcQueryHandlerAdapter::arc(fe_instance_ref.clone())),
         Some(fe_instance_ref.clone()),
         Some(flight_handler),
         None,
@@ -563,7 +563,7 @@ pub async fn setup_mysql_server_with_user_provider(
     let fe_mysql_server = Arc::new(MysqlServer::create_server(
         runtime,
         Arc::new(MysqlSpawnRef::new(
-            ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
+            ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
             user_provider,
         )),
         Arc::new(MysqlSpawnConfig::new(
@@ -615,7 +615,7 @@ pub async fn setup_pg_server_with_user_provider(
         ..Default::default()
     };
     let fe_pg_server = Arc::new(Box::new(PostgresServer::new(
-        ServerSqlQueryHandlerAdaptor::arc(fe_instance_ref),
+        ServerSqlQueryHandlerAdapter::arc(fe_instance_ref),
         opts.tls.clone(),
         runtime,
         user_provider,

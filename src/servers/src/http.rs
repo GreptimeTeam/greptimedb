@@ -802,8 +802,8 @@ mod test {
 
     use super::*;
     use crate::error::Error;
-    use crate::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerAdaptor};
-    use crate::query_handler::sql::{ServerSqlQueryHandlerAdaptor, SqlQueryHandler};
+    use crate::query_handler::grpc::{GrpcQueryHandler, ServerGrpcQueryHandlerAdapter};
+    use crate::query_handler::sql::{ServerSqlQueryHandlerAdapter, SqlQueryHandler};
 
     struct DummyInstance {
         _tx: mpsc::Sender<(String, Vec<u8>)>,
@@ -869,8 +869,8 @@ mod test {
 
     fn make_test_app(tx: mpsc::Sender<(String, Vec<u8>)>) -> Router {
         let instance = Arc::new(DummyInstance { _tx: tx });
-        let sql_instance = ServerSqlQueryHandlerAdaptor::arc(instance.clone());
-        let grpc_instance = ServerGrpcQueryHandlerAdaptor::arc(instance);
+        let sql_instance = ServerSqlQueryHandlerAdapter::arc(instance.clone());
+        let grpc_instance = ServerGrpcQueryHandlerAdapter::arc(instance);
         let server = HttpServerBuilder::new(HttpOptions::default())
             .with_sql_handler(sql_instance)
             .with_grpc_handler(grpc_instance)

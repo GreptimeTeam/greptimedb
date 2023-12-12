@@ -37,16 +37,16 @@ pub trait GrpcQueryHandler {
     ) -> std::result::Result<Output, Self::Error>;
 }
 
-pub struct ServerGrpcQueryHandlerAdaptor<E>(GrpcQueryHandlerRef<E>);
+pub struct ServerGrpcQueryHandlerAdapter<E>(GrpcQueryHandlerRef<E>);
 
-impl<E> ServerGrpcQueryHandlerAdaptor<E> {
+impl<E> ServerGrpcQueryHandlerAdapter<E> {
     pub fn arc(handler: GrpcQueryHandlerRef<E>) -> Arc<Self> {
         Arc::new(Self(handler))
     }
 }
 
 #[async_trait]
-impl<E> GrpcQueryHandler for ServerGrpcQueryHandlerAdaptor<E>
+impl<E> GrpcQueryHandler for ServerGrpcQueryHandlerAdapter<E>
 where
     E: ErrorExt + Send + Sync + 'static,
 {
