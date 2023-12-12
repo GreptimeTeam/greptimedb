@@ -23,6 +23,7 @@ use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::region_keeper::MemoryRegionKeeper;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -396,6 +397,7 @@ impl StartCommand {
                 Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
                 Arc::new(StandaloneTableMetadataCreator::new(kv_backend)),
+                Arc::new(MemoryRegionKeeper::default()),
             )
             .context(InitDdlManagerSnafu)?,
         );

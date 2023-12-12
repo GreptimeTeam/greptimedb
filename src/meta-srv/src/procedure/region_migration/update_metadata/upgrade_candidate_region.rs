@@ -174,6 +174,7 @@ mod tests {
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
+    use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
     use store_api::storage::RegionId;
 
@@ -182,7 +183,6 @@ mod tests {
     use crate::procedure::region_migration::test_util::{self, TestingEnv};
     use crate::procedure::region_migration::update_metadata::UpdateMetadata;
     use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
-    use crate::region::lease_keeper::OpeningRegionKeeper;
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
@@ -301,7 +301,7 @@ mod tests {
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let opening_keeper = OpeningRegionKeeper::default();
+        let opening_keeper = MemoryRegionKeeper::default();
 
         let table_id = 1024;
         let table_info = new_test_table_info(table_id, vec![1]).into();
@@ -448,7 +448,7 @@ mod tests {
         let env = TestingEnv::new();
         let persistent_context = new_persistent_context();
         let mut ctx = env.context_factory().new_context(persistent_context);
-        let opening_keeper = OpeningRegionKeeper::default();
+        let opening_keeper = MemoryRegionKeeper::default();
 
         let table_id = 1024;
         let table_info = new_test_table_info(table_id, vec![1]).into();

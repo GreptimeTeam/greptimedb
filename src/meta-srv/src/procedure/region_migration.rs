@@ -32,6 +32,7 @@ use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
 use common_meta::peer::Peer;
+use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::ClusterId;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -45,7 +46,6 @@ use tokio::time::Instant;
 use self::migration_start::RegionMigrationStart;
 use crate::error::{self, Error, Result};
 use crate::procedure::utils::region_lock_key;
-use crate::region::lease_keeper::{OpeningRegionGuard, OpeningRegionKeeperRef};
 use crate::service::mailbox::{BroadcastChannel, MailboxRef};
 
 /// It's shared in each step and available even after recovering.
@@ -84,7 +84,7 @@ pub struct VolatileContext {
     /// `opening_region_guard` should be consumed after
     /// the corresponding [RegionRoute](common_meta::rpc::router::RegionRoute) of the opening region
     /// was written into [TableRouteValue](common_meta::key::table_route::TableRouteValue).
-    opening_region_guard: Option<OpeningRegionGuard>,
+    opening_region_guard: Option<OperatingRegionGuard>,
     /// `table_route` is stored via previous steps for future use.
     table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
     /// `table_info` is stored via previous steps for future use.
@@ -126,7 +126,7 @@ pub trait ContextFactory {
 pub struct ContextFactoryImpl {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
-    opening_region_keeper: OpeningRegionKeeperRef,
+    opening_region_keeper: MemoryRegionKeeperRef,
     mailbox: MailboxRef,
     server_addr: String,
 }
@@ -151,7 +151,7 @@ pub struct Context {
     persistent_ctx: PersistentContext,
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
-    opening_region_keeper: OpeningRegionKeeperRef,
+    opening_region_keeper: MemoryRegionKeeperRef,
     mailbox: MailboxRef,
     server_addr: String,
 }

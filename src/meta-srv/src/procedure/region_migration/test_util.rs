@@ -23,6 +23,7 @@ use common_meta::instruction::{
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
+use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::Sequence;
 use common_meta::DatanodeId;
@@ -43,7 +44,6 @@ use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeader
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::PersistentContext;
-use crate::region::lease_keeper::{OpeningRegionKeeper, OpeningRegionKeeperRef};
 use crate::service::mailbox::{Channel, MailboxRef};
 
 pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
@@ -83,7 +83,7 @@ impl MailboxContext {
 pub struct TestingEnv {
     table_metadata_manager: TableMetadataManagerRef,
     mailbox_ctx: MailboxContext,
-    opening_region_keeper: OpeningRegionKeeperRef,
+    opening_region_keeper: MemoryRegionKeeperRef,
     server_addr: String,
 }
 
@@ -96,7 +96,7 @@ impl TestingEnv {
         let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 1, kv_backend.clone());
 
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
-        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         Self {
             table_metadata_manager,
@@ -127,8 +127,8 @@ impl TestingEnv {
         &self.table_metadata_manager
     }
 
-    /// Returns the [OpeningRegionKeeperRef]
-    pub fn opening_region_keeper(&self) -> &OpeningRegionKeeperRef {
+    /// Returns the [MemoryRegionKeeperRef]
+    pub fn opening_region_keeper(&self) -> &MemoryRegionKeeperRef {
         &self.opening_region_keeper
     }
 

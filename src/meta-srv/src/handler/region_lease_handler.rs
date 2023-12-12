@@ -12,70 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::meta::{HeartbeatRequest, RegionLease, Role};
 use async_trait::async_trait;
 use common_meta::key::TableMetadataManagerRef;
-use common_telemetry::info;
-use store_api::region_engine::{GrantedRegion, RegionRole};
-use store_api::storage::RegionId;
+use common_meta::region_keeper::MemoryRegionKeeperRef;
+use store_api::region_engine::GrantedRegion;
 
 use crate::error::Result;
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
-use crate::region::lease_keeper::{OpeningRegionKeeperRef, RegionLeaseKeeperRef};
+use crate::region::lease_keeper::{RegionLeaseKeeperRef, RenewRegionLeasesResponse};
 use crate::region::RegionLeaseKeeper;
 
 pub struct RegionLeaseHandler {
     region_lease_seconds: u64,
     region_lease_keeper: RegionLeaseKeeperRef,
-    opening_region_keeper: OpeningRegionKeeperRef,
 }
 
 impl RegionLeaseHandler {
     pub fn new(
         region_lease_seconds: u64,
         table_metadata_manager: TableMetadataManagerRef,
-        opening_region_keeper: OpeningRegionKeeperRef,
+        memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Self {
-        let region_lease_keeper = RegionLeaseKeeper::new(table_metadata_manager);
+        let region_lease_keeper =
+            RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper.clone());
 
         Self {
             region_lease_seconds,
             region_lease_keeper: Arc::new(region_lease_keeper),
-            opening_region_keeper,
-        }
-    }
-}
-
-fn flip_role(role: RegionRole) -> RegionRole {
-    match role {
-        RegionRole::Follower => RegionRole::Leader,
-        RegionRole::Leader => RegionRole::Follower,
-    }
-}
-
-/// Grants lease of regions.
-///
-/// - If a region is in an `operable` set, it will be granted an `flip_role(current)`([RegionRole]);
-/// otherwise, it will be granted a `current`([RegionRole]).
-/// - If a region is in a `closeable` set, it won't be granted.
-fn grant(
-    granted_regions: &mut Vec<GrantedRegion>,
-    operable: &HashSet<RegionId>,
-    closeable: &HashSet<RegionId>,
-    regions: &[RegionId],
-    current: RegionRole,
-) {
-    for region in regions {
-        if operable.contains(region) {
-            granted_regions.push(GrantedRegion::new(*region, flip_role(current)));
-        } else if closeable.contains(region) {
-            // Filters out the closeable regions.
-        } else {
-            granted_regions.push(GrantedRegion::new(*region, current))
         }
     }
 }
@@ -99,76 +66,33 @@ impl HeartbeatHandler for RegionLeaseHandler {
         let regions = stat.regions();
         let cluster_id = stat.cluster_id;
         let datanode_id = stat.id;
-        let mut granted_regions = Vec::with_capacity(regions.len());
-        let mut inactive_regions = HashSet::new();
 
-        let (leaders, followers): (Vec<_>, Vec<_>) = regions
+        let RenewRegionLeasesResponse {
+            non_exists,
+            renewed,
+        } = self
+            .region_lease_keeper
+            .renew_region_leases(cluster_id, datanode_id, &regions)
+            .await?;
+
+        let renewed = renewed
             .into_iter()
-            .map(|(id, role)| match role {
-                RegionRole::Follower => (None, Some(id)),
-                RegionRole::Leader => (Some(id), None),
+            .map(|(region_id, region_role)| {
+                GrantedRegion {
+                    region_id,
+                    region_role,
+                }
+                .into()
             })
-            .unzip();
+            .collect::<Vec<_>>();
 
-        let leaders = leaders.into_iter().flatten().collect::<Vec<_>>();
-
-        let (downgradable, closeable) = self
-            .region_lease_keeper
-            .find_staled_leader_regions(cluster_id, datanode_id, &leaders)
-            .await?;
-
-        grant(
-            &mut granted_regions,
-            &downgradable,
-            &closeable,
-            &leaders,
-            RegionRole::Leader,
-        );
-        if !closeable.is_empty() {
-            info!(
-                "Granting region lease, found closeable leader regions: {:?} on datanode {}",
-                closeable, datanode_id
-            );
-        }
-        inactive_regions.extend(closeable);
-
-        let followers = followers.into_iter().flatten().collect::<Vec<_>>();
-
-        let (upgradeable, closeable) = self
-            .region_lease_keeper
-            .find_staled_follower_regions(cluster_id, datanode_id, &followers)
-            .await?;
-
-        // If a region is opening, it will be filtered out from the closeable regions set.
-        let closeable = self
-            .opening_region_keeper
-            .filter_opening_regions(datanode_id, closeable);
-
-        grant(
-            &mut granted_regions,
-            &upgradeable,
-            &closeable,
-            &followers,
-            RegionRole::Follower,
-        );
-        if !closeable.is_empty() {
-            info!(
-                "Granting region lease, found closeable follower regions {:?} on datanode {}",
-                closeable, datanode_id
-            );
-        }
-        inactive_regions.extend(closeable);
-
-        acc.inactive_region_ids = inactive_regions;
         acc.region_lease = Some(RegionLease {
-            regions: granted_regions
-                .into_iter()
-                .map(Into::into)
-                .collect::<Vec<_>>(),
+            regions: renewed,
             duration_since_epoch: req.duration_since_epoch,
             lease_seconds: self.region_lease_seconds,
-            closeable_region_ids: vec![],
+            closeable_region_ids: non_exists.iter().map(|region| region.as_u64()).collect(),
         });
+        acc.inactive_region_ids = non_exists;
 
         Ok(HandleControl::Continue)
     }
@@ -176,7 +100,7 @@ impl HeartbeatHandler for RegionLeaseHandler {
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants;
@@ -184,20 +108,22 @@ mod test {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 
     use super::*;
     use crate::handler::node_stat::{RegionStat, Stat};
     use crate::metasrv::builder::MetaSrvBuilder;
-    use crate::region::lease_keeper::OpeningRegionKeeper;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(store));
 
-        RegionLeaseKeeper::new(table_metadata_manager)
+        let memory_region_keeper = Arc::new(MemoryRegionKeeper::default());
+        RegionLeaseKeeper::new(table_metadata_manager, memory_region_keeper)
     }
 
     fn new_empty_region_stat(region_id: RegionId, role: RegionRole) -> RegionStat {
@@ -260,7 +186,7 @@ mod test {
             ..Default::default()
         };
 
-        let opening_region_keeper = Arc::new(OpeningRegionKeeper::default());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
         let handler = RegionLeaseHandler::new(
             distributed_time_constants::REGION_LEASE_SECS,
@@ -272,6 +198,10 @@ mod test {
 
         assert_region_lease(acc, vec![GrantedRegion::new(region_id, RegionRole::Leader)]);
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
 
         let acc = &mut HeartbeatAccumulator::default();
 
@@ -297,6 +227,10 @@ mod test {
             vec![GrantedRegion::new(region_id, RegionRole::Follower)],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
 
         let opening_region_id = RegionId::new(table_id, region_number + 2);
         let _guard = opening_region_keeper
@@ -331,6 +265,10 @@ mod test {
             ],
         );
         assert_eq!(acc.inactive_region_ids, HashSet::from([another_region_id]));
+        assert_eq!(
+            acc.region_lease.as_ref().unwrap().closeable_region_ids,
+            vec![another_region_id]
+        );
     }
 
     #[tokio::test]

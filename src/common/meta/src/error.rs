@@ -19,10 +19,11 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
-use store_api::storage::RegionNumber;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::peer::Peer;
+use crate::DatanodeId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -30,6 +31,17 @@ use crate::peer::Peer;
 pub enum Error {
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey { location: Location },
+
+    #[snafu(display(
+        "Another procedure is operating the region: {} on peer: {}",
+        region_id,
+        peer_id
+    ))]
+    RegionOperatingRace {
+        location: Location,
+        peer_id: DatanodeId,
+        region_id: RegionId,
+    },
 
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
     InvalidTxnResult { err_msg: String, location: Location },
@@ -291,7 +303,16 @@ impl ErrorExt for Error {
             | SequenceOutOfRange { .. }
             | UnexpectedSequenceValue { .. }
             | InvalidHeartbeatResponse { .. }
-            | InvalidTxnResult { .. } => StatusCode::Unexpected,
+            | InvalidTxnResult { .. }
+            | EncodeJson { .. }
+            | DecodeJson { .. }
+            | PayloadNotExist { .. }
+            | ConvertRawKey { .. }
+            | DecodeProto { .. }
+            | BuildTableMeta { .. }
+            | TableRouteNotFound { .. }
+            | ConvertRawTableInfo { .. }
+            | RegionOperatingRace { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -305,15 +326,6 @@ impl ErrorExt for Error {
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
-
-            EncodeJson { .. }
-            | DecodeJson { .. }
-            | PayloadNotExist { .. }
-            | ConvertRawKey { .. }
-            | DecodeProto { .. }
-            | BuildTableMeta { .. }
-            | TableRouteNotFound { .. }
-            | ConvertRawTableInfo { .. } => StatusCode::Unexpected,
 
             SubmitProcedure { source, .. } | WaitProcedure { source, .. } => source.status_code(),
             RegisterProcedureLoader { source, .. } => source.status_code(),

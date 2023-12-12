@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use super::DeserializedValueWithBytes;
@@ -50,6 +51,7 @@ impl TableRouteValue {
         }
     }
 
+    /// Returns a new version [TableRouteValue] with `region_routes`.
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
         Self {
             region_routes,
@@ -63,6 +65,14 @@ impl TableRouteValue {
     #[cfg(any(tets, feature = "testing"))]
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Returns the corresponding [RegionRoute].
+    pub fn region_route(&self, region_id: RegionId) -> Option<RegionRoute> {
+        self.region_routes
+            .iter()
+            .find(|route| route.region.id == region_id)
+            .cloned()
     }
 }
 

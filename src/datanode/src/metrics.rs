@@ -19,6 +19,7 @@ use prometheus::*;
 pub const REGION_REQUEST_TYPE: &str = "datanode_region_request_type";
 
 pub const REGION_ROLE: &str = "region_role";
+pub const REGION_ID: &str = "region_id";
 
 lazy_static! {
     /// The elapsed time of handling a request in the region_server.
@@ -32,6 +33,12 @@ lazy_static! {
     pub static ref LAST_RECEIVED_HEARTBEAT_ELAPSED: IntGauge = register_int_gauge!(
         "last_received_heartbeat_lease_elapsed",
         "last received heartbeat lease elapsed",
+    )
+    .unwrap();
+    pub static ref LEASE_EXPIRED_REGION: IntGaugeVec = register_int_gauge_vec!(
+        "lease_expired_region",
+        "lease expired region",
+        &[REGION_ID]
     )
     .unwrap();
     /// The received region leases via heartbeat.

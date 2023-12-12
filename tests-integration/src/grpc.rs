@@ -44,6 +44,7 @@ mod test {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_distributed_handle_ddl_request() {
+        common_telemetry::init_default_ut_logging();
         let instance =
             tests::create_distributed_instance("test_distributed_handle_ddl_request").await;
 

@@ -115,6 +115,7 @@ pub mod test_data {
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
+    use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
     use common_meta::sequence::Sequence;
     use datatypes::prelude::ConcreteDataType;
@@ -205,6 +206,7 @@ pub mod test_data {
                 },
             )),
             table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            memory_region_keeper: Arc::new(MemoryRegionKeeper::new()),
         }
     }
 }

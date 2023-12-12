@@ -18,6 +18,7 @@ use api::v1::meta::{
     Partition as PbPartition, Peer as PbPeer, Region as PbRegion, Table as PbTable,
     TableRoute as PbTableRoute,
 };
+use derive_builder::Builder;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::OptionExt;
@@ -27,6 +28,7 @@ use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
 use crate::table_name::TableName;
+use crate::DatanodeId;
 
 pub fn region_distribution(region_routes: &[RegionRoute]) -> Result<RegionDistribution> {
     let mut regions_id_map = RegionDistribution::new();
@@ -56,6 +58,19 @@ pub fn find_leaders(region_routes: &[RegionRoute]) -> HashSet<Peer> {
         .flat_map(|x| &x.leader_peer)
         .cloned()
         .collect()
+}
+
+/// Returns the operating leader regions with corresponding [DatanodeId].
+pub fn operating_leader_regions(region_routes: &[RegionRoute]) -> Vec<(RegionId, DatanodeId)> {
+    region_routes
+        .iter()
+        .filter_map(|route| {
+            route
+                .leader_peer
+                .as_ref()
+                .map(|leader| (route.region.id, leader.id))
+        })
+        .collect::<Vec<_>>()
 }
 
 /// Returns the HashMap<[RegionNumber], &[Peer]>;
@@ -231,12 +246,15 @@ impl From<Table> for PbTable {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Builder)]
 pub struct RegionRoute {
     pub region: Region,
+    #[builder(setter(into, strip_option))]
     pub leader_peer: Option<Peer>,
+    #[builder(setter(into), default)]
     pub follower_peers: Vec<Peer>,
     /// `None` by default.
+    #[builder(setter(into, strip_option), default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_status: Option<RegionStatus>,
 }

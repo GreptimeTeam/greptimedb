@@ -12,36 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod mito;
-pub mod utils;
-
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::rpc::router::RegionRoute;
 use common_meta::DatanodeId;
-use common_telemetry::warn;
 use snafu::ResultExt;
+use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, TableId};
 
-use self::mito::find_staled_leader_regions;
 use crate::error::{self, Result};
-use crate::metrics;
-use crate::region::lease_keeper::utils::find_staled_follower_regions;
 
 pub type RegionLeaseKeeperRef = Arc<RegionLeaseKeeper>;
 
+/// Renews lease of regions.
 pub struct RegionLeaseKeeper {
     table_metadata_manager: TableMetadataManagerRef,
+    memory_region_keeper: MemoryRegionKeeperRef,
+}
+
+/// The result of region lease renewal,
+/// contains the renewed region leases and [RegionId] of non-existing regions.
+pub struct RenewRegionLeasesResponse {
+    pub renewed: HashMap<RegionId, RegionRole>,
+    pub non_exists: HashSet<RegionId>,
 }
 
 impl RegionLeaseKeeper {
-    pub fn new(table_metadata_manager: TableMetadataManagerRef) -> Self {
+    pub fn new(
+        table_metadata_manager: TableMetadataManagerRef,
+        memory_region_keeper: MemoryRegionKeeperRef,
+    ) -> Self {
         Self {
             table_metadata_manager,
+            memory_region_keeper,
         }
     }
+}
+
+fn renew_region_lease_via_region_route(
+    region_route: &RegionRoute,
+    datanode_id: DatanodeId,
+    region_id: RegionId,
+) -> Option<(RegionId, RegionRole)> {
+    // If it's a leader region on this datanode.
+    if let Some(leader) = &region_route.leader_peer {
+        if leader.id == datanode_id {
+            let region_role = if region_route.is_leader_downgraded() {
+                RegionRole::Follower
+            } else {
+                RegionRole::Leader
+            };
+
+            return Some((region_id, region_role));
+        }
+    }
+
+    // If it's a follower region on this datanode.
+    if region_route
+        .follower_peers
+        .iter()
+        .any(|peer| peer.id == datanode_id)
+    {
+        return Some((region_id, RegionRole::Follower));
+    }
+
+    // The region doesn't belong to this datanode.
+    None
 }
 
 impl RegionLeaseKeeper {
@@ -73,100 +113,68 @@ impl RegionLeaseKeeper {
         Ok(metadata_subset)
     }
 
-    /// Returns downgradable regions, and closeable regions.
-    ///
-    /// - Downgradable regions:
-    /// Region's peer(`datanode_id`) is the corresponding downgraded leader peer in `region_routes`.
-    ///
-    /// - closeable regions:
-    /// - It returns a region if it's peer(`datanode_id`) isn't the corresponding leader peer in `region_routes`.
-    ///     - Expected as [RegionRole::Follower](store_api::region_engine::RegionRole::Follower) regions.
-    ///     - Unexpected [RegionRole::Leader](store_api::region_engine::RegionRole::Leader) regions.
-    /// - It returns a region if the region's table metadata is not found.
-    pub async fn find_staled_leader_regions(
+    /// Returns [None] if specific region doesn't belong to the datanode.
+    fn renew_region_lease(
         &self,
-        _cluster_id: u64,
-        datanode_id: u64,
-        datanode_regions: &[RegionId],
-    ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
-        let tables = self.collect_tables(datanode_regions);
-        let table_ids = tables.keys().copied().collect::<Vec<_>>();
+        table_metadata: &HashMap<TableId, TableRouteValue>,
+        datanode_id: DatanodeId,
+        region_id: RegionId,
+        role: RegionRole,
+    ) -> Option<(RegionId, RegionRole)> {
+        // Renews the lease if it's a opening region or deleting region.
+        if self.memory_region_keeper.contains(datanode_id, region_id) {
+            return Some((region_id, role));
+        }
 
-        let metadata_subset = {
-            let _timer = metrics::METRIC_META_LOAD_LEADER_METADATA_ELAPSED.start_timer();
-            self.collect_tables_metadata(&table_ids).await?
-        };
-
-        let mut closeable_set = HashSet::new();
-        let mut downgradable_set = HashSet::new();
-
-        for (table_id, regions) in tables {
-            if let Some(metadata) = metadata_subset.get(&table_id) {
-                let region_routes = &metadata.region_routes;
-
-                let (downgradable, closeable) =
-                    find_staled_leader_regions(datanode_id, &regions, region_routes);
-
-                downgradable_set.extend(downgradable);
-                closeable_set.extend(closeable);
-            } else {
-                warn!(
-                    "The table {} metadata is not found, appends closeable leader regions: {:?}",
-                    table_id, regions
-                );
-                // If table metadata is not found.
-                closeable_set.extend(regions);
+        if let Some(table_route) = table_metadata.get(&region_id.table_id()) {
+            if let Some(region_route) = table_route.region_route(region_id) {
+                return renew_region_lease_via_region_route(&region_route, datanode_id, region_id);
             }
         }
 
-        Ok((downgradable_set, closeable_set))
+        None
     }
 
-    /// Returns upgradable regions, and closeable regions.
+    /// Renews the lease of regions for specific datanode.
     ///
-    /// Upgradable regions:
-    /// - Region's peer(`datanode_id`) is the corresponding leader peer in `region_routes`.
+    /// The lease of regions will be renewed if:
+    /// -  The region of the specific datanode exists in [TableRouteValue].
+    /// -  The region of the specific datanode is opening.
     ///
-    /// closeable regions:
-    /// - Region's peer(`datanode_id`) isn't the corresponding leader/follower peer in `region_routes`.
-    /// - Region's table metadata is not found.
-    pub async fn find_staled_follower_regions(
+    /// Otherwise the lease of regions will not be renewed,
+    /// and corresponding regions will be added to `non_exists` of [RenewRegionLeasesResponse].
+    pub async fn renew_region_leases(
         &self,
         _cluster_id: u64,
-        datanode_id: u64,
-        datanode_regions: &[RegionId],
-    ) -> Result<(HashSet<RegionId>, HashSet<RegionId>)> {
-        let tables = self.collect_tables(datanode_regions);
+        datanode_id: DatanodeId,
+        regions: &[(RegionId, RegionRole)],
+    ) -> Result<RenewRegionLeasesResponse> {
+        let region_ids = regions
+            .iter()
+            .map(|(region_id, _)| *region_id)
+            .collect::<Vec<_>>();
+        let tables = self.collect_tables(&region_ids);
         let table_ids = tables.keys().copied().collect::<Vec<_>>();
+        let table_metadata = self.collect_tables_metadata(&table_ids).await?;
 
-        let metadata_subset = {
-            let _timer = metrics::METRIC_META_LOAD_FOLLOWER_METADATA_ELAPSED.start_timer();
-            self.collect_tables_metadata(&table_ids).await?
-        };
+        let mut renewed = HashMap::new();
+        let mut non_exists = HashSet::new();
 
-        let mut upgradable_set = HashSet::new();
-        let mut closeable_set = HashSet::new();
-
-        for (table_id, regions) in tables {
-            if let Some(metadata) = metadata_subset.get(&table_id) {
-                let region_routes = &metadata.region_routes;
-
-                let (upgradable, closeable) =
-                    find_staled_follower_regions(datanode_id, &regions, region_routes);
-
-                upgradable_set.extend(upgradable);
-                closeable_set.extend(closeable);
-            } else {
-                warn!(
-                    "The table {} metadata is not found, appends closeable followers regions: {:?}",
-                    table_id, regions
-                );
-                // If table metadata is not found.
-                closeable_set.extend(regions);
+        for &(region, role) in regions {
+            match self.renew_region_lease(&table_metadata, datanode_id, region, role) {
+                Some((region, renewed_role)) => {
+                    renewed.insert(region, renewed_role);
+                }
+                None => {
+                    non_exists.insert(region);
+                }
             }
         }
 
-        Ok((upgradable_set, closeable_set))
+        Ok(RenewRegionLeasesResponse {
+            renewed,
+            non_exists,
+        })
     }
 
     #[cfg(test)]
@@ -175,394 +183,217 @@ impl RegionLeaseKeeper {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct OpeningRegionGuard {
-    datanode_id: DatanodeId,
-    region_id: RegionId,
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
-}
-
-impl Drop for OpeningRegionGuard {
-    fn drop(&mut self) {
-        let mut inner = self.inner.write().unwrap();
-        inner.remove(&(self.datanode_id, self.region_id));
-    }
-}
-
-impl OpeningRegionGuard {
-    /// Returns opening region info.
-    pub fn info(&self) -> (DatanodeId, RegionId) {
-        (self.datanode_id, self.region_id)
-    }
-}
-
-pub type OpeningRegionKeeperRef = Arc<OpeningRegionKeeper>;
-
-#[derive(Debug, Clone, Default)]
-///  Tracks opening regions.
-pub struct OpeningRegionKeeper {
-    inner: Arc<RwLock<HashSet<(DatanodeId, RegionId)>>>,
-}
-
-impl OpeningRegionKeeper {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    /// Returns [OpeningRegionGuard] if Region(`region_id`) on Peer(`datanode_id`) does not exist.
-    pub fn register(
-        &self,
-        datanode_id: DatanodeId,
-        region_id: RegionId,
-    ) -> Option<OpeningRegionGuard> {
-        let mut inner = self.inner.write().unwrap();
-
-        if inner.insert((datanode_id, region_id)) {
-            Some(OpeningRegionGuard {
-                datanode_id,
-                region_id,
-                inner: self.inner.clone(),
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Returns true if the keeper contains a (`datanoe_id`, `region_id`) tuple.
-    pub fn contains(&self, datanode_id: DatanodeId, region_id: RegionId) -> bool {
-        let inner = self.inner.read().unwrap();
-        inner.contains(&(datanode_id, region_id))
-    }
-
-    /// Returns a set of filtered out regions that are opening.
-    pub fn filter_opening_regions(
-        &self,
-        datanode_id: DatanodeId,
-        mut region_ids: HashSet<RegionId>,
-    ) -> HashSet<RegionId> {
-        let inner = self.inner.read().unwrap();
-        region_ids.retain(|region_id| !inner.contains(&(datanode_id, *region_id)));
-
-        region_ids
-    }
-
-    /// Returns number of element in tracking set.
-    pub fn len(&self) -> usize {
-        let inner = self.inner.read().unwrap();
-        inner.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute, RegionStatus};
+    use common_meta::region_keeper::MemoryRegionKeeper;
+    use common_meta::rpc::router::{Region, RegionRouteBuilder, RegionStatus};
+    use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
     use table::metadata::RawTableInfo;
 
-    use super::{OpeningRegionKeeper, RegionLeaseKeeper};
+    use super::{renew_region_lease_via_region_route, RegionLeaseKeeper};
+    use crate::region::lease_keeper::RenewRegionLeasesResponse;
 
     fn new_test_keeper() -> RegionLeaseKeeper {
         let store = Arc::new(MemoryKvBackend::new());
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(store));
 
-        RegionLeaseKeeper::new(table_metadata_manager)
-    }
-
-    #[tokio::test]
-    async fn test_empty_table_routes() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let region_id = RegionId::from_u64(region_number as u64);
-
-        let keeper = new_test_keeper();
-
-        let datanode_regions = vec![region_id];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&region_id));
-        assert!(downgradable.is_empty());
-
-        let (upgradable, closeable) = keeper
-            .find_staled_follower_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert!(upgradable.is_empty());
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_find_closeable_regions_simple() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let table_id = 10;
-        let region_id = RegionId::new(table_id, region_number);
-        let peer = Peer::empty(datanode_id);
-        let table_info = new_test_table_info(table_id, vec![region_number]).into();
-
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(peer.clone()),
-            ..Default::default()
-        }];
-
-        let keeper = new_test_keeper();
-        let table_metadata_manager = keeper.table_metadata_manager();
-
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-
-        // `closeable` should be empty.
-        let datanode_regions = vec![region_id];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert!(closeable.is_empty());
-        assert!(downgradable.is_empty());
-
-        // `closeable` should be empty.
-        let datanode_regions = vec![];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert!(closeable.is_empty());
-        assert!(downgradable.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_find_closeable_regions_2() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let table_id = 10;
-        let region_id = RegionId::new(table_id, region_number);
-        let another_region_id = RegionId::new(table_id, region_number + 1);
-        let unknown_region_id = RegionId::new(table_id + 1, region_number);
-
-        let peer = Peer::empty(datanode_id);
-        let another_peer = Peer::empty(datanode_id + 1);
-
-        let table_info =
-            new_test_table_info(table_id, vec![region_number, region_number + 1]).into();
-
-        let region_routes = vec![
-            RegionRoute {
-                region: Region::new_test(region_id),
-                leader_peer: Some(peer.clone()),
-                ..Default::default()
-            },
-            RegionRoute {
-                region: Region::new_test(another_region_id),
-                leader_peer: None,
-                follower_peers: vec![another_peer.clone()],
-                leader_status: None,
-            },
-        ];
-
-        let keeper = new_test_keeper();
-        let table_metadata_manager = keeper.table_metadata_manager();
-
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-
-        // Unexpected Leader region.
-        // `closeable` should be vec![unknown_region_id].
-        let datanode_regions = vec![region_id, unknown_region_id];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&unknown_region_id));
-        assert!(downgradable.is_empty());
-
-        // Expected as Follower region.
-        // `closeable` should be vec![another_region_id], because the `another_region_id` is a active region of `another_peer`.
-        let datanode_regions = vec![another_region_id];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&another_region_id));
-        assert!(downgradable.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_find_staled_leader_region_downgraded() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let table_id = 10;
-        let region_id = RegionId::new(table_id, region_number);
-        let another_region_id = RegionId::new(table_id, region_number + 1);
-        let peer = Peer::empty(datanode_id);
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
-
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(peer.clone()),
-            leader_status: Some(RegionStatus::Downgraded),
-            ..Default::default()
-        }];
-        let keeper = new_test_keeper();
-        let table_metadata_manager = keeper.table_metadata_manager();
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-
-        // `upgradable` should be empty, `closeable` should be empty.
-        let datanode_regions = vec![region_id, another_region_id];
-
-        let (downgradable, closeable) = keeper
-            .find_staled_leader_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&another_region_id));
-        assert_eq!(downgradable.len(), 1);
-        assert!(downgradable.contains(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_find_staled_follower_regions() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let table_id = 10;
-        let region_id = RegionId::new(table_id, region_number);
-        let peer = Peer::empty(datanode_id);
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
-
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(peer.clone()),
-            ..Default::default()
-        }];
-
-        let keeper = new_test_keeper();
-        let table_metadata_manager = keeper.table_metadata_manager();
-
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-
-        // `upgradable` should be vec![region_id], `closeable` should be empty.
-        let datanode_regions = vec![region_id];
-
-        let (upgradable, closeable) = keeper
-            .find_staled_follower_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert!(closeable.is_empty());
-        assert_eq!(upgradable.len(), 1);
-        assert!(upgradable.contains(&region_id));
-
-        // `upgradable` should be empty, `closeable` should be vec![region_id].
-        let datanode_regions = vec![region_id];
-
-        let (upgradable, closeable) = keeper
-            .find_staled_follower_regions(0, datanode_id + 1, &datanode_regions)
-            .await
-            .unwrap();
-
-        assert!(upgradable.is_empty());
-        assert_eq!(closeable.len(), 1);
-        assert!(closeable.contains(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_find_staled_region_downgraded() {
-        let datanode_id = 1;
-        let region_number = 1u32;
-        let table_id = 10;
-        let region_id = RegionId::new(table_id, region_number);
-        let peer = Peer::empty(datanode_id);
-        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
-
-        let region_routes = vec![RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(peer.clone()),
-            leader_status: Some(RegionStatus::Downgraded),
-            ..Default::default()
-        }];
-
-        let datanode_regions = vec![region_id];
-        let keeper = new_test_keeper();
-        let table_metadata_manager = keeper.table_metadata_manager();
-        table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
-            .await
-            .unwrap();
-
-        let (upgradable, closeable) = keeper
-            .find_staled_follower_regions(0, datanode_id, &datanode_regions)
-            .await
-            .unwrap();
-        assert!(upgradable.is_empty());
-        assert!(closeable.is_empty());
+        let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
+        RegionLeaseKeeper::new(table_metadata_manager, opening_region_keeper)
     }
 
     #[test]
-    fn test_opening_region_keeper() {
-        let keeper = OpeningRegionKeeper::new();
+    fn test_renew_region_lease_via_region_route() {
+        let region_id = RegionId::new(1024, 1);
+        let leader_peer_id = 1024;
+        let follower_peer_id = 2048;
+        let mut region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .follower_peers(vec![Peer::empty(follower_peer_id)])
+            .build()
+            .unwrap();
 
-        let guard = keeper.register(1, RegionId::from_u64(1)).unwrap();
-        assert!(keeper.register(1, RegionId::from_u64(1)).is_none());
-        let guard2 = keeper.register(1, RegionId::from_u64(2)).unwrap();
+        // The region doesn't belong to the datanode.
+        for region_id in [RegionId::new(1024, 2), region_id] {
+            assert!(renew_region_lease_via_region_route(&region_route, 1, region_id).is_none());
+        }
 
-        let output = keeper.filter_opening_regions(
-            1,
-            HashSet::from([
-                RegionId::from_u64(1),
-                RegionId::from_u64(2),
-                RegionId::from_u64(3),
-            ]),
+        // The leader region on the datanode.
+        assert_eq!(
+            renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
+            Some((region_id, RegionRole::Leader))
         );
-        assert_eq!(output.len(), 1);
-        assert!(output.contains(&RegionId::from_u64(3)));
+        // The follower region on the datanode.
+        assert_eq!(
+            renew_region_lease_via_region_route(&region_route, follower_peer_id, region_id),
+            Some((region_id, RegionRole::Follower))
+        );
 
-        assert_eq!(keeper.len(), 2);
-        drop(guard);
+        region_route.leader_status = Some(RegionStatus::Downgraded);
+        // The downgraded leader region on the datanode.
+        assert_eq!(
+            renew_region_lease_via_region_route(&region_route, leader_peer_id, region_id),
+            Some((region_id, RegionRole::Follower))
+        );
+    }
 
-        assert_eq!(keeper.len(), 1);
+    #[tokio::test]
+    async fn test_renew_region_leases_non_exists_regions() {
+        let keeper = new_test_keeper();
 
-        assert!(keeper.contains(1, RegionId::from_u64(2)));
-        drop(guard2);
+        let RenewRegionLeasesResponse {
+            non_exists,
+            renewed,
+        } = keeper
+            .renew_region_leases(
+                0,
+                1,
+                &[
+                    (RegionId::new(1024, 1), RegionRole::Follower),
+                    (RegionId::new(1024, 2), RegionRole::Leader),
+                ],
+            )
+            .await
+            .unwrap();
 
-        assert!(keeper.is_empty());
+        assert!(renewed.is_empty());
+        assert_eq!(
+            non_exists,
+            HashSet::from([RegionId::new(1024, 1), RegionId::new(1024, 2)])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_basic() {
+        let region_number = 1u32;
+        let table_id = 1024;
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
+        let region_id = RegionId::new(table_id, 1);
+        let leader_peer_id = 1024;
+        let follower_peer_id = 2048;
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .follower_peers(vec![Peer::empty(follower_peer_id)])
+            .build()
+            .unwrap();
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, vec![region_route.clone()])
+            .await
+            .unwrap();
+
+        // The region doesn't belong to the datanode.
+        for region_id in [RegionId::new(1024, 2), region_id] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(0, 1, &[(region_id, RegionRole::Follower)])
+                .await
+                .unwrap();
+            assert!(renewed.is_empty());
+            assert_eq!(non_exists, HashSet::from([region_id]));
+        }
+
+        // The leader region on the datanode.
+        for role in [RegionRole::Leader, RegionRole::Follower] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(0, leader_peer_id, &[(region_id, role)])
+                .await
+                .unwrap();
+
+            assert!(non_exists.is_empty());
+            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Leader)]));
+        }
+
+        // The follower region on the datanode.
+        for role in [RegionRole::Leader, RegionRole::Follower] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(0, follower_peer_id, &[(region_id, role)])
+                .await
+                .unwrap();
+
+            assert!(non_exists.is_empty());
+            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Follower)]));
+        }
+
+        let opening_region_id = RegionId::new(2048, 1);
+        let _guard = keeper
+            .memory_region_keeper
+            .register(leader_peer_id, opening_region_id)
+            .unwrap();
+
+        // The opening region on the datanode.
+        // NOTES: The procedure lock will ensure only one opening leader.
+        for role in [RegionRole::Leader, RegionRole::Follower] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(0, leader_peer_id, &[(opening_region_id, role)])
+                .await
+                .unwrap();
+
+            assert!(non_exists.is_empty());
+            assert_eq!(renewed, HashMap::from([(opening_region_id, role)]));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_renew_region_leases_with_downgrade_leader() {
+        let region_number = 1u32;
+        let table_id = 1024;
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
+        let region_id = RegionId::new(table_id, 1);
+        let leader_peer_id = 1024;
+        let follower_peer_id = 2048;
+        let region_route = RegionRouteBuilder::default()
+            .region(Region::new_test(region_id))
+            .leader_peer(Peer::empty(leader_peer_id))
+            .follower_peers(vec![Peer::empty(follower_peer_id)])
+            .leader_status(RegionStatus::Downgraded)
+            .build()
+            .unwrap();
+
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, vec![region_route.clone()])
+            .await
+            .unwrap();
+
+        // The leader region on the datanode.
+        for role in [RegionRole::Leader, RegionRole::Follower] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(0, follower_peer_id, &[(region_id, role)])
+                .await
+                .unwrap();
+
+            assert!(non_exists.is_empty());
+            assert_eq!(renewed, HashMap::from([(region_id, RegionRole::Follower)]));
+        }
     }
 }

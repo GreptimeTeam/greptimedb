@@ -18,7 +18,10 @@ use api::v1::region::{
 };
 use api::v1::{ColumnDef, SemanticType};
 use async_trait::async_trait;
-use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
+use common_error::ext::BoxedError;
+use common_procedure::error::{
+    ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
+};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
@@ -35,8 +38,11 @@ use crate::ddl::DdlContext;
 use crate::error::{self, Result};
 use crate::key::table_name::TableNameKey;
 use crate::metrics;
+use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::CreateTableTask;
-use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
+use crate::rpc::router::{
+    find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
+};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -60,10 +66,18 @@ impl CreateTableProcedure {
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data = serde_json::from_str(json).context(FromJsonSnafu)?;
-        Ok(CreateTableProcedure {
-            context,
-            creator: TableCreator { data },
-        })
+
+        let mut creator = TableCreator {
+            data,
+            opening_regions: vec![],
+        };
+
+        creator
+            .register_opening_regions(&context)
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+
+        Ok(CreateTableProcedure { context, creator })
     }
 
     pub fn table_info(&self) -> &RawTableInfo {
@@ -169,6 +183,9 @@ impl CreateTableProcedure {
     }
 
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
+        // Registers opening regions
+        self.creator.register_opening_regions(&self.context)?;
+
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
 
@@ -226,7 +243,9 @@ impl CreateTableProcedure {
 
         self.creator.data.state = CreateTableState::CreateMetadata;
 
-        Ok(Status::executing(true))
+        // Ensures the procedures after the crash start from the `DatanodeCreateRegions` stage.
+        // TODO(weny): Add more tests.
+        Ok(Status::executing(false))
     }
 
     async fn on_create_metadata(&self) -> Result<Status> {
@@ -282,7 +301,10 @@ impl Procedure for CreateTableProcedure {
 }
 
 pub struct TableCreator {
+    /// The serializable data.
     pub data: CreateTableData,
+    /// The guards of opening.
+    pub opening_regions: Vec<OperatingRegionGuard>,
 }
 
 impl TableCreator {
@@ -294,7 +316,35 @@ impl TableCreator {
                 task,
                 region_routes,
             },
+            opening_regions: vec![],
         }
+    }
+
+    /// Register opening regions if doesn't exist.
+    pub fn register_opening_regions(&mut self, context: &DdlContext) -> Result<()> {
+        let region_routes = &self.data.region_routes;
+
+        let opening_regions = operating_leader_regions(region_routes);
+
+        if self.opening_regions.len() == opening_regions.len() {
+            return Ok(());
+        }
+
+        let mut opening_region_guards = Vec::with_capacity(opening_regions.len());
+
+        for (region_id, datanode_id) in opening_regions {
+            let guard = context
+                .memory_region_keeper
+                .register(datanode_id, region_id)
+                .context(error::RegionOperatingRaceSnafu {
+                    region_id,
+                    peer_id: datanode_id,
+                })?;
+            opening_region_guards.push(guard);
+        }
+
+        self.opening_regions = opening_region_guards;
+        Ok(())
     }
 }
 
