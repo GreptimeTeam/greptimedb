@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 arc-swap = "1.0"
+build-data = "0.1.4"
 chrono-tz = "0.6"
 common-error.workspace = true
 common-macro.workspace = true

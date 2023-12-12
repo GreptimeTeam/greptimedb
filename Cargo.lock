@@ -1664,6 +1664,7 @@ name = "common-function"
 version = "0.4.4"
 dependencies = [
  "arc-swap",
+ "build-data",
  "chrono-tz 0.6.3",
  "common-error",
  "common-macro",
