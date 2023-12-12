@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use async_stream::try_stream;
 use common_error::ext::BoxedError;
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatch, RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
 use snafu::ResultExt;
@@ -164,7 +164,7 @@ impl SeqScan {
             // Update metrics.
             READ_STAGE_ELAPSED.with_label_values(&["total"]).observe(metrics.scan_cost.as_secs_f64());
         };
-        let stream = Box::pin(RecordBatchStreamAdaptor::new(
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
             self.mapper.output_schema(),
             Box::pin(stream),
         ));

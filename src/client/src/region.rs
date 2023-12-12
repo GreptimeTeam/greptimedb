@@ -23,7 +23,7 @@ use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::datanode_manager::{AffectedRows, Datanode};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_recordbatch::error::ExternalSnafu;
-use common_recordbatch::{RecordBatchStreamAdaptor, SendableRecordBatchStream};
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use prost::Message;
 use snafu::{location, Location, OptionExt, ResultExt};
@@ -136,7 +136,7 @@ impl RegionRequester {
                 yield Ok(record_batch);
             }
         }));
-        let record_batch_stream = RecordBatchStreamAdaptor {
+        let record_batch_stream = RecordBatchStreamWrapper {
             schema,
             stream,
             output_ordering: None,
