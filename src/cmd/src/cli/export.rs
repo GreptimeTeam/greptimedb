@@ -105,7 +105,7 @@ impl ExportCommand {
             }));
         }
 
-        Ok(Instance::Tool(Box::new(Export {
+        Ok(Instance::new(Arc::new(Export {
             client: database_client,
             catalog,
             schema,

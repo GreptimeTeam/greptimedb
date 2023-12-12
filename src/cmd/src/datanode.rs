@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_telemetry::logging;
@@ -23,28 +24,40 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
+use tokio::sync::Mutex;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
-use crate::options::{Options, TopLevelOptions};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 pub struct Instance {
-    datanode: Datanode,
+    datanode: Arc<Mutex<Datanode>>,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
-        plugins::start_datanode_plugins(self.datanode.plugins())
+    fn new(datanode: Datanode) -> Self {
+        Self {
+            datanode: Arc::new(Mutex::new(datanode)),
+        }
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    async fn start(&self) -> Result<()> {
+        let mut datanode = self.datanode.lock().await;
+
+        plugins::start_datanode_plugins(datanode.plugins())
             .await
             .context(StartDatanodeSnafu)?;
 
-        self.datanode.start().await.context(StartDatanodeSnafu)
+        datanode.start().await.context(StartDatanodeSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
-        self.datanode
-            .shutdown()
-            .await
-            .context(ShutdownDatanodeSnafu)
+    async fn stop(&self) -> Result<()> {
+        let datanode = self.datanode.lock().await;
+
+        datanode.shutdown().await.context(ShutdownDatanodeSnafu)
     }
 }
 
@@ -59,8 +72,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_opts)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -76,9 +89,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -108,19 +121,19 @@ struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: DatanodeOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             DatanodeOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = top_level_opts.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_opts.log_level.is_some() {
-            opts.logging.level = top_level_opts.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         if let Some(addr) = &self.rpc_addr {
@@ -204,7 +217,7 @@ impl StartCommand {
             .await
             .context(StartDatanodeSnafu)?;
 
-        Ok(Instance { datanode })
+        Ok(Instance::new(datanode))
     }
 }
 
@@ -219,7 +232,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_read_from_config_file() {
@@ -274,8 +287,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Datanode(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Datanode(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
 
@@ -331,7 +343,7 @@ mod tests {
     #[test]
     fn test_try_from_cmd() {
         if let Options::Datanode(opt) = StartCommand::default()
-            .load_options(TopLevelOptions::default())
+            .load_options(&CliOptions::default())
             .unwrap()
         {
             assert_eq!(Mode::Standalone, opt.mode)
@@ -342,7 +354,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .unwrap()
         {
             assert_eq!(Mode::Distributed, opt.mode)
@@ -352,7 +364,7 @@ mod tests {
             metasrv_addr: Some(vec!["127.0.0.1:3002".to_string()]),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .is_err());
 
         // Providing node_id but leave metasrv_addr absent is ok since metasrv_addr has default value
@@ -360,18 +372,21 @@ mod tests {
             node_id: Some(42),
             ..Default::default()
         })
-        .load_options(TopLevelOptions::default())
+        .load_options(&CliOptions::default())
         .is_ok());
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand::default();
 
         let options = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap();
 
@@ -454,8 +469,7 @@ mod tests {
                     ..Default::default()
                 };
 
-                let Options::Datanode(opts) =
-                    command.load_options(TopLevelOptions::default()).unwrap()
+                let Options::Datanode(opts) = command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

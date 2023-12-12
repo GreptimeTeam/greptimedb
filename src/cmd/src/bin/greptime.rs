@@ -15,80 +15,14 @@
 #![doc = include_str!("../../../../README.md")]
 
 use std::fmt;
+use std::sync::Arc;
 
-use clap::Parser;
+use clap::{FromArgMatches, Parser, Subcommand};
 use cmd::error::Result;
-use cmd::options::{Options, TopLevelOptions};
-use cmd::{cli, datanode, frontend, metasrv, standalone};
-use common_telemetry::logging::{error, info, TracingOptions};
-
-lazy_static::lazy_static! {
-    static ref APP_VERSION: prometheus::IntGaugeVec =
-        prometheus::register_int_gauge_vec!("app_version", "app version", &["short_version", "version"]).unwrap();
-}
-
-#[derive(Parser)]
-#[clap(name = "greptimedb", version = print_version())]
-struct Command {
-    #[clap(long)]
-    log_dir: Option<String>,
-    #[clap(long)]
-    log_level: Option<String>,
-    #[clap(subcommand)]
-    subcmd: SubCommand,
-
-    #[cfg(feature = "tokio-console")]
-    #[clap(long)]
-    tokio_console_addr: Option<String>,
-}
-
-pub enum Application {
-    Datanode(datanode::Instance),
-    Frontend(frontend::Instance),
-    Metasrv(metasrv::Instance),
-    Standalone(standalone::Instance),
-    Cli(cli::Instance),
-}
-
-impl Application {
-    async fn start(&mut self) -> Result<()> {
-        match self {
-            Application::Datanode(instance) => instance.start().await,
-            Application::Frontend(instance) => instance.start().await,
-            Application::Metasrv(instance) => instance.start().await,
-            Application::Standalone(instance) => instance.start().await,
-            Application::Cli(instance) => instance.start().await,
-        }
-    }
-
-    async fn stop(&self) -> Result<()> {
-        match self {
-            Application::Datanode(instance) => instance.stop().await,
-            Application::Frontend(instance) => instance.stop().await,
-            Application::Metasrv(instance) => instance.stop().await,
-            Application::Standalone(instance) => instance.stop().await,
-            Application::Cli(instance) => instance.stop().await,
-        }
-    }
-}
-
-impl Command {
-    async fn build(self, opts: Options) -> Result<Application> {
-        self.subcmd.build(opts).await
-    }
-
-    fn load_options(&self) -> Result<Options> {
-        let top_level_opts = self.top_level_options();
-        self.subcmd.load_options(top_level_opts)
-    }
-
-    fn top_level_options(&self) -> TopLevelOptions {
-        TopLevelOptions {
-            log_dir: self.log_dir.clone(),
-            log_level: self.log_level.clone(),
-        }
-    }
-}
+use cmd::options::{CliOptions, Options};
+use cmd::{
+    cli, datanode, frontend, greptimedb_cli, log_versions, metasrv, standalone, start_app, App,
+};
 
 #[derive(Parser)]
 enum SubCommand {
@@ -105,40 +39,41 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: Options) -> Result<Application> {
-        match (self, opts) {
+    async fn build(self, opts: Options) -> Result<Arc<dyn App>> {
+        let app: Arc<dyn App> = match (self, opts) {
             (SubCommand::Datanode(cmd), Options::Datanode(dn_opts)) => {
                 let app = cmd.build(*dn_opts).await?;
-                Ok(Application::Datanode(app))
+                Arc::new(app) as _
             }
             (SubCommand::Frontend(cmd), Options::Frontend(fe_opts)) => {
                 let app = cmd.build(*fe_opts).await?;
-                Ok(Application::Frontend(app))
+                Arc::new(app) as _
             }
             (SubCommand::Metasrv(cmd), Options::Metasrv(meta_opts)) => {
                 let app = cmd.build(*meta_opts).await?;
-                Ok(Application::Metasrv(app))
+                Arc::new(app) as _
             }
             (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
                 let app = cmd.build(*opts).await?;
-                Ok(Application::Standalone(app))
+                Arc::new(app) as _
             }
             (SubCommand::Cli(cmd), Options::Cli(_)) => {
                 let app = cmd.build().await?;
-                Ok(Application::Cli(app))
+                Arc::new(app) as _
             }
 
             _ => unreachable!(),
-        }
+        };
+        Ok(app)
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Datanode(cmd) => cmd.load_options(top_level_opts),
-            SubCommand::Frontend(cmd) => cmd.load_options(top_level_opts),
-            SubCommand::Metasrv(cmd) => cmd.load_options(top_level_opts),
-            SubCommand::Standalone(cmd) => cmd.load_options(top_level_opts),
-            SubCommand::Cli(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Datanode(cmd) => cmd.load_options(cli_options),
+            SubCommand::Frontend(cmd) => cmd.load_options(cli_options),
+            SubCommand::Metasrv(cmd) => cmd.load_options(cli_options),
+            SubCommand::Standalone(cmd) => cmd.load_options(cli_options),
+            SubCommand::Cli(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -155,90 +90,41 @@ impl fmt::Display for SubCommand {
     }
 }
 
-fn print_version() -> &'static str {
-    concat!(
-        "\nbranch: ",
-        env!("GIT_BRANCH"),
-        "\ncommit: ",
-        env!("GIT_COMMIT"),
-        "\ndirty: ",
-        env!("GIT_DIRTY"),
-        "\nversion: ",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-fn short_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-// {app_name}-{branch_name}-{commit_short}
-// The branch name (tag) of a release build should already contain the short
-// version so the full version doesn't concat the short version explicitly.
-fn full_version() -> &'static str {
-    concat!(
-        "greptimedb-",
-        env!("GIT_BRANCH"),
-        "-",
-        env!("GIT_COMMIT_SHORT")
-    )
-}
-
-fn log_env_flags() {
-    info!("command line arguments");
-    for argument in std::env::args() {
-        info!("argument: {}", argument);
-    }
-}
-
 #[cfg(not(windows))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cmd = Command::parse();
-    let app_name = &cmd.subcmd.to_string();
+    common_telemetry::set_panic_hook();
 
-    let opts = cmd.load_options()?;
-    let logging_opts = opts.logging_options();
-    let tracing_opts = TracingOptions {
-        #[cfg(feature = "tokio-console")]
-        tokio_console_addr: cmd.tokio_console_addr.clone(),
+    let cli = greptimedb_cli();
+
+    let cli = SubCommand::augment_subcommands(cli);
+
+    let args = cli.get_matches();
+
+    let subcmd = match SubCommand::from_arg_matches(&args) {
+        Ok(subcmd) => subcmd,
+        Err(e) => e.exit(),
     };
 
-    common_telemetry::set_panic_hook();
-    let _guard =
-        common_telemetry::init_global_logging(app_name, logging_opts, tracing_opts, opts.node_id());
+    let app_name = subcmd.to_string();
 
-    // Report app version as gauge.
-    APP_VERSION
-        .with_label_values(&[short_version(), full_version()])
-        .inc();
+    let cli_options = CliOptions::new(&args);
 
-    // Log version and argument flags.
-    info!(
-        "short_version: {}, full_version: {}",
-        short_version(),
-        full_version()
+    let opts = subcmd.load_options(&cli_options)?;
+
+    let _guard = common_telemetry::init_global_logging(
+        &app_name,
+        opts.logging_options(),
+        cli_options.tracing_options(),
+        opts.node_id(),
     );
-    log_env_flags();
 
-    let mut app = cmd.build(opts).await?;
+    log_versions();
 
-    tokio::select! {
-        result = app.start() => {
-            if let Err(err) = result {
-                error!(err; "Fatal error occurs!");
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            if let Err(err) = app.stop().await {
-                error!(err; "Fatal error occurs!");
-            }
-            info!("Goodbye!");
-        }
-    }
+    let app = subcmd.build(opts).await?;
 
-    Ok(())
+    start_app(app_name, app).await
 }
