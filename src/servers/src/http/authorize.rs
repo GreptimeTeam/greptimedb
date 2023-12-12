@@ -12,118 +12,108 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::marker::PhantomData;
-
 use ::auth::UserProviderRef;
+use axum::extract::State;
 use axum::http::{self, Request, StatusCode};
-use axum::response::Response;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_telemetry::warn;
-use futures::future::BoxFuture;
 use headers::Header;
-use http_body::Body;
 use secrecy::SecretString;
 use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
-use tower_http::auth::AsyncAuthorizeRequest;
 
 use super::header::GreptimeDbName;
-use super::PUBLIC_APIS;
+use super::{JsonResponse, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
 use crate::http::HTTP_API_PREFIX;
 
-pub struct HttpAuth<RespBody> {
+#[derive(Clone)]
+pub struct AuthState {
+    pub user_provider: Option<UserProviderRef>,
+}
+
+pub async fn inner_auth<B>(
     user_provider: Option<UserProviderRef>,
-    _ty: PhantomData<RespBody>,
-}
+    mut req: Request<B>,
+) -> std::result::Result<Request<B>, Response> {
+    // 1. prepare
+    let (catalog, schema) = extract_catalog_and_schema(&req);
+    let query_ctx = QueryContext::with(catalog, schema);
+    let need_auth = need_auth(&req);
 
-impl<RespBody> HttpAuth<RespBody> {
-    pub fn new(user_provider: Option<UserProviderRef>) -> Self {
-        Self {
-            user_provider,
-            _ty: PhantomData,
+    // 2. check if auth is needed
+    let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
+        user_provider
+    } else {
+        query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
+        let _ = req.extensions_mut().insert(query_ctx);
+        return Ok(req);
+    };
+
+    // 3. get username and pwd
+    let (username, password) = match extract_username_and_password(&req) {
+        Ok((username, password)) => (username, password),
+        Err(e) => {
+            warn!("extract username and password failed: {}", e);
+            crate::metrics::METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            return Err(err_response(e).into_response());
+        }
+    };
+
+    // 4. auth
+    match user_provider
+        .auth(
+            auth::Identity::UserId(&username, None),
+            auth::Password::PlainText(password),
+            catalog,
+            schema,
+        )
+        .await
+    {
+        Ok(userinfo) => {
+            query_ctx.set_current_user(Some(userinfo));
+            let _ = req.extensions_mut().insert(query_ctx);
+            Ok(req)
+        }
+        Err(e) => {
+            warn!("authenticate failed: {}", e);
+            crate::metrics::METRIC_AUTH_FAILURE
+                .with_label_values(&[e.status_code().as_ref()])
+                .inc();
+            Err(err_response(e).into_response())
         }
     }
 }
 
-impl<RespBody> Clone for HttpAuth<RespBody> {
-    fn clone(&self) -> Self {
-        Self {
-            user_provider: self.user_provider.clone(),
-            _ty: PhantomData,
-        }
+pub async fn auth<B>(
+    State(auth_state): State<AuthState>,
+    req: Request<B>,
+    next: Next<B>,
+) -> Response {
+    match inner_auth(auth_state.user_provider, req).await {
+        Ok(req) => next.run(req).await,
+        Err(resp) => resp,
     }
 }
 
-impl<B, RespBody> AsyncAuthorizeRequest<B> for HttpAuth<RespBody>
-where
-    B: Send + Sync + 'static,
-    RespBody: Body + Default,
-{
-    type RequestBody = B;
-    type ResponseBody = RespBody;
-    type Future = BoxFuture<'static, std::result::Result<Request<B>, Response<Self::ResponseBody>>>;
-
-    fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
-        let user_provider = self.user_provider.clone();
-        Box::pin(async move {
-            let (catalog, schema) = extract_catalog_and_schema(&request);
-            let query_ctx = QueryContext::with(catalog, schema);
-            let need_auth = need_auth(&request);
-
-            let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
-                user_provider
-            } else {
-                query_ctx.set_current_user(Some(auth::userinfo_by_name(None)));
-                let _ = request.extensions_mut().insert(query_ctx);
-                return Ok(request);
-            };
-
-            let (username, password) = match extract_username_and_password(&request) {
-                Ok((username, password)) => (username, password),
-                Err(e) => {
-                    warn!("extract username and password failed: {}", e);
-                    crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[e.status_code().as_ref()])
-                        .inc();
-                    return Err(unauthorized_resp());
-                }
-            };
-
-            match user_provider
-                .auth(
-                    ::auth::Identity::UserId(username.as_str(), None),
-                    ::auth::Password::PlainText(password),
-                    catalog,
-                    schema,
-                )
-                .await
-            {
-                Ok(userinfo) => {
-                    query_ctx.set_current_user(Some(userinfo));
-                    let _ = request.extensions_mut().insert(query_ctx);
-                    Ok(request)
-                }
-                Err(e) => {
-                    warn!("authenticate failed: {}", e);
-                    crate::metrics::METRIC_AUTH_FAILURE
-                        .with_label_values(&[e.status_code().as_ref()])
-                        .inc();
-                    Err(unauthorized_resp())
-                }
-            }
-        })
-    }
+fn err_response(err: impl ErrorExt) -> impl IntoResponse {
+    let body = JsonResponse::with_error(err);
+    (StatusCode::UNAUTHORIZED, Json(body))
 }
 
-fn extract_catalog_and_schema<B: Send + Sync + 'static>(request: &Request<B>) -> (&str, &str) {
+fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
     // parse database from header
     let dbname = request
         .headers()
@@ -139,9 +129,7 @@ fn extract_catalog_and_schema<B: Send + Sync + 'static>(request: &Request<B>) ->
     parse_catalog_and_schema_from_db_string(dbname)
 }
 
-fn get_influxdb_credentials<B: Send + Sync + 'static>(
-    request: &Request<B>,
-) -> Result<Option<(Username, Password)>> {
+fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username, Password)>> {
     // compat with influxdb v2 and v1
     if let Some(header) = request.headers().get(http::header::AUTHORIZATION) {
         // try v2 first
@@ -182,9 +170,7 @@ fn get_influxdb_credentials<B: Send + Sync + 'static>(
     }
 }
 
-fn extract_username_and_password<B: Send + Sync + 'static>(
-    request: &Request<B>,
-) -> Result<(Username, Password)> {
+fn extract_username_and_password<B>(request: &Request<B>) -> Result<(Username, Password)> {
     Ok(if request.uri().path().contains("influxdb") {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
@@ -195,15 +181,6 @@ fn extract_username_and_password<B: Send + Sync + 'static>(
             AuthScheme::Basic(username, password) => (username, password),
         }
     })
-}
-
-fn unauthorized_resp<RespBody>() -> Response<RespBody>
-where
-    RespBody: Body + Default,
-{
-    let mut res = Response::new(RespBody::default());
-    *res.status_mut() = StatusCode::UNAUTHORIZED;
-    res
 }
 
 #[derive(Debug)]
