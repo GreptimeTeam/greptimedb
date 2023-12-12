@@ -31,6 +31,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
+use crate::wal::region_wal_options::RegionWalOptions;
 use crate::DatanodeId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -103,16 +104,24 @@ pub struct DatanodeTableValue {
     pub regions: Vec<RegionNumber>,
     #[serde(flatten)]
     pub region_info: RegionInfo,
+    #[serde(default)]
+    pub region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, region_info: RegionInfo) -> Self {
+    pub fn new(
+        table_id: TableId,
+        regions: Vec<RegionNumber>,
+        region_info: RegionInfo,
+        region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
+    ) -> Self {
         Self {
             table_id,
             regions,
             region_info,
             version: 0,
+            region_wal_options,
         }
     }
 }
@@ -165,11 +174,22 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
+        region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
+                let region_wal_options = regions
+                    .iter()
+                    .filter_map(|region_number| {
+                        let Some(opts) = region_wal_options.get(region_number).cloned() else {
+                            return None;
+                        };
+                        Some((*region_number, opts))
+                    })
+                    .collect();
+
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
                     table_id,
@@ -179,6 +199,7 @@ impl DatanodeTableManager {
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
                     },
+                    region_wal_options,
                 );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
@@ -201,6 +222,9 @@ impl DatanodeTableManager {
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
+        // TODO(niebayes): Properly fetch or construct new region wal options.
+        let new_region_wal_options = HashMap::new();
+
         // Removes the old datanode table key value pairs
         for current_datanode in current_region_distribution.keys() {
             if !new_region_distribution.contains_key(current_datanode) {
@@ -221,8 +245,13 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
-                    .try_as_raw_value()?;
+                let val = DatanodeTableValue::new(
+                    table_id,
+                    regions,
+                    region_info.clone(),
+                    new_region_wal_options.clone(),
+                )
+                .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
         }
@@ -257,6 +286,8 @@ impl DatanodeTableManager {
 mod tests {
     use super::*;
 
+    // TODO(niebayes): Add serde tests for RegionWalOptions.
+
     #[test]
     fn test_serde() {
         let key = DatanodeTableKey {
@@ -270,9 +301,10 @@ mod tests {
             table_id: 42,
             regions: vec![1, 2, 3],
             region_info: RegionInfo::default(),
+            region_wal_options: HashMap::new(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);

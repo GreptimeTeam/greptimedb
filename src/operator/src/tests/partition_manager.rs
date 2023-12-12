@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -22,6 +22,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::wal::region_wal_options::RegionWalOptions;
 use common_query::prelude::Expr;
 use datafusion_expr::expr_fn::{and, binary_expr, col, or};
 use datafusion_expr::{lit, Operator};
@@ -80,6 +81,12 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
+fn new_test_region_wal_options(
+    _regions: Vec<RegionNumber>,
+) -> HashMap<RegionNumber, RegionWalOptions> {
+    todo!()
+}
+
 /// Create a partition rule manager with two tables, one is partitioned by single column, and
 /// the other one is two. The tables are under default catalog and schema.
 ///
@@ -102,9 +109,10 @@ pub(crate) async fn create_partition_rule_manager(
     let table_metadata_manager = TableMetadataManager::new(kv_backend.clone());
     let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
 
+    let regions = vec![1u32, 2, 3];
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(1, "table_1", vec![0u32, 1, 2].into_iter()).into(),
+            new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
             vec![
                 RegionRoute {
                     region: Region {
@@ -161,13 +169,15 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
+            new_test_region_wal_options(regions),
         )
         .await
         .unwrap();
 
+    let regions = vec![1u32, 2, 3];
     table_metadata_manager
         .create_table_metadata(
-            new_test_table_info(2, "table_2", vec![0u32, 1, 2].into_iter()).into(),
+            new_test_table_info(2, "table_2", regions.clone().into_iter()).into(),
             vec![
                 RegionRoute {
                     region: Region {
@@ -230,6 +240,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
+            new_test_region_wal_options(regions),
         )
         .await
         .unwrap();

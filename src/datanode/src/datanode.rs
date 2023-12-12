@@ -516,14 +516,23 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
+    use common_meta::wal::region_wal_options::RegionWalOptions;
     use store_api::region_request::RegionRequest;
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, RegionNumber};
 
     use crate::config::DatanodeOptions;
     use crate::datanode::DatanodeBuilder;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
+    fn new_test_region_wal_options(
+        _regions: Vec<RegionNumber>,
+    ) -> HashMap<RegionNumber, RegionWalOptions> {
+        todo!()
+    }
+
     async fn setup_table_datanode(kv: &KvBackendRef) {
+        let regions = vec![0, 1, 2];
+
         let mgr = DatanodeTableManager::new(kv.clone());
         let txn = mgr
             .build_create_txn(
@@ -531,7 +540,8 @@ mod tests {
                 "mock",
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
-                BTreeMap::from([(0, vec![0, 1, 2])]),
+                new_test_region_wal_options(regions.clone()),
+                BTreeMap::from([(0, regions)]),
             )
             .unwrap();
 

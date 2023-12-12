@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -26,7 +28,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
     TableMetadataAllocatorRef,
 };
 use crate::error::{
@@ -43,6 +45,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
+use crate::wal::region_wal_options::RegionWalOptions;
 pub type DdlManagerRef = Arc<DdlManager>;
 
 /// The [DdlManager] provides the ability to execute Ddl.
@@ -171,11 +174,17 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure =
-            CreateTableProcedure::new(cluster_id, create_table_task, region_routes, context);
+        let procedure = CreateTableProcedure::new(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -369,7 +378,7 @@ async fn handle_create_table_task(
     cluster_id: u64,
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let (table_id, region_routes) = ddl_manager
+    let table_meta = ddl_manager
         .table_meta_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
@@ -378,8 +387,19 @@ async fn handle_create_table_task(
         )
         .await?;
 
+    let TableMetadata {
+        table_id,
+        region_routes,
+        region_wal_options,
+    } = table_meta;
+
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, region_routes)
+        .submit_create_table_task(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options,
+        )
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");
@@ -432,7 +452,7 @@ mod tests {
 
     use api::v1::meta::Partition;
     use common_procedure::local::LocalManager;
-    use table::metadata::{RawTableInfo, TableId};
+    use table::metadata::RawTableInfo;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -441,12 +461,11 @@ mod tests {
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::truncate_table::TruncateTableProcedure;
-    use crate::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+    use crate::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
     use crate::error::Result;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
-    use crate::rpc::router::RegionRoute;
     use crate::state_store::KvStateStore;
 
     /// A dummy implemented [DatanodeManager].
@@ -469,7 +488,7 @@ mod tests {
             _ctx: &TableMetadataAllocatorContext,
             _table_info: &mut RawTableInfo,
             _partitions: &[Partition],
-        ) -> Result<(TableId, Vec<RegionRoute>)> {
+        ) -> Result<TableMetadata> {
             unimplemented!()
         }
     }

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::mailbox_message::Payload;
@@ -331,7 +332,7 @@ impl ProcedureMigrationTestSuite {
     ) {
         self.env
             .table_metadata_manager()
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::new())
             .await
             .unwrap();
     }

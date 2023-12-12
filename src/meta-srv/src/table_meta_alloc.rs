@@ -15,10 +15,11 @@
 use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
+use common_meta::wal::region_wal_options::RegionWalOptionsAllocator;
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
@@ -32,6 +33,7 @@ pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
+    region_wal_options_allocator: RegionWalOptionsAllocator,
 }
 
 impl MetaSrvTableMetadataAllocator {
@@ -39,11 +41,13 @@ impl MetaSrvTableMetadataAllocator {
         ctx: SelectorContext,
         selector: SelectorRef,
         table_id_sequence: SequenceRef,
+        region_wal_options_allocator: RegionWalOptionsAllocator,
     ) -> Self {
         Self {
             ctx,
             selector,
             table_id_sequence,
+            region_wal_options_allocator,
         }
     }
 }
@@ -55,8 +59,8 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         ctx: &TableMetadataAllocatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
-        handle_create_region_routes(
+    ) -> MetaResult<TableMetadata> {
+        let (table_id, region_routes) = handle_create_region_routes(
             ctx.cluster_id,
             raw_table_info,
             partitions,
@@ -66,7 +70,21 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         )
         .await
         .map_err(BoxedError::new)
-        .context(meta_error::ExternalSnafu)
+        .context(meta_error::ExternalSnafu)?;
+
+        let region_numbers = region_routes
+            .iter()
+            .map(|route| route.region.id.region_number());
+        let region_wal_options = self
+            .region_wal_options_allocator
+            .alloc_batch(region_numbers.len());
+        let region_wal_options = region_numbers.zip(region_wal_options).collect();
+
+        Ok(TableMetadata {
+            table_id,
+            region_routes,
+            region_wal_options,
+        })
     }
 }
 

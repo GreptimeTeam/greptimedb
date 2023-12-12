@@ -418,7 +418,7 @@ mod tests {
         }];
 
         env.table_metadata_manager()
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::new())
             .await
             .unwrap();
 

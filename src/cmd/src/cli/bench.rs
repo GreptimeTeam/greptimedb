@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +24,12 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
+use common_meta::wal::region_wal_options::RegionWalOptions;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use rand::Rng;
+use store_api::storage::RegionNumber;
 use table::metadata::{RawTableInfo, RawTableMeta, TableId, TableIdent, TableType};
 
 use self::metadata::TableMetadataBencher;
@@ -137,11 +139,11 @@ fn create_table_info(table_id: TableId, table_name: TableName) -> RawTableInfo {
     }
 }
 
-fn create_region_routes() -> Vec<RegionRoute> {
-    let mut regions = Vec::with_capacity(100);
+fn create_region_routes(region_numbers: Vec<RegionNumber>) -> Vec<RegionRoute> {
+    let mut regions = Vec::with_capacity(region_numbers.len());
     let mut rng = rand::thread_rng();
 
-    for region_id in 0..64u64 {
+    for region_id in region_numbers.into_iter().map(u64::from) {
         regions.push(RegionRoute {
             region: Region {
                 id: region_id.into(),
@@ -159,4 +161,10 @@ fn create_region_routes() -> Vec<RegionRoute> {
     }
 
     regions
+}
+
+fn create_region_wal_options(
+    _region_numbers: Vec<RegionNumber>,
+) -> HashMap<RegionNumber, RegionWalOptions> {
+    todo!()
 }
