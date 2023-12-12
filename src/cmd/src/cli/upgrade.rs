@@ -397,7 +397,7 @@ impl MigrateTableMetadata {
             value.regions_id_map.clone().into_iter().collect();
 
         // TODO(niebayes): Properly fetch or construct region wal options.
-        let region_wal_options = HashMap::new();
+        let region_wal_options = HashMap::default();
 
         let datanode_table_kvs = region_distribution
             .into_iter()

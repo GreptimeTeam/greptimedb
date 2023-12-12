@@ -223,7 +223,7 @@ impl DatanodeTableManager {
         let mut opts = Vec::new();
 
         // TODO(niebayes): Properly fetch or construct new region wal options.
-        let new_region_wal_options = HashMap::new();
+        let new_region_wal_options = HashMap::default();
 
         // Removes the old datanode table key value pairs
         for current_datanode in current_region_distribution.keys() {

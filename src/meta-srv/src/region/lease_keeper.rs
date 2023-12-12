@@ -328,7 +328,7 @@ mod tests {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -388,7 +388,7 @@ mod tests {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -438,7 +438,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -475,7 +475,7 @@ mod tests {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -524,7 +524,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 

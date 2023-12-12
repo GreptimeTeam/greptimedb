@@ -235,7 +235,7 @@ mod test {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -365,7 +365,7 @@ mod test {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::new())
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
