@@ -138,7 +138,6 @@ impl StatusCode {
     pub fn should_log_error(&self) -> bool {
         match self {
             StatusCode::Unknown
-            | StatusCode::Unsupported
             | StatusCode::Unexpected
             | StatusCode::Internal
             | StatusCode::Cancelled
@@ -147,6 +146,7 @@ impl StatusCode {
             | StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted => true,
             StatusCode::Success
+            | StatusCode::Unsupported
             | StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
             | StatusCode::TableAlreadyExists
