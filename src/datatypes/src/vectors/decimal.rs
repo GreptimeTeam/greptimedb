@@ -310,6 +310,10 @@ impl MutableVector for Decimal128VectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let decimal_val = value.as_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
@@ -356,6 +360,12 @@ impl ScalarVectorBuilder for Decimal128VectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         Decimal128Vector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        Decimal128Vector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }

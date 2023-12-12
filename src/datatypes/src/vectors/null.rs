@@ -156,6 +156,10 @@ impl MutableVector for NullVectorBuilder {
         vector
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(NullVector::new(self.length))
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         ensure!(
             value.is_null(),

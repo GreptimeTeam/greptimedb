@@ -159,6 +159,10 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_binary()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -195,6 +199,12 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         BinaryVector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        BinaryVector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }

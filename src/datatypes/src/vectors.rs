@@ -191,6 +191,9 @@ pub trait MutableVector: Send + Sync {
     /// Convert `self` to an (immutable) [VectorRef] and reset `self`.
     fn to_vector(&mut self) -> VectorRef;
 
+    /// Convert `self` to an (immutable) [VectorRef] and without resetting `self`.
+    fn to_vector_cloned(&self) -> VectorRef;
+
     /// Try to push value ref to this mutable vector.
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()>;
 
@@ -422,5 +425,35 @@ pub mod tests {
 
         // Panic with_capacity
         let _ = ListVectorBuilder::with_capacity(1024);
+    }
+
+    #[test]
+    fn test_mutable_vector_finish_cloned() {
+        // create a primitive type mutable vector
+        let mut builder = Int32VectorBuilder::with_capacity(1024);
+        builder.push(Some(1));
+        builder.push(Some(2));
+        builder.push(Some(3));
+        // use finish_cloned won't reset builder
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(4));
+        assert_eq!(builder.len(), 4);
+
+        // use finish will reset builder
+        let vector = builder.finish();
+        assert_eq!(vector.len(), 4);
+        assert_eq!(builder.len(), 0);
+
+        // use MutableVector trait to_vector_cloned won't reset builder
+        let mut builder = StringVectorBuilder::with_capacity(1024);
+        builder.push(Some("1"));
+        builder.push(Some("2"));
+        builder.push(Some("3"));
+        let vector = builder.to_vector_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
     }
 }

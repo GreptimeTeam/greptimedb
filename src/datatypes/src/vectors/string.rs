@@ -190,6 +190,10 @@ impl MutableVector for StringVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_string()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -226,6 +230,12 @@ impl ScalarVectorBuilder for StringVectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         StringVector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        StringVector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }

@@ -303,6 +303,10 @@ impl<T: LogicalPrimitiveType> MutableVector for PrimitiveVectorBuilder<T> {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let primitive = T::cast_value_ref(value)?;
         match primitive {
@@ -350,6 +354,12 @@ where
     fn finish(&mut self) -> Self::VectorType {
         PrimitiveVector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        PrimitiveVector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }

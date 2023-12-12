@@ -18,7 +18,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayData, ArrayRef, BooleanBufferBuilder, Int32BufferBuilder, ListArray,
 };
-use arrow::buffer::Buffer;
+use arrow::buffer::{Buffer, NullBuffer};
 use arrow::datatypes::DataType as ArrowDataType;
 use serde_json::Value as JsonValue;
 
@@ -281,6 +281,10 @@ impl MutableVector for ListVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         if let Some(list_ref) = value.as_list()? {
             match list_ref {
@@ -346,6 +350,31 @@ impl ScalarVectorBuilder for ListVectorBuilder {
             .add_buffer(offset_buffer)
             .add_child_data(values_data)
             .null_bit_buffer(null_bit_buffer);
+
+        let array_data = unsafe { array_data_builder.build_unchecked() };
+        let array = ListArray::from(array_data);
+
+        ListVector {
+            array,
+            item_type: self.item_type.clone(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        let len = self.len();
+        let values_vector = self.values_builder.to_vector_cloned();
+        let values_arr = values_vector.to_arrow_array();
+        let values_data = values_arr.to_data();
+
+        let offset_buffer = Buffer::from_slice_ref(self.offsets_builder.as_slice());
+        let nulls = self.null_buffer_builder.finish_cloned();
+
+        let data_type = ConcreteDataType::list_datatype(self.item_type.clone()).as_arrow_type();
+        let array_data_builder = ArrayData::builder(data_type)
+            .len(len)
+            .add_buffer(offset_buffer)
+            .add_child_data(values_data)
+            .nulls(nulls);
 
         let array_data = unsafe { array_data_builder.build_unchecked() };
         let array = ListArray::from(array_data);
@@ -425,6 +454,12 @@ impl NullBufferBuilder {
         let buf = self.bitmap_builder.take().map(Into::into);
         self.len = 0;
         buf
+    }
+
+    /// Builds the [NullBuffer] without resetting the builder.
+    fn finish_cloned(&self) -> Option<NullBuffer> {
+        let buffer = self.bitmap_builder.as_ref()?.finish_cloned();
+        Some(NullBuffer::new(buffer))
     }
 
     #[inline]
