@@ -16,7 +16,7 @@ use snafu::ResultExt;
 use sqlparser::ast::Ident;
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::Keyword;
-use sqlparser::parser::{Parser, ParserError};
+use sqlparser::parser::{Parser, ParserError, ParserOptions};
 use sqlparser::tokenizer::{Token, TokenWithLocation};
 
 use crate::ast::{Expr, ObjectName};
@@ -37,6 +37,7 @@ impl<'a> ParserContext<'a> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
         let mut parser_ctx = ParserContext { sql, parser };
@@ -67,6 +68,7 @@ impl<'a> ParserContext<'a> {
 
     pub fn parse_function(sql: &'a str, dialect: &dyn Dialect) -> Result<Expr> {
         let mut parser = Parser::new(dialect)
+            .with_options(ParserOptions::new().with_trailing_commas(true))
             .try_with_sql(sql)
             .context(SyntaxSnafu)?;
 

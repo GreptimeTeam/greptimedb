@@ -37,8 +37,20 @@ async fn create_insert_query_assert(
     lookback: Duration,
     expected: &str,
 ) {
-    let _ = instance.do_query(create, QueryContext::arc()).await;
-    let _ = instance.do_query(insert, QueryContext::arc()).await;
+    instance
+        .do_query(create, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+    instance
+        .do_query(insert, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
 
     let query = PromQuery {
         query: promql.to_string(),
@@ -69,8 +81,20 @@ async fn create_insert_tql_assert(
     tql: &str,
     expected: &str,
 ) {
-    let _ = instance.do_query(create, QueryContext::arc()).await;
-    let _ = instance.do_query(insert, QueryContext::arc()).await;
+    instance
+        .do_query(create, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
+    instance
+        .do_query(insert, QueryContext::arc())
+        .await
+        .into_iter()
+        .for_each(|v| {
+            let _ = v.unwrap();
+        });
 
     let query_output = instance
         .do_query(tql, QueryContext::arc())
@@ -181,7 +205,7 @@ const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
     "group" string,
     "value" double,
     ts timestamp TIME INDEX,
-    PRIMARY KEY (job, instance, group),
+    PRIMARY KEY (job, instance, "group"),
 );"#;
 
 // load 5m
@@ -193,7 +217,7 @@ const AGGREGATORS_CREATE_TABLE: &str = r#"create table http_requests (
 // http_requests{job="app-server", instance="1", group="production"} 0+60x10
 // http_requests{job="app-server", instance="0", group="canary"}   0+70x10
 // http_requests{job="app-server", instance="1", group="canary"}   0+80x10
-const AGGREGATORS_INSERT_DATA: &str = r#"insert into http_requests(job, instance, group, value, ts) values
+const AGGREGATORS_INSERT_DATA: &str = r#"insert into http_requests(job, instance, "group", value, ts) values
     ('api-server', '0', 'production', 100, 0),
     ('api-server', '1', 'production', 200, 0),
     ('api-server', '0', 'canary', 300, 0),
