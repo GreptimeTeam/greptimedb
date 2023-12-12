@@ -131,6 +131,15 @@ select TO_UNIXTIME(b) from test_unixtime;
 | 27                           |
 +------------------------------+
 
+-- TEST tailing commas support
+select a, b, from test_unixtime;
+
++----+---------------------+
+| a  | b                   |
++----+---------------------+
+| 27 | 1970-01-01T00:00:27 |
++----+---------------------+
+
 DROP TABLE test_unixtime;
 
 Affected Rows: 0

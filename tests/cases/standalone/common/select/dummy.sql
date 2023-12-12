@@ -36,4 +36,7 @@ select b from test_unixtime;
 
 select TO_UNIXTIME(b) from test_unixtime;
 
+-- TEST tailing commas support
+select a, b, from test_unixtime;
+
 DROP TABLE test_unixtime;
