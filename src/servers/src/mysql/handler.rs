@@ -416,7 +416,7 @@ fn format_duration(duration: Duration) -> String {
 fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
-    params: &Vec<ParamValue>,
+    params: &[ParamValue],
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
 
