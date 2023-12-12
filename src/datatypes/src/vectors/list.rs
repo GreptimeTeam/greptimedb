@@ -360,6 +360,7 @@ impl ScalarVectorBuilder for ListVectorBuilder {
         }
     }
 
+    // Port from https://github.com/apache/arrow-rs/blob/ef6932f31e243d8545e097569653c8d3f1365b4d/arrow-array/src/builder/generic_list_builder.rs#L302-L325
     fn finish_cloned(&self) -> Self::VectorType {
         let len = self.len();
         let values_vector = self.values_builder.to_vector_cloned();
