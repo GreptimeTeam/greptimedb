@@ -31,7 +31,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
-use crate::wal::region_wal_options::RegionWalOptions;
+use crate::wal::region_wal_options::EncodedRegionWalOptions;
 use crate::DatanodeId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -105,7 +105,7 @@ pub struct DatanodeTableValue {
     #[serde(flatten)]
     pub region_info: RegionInfo,
     #[serde(default)]
-    pub region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
+    pub region_wal_options: HashMap<RegionNumber, EncodedRegionWalOptions>,
     version: u64,
 }
 
@@ -114,14 +114,14 @@ impl DatanodeTableValue {
         table_id: TableId,
         regions: Vec<RegionNumber>,
         region_info: RegionInfo,
-        region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
+        region_wal_options: HashMap<RegionNumber, EncodedRegionWalOptions>,
     ) -> Self {
         Self {
             table_id,
             regions,
             region_info,
-            version: 0,
             region_wal_options,
+            version: 0,
         }
     }
 }
@@ -174,7 +174,7 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<RegionNumber, RegionWalOptions>,
+        region_wal_options: HashMap<RegionNumber, EncodedRegionWalOptions>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
@@ -183,10 +183,10 @@ impl DatanodeTableManager {
                 let region_wal_options = regions
                     .iter()
                     .filter_map(|region_number| {
-                        let Some(opts) = region_wal_options.get(region_number).cloned() else {
+                        let Some(wal_opts) = region_wal_options.get(region_number).cloned() else {
                             return None;
                         };
-                        Some((*region_number, opts))
+                        Some((*region_number, wal_opts))
                     })
                     .collect();
 

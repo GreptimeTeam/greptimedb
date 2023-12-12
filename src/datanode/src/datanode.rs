@@ -516,7 +516,7 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::KvBackendRef;
-    use common_meta::wal::region_wal_options::RegionWalOptions;
+    use common_meta::wal::region_wal_options::EncodedRegionWalOptions;
     use store_api::region_request::RegionRequest;
     use store_api::storage::{RegionId, RegionNumber};
 
@@ -526,7 +526,7 @@ mod tests {
 
     fn new_test_region_wal_options(
         _regions: Vec<RegionNumber>,
-    ) -> HashMap<RegionNumber, RegionWalOptions> {
+    ) -> HashMap<RegionNumber, EncodedRegionWalOptions> {
         todo!()
     }
 

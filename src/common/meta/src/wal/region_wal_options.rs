@@ -30,16 +30,18 @@ impl RegionWalOptions {
     }
 }
 
-impl From<&RegionWalOptions> for HashMap<String, String> {
+pub type EncodedRegionWalOptions = HashMap<String, String>;
+
+impl From<&RegionWalOptions> for EncodedRegionWalOptions {
     fn from(value: &RegionWalOptions) -> Self {
         todo!()
     }
 }
 
-impl TryFrom<&HashMap<String, String>> for RegionWalOptions {
+impl TryFrom<&EncodedRegionWalOptions> for RegionWalOptions {
     type Error = crate::error::Error;
 
-    fn try_from(value: &HashMap<String, String>) -> Result<Self> {
+    fn try_from(value: &EncodedRegionWalOptions) -> Result<Self> {
         todo!()
     }
 }

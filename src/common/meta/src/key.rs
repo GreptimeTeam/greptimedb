@@ -388,6 +388,10 @@ impl TableMetadataManager {
             .build_create_txn(&table_name, table_id)?;
 
         let region_options = (&table_info.meta.options).into();
+        let region_wal_options = region_wal_options
+            .into_iter()
+            .map(|(region_number, wal_opts)| (region_number, (&wal_opts).into()))
+            .collect();
 
         // Creates table info.
         let table_info_value = TableInfoValue::new(table_info);
