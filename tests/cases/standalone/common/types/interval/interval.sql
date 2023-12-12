@@ -58,8 +58,7 @@ SELECT ts - interval_value as new_value from intervals;
 SELECT DATE '2000-10-30' + interval_value from intervals;
 
 -- DATE - INTERVAL
--- Run failed in distributed mode, but passed in standalone mode:
--- SELECT DATE '2000-10-30' - interval_value from intervals;
+SELECT DATE '2000-10-30' - interval_value from intervals;
 
 -- INTERVAL + TIMESTAMP CONSTANT
 SELECT TIMESTAMP '1992-09-20 11:30:00.123456' + interval_value as new_value from intervals;

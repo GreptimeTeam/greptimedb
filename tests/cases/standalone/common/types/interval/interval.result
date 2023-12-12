@@ -202,8 +202,26 @@ SELECT DATE '2000-10-30' + interval_value from intervals;
 +-----------------------------------------------+
 
 -- DATE - INTERVAL
--- Run failed in distributed mode, but passed in standalone mode:
--- SELECT DATE '2000-10-30' - interval_value from intervals;
+SELECT DATE '2000-10-30' - interval_value from intervals;
+
++-----------------------------------------------+
+| Utf8("2000-10-30") - intervals.interval_value |
++-----------------------------------------------+
+| 1999-10-30                                    |
+| 1999-10-30                                    |
+| 1998-08-30                                    |
+| 1997-10-30                                    |
+| 1996-10-30                                    |
+| 1995-10-30                                    |
+| 1994-10-30                                    |
+| 1993-10-30                                    |
+| 1992-10-30                                    |
+| 1991-10-21                                    |
+| 1990-10-30                                    |
+| 1989-10-19                                    |
+| 1988-10-18                                    |
++-----------------------------------------------+
+
 -- INTERVAL + TIMESTAMP CONSTANT
 SELECT TIMESTAMP '1992-09-20 11:30:00.123456' + interval_value as new_value from intervals;
 
