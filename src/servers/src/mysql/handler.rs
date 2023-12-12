@@ -26,6 +26,7 @@ use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{error, logging, tracing, warn};
 use datatypes::prelude::ConcreteDataType;
+use itertools::Itertools;
 use opensrv_mysql::{
     AsyncMysqlShim, Column, ErrorKind, InitWriter, ParamParser, ParamValue, QueryResultWriter,
     StatementMetaWriter, ValueInner,
@@ -286,7 +287,27 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
                     }
                     .fail();
                 }
-                let plan = replace_params_with_values(&plan, param_types, params)?;
+
+                let plan = match replace_params_with_values(&plan, param_types, &params) {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        w.error(
+                            ErrorKind::ER_TRUNCATED_WRONG_VALUE,
+                            format!(
+                                "err: {}, params: {}",
+                                e.output_msg(),
+                                params
+                                    .iter()
+                                    .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
+                                    .join(", ")
+                            )
+                            .as_bytes(),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+
                 logging::debug!("Mysql execute prepared plan: {}", plan.display_indent());
                 vec![
                     self.do_exec_plan(&sql_plan.query, plan, query_ctx.clone())
@@ -395,7 +416,7 @@ fn format_duration(duration: Duration) -> String {
 fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
-    params: Vec<ParamValue>,
+    params: &Vec<ParamValue>,
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
 
