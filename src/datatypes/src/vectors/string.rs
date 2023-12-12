@@ -254,6 +254,8 @@ vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 #[cfg(test)]
 mod tests {
 
+    use std::vec;
+
     use arrow::datatypes::DataType;
 
     use super::*;
@@ -368,5 +370,20 @@ mod tests {
         let vector = StringVector::from(corpus);
         let serialized = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
         assert_eq!(r#"["🀀🀀🀀","🀁🀁🀁","🀂🀂🀂","🀃🀃🀃","🀆🀆"]"#, serialized);
+    }
+
+    #[test]
+    fn test_string_vector_builder_finish_cloned() {
+        let mut builder = StringVectorBuilder::with_capacity(1024);
+        builder.push(Some("1"));
+        builder.push(Some("2"));
+        builder.push(Some("3"));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(
+            r#"["1","2","3"]"#,
+            serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap(),
+        );
+        assert_eq!(builder.len(), 3);
     }
 }

@@ -358,4 +358,21 @@ mod tests {
         let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
         assert_eq!(expect, vector);
     }
+
+    #[test]
+    fn test_binary_vector_builder_finish_cloned() {
+        let mut builder = BinaryVectorBuilder::with_capacity(1024);
+        builder.push(Some(b"one"));
+        builder.push(Some(b"two"));
+        builder.push(Some(b"three"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"one", vector.get_data(0).unwrap());
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(b"four"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"four", vector.get_data(3).unwrap());
+        assert_eq!(builder.len(), 4);
+    }
 }

@@ -763,4 +763,24 @@ pub mod tests {
             iter.nth(1).unwrap().unwrap()
         );
     }
+
+    #[test]
+    fn test_list_vector_builder_finish_cloned() {
+        let mut builder =
+            ListVectorBuilder::with_type_capacity(ConcreteDataType::int32_datatype(), 2);
+        builder.push(None);
+        builder.push(Some(ListValueRef::Ref {
+            val: &ListValue::new(
+                Some(Box::new(vec![
+                    Value::Int32(4),
+                    Value::Null,
+                    Value::Int32(6),
+                ])),
+                ConcreteDataType::int32_datatype(),
+            ),
+        }));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 2);
+        assert_eq!(builder.len(), 2);
+    }
 }

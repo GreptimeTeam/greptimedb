@@ -563,4 +563,16 @@ pub mod tests {
             .collect::<Vec<_>>();
         assert_eq!(values, vec![2, 4, 6, 8]);
     }
+
+    #[test]
+    fn test_decimal128_vector_builder_finish_cloned() {
+        let mut builder = Decimal128VectorBuilder::with_capacity(1024);
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 4);
+        assert_eq!(builder.len(), 4);
+    }
 }

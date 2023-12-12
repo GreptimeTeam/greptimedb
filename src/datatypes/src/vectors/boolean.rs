@@ -368,4 +368,21 @@ mod tests {
         let expect: VectorRef = Arc::new(BooleanVector::from_slice(&[true, false, true]));
         assert_eq!(expect, vector);
     }
+
+    #[test]
+    fn test_boolean_vector_builder_finish_cloned() {
+        let mut builder = BooleanVectorBuilder::with_capacity(1024);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        let vector = builder.finish_cloned();
+        assert!(vector.get_data(0).unwrap());
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(false));
+        let vector = builder.finish_cloned();
+        assert!(!vector.get_data(3).unwrap());
+        assert_eq!(builder.len(), 4);
+    }
 }

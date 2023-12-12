@@ -400,6 +400,8 @@ pub(crate) fn replicate_primitive<T: LogicalPrimitiveType>(
 
 #[cfg(test)]
 mod tests {
+    use std::vec;
+
     use arrow::array::{
         Int32Array, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
         Time64NanosecondArray,
@@ -416,13 +418,14 @@ mod tests {
     use super::*;
     use crate::data_type::DataType;
     use crate::serialize::Serializable;
+    use crate::timestamp::TimestampMillisecond;
     use crate::types::Int64Type;
     use crate::vectors::{
         DurationMicrosecondVector, DurationMillisecondVector, DurationNanosecondVector,
         DurationSecondVector, IntervalDayTimeVector, IntervalYearMonthVector,
         TimeMicrosecondVector, TimeMillisecondVector, TimeNanosecondVector, TimeSecondVector,
-        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
-        TimestampSecondVector,
+        TimestampMicrosecondVector, TimestampMillisecondVector, TimestampMillisecondVectorBuilder,
+        TimestampNanosecondVector, TimestampSecondVector,
     };
 
     fn check_vec(v: Int32Vector) {
@@ -691,5 +694,24 @@ mod tests {
             DurationNanosecondVector::from_values(vec![1000, 2000, 3000]),
             vector
         );
+    }
+
+    #[test]
+    fn test_primitive_vector_builder_finish_cloned() {
+        let mut builder = Int64Type::default().create_mutable_vector(3);
+        builder.push_value_ref(ValueRef::Int64(123));
+        builder.push_value_ref(ValueRef::Int64(456));
+        let vector = builder.to_vector_cloned();
+        assert_eq!(vector.len(), 2);
+        assert_eq!(vector.null_count(), 0);
+        assert_eq!(builder.len(), 2);
+
+        let mut builder = TimestampMillisecondVectorBuilder::with_capacity(1024);
+        builder.push(Some(TimestampMillisecond::new(1)));
+        builder.push(Some(TimestampMillisecond::new(2)));
+        builder.push(Some(TimestampMillisecond::new(3)));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
     }
 }

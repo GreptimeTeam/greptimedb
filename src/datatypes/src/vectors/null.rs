@@ -279,4 +279,14 @@ mod tests {
         let expect: VectorRef = Arc::new(input);
         assert_eq!(expect, vector);
     }
+
+    #[test]
+    fn test_null_vector_builder_finish_cloned() {
+        let mut builder = NullType.create_mutable_vector(3);
+        builder.push_null();
+        builder.push_null();
+        let vector = builder.to_vector_cloned();
+        assert_eq!(vector.len(), 2);
+        assert_eq!(vector.null_count(), 2);
+    }
 }
