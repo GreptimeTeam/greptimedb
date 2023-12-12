@@ -26,6 +26,7 @@ pub mod script;
 
 #[cfg(feature = "dashboard")]
 mod dashboard;
+mod influxdb_result_v1;
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -487,14 +488,24 @@ impl HttpServer {
         let mut router = Router::new();
 
         if let Some(sql_handler) = self.sql_handler.clone() {
+            let api_state = ApiState {
+                sql_handler,
+                script_handler: self.script_handler.clone(),
+            };
             let sql_router = self
-                .route_sql(ApiState {
-                    sql_handler,
-                    script_handler: self.script_handler.clone(),
-                })
+                .route_sql(api_state.clone())
                 .finish_api(&mut api)
                 .layer(Extension(api.clone()));
             router = router.nest(&format!("/{HTTP_API_VERSION}"), sql_router);
+
+            let sql_with_influxdb_result_router = self
+                .route_sql_with_influxdb_result(api_state)
+                .finish_api(&mut api)
+                .layer(Extension(api.clone()));
+            router = router.nest(
+                &format!("/{HTTP_API_VERSION}"),
+                sql_with_influxdb_result_router,
+            );
         }
 
         if let Some(opentsdb_handler) = self.opentsdb_handler.clone() {
@@ -633,6 +644,22 @@ impl HttpServer {
             .api_route("/run-script", apirouting::post(script::run_script))
             .route("/private/api.json", apirouting::get(serve_api))
             .route("/private/docs", apirouting::get(serve_docs))
+            .with_state(api_state)
+    }
+
+    fn route_sql_with_influxdb_result<S>(&self, api_state: ApiState) -> ApiRouter<S> {
+        ApiRouter::new()
+            .api_route(
+                "/sql_with_influxdb_v1_result",
+                apirouting::get_with(
+                    influxdb_result_v1::sql_with_influxdb_v1_result,
+                    handler::sql_docs,
+                )
+                .post_with(
+                    influxdb_result_v1::sql_with_influxdb_v1_result,
+                    handler::sql_docs,
+                ),
+            )
             .with_state(api_state)
     }
 
