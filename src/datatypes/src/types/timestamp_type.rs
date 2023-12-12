@@ -227,6 +227,7 @@ mod tests {
         );
     }
 
+    // $TZ doesn't take effort
     #[test]
     fn test_timestamp_cast() {
         std::env::set_var("TZ", "Asia/Shanghai");
@@ -235,7 +236,8 @@ mod tests {
         let ts = ConcreteDataType::timestamp_second_datatype()
             .try_cast(s)
             .unwrap();
-        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1609434123)));
+        // 1609462923 is 2021-01-01T01:02:03Z
+        assert_eq!(ts, Value::Timestamp(Timestamp::new_second(1609462923)));
         // String cast failed
         let s = Value::String("12345".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype().try_cast(s);
