@@ -188,8 +188,11 @@ table = { path = "src/table" }
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "abbd357c1e193cd270ea65ee7652334a150b628f"
 
+[profile.dev]
+debug = 1
+
 [profile.release]
-debug = true
+debug = 1
 
 [profile.nightly]
 inherits = "release"
