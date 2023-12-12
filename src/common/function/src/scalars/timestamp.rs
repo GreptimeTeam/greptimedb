@@ -19,7 +19,7 @@ mod to_unixtime;
 use greatest::GreatestFunction;
 use to_unixtime::ToUnixtimeFunction;
 
-use crate::scalars::function_registry::FunctionRegistry;
+use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct TimestampFunction;
 

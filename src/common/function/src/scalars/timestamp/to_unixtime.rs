@@ -23,7 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Int64Vector, VectorRef};
 use snafu::ensure;
 
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 /// A function to convert the column into the unix timestamp in seconds.
 #[derive(Clone, Debug, Default)]
@@ -152,7 +152,6 @@ mod tests {
     };
 
     use super::{ToUnixtimeFunction, *};
-    use crate::scalars::Function;
 
     #[test]
     fn test_string_to_unixtime() {

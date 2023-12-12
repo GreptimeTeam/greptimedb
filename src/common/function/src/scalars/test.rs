@@ -21,7 +21,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Default)]
 pub(crate) struct TestAndFunction;

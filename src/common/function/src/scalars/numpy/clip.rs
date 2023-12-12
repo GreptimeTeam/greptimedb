@@ -25,7 +25,7 @@ use datatypes::vectors::PrimitiveVector;
 use paste::paste;
 
 use crate::scalars::expression::{scalar_binary_op, EvalContext};
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 /// numpy.clip function, <https://numpy.org/doc/stable/reference/generated/numpy.clip.html>
 #[derive(Clone, Debug, Default)]

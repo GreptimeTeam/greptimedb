@@ -23,7 +23,7 @@ use datatypes::vectors::VectorRef;
 use snafu::ensure;
 
 use crate::helper;
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 /// A function adds an interval value to Timestamp, Date or DateTime, and return the result.
 #[derive(Clone, Debug, Default)]
@@ -149,7 +149,6 @@ mod tests {
     };
 
     use super::{DateAddFunction, *};
-    use crate::scalars::Function;
 
     #[test]
     fn test_date_add_misc() {

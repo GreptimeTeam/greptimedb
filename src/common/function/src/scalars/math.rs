@@ -28,9 +28,9 @@ pub use pow::PowFunction;
 pub use rate::RateFunction;
 use snafu::ResultExt;
 
-use super::function::FunctionContext;
-use super::Function;
-use crate::scalars::function_registry::FunctionRegistry;
+use crate::function::FunctionContext;
+use crate::function::Function;
+use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct MathFunction;
 

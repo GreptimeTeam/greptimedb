@@ -26,7 +26,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_function::scalars::aggregate::AggregateFunctionMetaRef;
 use common_function::scalars::udf::create_udf;
-use common_function::scalars::FunctionRef;
+use common_function::function::FunctionRef;
 use common_query::physical_plan::{DfPhysicalPlanAdapter, PhysicalPlan, PhysicalPlanAdapter};
 use common_query::prelude::ScalarUdf;
 use common_query::Output;

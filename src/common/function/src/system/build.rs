@@ -20,20 +20,13 @@ use common_query::prelude::{Signature, Volatility};
 use datatypes::prelude::*;
 use datatypes::vectors::{StringVector, VectorRef};
 
-use crate::scalars::function::{Function, FunctionContext};
-use crate::scalars::FunctionRegistry;
+use crate::function::{Function, FunctionContext};
+
 const DEFAULT_VALUE: &str = "unknown";
 
-pub(crate) struct SystemFunction;
-/// generates rates from a sequence of adjacent data points.
+/// generates build information  
 #[derive(Clone, Debug, Default)]
 pub struct BuildFunction;
-
-impl SystemFunction {
-    pub fn register(registry: &FunctionRegistry) {
-        registry.register(Arc::new(BuildFunction));
-    }
-}
 
 impl fmt::Display for BuildFunction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

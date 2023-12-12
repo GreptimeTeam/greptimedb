@@ -23,7 +23,7 @@ use datatypes::prelude::*;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::ResultExt;
 
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 /// generates rates from a sequence of adjacent data points.
 #[derive(Clone, Debug, Default)]
