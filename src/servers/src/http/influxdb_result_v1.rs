@@ -281,6 +281,22 @@ impl InfluxdbResponse {
         }
         Self::with_output(Some(results))
     }
+
+    pub fn success(&self) -> bool {
+        self.error.is_none()
+    }
+
+    pub fn error(&self) -> Option<&String> {
+        self.error.as_ref()
+    }
+
+    pub fn results(&self) -> Option<&[InfluxdbOutput]> {
+        self.results.as_deref()
+    }
+
+    pub fn execution_time_ms(&self) -> Option<u128> {
+        self.execution_time_ms
+    }
 }
 
 async fn validate_schema(

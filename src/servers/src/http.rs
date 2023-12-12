@@ -26,7 +26,7 @@ pub mod script;
 
 #[cfg(feature = "dashboard")]
 mod dashboard;
-mod influxdb_result_v1;
+pub mod influxdb_result_v1;
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};

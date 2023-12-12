@@ -15,6 +15,7 @@
 mod authorize;
 mod http_handler_test;
 mod http_test;
+mod influxdb_result_v1_test;
 mod influxdb_test;
 mod opentsdb_test;
 mod prom_store_test;
