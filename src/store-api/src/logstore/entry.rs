@@ -16,9 +16,12 @@ use common_error::ext::ErrorExt;
 
 use crate::logstore::namespace::Namespace;
 
-pub type Offset = usize;
-pub type Epoch = u64;
+/// An entry's logical id, allocated by log store users.
 pub type Id = u64;
+/// An entry's physical offset in the underlying log store.
+pub type Offset = usize;
+// TODO(niebayes): consider removing `Epoch`.
+pub type Epoch = u64;
 
 /// Entry is the minimal data storage unit in `LogStore`.
 pub trait Entry: Send + Sync {

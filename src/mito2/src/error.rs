@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
@@ -217,6 +218,17 @@ pub enum Error {
     DeleteWal {
         region_id: RegionId,
         location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Failed to build a wal namespace, region_id: {}, wal_options: {:?}",
+        region_id,
+        wal_options
+    ))]
+    BuildWalNamespace {
+        region_id: RegionId,
+        wal_options: HashMap<String, String>,
         source: BoxedError,
     },
 
@@ -427,7 +439,8 @@ impl ErrorExt for Error {
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
-            | DeleteWal { .. } => StatusCode::StorageUnavailable,
+            | DeleteWal { .. }
+            | BuildWalNamespace { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }

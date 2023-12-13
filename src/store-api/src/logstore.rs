@@ -14,11 +14,14 @@
 
 //! LogStore APIs.
 
+use std::collections::HashMap;
+
 use common_error::ext::ErrorExt;
 
-use crate::logstore::entry::{Entry, Id};
+use crate::logstore::entry::{Entry, Id as EntryId, Offset as EntryOffset};
 use crate::logstore::entry_stream::SendableEntryStream;
-use crate::logstore::namespace::Namespace;
+use crate::logstore::namespace::{Id as NamespaceId, Namespace};
+use crate::storage::RegionNumber;
 
 pub mod entry;
 pub mod entry_stream;
@@ -36,17 +39,21 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Append an `Entry` to WAL with given namespace and return append response containing
     /// the entry id.
-    async fn append(&self, e: Self::Entry) -> Result<AppendResponse, Self::Error>;
+    async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
-    /// Append a batch of entries atomically and return the offset of first entry.
-    async fn append_batch(&self, e: Vec<Self::Entry>) -> Result<(), Self::Error>;
+    /// Append a batch of entries and return an append batch response containing the start entry ids of
+    /// log entries written to each region.
+    async fn append_batch(
+        &self,
+        entries: Vec<Self::Entry>,
+    ) -> Result<AppendBatchResponse, Self::Error>;
 
     /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
     async fn read(
         &self,
         ns: &Self::Namespace,
-        id: Id,
+        id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
     /// Create a new `Namespace`.
@@ -59,19 +66,37 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
     /// Create an entry of the associate Entry type
-    fn entry<D: AsRef<[u8]>>(&self, data: D, id: Id, ns: Self::Namespace) -> Self::Entry;
+    fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
+        -> Self::Entry;
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(&self, id: namespace::Id) -> Self::Namespace;
+    fn namespace(
+        &self,
+        ns_id: NamespaceId,
+        wal_options: &HashMap<String, String>,
+    ) -> Result<Self::Namespace, Self::Error>;
 
     /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
     /// the log files if all entries inside are obsolete. This method may not delete log
     /// files immediately.
-    async fn obsolete(&self, namespace: Self::Namespace, id: Id) -> Result<(), Self::Error>;
+    async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 }
 
+/// The response of an `append` operation.
 #[derive(Debug)]
 pub struct AppendResponse {
-    pub entry_id: Id,
+    /// The entry id of the appended log entry.
+    pub entry_id: EntryId,
+    /// The start entry offset of the appended log entry.
+    /// Depends on the `LogStore` implementation, the entry offset may be missing.
+    pub offset: Option<EntryOffset>,
+}
+
+/// The response of an `append_batch` operation.
+#[derive(Debug, Default)]
+pub struct AppendBatchResponse {
+    /// Key: region number. Value: the known minimum start offset of the appended log entries belonging to the region.
+    /// Depends on the `LogStore` implementation, the entry offsets may be missing.
+    pub offsets: HashMap<RegionNumber, EntryOffset>,
 }

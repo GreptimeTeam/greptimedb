@@ -14,6 +14,7 @@
 
 //! Write ahead log of the engine.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -29,7 +30,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
+    BuildWalNamespaceSnafu, DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result,
+    WriteWalSnafu,
 };
 
 /// WAL entry id.
@@ -66,7 +68,7 @@ impl<S: LogStore> Wal<S> {
     /// Scan entries of specific region starting from `start_id` (inclusive).
     pub fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
         let stream = try_stream!({
-            let namespace = self.store.namespace(region_id.into());
+            let namespace = try_build_wal_namespace(&self.store, region_id)?;
             let mut stream = self
                 .store
                 .read(&namespace, start_id)
@@ -90,7 +92,7 @@ impl<S: LogStore> Wal<S> {
 
     /// Mark entries whose ids `<= last_id` as deleted.
     pub async fn obsolete(&self, region_id: RegionId, last_id: EntryId) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+        let namespace = try_build_wal_namespace(&self.store, region_id)?;
         self.store
             .obsolete(namespace, last_id)
             .await
@@ -127,7 +129,7 @@ impl<S: LogStore> WalWriter<S> {
         entry_id: EntryId,
         wal_entry: &WalEntry,
     ) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+        let namespace = try_build_wal_namespace(&self.store, region_id)?;
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
         wal_entry
@@ -152,7 +154,22 @@ impl<S: LogStore> WalWriter<S> {
             .await
             .map_err(BoxedError::new)
             .context(WriteWalSnafu)
+            .map(|_| ())
     }
+}
+
+fn try_build_wal_namespace<S: LogStore>(
+    store: &Arc<S>,
+    region_id: RegionId,
+) -> Result<S::Namespace> {
+    let wal_options = HashMap::default();
+    store
+        .namespace(region_id.into(), &wal_options)
+        .map_err(BoxedError::new)
+        .with_context(|_| BuildWalNamespaceSnafu {
+            region_id,
+            wal_options,
+        })
 }
 
 #[cfg(test)]
