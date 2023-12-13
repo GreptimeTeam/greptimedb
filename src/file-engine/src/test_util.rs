@@ -65,3 +65,7 @@ pub fn new_test_options() -> HashMap<String, String> {
         ),
     ])
 }
+
+pub fn new_test_wal_options() -> HashMap<String, String> {
+    HashMap::default()
+}

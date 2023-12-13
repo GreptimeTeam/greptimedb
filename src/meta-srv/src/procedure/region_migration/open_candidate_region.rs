@@ -77,6 +77,9 @@ impl OpenCandidateRegion {
         let engine = table_info.meta.engine.clone();
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
 
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options = HashMap::default();
+
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
                 cluster_id,
@@ -87,6 +90,7 @@ impl OpenCandidateRegion {
             },
             &region_storage_path,
             region_options,
+            region_wal_options,
         ));
 
         Ok(open_instruction)
@@ -212,6 +216,7 @@ mod tests {
             },
             region_storage_path: "/bar/foo/region/".to_string(),
             options: Default::default(),
+            wal_options: Default::default(),
         })
     }
 

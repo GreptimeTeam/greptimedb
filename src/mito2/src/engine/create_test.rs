@@ -198,3 +198,5 @@ async fn test_engine_create_with_custom_store() {
         .await
         .unwrap());
 }
+
+// TODO(niebayes): add tests for test_engine_create_with_wal_options.

@@ -40,7 +40,6 @@ use crate::metrics;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{find_leader_regions, find_leaders, RegionRoute};
 use crate::wal::region_wal_options::RegionWalOptions;
-use crate::wal::WAL_KAFKA_TOPIC;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -174,6 +173,7 @@ impl CreateTableProcedure {
             primary_key,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
+            wal_options: HashMap::default(),
         })
     }
 
@@ -204,15 +204,10 @@ impl CreateTableProcedure {
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
-
-                    region_wal_options.get(region_number).and_then(|wal_opts| {
-                        let Some(kafka_topic) = wal_opts.kafka_topic().clone() else {
-                            return None;
-                        };
-                        create_region_request
-                            .options
-                            .insert(WAL_KAFKA_TOPIC.to_string(), kafka_topic)
-                    });
+                    create_region_request.wal_options = region_wal_options
+                        .get(region_number)
+                        .map(|wal_opts| wal_opts.into())
+                        .unwrap_or_default();
 
                     PbRegionRequest::Create(create_region_request)
                 })

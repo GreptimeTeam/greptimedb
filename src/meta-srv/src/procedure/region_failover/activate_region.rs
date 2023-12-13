@@ -43,6 +43,7 @@ pub(super) struct ActivateRegion {
     remark_inactive_region: bool,
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
+    region_wal_options: Option<HashMap<String, String>>,
 }
 
 impl ActivateRegion {
@@ -52,6 +53,7 @@ impl ActivateRegion {
             remark_inactive_region: false,
             region_storage_path: None,
             region_options: None,
+            region_wal_options: None,
         }
     }
 
@@ -80,15 +82,22 @@ impl ActivateRegion {
             ..failed_region.clone()
         };
         info!("Activating region: {candidate_ident:?}");
+
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options = HashMap::default();
+
         let instruction = Instruction::OpenRegion(OpenRegion::new(
             candidate_ident.clone(),
             &region_storage_path,
             region_options.clone(),
+            region_wal_options.clone(),
         ));
 
         self.region_storage_path = Some(region_storage_path);
         self.region_options = Some(region_options);
+        self.region_wal_options = Some(region_wal_options);
+
         let msg = MailboxMessage::json_message(
             "Activate Region",
             &format!("Metasrv@{}", ctx.selector_ctx.server_addr),
@@ -222,6 +231,7 @@ mod tests {
                     },
                     &env.path,
                     HashMap::new(),
+                    HashMap::new(),
                 )))
                 .unwrap(),
             ))
@@ -291,6 +301,7 @@ mod tests {
                         ..failed_region.clone()
                     },
                     &env.path,
+                    HashMap::new(),
                     HashMap::new(),
                 )))
                 .unwrap(),

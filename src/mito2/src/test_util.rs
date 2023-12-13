@@ -289,6 +289,7 @@ pub struct CreateRequestBuilder {
     tag_num: usize,
     field_num: usize,
     options: HashMap<String, String>,
+    wal_options: HashMap<String, String>,
     primary_key: Option<Vec<ColumnId>>,
     all_not_null: bool,
     engine: String,
@@ -301,6 +302,7 @@ impl Default for CreateRequestBuilder {
             tag_num: 1,
             field_num: 1,
             options: HashMap::new(),
+            wal_options: HashMap::new(),
             primary_key: None,
             all_not_null: false,
             engine: MITO_ENGINE_NAME.to_string(),
@@ -341,6 +343,12 @@ impl CreateRequestBuilder {
     #[must_use]
     pub fn insert_option(mut self, key: &str, value: &str) -> Self {
         self.options.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    #[must_use]
+    pub fn insert_wal_option(mut self, key: &str, value: &str) -> Self {
+        self.wal_options.insert(key.to_string(), value.to_string());
         self
     }
 
@@ -397,6 +405,7 @@ impl CreateRequestBuilder {
             column_metadatas,
             primary_key: self.primary_key.clone().unwrap_or(primary_key),
             options: self.options.clone(),
+            wal_options: self.wal_options.clone(),
             region_dir: self.region_dir.clone(),
         }
     }
@@ -698,6 +707,7 @@ pub async fn reopen_region(
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                wal_options: HashMap::default(),
             }),
         )
         .await

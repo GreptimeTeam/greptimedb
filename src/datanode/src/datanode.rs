@@ -346,11 +346,18 @@ impl DatanodeBuilder {
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
             for region_number in table_value.regions {
+                let region_wal_options = table_value
+                    .region_wal_options
+                    .get(&region_number)
+                    .cloned()
+                    .unwrap_or_default();
+
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
                     table_value.region_info.engine.clone(),
                     table_value.region_info.region_storage_path.clone(),
                     table_value.region_info.region_options.clone(),
+                    region_wal_options,
                 ));
             }
         }
@@ -358,7 +365,7 @@ impl DatanodeBuilder {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
         let mut tasks = vec![];
 
-        for (region_id, engine, store_path, options) in regions {
+        for (region_id, engine, store_path, options, wal_options) in regions {
             let region_dir = region_dir(&store_path, region_id);
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {
@@ -370,6 +377,7 @@ impl DatanodeBuilder {
                             engine: engine.clone(),
                             region_dir,
                             options,
+                            wal_options,
                         }),
                     )
                     .await?;

@@ -96,14 +96,21 @@ pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
     pub options: HashMap<String, String>,
+    pub wal_options: HashMap<String, String>,
 }
 
 impl OpenRegion {
-    pub fn new(region_ident: RegionIdent, path: &str, options: HashMap<String, String>) -> Self {
+    pub fn new(
+        region_ident: RegionIdent,
+        path: &str,
+        options: HashMap<String, String>,
+        wal_options: HashMap<String, String>,
+    ) -> Self {
         Self {
             region_ident,
             region_storage_path: path.to_string(),
             options,
+            wal_options,
         }
     }
 }
@@ -217,6 +224,7 @@ mod tests {
                 engine: "mito2".to_string(),
             },
             "test/foo",
+            HashMap::new(),
             HashMap::new(),
         ));
 

@@ -19,8 +19,6 @@ use crate::wal::kafka::KafkaOptions;
 pub mod kafka;
 pub mod region_wal_options;
 
-pub const WAL_KAFKA_TOPIC: &str = "wal_kafka_topic";
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct WalOptions {
     kafka: Option<KafkaOptions>,
