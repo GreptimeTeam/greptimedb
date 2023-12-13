@@ -374,6 +374,7 @@ mod tests {
     use super::update_metadata::UpdateMetadata;
     use super::*;
     use crate::handler::HeartbeatMailbox;
+    use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
     use crate::procedure::region_migration::test_util::*;
     use crate::service::mailbox::Channel;
 
@@ -644,6 +645,310 @@ mod tests {
         // Ensure it didn't run into the slow path.
         assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS / 2);
 
+        runner.suite.verify_table_metadata().await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow_open_candidate_region_retryable_error() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = vec![
+            // Migration Start
+            Step::next(
+                "Should be the open candidate region",
+                None,
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be throwing a non-retry error",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                )),
+                Assertion::error(|error| assert!(error.is_retryable())),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be throwing a non-retry error again",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                )),
+                Assertion::error(|error| assert!(error.is_retryable())),
+            ),
+        ];
+
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to UpdateMetadata::Downgrade",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            // Mocks the volatile ctx lost(i.g., Meta leader restarts).
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+
+        let table_routes_version = runner
+            .env()
+            .table_metadata_manager()
+            .table_route_manager()
+            .get(region_id.table_id())
+            .await
+            .unwrap()
+            .unwrap()
+            .version();
+        // Should be unchanged.
+        assert_eq!(table_routes_version, 0);
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow_upgrade_candidate_with_retry_and_failed() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let from_peer_id = persistent_context.from_peer.id;
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let to_peer = persistent_context.to_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![to_peer],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = vec![
+            // MigrationStart
+            Step::next(
+                "Should be the update metadata for downgrading",
+                None,
+                Assertion::simple(assert_update_metadata_downgrade, assert_need_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Candidate
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the rollback metadata",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                )),
+                Assertion::simple(assert_update_metadata_rollback, assert_no_persist),
+            ),
+            // UpdateMetadata::Rollback
+            Step::next(
+                "Should be the region migration abort",
+                None,
+                Assertion::simple(assert_region_migration_abort, assert_no_persist),
+            ),
+            // RegionMigrationAbort
+            Step::next(
+                "Should throw an error",
+                None,
+                Assertion::error(|error| {
+                    assert!(!error.is_retryable());
+                    assert_matches!(error, error::Error::MigrationAbort { .. });
+                }),
+            ),
+        ];
+
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to UpdateMetadata::Downgrade",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(UpdateMetadata::Downgrade))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+
+        // Run the table tests.
+        ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_procedure_flow_upgrade_candidate_with_retry() {
+        common_telemetry::init_default_ut_logging();
+
+        let persistent_context = test_util::new_persistent_context(1, 2, RegionId::new(1024, 1));
+        let state = Box::new(RegionMigrationStart);
+
+        // The table metadata.
+        let to_peer_id = persistent_context.to_peer.id;
+        let from_peer_id = persistent_context.from_peer.id;
+        let from_peer = persistent_context.from_peer.clone();
+        let region_id = persistent_context.region_id;
+        let table_info = new_test_table_info(1024, vec![1]).into();
+        let region_routes = vec![RegionRoute {
+            region: Region::new_test(region_id),
+            leader_peer: Some(from_peer),
+            follower_peers: vec![],
+            ..Default::default()
+        }];
+
+        let suite = ProcedureMigrationTestSuite::new(persistent_context, state);
+        suite.init_table_metadata(table_info, region_routes).await;
+
+        let steps = vec![
+            // Migration Start
+            Step::next(
+                "Should be the open candidate region",
+                None,
+                Assertion::simple(assert_open_candidate_region, assert_need_persist),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be throwing a retryable error",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, false, None))),
+                )),
+                Assertion::error(|error| assert!(error.is_retryable())),
+            ),
+            // OpenCandidateRegion
+            Step::next(
+                "Should be the update metadata for downgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    Arc::new(|id| Ok(new_open_region_reply(id, true, None))),
+                )),
+                Assertion::simple(assert_update_metadata_downgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Downgrade
+            Step::next(
+                "Should be the downgrade leader region",
+                None,
+                Assertion::simple(assert_downgrade_leader_region, assert_no_persist),
+            ),
+            // Downgrade Leader
+            Step::next(
+                "Should be the upgrade candidate region",
+                Some(mock_datanode_reply(
+                    from_peer_id,
+                    merge_mailbox_messages(vec![
+                        Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                        Arc::new(|id| Ok(new_downgrade_region_reply(id, None, true, None))),
+                    ]),
+                )),
+                Assertion::simple(assert_upgrade_candidate_region, assert_no_persist),
+            ),
+            // Upgrade Candidate
+            Step::next(
+                "Should be the update metadata for upgrading",
+                Some(mock_datanode_reply(
+                    to_peer_id,
+                    merge_mailbox_messages(vec![
+                        Arc::new(|id| error::MailboxTimeoutSnafu { id }.fail()),
+                        Arc::new(|id| Ok(new_upgrade_region_reply(id, true, true, None))),
+                    ]),
+                )),
+                Assertion::simple(assert_update_metadata_upgrade, assert_no_persist),
+            ),
+            // UpdateMetadata::Upgrade
+            Step::next(
+                "Should be the region migration end",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+            // RegionMigrationEnd
+            Step::next(
+                "Should be the region migration end again",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
+        ];
+
+        let setup_to_latest_persisted_state = Step::setup(
+            "Sets state to OpenCandidateRegion",
+            merge_before_test_fn(vec![
+                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
+                Arc::new(reset_volatile_ctx),
+            ]),
+        );
+
+        let steps = [
+            steps.clone(),
+            vec![setup_to_latest_persisted_state.clone()],
+            steps.clone()[1..].to_vec(),
+            vec![setup_to_latest_persisted_state],
+            steps.clone()[1..].to_vec(),
+        ]
+        .concat();
+
+        let timer = Instant::now();
+
+        // Run the table tests.
+        let runner = ProcedureMigrationSuiteRunner::new(suite)
+            .steps(steps.clone())
+            .run_once()
+            .await;
+
+        // Ensure it didn't run into the slow path.
+        assert!(timer.elapsed().as_secs() < REGION_LEASE_SECS);
         runner.suite.verify_table_metadata().await;
     }
 }

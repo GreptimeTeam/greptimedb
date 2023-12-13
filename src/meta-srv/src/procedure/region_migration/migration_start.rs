@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_next_downgrade_leader_region_state() {
+    async fn test_next_update_metadata_downgrade_state() {
         let mut state = Box::new(RegionMigrationStart);
         // from_peer: 1
         // to_peer: 2

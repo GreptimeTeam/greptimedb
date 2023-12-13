@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use api::v1::meta::mailbox_message::Payload;
@@ -36,12 +37,14 @@ use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
 use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
-use crate::error::Result;
+use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
+use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::PersistentContext;
 use crate::service::mailbox::{Channel, MailboxRef};
@@ -141,6 +144,25 @@ impl TestingEnv {
     }
 }
 
+/// Generates a [InstructionReply::OpenRegion] reply.
+pub(crate) fn new_open_region_reply(
+    id: u64,
+    result: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::OpenRegion(SimpleReply { result, error }))
+                .unwrap(),
+        )),
+    }
+}
+
 /// Generates a [InstructionReply::CloseRegion] reply.
 pub fn new_close_region_reply(id: u64) -> MailboxMessage {
     MailboxMessage {
@@ -214,9 +236,10 @@ pub fn send_mock_reply(
     msg: impl Fn(u64) -> Result<MailboxMessage> + Send + 'static,
 ) {
     common_runtime::spawn_bg(async move {
-        let resp = rx.recv().await.unwrap().unwrap();
-        let reply_id = resp.mailbox_message.unwrap().id;
-        mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+        while let Some(Ok(resp)) = rx.recv().await {
+            let reply_id = resp.mailbox_message.unwrap().id;
+            mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+        }
     });
 }
 
@@ -257,12 +280,16 @@ pub(crate) type StateAssertion = Arc<dyn Fn(&dyn State) + Send + Sync>;
 /// Status assertion function.
 pub(crate) type StatusAssertion = Arc<dyn Fn(Status) + Send + Sync>;
 
+/// Error assertion function.
+pub(crate) type ErrorAssertion = Arc<dyn Fn(Error) + Send + Sync>;
+
 // TODO(weny): Remove it.
 #[allow(dead_code)]
 /// The type of assertion.
 #[derive(Clone)]
 pub(crate) enum Assertion {
     Simple(StateAssertion, StatusAssertion),
+    Error(ErrorAssertion),
     Custom(CustomAssertion),
 }
 
@@ -276,6 +303,11 @@ impl Assertion {
         status: U,
     ) -> Self {
         Self::Simple(Arc::new(state), Arc::new(status))
+    }
+
+    /// Returns an [Assertion::Error].
+    pub(crate) fn error<T: Fn(Error) + Send + Sync + 'static>(error_assert: T) -> Self {
+        Self::Error(Arc::new(error_assert))
     }
 }
 
@@ -315,8 +347,12 @@ impl ProcedureMigrationTestSuite {
                 status_assert(status);
                 self.state = next;
             }
+            Assertion::Error(error_assert) => {
+                let error = result.unwrap_err();
+                error_assert(error);
+            }
             Assertion::Custom(assert_fn) => {
-                assert_fn(self, result);
+                assert_fn(self, result).await?;
             }
         }
 
@@ -425,6 +461,11 @@ impl ProcedureMigrationSuiteRunner {
 
         self
     }
+
+    /// Returns [TestingEnv] of [ProcedureMigrationTestSuite].
+    pub(crate) fn env(&self) -> &TestingEnv {
+        &self.suite.env
+    }
 }
 
 /// Asserts the [Status] needs to be persistent.
@@ -442,6 +483,11 @@ pub(crate) fn assert_done(status: Status) {
     assert_matches!(status, Status::Done)
 }
 
+/// Asserts the [State] should be [OpenCandidateRegion].
+pub(crate) fn assert_open_candidate_region(next: &dyn State) {
+    let _ = next.as_any().downcast_ref::<OpenCandidateRegion>().unwrap();
+}
+
 /// Asserts the [State] should be [UpdateMetadata::Downgrade].
 pub(crate) fn assert_update_metadata_downgrade(next: &dyn State) {
     let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
@@ -454,9 +500,23 @@ pub(crate) fn assert_update_metadata_upgrade(next: &dyn State) {
     assert_matches!(state, UpdateMetadata::Upgrade);
 }
 
+/// Asserts the [State] should be [UpdateMetadata::Rollback].
+pub(crate) fn assert_update_metadata_rollback(next: &dyn State) {
+    let state = next.as_any().downcast_ref::<UpdateMetadata>().unwrap();
+    assert_matches!(state, UpdateMetadata::Rollback);
+}
+
 /// Asserts the [State] should be [RegionMigrationEnd].
 pub(crate) fn assert_region_migration_end(next: &dyn State) {
     let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
+}
+
+/// Asserts the [State] should be [RegionMigrationAbort].
+pub(crate) fn assert_region_migration_abort(next: &dyn State) {
+    let _ = next
+        .as_any()
+        .downcast_ref::<RegionMigrationAbort>()
+        .unwrap();
 }
 
 /// Asserts the [State] should be [DowngradeLeaderRegion].
@@ -525,4 +585,40 @@ pub(crate) fn merge_before_test_fn(hooks: Vec<BeforeTest>) -> BeforeTest {
             }
         })
     })
+}
+
+/// The factory of [MailboxMessage].
+type MailboxMessageFactory = Arc<dyn Fn(u64) -> Result<MailboxMessage> + Send + Sync>;
+
+/// Merges the batch of [MailboxMessageFactory] and all [MailboxMessageFactory] only will be executed once.
+pub(crate) fn merge_mailbox_messages(msgs: Vec<MailboxMessageFactory>) -> MailboxMessageFactory {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let l = msgs.len();
+
+    Arc::new(move |id| {
+        let cur = counter.fetch_add(1, Ordering::Relaxed) % l;
+
+        debug!("Sending message id: {id} use message[{cur}]");
+        msgs[cur](id)
+    })
+}
+
+#[test]
+fn test_merge_mailbox_messages() {
+    let merged_factory = merge_mailbox_messages(vec![
+        Arc::new(|_| error::UnexpectedSnafu { violated: "first" }.fail()),
+        Arc::new(|_| error::UnexpectedSnafu { violated: "second" }.fail()),
+    ]);
+
+    if let error::Error::Unexpected { violated, .. } = merged_factory(0).unwrap_err() {
+        assert_eq!(violated, "first");
+    } else {
+        unreachable!()
+    }
+
+    if let error::Error::Unexpected { violated, .. } = merged_factory(0).unwrap_err() {
+        assert_eq!(violated, "second");
+    } else {
+        unreachable!()
+    }
 }
