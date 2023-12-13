@@ -14,7 +14,8 @@
 
 use std::sync::Arc;
 
-use common_function::scalars::{FunctionRef, FUNCTION_REGISTRY};
+use common_function::function::FunctionRef;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use datafusion::arrow::array::{ArrayRef, NullArray};
 use datafusion::physical_plan::expressions;
 use datafusion_expr::ColumnarValue;

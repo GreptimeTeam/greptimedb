@@ -95,7 +95,7 @@ mod tests {
             build_data::get_git_dirty().map_or(DEFAULT_VALUE.to_string(), |v| v.to_string()),
             env!("CARGO_PKG_VERSION")
         );
-        let vector = build.eval(FunctionContext::default(), &vec![]).unwrap();
+        let vector = build.eval(FunctionContext::default(), &[]).unwrap();
         let expect: VectorRef = Arc::new(StringVector::from(vec![build_info]));
         assert_eq!(expect, vector);
     }

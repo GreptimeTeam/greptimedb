@@ -20,8 +20,8 @@ use common_query::prelude::{Signature, Volatility};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::VectorRef;
 
-use crate::scalars::expression::{scalar_binary_op, EvalContext};
 use crate::function::{Function, FunctionContext};
+use crate::scalars::expression::{scalar_binary_op, EvalContext};
 
 #[derive(Clone, Default)]
 pub(crate) struct TestAndFunction;
