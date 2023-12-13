@@ -288,9 +288,9 @@ pub(crate) mod greptime_builtin {
     use std::sync::Arc;
 
     use arrow::compute::kernels::{aggregate, boolean};
-    use common_function::scalars::function::FunctionContext;
+    use common_function::function::{Function, FunctionContext, FunctionRef};
+    use common_function::function_registry::FUNCTION_REGISTRY;
     use common_function::scalars::math::PowFunction;
-    use common_function::scalars::{Function, FunctionRef, FUNCTION_REGISTRY};
     use datafusion::arrow::datatypes::DataType as ArrowDataType;
     use datafusion::dataframe::DataFrame as DfDataFrame;
     use datafusion::physical_plan::expressions;

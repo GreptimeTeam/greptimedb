@@ -12,12 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod aggregate;
-pub(crate) mod date;
-pub mod expression;
-pub mod math;
-pub mod numpy;
-#[cfg(test)]
-pub(crate) mod test;
-pub(crate) mod timestamp;
-pub mod udf;
+pub mod build;
+
+use std::sync::Arc;
+
+use build::BuildFunction;
+
+use crate::function_registry::FunctionRegistry;
+
+pub(crate) struct SystemFunction;
+
+impl SystemFunction {
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register(Arc::new(BuildFunction));
+    }
+}

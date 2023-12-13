@@ -23,7 +23,7 @@ use datatypes::prelude::*;
 use datatypes::vectors::Helper;
 use snafu::ResultExt;
 
-use crate::scalars::function::{FunctionContext, FunctionRef};
+use crate::function::{FunctionContext, FunctionRef};
 
 /// Create a ScalarUdf from function.
 pub fn create_udf(func: FunctionRef) -> ScalarUdf {
@@ -72,7 +72,7 @@ mod tests {
     use datatypes::vectors::{BooleanVector, ConstantVector};
 
     use super::*;
-    use crate::scalars::function::Function;
+    use crate::function::Function;
     use crate::scalars::test::TestAndFunction;
 
     #[test]

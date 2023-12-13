@@ -27,7 +27,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::vectors::{Helper, VectorRef};
 use snafu::{ensure, ResultExt};
 
-use crate::scalars::function::{Function, FunctionContext};
+use crate::function::{Function, FunctionContext};
 
 #[derive(Clone, Debug, Default)]
 pub struct GreatestFunction;
@@ -113,10 +113,7 @@ mod tests {
     use datatypes::value::Value;
     use datatypes::vectors::{DateVector, StringVector, Vector};
 
-    use super::GreatestFunction;
-    use crate::scalars::function::FunctionContext;
-    use crate::scalars::Function;
-
+    use super::*;
     #[test]
     fn test_greatest_takes_string_vector() {
         let function = GreatestFunction;

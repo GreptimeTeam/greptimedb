@@ -19,7 +19,7 @@ mod date_sub;
 use date_add::DateAddFunction;
 use date_sub::DateSubFunction;
 
-use crate::scalars::function_registry::FunctionRegistry;
+use crate::function_registry::FunctionRegistry;
 
 pub(crate) struct DateFunction;
 

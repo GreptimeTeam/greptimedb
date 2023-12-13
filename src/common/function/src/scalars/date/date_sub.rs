@@ -22,8 +22,8 @@ use datatypes::value::ValueRef;
 use datatypes::vectors::VectorRef;
 use snafu::ensure;
 
+use crate::function::{Function, FunctionContext};
 use crate::helper;
-use crate::scalars::function::{Function, FunctionContext};
 
 /// A function subtracts an interval value to Timestamp, Date or DateTime, and return the result.
 #[derive(Clone, Debug, Default)]
@@ -150,7 +150,6 @@ mod tests {
     };
 
     use super::{DateSubFunction, *};
-    use crate::scalars::Function;
 
     #[test]
     fn test_date_sub_misc() {

@@ -21,7 +21,8 @@ use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
-use common_function::scalars::{Function, FUNCTION_REGISTRY};
+use common_function::function::Function;
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::error::{PyUdfSnafu, UdfTempRecordBatchSnafu};
 use common_query::prelude::Signature;
 use common_query::Output;
@@ -150,7 +151,7 @@ impl Function for PyUDF {
 
     fn eval(
         &self,
-        _func_ctx: common_function::scalars::function::FunctionContext,
+        _func_ctx: common_function::function::FunctionContext,
         columns: &[datatypes::vectors::VectorRef],
     ) -> common_query::error::Result<datatypes::vectors::VectorRef> {
         // FIXME(discord9): exec_parsed require a RecordBatch(basically a Vector+Schema), where schema can't pop out from nowhere, right?
