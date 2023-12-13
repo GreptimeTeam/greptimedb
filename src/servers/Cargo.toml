@@ -86,8 +86,8 @@ snap = "1"
 sql.workspace = true
 strum.workspace = true
 table.workspace = true
-tokio-stream = { workspace = true, features = ["net"] }
 tokio-rustls = "0.25"
+tokio-stream = { workspace = true, features = ["net"] }
 tokio.workspace = true
 tonic-reflection = "0.10"
 tonic.workspace = true
@@ -114,7 +114,7 @@ serde_json = "1.0"
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tokio-postgres = "0.7"
-tokio-postgres-rustls = { git = "https://github.com/ol-teuto/tokio-postgres-rustls.git", branch = "rustls-update"}
+tokio-postgres-rustls = { git = "https://github.com/ol-teuto/tokio-postgres-rustls.git", branch = "rustls-update" }
 tokio-test = "0.4"
 
 [build-dependencies]
