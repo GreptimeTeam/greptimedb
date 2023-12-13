@@ -34,7 +34,7 @@ pub struct SqlQuery {
     pub sql: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 pub struct InfluxdbRecordsOutput {
     // The SQL query does not return the table name, but in InfluxDB,
     // we require the table name, so we set it to an empty string “”.
@@ -102,7 +102,7 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 pub struct InfluxdbOutput {
     pub statement_id: u32,
     pub series: Vec<InfluxdbRecordsOutput>,
@@ -127,7 +127,7 @@ pub struct InfluxdbV1Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u128>,
+    execution_time_ms: Option<u64>,
 }
 
 impl InfluxdbV1Response {
@@ -162,7 +162,7 @@ impl InfluxdbV1Response {
         }
     }
 
-    pub fn with_execution_time(&mut self, execution_time: u128) {
+    pub fn with_execution_time(&mut self, execution_time: u64) {
         self.execution_time_ms = Some(execution_time);
     }
 
@@ -236,7 +236,7 @@ impl InfluxdbV1Response {
         &self.results
     }
 
-    pub fn execution_time_ms(&self) -> Option<u128> {
+    pub fn execution_time_ms(&self) -> Option<u64> {
         self.execution_time_ms
     }
 }

@@ -253,7 +253,7 @@ pub struct GreptimedbV1Response {
     error: Option<String>,
     output: Vec<JsonOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u128>,
+    execution_time_ms: Option<u64>,
 }
 
 impl GreptimedbV1Response {
@@ -291,7 +291,7 @@ impl GreptimedbV1Response {
         }
     }
 
-    fn with_execution_time(&mut self, execution_time: u128) {
+    fn with_execution_time(&mut self, execution_time: u64) {
         self.execution_time_ms = Some(execution_time);
     }
 
@@ -354,7 +354,7 @@ impl GreptimedbV1Response {
         &self.output
     }
 
-    pub fn execution_time_ms(&self) -> Option<u128> {
+    pub fn execution_time_ms(&self) -> Option<u64> {
         self.execution_time_ms
     }
 }
@@ -476,10 +476,10 @@ impl JsonResponse {
     fn with_execution_time(mut self, execution_time: u128) -> Self {
         match &mut self {
             JsonResponse::GreptimedbV1(resp) => {
-                resp.with_execution_time(execution_time);
+                resp.with_execution_time(execution_time as u64);
             }
             JsonResponse::InfluxdbV1(resp) => {
-                resp.with_execution_time(execution_time);
+                resp.with_execution_time(execution_time as u64);
             }
         }
         self
