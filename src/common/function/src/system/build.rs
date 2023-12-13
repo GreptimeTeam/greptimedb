@@ -24,7 +24,7 @@ use crate::function::{Function, FunctionContext};
 
 const DEFAULT_VALUE: &str = "unknown";
 
-/// generates build information  
+/// Generates build information  
 #[derive(Clone, Debug, Default)]
 pub struct BuildFunction;
 
