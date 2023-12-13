@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct RaftEngineOptions {
+pub struct RaftEngineConfig {
     // wal directory
     pub dir: Option<String>,
     // wal file size in bytes
@@ -35,7 +35,7 @@ pub struct RaftEngineOptions {
     pub sync_write: bool,
 }
 
-impl Default for RaftEngineOptions {
+impl Default for RaftEngineConfig {
     fn default() -> Self {
         Self {
             dir: None,

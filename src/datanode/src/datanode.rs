@@ -21,8 +21,7 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
-use common_config::wal::kafka::KafkaOptions;
-use common_config::wal::raft_engine::RaftEngineOptions;
+use common_config::wal::{KafkaConfig, RaftEngineConfig};
 use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -494,7 +493,7 @@ impl DatanodeBuilder {
     /// Builds [RaftEngineLogStore].
     async fn build_raft_engine_log_store(
         data_home: &str,
-        config: &RaftEngineOptions,
+        config: &RaftEngineConfig,
     ) -> Result<Arc<RaftEngineLogStore>> {
         let data_home = normalize_dir(data_home);
         let wal_dir = match &config.dir {
@@ -519,8 +518,8 @@ impl DatanodeBuilder {
     }
 
     /// Builds [KafkaLogStore].
-    async fn build_kafka_log_store(kafka_opts: &KafkaOptions) -> Result<Arc<KafkaLogStore>> {
-        let _ = kafka_opts;
+    async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        let _ = config;
         todo!()
     }
 
