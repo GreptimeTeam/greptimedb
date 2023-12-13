@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -86,6 +87,8 @@ pub(crate) struct RegionWriteCtx {
     /// We keep [WalEntry] instead of mutations to avoid taking mutations
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
+    /// Wal options.
+    wal_options: HashMap<String, String>,
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for i-th mutation.
@@ -102,7 +105,11 @@ pub(crate) struct RegionWriteCtx {
 
 impl RegionWriteCtx {
     /// Returns an empty context.
-    pub(crate) fn new(region_id: RegionId, version_control: &VersionControlRef) -> RegionWriteCtx {
+    pub(crate) fn new(
+        region_id: RegionId,
+        version_control: &VersionControlRef,
+        wal_options: HashMap<String, String>,
+    ) -> RegionWriteCtx {
         let VersionControlData {
             version,
             committed_sequence,
@@ -117,6 +124,7 @@ impl RegionWriteCtx {
             next_sequence: committed_sequence + 1,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
+            wal_options,
             notifiers: Vec::new(),
             failed: false,
             put_num: 0,
@@ -153,7 +161,12 @@ impl RegionWriteCtx {
         &mut self,
         wal_writer: &mut WalWriter<S>,
     ) -> Result<()> {
-        wal_writer.add_entry(self.region_id, self.next_entry_id, &self.wal_entry)?;
+        wal_writer.add_entry(
+            self.region_id,
+            self.next_entry_id,
+            &self.wal_entry,
+            &self.wal_options,
+        )?;
         // We only call this method one time, but we still bump next entry id for consistency.
         self.next_entry_id += 1;
         Ok(())

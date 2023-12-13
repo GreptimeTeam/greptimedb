@@ -57,21 +57,20 @@ impl<S> Wal<S> {
 
 impl<S: LogStore> Wal<S> {
     /// Returns a writer to write to the WAL.
-    pub fn writer(&self, wal_options: &HashMap<String, String>) -> WalWriter<S> {
+    pub fn writer(&self) -> WalWriter<S> {
         WalWriter {
             store: self.store.clone(),
             entries: Vec::new(),
             entry_encode_buf: Vec::new(),
-            wal_options,
         }
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).
-    pub fn scan(
-        &self,
+    pub fn scan<'a>(
+        &'a self,
         region_id: RegionId,
         start_id: EntryId,
-        wal_options: &HashMap<String, String>,
+        wal_options: &'a HashMap<String, String>,
     ) -> Result<WalEntryStream> {
         let stream = try_stream!({
             let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
@@ -123,26 +122,25 @@ fn decode_entry<E: Entry>(region_id: RegionId, entry: E) -> Result<(EntryId, Wal
 }
 
 /// WAL batch writer.
-pub struct WalWriter<'a, S: LogStore> {
+pub struct WalWriter<S: LogStore> {
     /// Log store of the WAL.
     store: Arc<S>,
     /// Entries to write.
     entries: Vec<S::Entry>,
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
-    /// Wal options.
-    wal_options: &'a HashMap<String, String>,
 }
 
-impl<'a, S: LogStore> WalWriter<'a, S> {
+impl<S: LogStore> WalWriter<S> {
     /// Add an wal entry for specific region to the writer's buffer.
     pub fn add_entry(
         &mut self,
         region_id: RegionId,
         entry_id: EntryId,
         wal_entry: &WalEntry,
+        wal_options: &HashMap<String, String>,
     ) -> Result<()> {
-        let namespace = try_build_wal_namespace(&self.store, region_id, &self.wal_options)?;
+        let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
         wal_entry
@@ -265,6 +263,7 @@ mod tests {
     async fn test_write_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
+        let wal_options = HashMap::new();
 
         let entry = WalEntry {
             mutations: vec![
@@ -272,13 +271,19 @@ mod tests {
                 new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
             ],
         };
-        let mut writer = wal.writer(&HashMap::default());
+        let mut writer = wal.writer();
         // Region 1 entry 1.
-        writer.add_entry(RegionId::new(1, 1), 1, &entry).unwrap();
+        writer
+            .add_entry(RegionId::new(1, 1), 1, &entry, &wal_options)
+            .unwrap();
         // Region 2 entry 1.
-        writer.add_entry(RegionId::new(1, 2), 1, &entry).unwrap();
+        writer
+            .add_entry(RegionId::new(1, 2), 1, &entry, &wal_options)
+            .unwrap();
         // Region 1 entry 2.
-        writer.add_entry(RegionId::new(1, 1), 2, &entry).unwrap();
+        writer
+            .add_entry(RegionId::new(1, 1), 2, &entry, &wal_options)
+            .unwrap();
 
         // Test writing multiple region to wal.
         writer.write_to_wal().await.unwrap();
@@ -325,31 +330,32 @@ mod tests {
     async fn test_scan_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
+        let wal_options = HashMap::new();
 
         let entries = sample_entries();
         let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
-        let mut writer = wal.writer(&HashMap::default());
-        writer.add_entry(id1, 1, &entries[0]).unwrap();
+        let mut writer = wal.writer();
+        writer.add_entry(id1, 1, &entries[0], &wal_options).unwrap();
         // Insert one entry into region2. Scan should not return this entry.
-        writer.add_entry(id2, 1, &entries[0]).unwrap();
-        writer.add_entry(id1, 2, &entries[1]).unwrap();
-        writer.add_entry(id1, 3, &entries[2]).unwrap();
-        writer.add_entry(id1, 4, &entries[3]).unwrap();
+        writer.add_entry(id2, 1, &entries[0], &wal_options).unwrap();
+        writer.add_entry(id1, 2, &entries[1], &wal_options).unwrap();
+        writer.add_entry(id1, 3, &entries[2], &wal_options).unwrap();
+        writer.add_entry(id1, 4, &entries[3], &wal_options).unwrap();
 
         writer.write_to_wal().await.unwrap();
 
         // Scan all contents region1
-        let stream = wal.scan(id1, 1, &HashMap::default()).unwrap();
+        let stream = wal.scan(id1, 1, &wal_options).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries, 1, &actual);
 
         // Scan parts of contents
-        let stream = wal.scan(id1, 2, &HashMap::default()).unwrap();
+        let stream = wal.scan(id1, 2, &wal_options).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[1..], 2, &actual);
 
         // Scan out of range
-        let stream = wal.scan(id1, 5, &HashMap::default()).unwrap();
+        let stream = wal.scan(id1, 5, &wal_options).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         assert!(actual.is_empty());
     }
@@ -358,14 +364,20 @@ mod tests {
     async fn test_obsolete_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
-        let wal_options = HashMap::default();
+        let wal_options = HashMap::new();
 
         let entries = sample_entries();
-        let mut writer = wal.writer(&wal_options);
+        let mut writer = wal.writer();
         let region_id = RegionId::new(1, 1);
-        writer.add_entry(region_id, 1, &entries[0]).unwrap();
-        writer.add_entry(region_id, 2, &entries[1]).unwrap();
-        writer.add_entry(region_id, 3, &entries[2]).unwrap();
+        writer
+            .add_entry(region_id, 1, &entries[0], &wal_options)
+            .unwrap();
+        writer
+            .add_entry(region_id, 2, &entries[1], &wal_options)
+            .unwrap();
+        writer
+            .add_entry(region_id, 3, &entries[2], &wal_options)
+            .unwrap();
 
         writer.write_to_wal().await.unwrap();
 
@@ -373,8 +385,10 @@ mod tests {
         wal.obsolete(region_id, 2, &wal_options).await.unwrap();
 
         // Put 4.
-        let mut writer = wal.writer(&wal_options);
-        writer.add_entry(region_id, 4, &entries[3]).unwrap();
+        let mut writer = wal.writer();
+        writer
+            .add_entry(region_id, 4, &entries[3], &wal_options)
+            .unwrap();
         writer.write_to_wal().await.unwrap();
 
         // Scan all

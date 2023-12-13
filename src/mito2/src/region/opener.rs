@@ -174,6 +174,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
+            wal_options: self.wal_options,
         })
     }
 
@@ -261,6 +262,7 @@ impl RegionOpener {
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
+            wal_options: self.wal_options.clone(),
         };
         Ok(Some(region))
     }
@@ -358,7 +360,7 @@ async fn replay_memtable<S: LogStore>(
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
-    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
+    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control, wal_options.clone());
     let mut wal_stream = wal.scan(region_id, flushed_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
