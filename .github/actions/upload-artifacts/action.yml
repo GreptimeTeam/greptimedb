@@ -22,7 +22,7 @@ runs:
       shell: bash
       run: |
         mkdir -p ${{ inputs.artifacts-dir }} && \
-        mv ${{ inputs.target-file }} ${{ inputs.artifacts-dir }}
+        cp ${{ inputs.target-file }} ${{ inputs.artifacts-dir }}
 
     # The compressed artifacts will use the following layout:
     # greptime-linux-amd64-pyo3-v0.3.0sha256sum
