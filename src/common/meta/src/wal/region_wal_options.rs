@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::wal::kafka::Topic as KafkaTopic;
 use crate::wal::WalOptions;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct RegionWalOptions;
 
 impl RegionWalOptions {
@@ -34,7 +34,8 @@ pub type EncodedRegionWalOptions = HashMap<String, String>;
 
 impl From<&RegionWalOptions> for EncodedRegionWalOptions {
     fn from(value: &RegionWalOptions) -> Self {
-        todo!()
+        // TODO(niebayes): implement encoding/decoding for region wal options.
+        EncodedRegionWalOptions::default()
     }
 }
 
@@ -46,6 +47,7 @@ impl TryFrom<&EncodedRegionWalOptions> for RegionWalOptions {
     }
 }
 
+#[derive(Default)]
 pub struct RegionWalOptionsAllocator;
 
 impl RegionWalOptionsAllocator {
@@ -61,6 +63,7 @@ impl RegionWalOptionsAllocator {
 
     /// Allocates a batch of wal options for regions.
     pub fn alloc_batch(&self, num_regions: usize) -> Vec<RegionWalOptions> {
-        todo!()
+        // TODO(niebayes): properly allocate a batch of region wal options.
+        vec![RegionWalOptions; num_regions]
     }
 }

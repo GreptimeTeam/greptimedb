@@ -350,7 +350,8 @@ fn build_procedure_manager(
 async fn build_region_wal_options_allocator(
     _wal_opts: &WalOptions,
 ) -> Result<RegionWalOptionsAllocator> {
-    todo!()
+    // TODO(niebayes): properly construct a region wal options allocator.
+    Ok(RegionWalOptionsAllocator)
 }
 
 fn build_ddl_manager(
