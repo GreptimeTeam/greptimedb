@@ -251,8 +251,7 @@ pub struct GreptimedbV1Response {
     code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<Vec<JsonOutput>>,
+    output: Vec<JsonOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_time_ms: Option<u128>,
 }
@@ -269,7 +268,7 @@ impl GreptimedbV1Response {
         GreptimedbV1Response {
             error: Some(error.output_msg()),
             code: code as u32,
-            output: None,
+            output: vec![],
             execution_time_ms: None,
         }
     }
@@ -278,12 +277,12 @@ impl GreptimedbV1Response {
         GreptimedbV1Response {
             error: Some(err_msg),
             code: error_code as u32,
-            output: None,
+            output: vec![],
             execution_time_ms: None,
         }
     }
 
-    fn with_output(output: Option<Vec<JsonOutput>>) -> Self {
+    fn with_output(output: Vec<JsonOutput>) -> Self {
         GreptimedbV1Response {
             error: None,
             code: StatusCode::Success as u32,
@@ -336,7 +335,7 @@ impl GreptimedbV1Response {
                 }
             }
         }
-        Self::with_output(Some(results))
+        Self::with_output(results)
     }
 
     pub fn code(&self) -> u32 {
@@ -351,8 +350,8 @@ impl GreptimedbV1Response {
         self.error.as_ref()
     }
 
-    pub fn output(&self) -> Option<&[JsonOutput]> {
-        self.output.as_deref()
+    pub fn output(&self) -> &[JsonOutput] {
+        &self.output
     }
 
     pub fn execution_time_ms(&self) -> Option<u128> {
@@ -360,6 +359,8 @@ impl GreptimedbV1Response {
     }
 }
 
+/// It allows the results of SQL queries to be presented in different formats.
+/// Currently, `greptimedb_v1` and `influxdb_v1` are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
     GreptimedbV1,
@@ -1062,7 +1063,7 @@ mod test {
 
             match json_resp {
                 JsonResponse::GreptimedbV1(json_resp) => {
-                    let json_output = &json_resp.output.unwrap()[0];
+                    let json_output = &json_resp.output[0];
                     if let JsonOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
@@ -1076,10 +1077,10 @@ mod test {
                     }
                 }
                 JsonResponse::InfluxdbV1(json_resp) => {
-                    let json_output = &json_resp.results().unwrap()[0];
+                    let json_output = &json_resp.results()[0];
                     assert_eq!(json_output.num_rows(), 4);
                     assert_eq!(json_output.num_cols(), 2);
-                    assert_eq!(json_output.series[0].columns.clone().unwrap()[0], "numbers");
+                    assert_eq!(json_output.series[0].columns.clone()[0], "numbers");
                     assert_eq!(
                         json_output.series[0].values[0][0],
                         serde_json::Value::from(1)

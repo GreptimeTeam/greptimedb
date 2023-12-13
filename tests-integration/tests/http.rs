@@ -143,7 +143,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
 
-    let output = body.output().unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
@@ -172,7 +172,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
@@ -195,7 +195,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
 
     assert_eq!(
@@ -218,7 +218,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
@@ -240,7 +240,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 2);
     assert_eq!(
         outputs[0],
@@ -285,7 +285,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
@@ -319,7 +319,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     };
     assert!(body.success());
     let _ = body.execution_time_ms().unwrap();
-    let outputs = body.output().unwrap();
+    let outputs = body.output();
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
@@ -586,7 +586,7 @@ def test(n) -> vector[f64]:
         unreachable!()
     };
     assert_eq!(body.code(), 0);
-    assert!(body.output().is_none());
+    assert!(body.output().is_empty());
 
     // call script
     let res = client
@@ -601,7 +601,7 @@ def test(n) -> vector[f64]:
 
     assert_eq!(body.code(), 0);
     let _ = body.execution_time_ms().unwrap();
-    let output = body.output().unwrap();
+    let output = body.output();
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],

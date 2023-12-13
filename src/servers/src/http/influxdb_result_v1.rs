@@ -39,12 +39,12 @@ pub struct InfluxdbRecordsOutput {
     // The SQL query does not return the table name, but in InfluxDB,
     // we require the table name, so we set it to an empty string “”.
     name: String,
-    pub(crate) columns: Option<Vec<String>>,
+    pub(crate) columns: Vec<String>,
     pub(crate) values: Vec<Vec<Value>>,
 }
 
 impl InfluxdbRecordsOutput {
-    pub fn new(columns: Option<Vec<String>>, values: Vec<Vec<Value>>) -> Self {
+    pub fn new(columns: Vec<String>, values: Vec<Vec<Value>>) -> Self {
         Self {
             name: "".to_string(),
             columns,
@@ -60,9 +60,9 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
         (epoch, recordbatches): (Option<Epoch>, Vec<RecordBatch>),
     ) -> Result<InfluxdbRecordsOutput, Self::Error> {
         if recordbatches.is_empty() {
-            Ok(InfluxdbRecordsOutput::new(None, vec![]))
+            Ok(InfluxdbRecordsOutput::new(vec![], vec![]))
         } else {
-            // safety ensured by previous empty check
+            // Safety: ensured by previous empty check
             let first = &recordbatches[0];
             let columns = first
                 .schema
@@ -82,14 +82,14 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
                             if let Some(epoch) = epoch {
                                 if let datatypes::value::Value::Timestamp(ts) = &value {
                                     if let Some(timestamp) = epoch.convert_timestamp(*ts) {
-                                        return datatypes::value::Value::Timestamp(timestamp);
+                                        return Value::try_from(
+                                            datatypes::value::Value::Timestamp(timestamp),
+                                        );
                                     }
                                 }
                             }
-
-                            value
+                            Value::try_from(value)
                         })
-                        .map(Value::try_from)
                         .collect::<Result<Vec<Value>, _>>()
                         .context(ToJsonSnafu)?;
 
@@ -97,7 +97,7 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
                 }
             }
 
-            Ok(InfluxdbRecordsOutput::new(Some(columns), rows))
+            Ok(InfluxdbRecordsOutput::new(columns, rows))
         }
     }
 }
@@ -116,15 +116,14 @@ impl InfluxdbOutput {
     pub fn num_cols(&self) -> usize {
         self.series
             .first()
-            .map(|r| r.columns.as_ref().map_or(0, |cols| cols.len()))
+            .map(|r| r.columns.len())
             .unwrap_or(0usize)
     }
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InfluxdbV1Response {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    results: Option<Vec<InfluxdbOutput>>,
+    results: Vec<InfluxdbOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +140,7 @@ impl InfluxdbV1Response {
         }
 
         InfluxdbV1Response {
-            results: None,
+            results: vec![],
             error: Some(error.output_msg()),
             execution_time_ms: None,
         }
@@ -149,13 +148,13 @@ impl InfluxdbV1Response {
 
     pub fn with_error_message(err_msg: String) -> Self {
         InfluxdbV1Response {
-            results: None,
+            results: vec![],
             error: Some(err_msg),
             execution_time_ms: None,
         }
     }
 
-    fn with_output(results: Option<Vec<InfluxdbOutput>>) -> Self {
+    fn with_output(results: Vec<InfluxdbOutput>) -> Self {
         InfluxdbV1Response {
             results,
             error: None,
@@ -175,7 +174,8 @@ impl InfluxdbV1Response {
         // TODO(sunng87): this api response structure cannot represent error
         // well. It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
-        for (statement_id, out) in outputs.into_iter().enumerate().map(|(i, o)| (i as u32, o)) {
+        for (statement_id, out) in outputs.into_iter().enumerate() {
+            let statement_id = statement_id as u32;
             match out {
                 Ok(Output::AffectedRows(_)) => {
                     results.push(InfluxdbOutput {
@@ -221,7 +221,7 @@ impl InfluxdbV1Response {
                 }
             }
         }
-        Self::with_output(Some(results))
+        Self::with_output(results)
     }
 
     pub fn success(&self) -> bool {
@@ -232,8 +232,8 @@ impl InfluxdbV1Response {
         self.error.as_ref()
     }
 
-    pub fn results(&self) -> Option<&[InfluxdbOutput]> {
-        self.results.as_deref()
+    pub fn results(&self) -> &[InfluxdbOutput] {
+        &self.results
     }
 
     pub fn execution_time_ms(&self) -> Option<u128> {

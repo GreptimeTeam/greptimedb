@@ -84,7 +84,7 @@ pub async fn scripts(
             .insert_script(query_ctx, name.unwrap(), &script)
             .await
         {
-            Ok(()) => GreptimedbV1Response::with_output(None).into(),
+            Ok(()) => GreptimedbV1Response::with_output(vec![]).into(),
             Err(e) => json_err!(
                 format!("Insert script error: {}", e.output_msg()),
                 e.status_code()

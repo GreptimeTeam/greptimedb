@@ -42,9 +42,10 @@ pub struct SqlQuery {
     // Both u and µ indicate microseconds.
     // epoch = [ns,u,µ,ms,s],
     //
-    // Currently, only InfluxDB result format is supported, and all
-    // columns of the `Timestamp` type will be converted to their
-    // specified time precision.
+    // TODO(jeremy): currently, only InfluxDB result format is supported,
+    // and all columns of the `Timestamp` type will be converted to their
+    // specified time precision. Maybe greptimedb format can support this
+    // param too.
     pub epoch: Option<String>,
 }
 
