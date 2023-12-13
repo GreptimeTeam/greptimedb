@@ -191,6 +191,9 @@ pub trait MutableVector: Send + Sync {
     /// Convert `self` to an (immutable) [VectorRef] and reset `self`.
     fn to_vector(&mut self) -> VectorRef;
 
+    /// Convert `self` to an (immutable) [VectorRef] and without resetting `self`.
+    fn to_vector_cloned(&self) -> VectorRef;
+
     /// Try to push value ref to this mutable vector.
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()>;
 
@@ -422,5 +425,19 @@ pub mod tests {
 
         // Panic with_capacity
         let _ = ListVectorBuilder::with_capacity(1024);
+    }
+
+    #[test]
+    fn test_mutable_vector_to_vector_cloned() {
+        // create a string vector builder
+        let mut builder = ConcreteDataType::string_datatype().create_mutable_vector(1024);
+        builder.push_value_ref(ValueRef::String("hello"));
+        builder.push_value_ref(ValueRef::String("world"));
+        builder.push_value_ref(ValueRef::String("!"));
+
+        // use MutableVector trait to_vector_cloned won't reset builder
+        let vector = builder.to_vector_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
     }
 }

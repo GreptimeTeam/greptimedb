@@ -159,6 +159,10 @@ impl MutableVector for BinaryVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_binary()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -195,6 +199,12 @@ impl ScalarVectorBuilder for BinaryVectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         BinaryVector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        BinaryVector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }
@@ -347,5 +357,22 @@ mod tests {
 
         let expect: VectorRef = Arc::new(BinaryVector::from_slice(&[b"hello", b"one", b"two"]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_binary_vector_builder_finish_cloned() {
+        let mut builder = BinaryVectorBuilder::with_capacity(1024);
+        builder.push(Some(b"one"));
+        builder.push(Some(b"two"));
+        builder.push(Some(b"three"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"one", vector.get_data(0).unwrap());
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(b"four"));
+        let vector = builder.finish_cloned();
+        assert_eq!(b"four", vector.get_data(3).unwrap());
+        assert_eq!(builder.len(), 4);
     }
 }

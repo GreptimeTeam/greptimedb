@@ -175,6 +175,10 @@ impl MutableVector for BooleanVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_boolean()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -211,6 +215,12 @@ impl ScalarVectorBuilder for BooleanVectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         BooleanVector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        BooleanVector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }
@@ -357,5 +367,22 @@ mod tests {
 
         let expect: VectorRef = Arc::new(BooleanVector::from_slice(&[true, false, true]));
         assert_eq!(expect, vector);
+    }
+
+    #[test]
+    fn test_boolean_vector_builder_finish_cloned() {
+        let mut builder = BooleanVectorBuilder::with_capacity(1024);
+        builder.push(Some(true));
+        builder.push(Some(false));
+        builder.push(Some(true));
+        let vector = builder.finish_cloned();
+        assert!(vector.get_data(0).unwrap());
+        assert_eq!(vector.len(), 3);
+        assert_eq!(builder.len(), 3);
+
+        builder.push(Some(false));
+        let vector = builder.finish_cloned();
+        assert!(!vector.get_data(3).unwrap());
+        assert_eq!(builder.len(), 4);
     }
 }

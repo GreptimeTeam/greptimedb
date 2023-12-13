@@ -310,6 +310,10 @@ impl MutableVector for Decimal128VectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         let decimal_val = value.as_decimal128()?.map(|v| v.val());
         self.mutable_array.append_option(decimal_val);
@@ -356,6 +360,12 @@ impl ScalarVectorBuilder for Decimal128VectorBuilder {
     fn finish(&mut self) -> Self::VectorType {
         Decimal128Vector {
             array: self.mutable_array.finish(),
+        }
+    }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        Decimal128Vector {
+            array: self.mutable_array.finish_cloned(),
         }
     }
 }
@@ -552,5 +562,17 @@ pub mod tests {
             .filter_map(|v| v.map(|x| x.val() * 2))
             .collect::<Vec<_>>();
         assert_eq!(values, vec![2, 4, 6, 8]);
+    }
+
+    #[test]
+    fn test_decimal128_vector_builder_finish_cloned() {
+        let mut builder = Decimal128VectorBuilder::with_capacity(1024);
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        builder.push(Some(Decimal128::new(1, 3, 1)));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 4);
+        assert_eq!(builder.len(), 4);
     }
 }

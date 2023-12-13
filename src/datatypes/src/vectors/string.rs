@@ -190,6 +190,10 @@ impl MutableVector for StringVectorBuilder {
         Arc::new(self.finish())
     }
 
+    fn to_vector_cloned(&self) -> VectorRef {
+        Arc::new(self.finish_cloned())
+    }
+
     fn try_push_value_ref(&mut self, value: ValueRef) -> Result<()> {
         match value.as_string()? {
             Some(v) => self.mutable_array.append_value(v),
@@ -228,6 +232,12 @@ impl ScalarVectorBuilder for StringVectorBuilder {
             array: self.mutable_array.finish(),
         }
     }
+
+    fn finish_cloned(&self) -> Self::VectorType {
+        StringVector {
+            array: self.mutable_array.finish_cloned(),
+        }
+    }
 }
 
 impl Serializable for StringVector {
@@ -243,6 +253,8 @@ vectors::impl_try_from_arrow_array_for_vector!(StringArray, StringVector);
 
 #[cfg(test)]
 mod tests {
+
+    use std::vec;
 
     use arrow::datatypes::DataType;
 
@@ -358,5 +370,20 @@ mod tests {
         let vector = StringVector::from(corpus);
         let serialized = serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap();
         assert_eq!(r#"["🀀🀀🀀","🀁🀁🀁","🀂🀂🀂","🀃🀃🀃","🀆🀆"]"#, serialized);
+    }
+
+    #[test]
+    fn test_string_vector_builder_finish_cloned() {
+        let mut builder = StringVectorBuilder::with_capacity(1024);
+        builder.push(Some("1"));
+        builder.push(Some("2"));
+        builder.push(Some("3"));
+        let vector = builder.finish_cloned();
+        assert_eq!(vector.len(), 3);
+        assert_eq!(
+            r#"["1","2","3"]"#,
+            serde_json::to_string(&vector.serialize_to_json().unwrap()).unwrap(),
+        );
+        assert_eq!(builder.len(), 3);
     }
 }
