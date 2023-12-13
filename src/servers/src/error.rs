@@ -170,9 +170,6 @@ pub enum Error {
     #[snafu(display("Failed to convert time precision, name: {}", name))]
     TimePrecision { name: String, location: Location },
 
-    #[snafu(display("Failed to convert epoch timestamp, name: {}", name))]
-    EpochTimestamp { name: String, location: Location },
-
     #[snafu(display("Connection reset by peer"))]
     ConnResetByPeer { location: Location },
 
@@ -454,7 +451,6 @@ impl ErrorExt for Error {
             | DataFrame { .. }
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
-            | EpochTimestamp { .. }
             | UrlDecode { .. }
             | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
 

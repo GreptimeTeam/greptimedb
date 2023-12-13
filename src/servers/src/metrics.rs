@@ -51,13 +51,6 @@ lazy_static! {
         &[METRIC_DB_LABEL]
     )
     .unwrap();
-    pub static ref METRIC_HTTP_SQL_WITH_INFLUXDB_V1_RESULT_FORMAT_ELAPSED: HistogramVec =
-        register_histogram_vec!(
-            "servers_http_sql_with_influxdb_v1_result_format_elapsed",
-            "servers http sql with influxdb v1 result format elapsed",
-            &[METRIC_DB_LABEL]
-        )
-        .unwrap();
     pub static ref METRIC_HTTP_PROMQL_ELAPSED: HistogramVec = register_histogram_vec!(
         "servers_http_promql_elapsed",
         "servers http promql elapsed",

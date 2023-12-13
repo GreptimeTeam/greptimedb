@@ -27,7 +27,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
-use crate::http::{ApiState, GreptimeOptionsConfigState, JsonResponse};
+use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, JsonResponse, ResponseFormat};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -35,6 +35,17 @@ use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 pub struct SqlQuery {
     pub db: Option<String>,
     pub sql: Option<String>,
+    // (Optional) result format: [`gerptimedb_v1`, `influxdb_v1`],
+    // the default value is `greptimedb_v1`
+    pub format: Option<String>,
+    // Returns epoch timestamps with the specified precision.
+    // Both u and µ indicate microseconds.
+    // epoch = [ns,u,µ,ms,s],
+    //
+    // Currently, only InfluxDB result format is supported, and all
+    // columns of the `Timestamp` type will be converted to their
+    // specified time precision.
+    pub epoch: Option<String>,
 }
 
 /// Handler to execute sql
@@ -50,20 +61,33 @@ pub async fn sql(
     let start = Instant::now();
     let sql = query_params.sql.or(form_params.sql);
     let db = query_ctx.get_db_string();
+    let format = query_params
+        .format
+        .or(form_params.format)
+        .map(|s| s.to_lowercase())
+        .map(|s| ResponseFormat::parse(s.as_str()).unwrap_or(ResponseFormat::GreptimedbV1))
+        .unwrap_or(ResponseFormat::GreptimedbV1);
+    let epoch = query_params
+        .epoch
+        .or(form_params.epoch)
+        .map(|s| s.to_lowercase())
+        .map(|s| Epoch::parse(s.as_str()).unwrap_or(Epoch::Millisecond));
+
     let _timer = crate::metrics::METRIC_HTTP_SQL_ELAPSED
         .with_label_values(&[db.as_str()])
         .start_timer();
 
     let resp = if let Some(sql) = &sql {
-        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone(), format).await {
             return Json(resp);
         }
 
-        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await).await
+        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await, format, epoch).await
     } else {
         JsonResponse::with_error_message(
             "sql parameter is required.".to_string(),
             StatusCode::InvalidArguments,
+            format,
         )
     };
 
@@ -104,13 +128,23 @@ pub async fn promql(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+    if let Some(resp) = validate_schema(
+        sql_handler.clone(),
+        query_ctx.clone(),
+        ResponseFormat::GreptimedbV1,
+    )
+    .await
+    {
         return Json(resp);
     }
 
     let prom_query = params.into();
-    let resp =
-        JsonResponse::from_output(sql_handler.do_promql_query(&prom_query, query_ctx).await).await;
+    let resp = JsonResponse::from_output(
+        sql_handler.do_promql_query(&prom_query, query_ctx).await,
+        ResponseFormat::GreptimedbV1,
+        None,
+    )
+    .await;
 
     Json(resp.with_execution_time(exec_start.elapsed().as_millis()))
 }
@@ -187,6 +221,7 @@ pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response
 async fn validate_schema(
     sql_handler: ServerSqlQueryHandlerRef,
     query_ctx: QueryContextRef,
+    format: ResponseFormat,
 ) -> Option<JsonResponse> {
     match sql_handler
         .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
@@ -195,6 +230,7 @@ async fn validate_schema(
         Ok(false) => Some(JsonResponse::with_error_message(
             format!("Database not found: {}", query_ctx.get_db_string()),
             StatusCode::DatabaseNotFound,
+            format,
         )),
         Err(e) => Some(JsonResponse::with_error_message(
             format!(
@@ -203,6 +239,7 @@ async fn validate_schema(
                 e.output_msg(),
             ),
             StatusCode::Internal,
+            format,
         )),
         _ => None,
     }

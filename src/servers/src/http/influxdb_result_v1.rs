@@ -12,45 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
-use std::time::Instant;
-
-use axum::extract::{Query, State};
-use axum::{Extension, Form, Json};
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::{debug, error};
-use common_time::timestamp::TimeUnit;
-use common_time::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use session::context::QueryContextRef;
 use snafu::ResultExt;
 
-use crate::error::{EpochTimestampSnafu, Error, ToJsonSnafu};
-use crate::http::ApiState;
-use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Epoch {
-    Nanosecond,
-    Microsecond,
-    Millisecond,
-    Second,
-}
-
-impl Display for Epoch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Epoch::Nanosecond => write!(f, "Epoch::Nanosecond"),
-            Epoch::Microsecond => write!(f, "Epoch::Microsecond"),
-            Epoch::Millisecond => write!(f, "Epoch::Millisecond"),
-            Epoch::Second => write!(f, "Epoch::Second"),
-        }
-    }
-}
+use crate::error::{Error, ToJsonSnafu};
+use crate::http::Epoch;
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -62,54 +34,13 @@ pub struct SqlQuery {
     pub sql: Option<String>,
 }
 
-/// Handler to execute sql
-#[axum_macros::debug_handler]
-pub async fn sql_with_influxdb_v1_result(
-    State(state): State<ApiState>,
-    Query(query_params): Query<SqlQuery>,
-    Extension(query_ctx): Extension<QueryContextRef>,
-    Form(form_params): Form<SqlQuery>,
-) -> Json<InfluxdbResponse> {
-    let sql_handler = &state.sql_handler;
-
-    let start = Instant::now();
-    let sql = query_params.sql.or(form_params.sql);
-    let db = query_ctx.get_db_string();
-    let epoch_str = query_params.epoch.or(form_params.epoch);
-    let mut epoch = None;
-    if let Some(epoch_str) = epoch_str {
-        match parse_epoch(epoch_str.as_str()) {
-            Ok(ep) => epoch = Some(ep),
-            Err(e) => {
-                return Json(InfluxdbResponse::with_error(e));
-            }
-        }
-    }
-
-    let _timer = crate::metrics::METRIC_HTTP_SQL_WITH_INFLUXDB_V1_RESULT_FORMAT_ELAPSED
-        .with_label_values(&[db.as_str()])
-        .start_timer();
-
-    let resp = if let Some(sql) = &sql {
-        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
-            return Json(resp);
-        }
-
-        InfluxdbResponse::from_output(sql_handler.do_query(sql, query_ctx).await, epoch).await
-    } else {
-        InfluxdbResponse::with_error_message("sql parameter is required.".to_string())
-    };
-
-    Json(resp.with_execution_time(start.elapsed().as_millis()))
-}
-
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct InfluxdbRecordsOutput {
     // The SQL query does not return the table name, but in InfluxDB,
     // we require the table name, so we set it to an empty string “”.
     name: String,
-    columns: Option<Vec<String>>,
-    values: Vec<Vec<Value>>,
+    pub(crate) columns: Option<Vec<String>>,
+    pub(crate) values: Vec<Vec<Value>>,
 }
 
 impl InfluxdbRecordsOutput {
@@ -150,8 +81,7 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
                         .map(|value| {
                             if let Some(epoch) = epoch {
                                 if let datatypes::value::Value::Timestamp(ts) = &value {
-                                    if let Some(timestamp) = convert_timestamp_by_epoch(*ts, epoch)
-                                    {
+                                    if let Some(timestamp) = epoch.convert_timestamp(*ts) {
                                         return datatypes::value::Value::Timestamp(timestamp);
                                     }
                                 }
@@ -178,8 +108,21 @@ pub struct InfluxdbOutput {
     pub series: Vec<InfluxdbRecordsOutput>,
 }
 
+impl InfluxdbOutput {
+    pub fn num_rows(&self) -> usize {
+        self.series.iter().map(|r| r.values.len()).sum()
+    }
+
+    pub fn num_cols(&self) -> usize {
+        self.series
+            .first()
+            .map(|r| r.columns.as_ref().map_or(0, |cols| cols.len()))
+            .unwrap_or(0usize)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-pub struct InfluxdbResponse {
+pub struct InfluxdbV1Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     results: Option<Vec<InfluxdbOutput>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,7 +131,7 @@ pub struct InfluxdbResponse {
     execution_time_ms: Option<u128>,
 }
 
-impl InfluxdbResponse {
+impl InfluxdbV1Response {
     pub fn with_error(error: impl ErrorExt) -> Self {
         let code = error.status_code();
         if code.should_log_error() {
@@ -197,15 +140,15 @@ impl InfluxdbResponse {
             debug!("Failed to handle HTTP request, err: {:?}", error);
         }
 
-        InfluxdbResponse {
+        InfluxdbV1Response {
             results: None,
             error: Some(error.output_msg()),
             execution_time_ms: None,
         }
     }
 
-    fn with_error_message(err_msg: String) -> Self {
-        InfluxdbResponse {
+    pub fn with_error_message(err_msg: String) -> Self {
+        InfluxdbV1Response {
             results: None,
             error: Some(err_msg),
             execution_time_ms: None,
@@ -213,16 +156,15 @@ impl InfluxdbResponse {
     }
 
     fn with_output(results: Option<Vec<InfluxdbOutput>>) -> Self {
-        InfluxdbResponse {
+        InfluxdbV1Response {
             results,
             error: None,
             execution_time_ms: None,
         }
     }
 
-    fn with_execution_time(mut self, execution_time: u128) -> Self {
+    pub fn with_execution_time(&mut self, execution_time: u128) {
         self.execution_time_ms = Some(execution_time);
-        self
     }
 
     /// Create a influxdb v1 response from query result
@@ -296,52 +238,5 @@ impl InfluxdbResponse {
 
     pub fn execution_time_ms(&self) -> Option<u128> {
         self.execution_time_ms
-    }
-}
-
-async fn validate_schema(
-    sql_handler: ServerSqlQueryHandlerRef,
-    query_ctx: QueryContextRef,
-) -> Option<InfluxdbResponse> {
-    match sql_handler
-        .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
-        .await
-    {
-        Ok(false) => Some(InfluxdbResponse::with_error_message(format!(
-            "Database not found: {}",
-            query_ctx.get_db_string()
-        ))),
-        Err(e) => Some(InfluxdbResponse::with_error_message(format!(
-            "Error checking database: {}, {}",
-            query_ctx.get_db_string(),
-            e.output_msg(),
-        ))),
-        _ => None,
-    }
-}
-
-fn parse_epoch(value: &str) -> crate::error::Result<Epoch> {
-    // Both u and µ indicate microseconds.
-    // epoch = [ns,u,µ,ms,s],
-    // For details, see the Influxdb documents.
-    // https://docs.influxdata.com/influxdb/v1/tools/api/#query-string-parameters-1
-    match value {
-        "ns" => Ok(Epoch::Nanosecond),
-        "u" | "µ" => Ok(Epoch::Microsecond),
-        "ms" => Ok(Epoch::Millisecond),
-        "s" => Ok(Epoch::Second),
-        unknown => EpochTimestampSnafu {
-            name: unknown.to_string(),
-        }
-        .fail(),
-    }
-}
-
-fn convert_timestamp_by_epoch(ts: Timestamp, epoch: Epoch) -> Option<Timestamp> {
-    match epoch {
-        Epoch::Nanosecond => ts.convert_to(TimeUnit::Nanosecond),
-        Epoch::Microsecond => ts.convert_to(TimeUnit::Microsecond),
-        Epoch::Millisecond => ts.convert_to(TimeUnit::Millisecond),
-        Epoch::Second => ts.convert_to(TimeUnit::Second),
     }
 }
