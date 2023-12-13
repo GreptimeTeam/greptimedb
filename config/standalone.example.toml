@@ -3,6 +3,10 @@ mode = "standalone"
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
 
+# Initialize all regions in the background during the startup.
+# By default, it provides services after all regions have been initialized.
+initialize_region_in_background = false
+
 # HTTP server options.
 [http]
 # Server address, "127.0.0.1:4000" by default.

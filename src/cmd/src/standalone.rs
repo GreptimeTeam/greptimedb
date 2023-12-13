@@ -97,6 +97,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
+    pub initialize_region_in_background: bool,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -119,6 +120,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
+            initialize_region_in_background: false,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -166,6 +168,7 @@ impl StandaloneOptions {
             storage: self.storage,
             region_engine: self.region_engine,
             rpc_addr: self.grpc.addr,
+            initialize_region_in_background: self.initialize_region_in_background,
             ..Default::default()
         }
     }

@@ -213,6 +213,7 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let mode = &self.opts.mode;
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         let meta_client = self.meta_client.take();
 
@@ -233,8 +234,23 @@ impl DatanodeBuilder {
 
         let region_server = self.new_region_server(region_event_listener).await?;
 
-        self.initialize_region_server(&region_server, kv_backend, !controlled_by_metasrv)
-            .await?;
+        let open_all_regions = open_all_regions(
+            region_server.clone(),
+            kv_backend,
+            !controlled_by_metasrv,
+            node_id,
+        );
+
+        if self.opts.initialize_region_in_background {
+            // Opens regions in background.
+            common_runtime::spawn_bg(async move {
+                if let Err(err) = open_all_regions.await {
+                    error!(err; "Failed to opening regions during the startup.");
+                }
+            });
+        } else {
+            open_all_regions.await?;
+        }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
@@ -331,6 +347,7 @@ impl DatanodeBuilder {
         Ok((server, addr))
     }
 
+    #[cfg(test)]
     /// Open all regions belong to this datanode.
     async fn initialize_region_server(
         &self,
@@ -338,67 +355,14 @@ impl DatanodeBuilder {
         kv_backend: KvBackendRef,
         open_with_writable: bool,
     ) -> Result<()> {
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        let mut regions = vec![];
-        let mut table_values = datanode_table_manager.tables(node_id);
-
-        while let Some(table_value) = table_values.next().await {
-            let table_value = table_value.context(GetMetadataSnafu)?;
-            for region_number in table_value.regions {
-                // Augments region options with wal options if a wal options is provided.
-                let mut region_options = table_value.region_info.region_options.clone();
-                table_value
-                    .region_info
-                    .region_wal_options
-                    .get(&region_number.to_string())
-                    .and_then(|wal_options| {
-                        region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
-                    });
-
-                regions.push((
-                    RegionId::new(table_value.table_id, region_number),
-                    table_value.region_info.engine.clone(),
-                    table_value.region_info.region_storage_path.clone(),
-                    region_options,
-                ));
-            }
-        }
-        info!("going to open {} regions", regions.len());
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
-        let mut tasks = vec![];
-
-        for (region_id, engine, store_path, options) in regions {
-            let region_dir = region_dir(&store_path, region_id);
-            let semaphore_moved = semaphore.clone();
-            tasks.push(async move {
-                let _permit = semaphore_moved.acquire().await;
-                region_server
-                    .handle_request(
-                        region_id,
-                        RegionRequest::Open(RegionOpenRequest {
-                            engine: engine.clone(),
-                            region_dir,
-                            options,
-                            skip_wal_replay: false,
-                        }),
-                    )
-                    .await?;
-                if open_with_writable {
-                    if let Err(e) = region_server.set_writable(region_id, true) {
-                        error!(
-                            e; "failed to set writable for region {region_id}"
-                        );
-                    }
-                }
-                Ok(())
-            });
-        }
-        let _ = try_join_all(tasks).await?;
-
-        info!("region server is initialized");
-
-        Ok(())
+        open_all_regions(
+            region_server.clone(),
+            kv_backend,
+            open_with_writable,
+            node_id,
+        )
+        .await
     }
 
     async fn new_region_server(
@@ -542,6 +506,78 @@ impl DatanodeBuilder {
         }
         Ok(Arc::new(object_store_manager))
     }
+}
+
+/// Open all regions belong to this datanode.
+async fn open_all_regions(
+    region_server: RegionServer,
+    kv_backend: KvBackendRef,
+    open_with_writable: bool,
+    node_id: u64,
+) -> Result<()> {
+    let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+    let mut regions = vec![];
+    let mut table_values = datanode_table_manager.tables(node_id);
+
+    while let Some(table_value) = table_values.next().await {
+        let table_value = table_value.context(GetMetadataSnafu)?;
+
+        for region_number in table_value.regions {
+            // Augments region options with wal options if a wal options is provided.
+            let mut region_options = table_value.region_info.region_options.clone();
+            table_value
+                .region_info
+                .region_wal_options
+                .get(&region_number.to_string())
+                .and_then(|wal_options| {
+                    region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+                });
+
+            regions.push((
+                RegionId::new(table_value.table_id, region_number),
+                table_value.region_info.engine.clone(),
+                table_value.region_info.region_storage_path.clone(),
+                region_options,
+            ));
+        }
+    }
+    info!("going to open {} regions", regions.len());
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
+    let mut tasks = vec![];
+
+    let region_server_ref = &region_server;
+    for (region_id, engine, store_path, options) in regions {
+        let region_dir = region_dir(&store_path, region_id);
+        let semaphore_moved = semaphore.clone();
+
+        tasks.push(async move {
+            let _permit = semaphore_moved.acquire().await;
+            region_server_ref
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: engine.clone(),
+                        region_dir,
+                        options,
+                        skip_wal_replay: false,
+                    }),
+                )
+                .await?;
+            if open_with_writable {
+                if let Err(e) = region_server_ref.set_writable(region_id, true) {
+                    error!(
+                        e; "failed to set writable for region {region_id}"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+    let _ = try_join_all(tasks).await?;
+
+    info!("all regions are opened");
+
+    Ok(())
 }
 
 #[cfg(test)]
