@@ -20,4 +20,4 @@ use serde::{Deserialize, Serialize};
 pub type Topic = String;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-pub struct KafkaOptions;
+pub struct KafkaConfig;

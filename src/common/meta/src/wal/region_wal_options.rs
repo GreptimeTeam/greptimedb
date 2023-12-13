@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::wal::kafka::Topic as KafkaTopic;
-use crate::wal::WalOptions;
+use crate::wal::WalConfig;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct RegionWalOptions;
@@ -52,7 +52,7 @@ pub struct RegionWalOptionsAllocator;
 
 impl RegionWalOptionsAllocator {
     /// Tries to create a RegionWalOptionsAllocator.
-    pub fn try_new(wal_opts: &WalOptions) -> Result<Self> {
+    pub fn try_new(config: &WalConfig) -> Result<Self> {
         todo!()
     }
 

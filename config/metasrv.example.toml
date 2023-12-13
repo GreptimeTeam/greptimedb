@@ -43,4 +43,4 @@ first_heartbeat_estimate = "1000ms"
 # connect_timeout = "10s"
 # tcp_nodelay = true
 
-# TODO(niebayes): add wal options for meta srv.
+[wal]

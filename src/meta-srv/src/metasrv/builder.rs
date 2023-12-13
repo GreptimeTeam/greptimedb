@@ -29,7 +29,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
 use common_meta::wal::region_wal_options::RegionWalOptionsAllocator;
-use common_meta::wal::WalOptions;
+use common_meta::wal::WalConfig;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -348,9 +348,10 @@ fn build_procedure_manager(
 }
 
 async fn build_region_wal_options_allocator(
-    _wal_opts: &WalOptions,
+    config: &WalConfig,
 ) -> Result<RegionWalOptionsAllocator> {
-    // TODO(niebayes): properly construct a region wal options allocator.
+    // TODO(niebayes): construct a region wal options allocator.
+    let _ = config;
     Ok(RegionWalOptionsAllocator)
 }
 

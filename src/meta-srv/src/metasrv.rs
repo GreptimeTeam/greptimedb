@@ -26,7 +26,7 @@ use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::WalOptions;
+use common_meta::wal::WalConfig;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -72,7 +72,7 @@ pub struct MetaSrvOptions {
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
-    pub wal: WalOptions,
+    pub wal: WalConfig,
 }
 
 impl Default for MetaSrvOptions {
@@ -97,7 +97,7 @@ impl Default for MetaSrvOptions {
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
-            wal: WalOptions::default(),
+            wal: WalConfig::default(),
         }
     }
 }

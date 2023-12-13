@@ -15,8 +15,7 @@
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::topic_selector::TopicSelectorRef;
-use crate::wal::kafka::Topic;
-use crate::wal::KafkaOptions;
+use crate::wal::kafka::{KafkaConfig, Topic};
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {
@@ -27,7 +26,7 @@ pub struct TopicManager {
 
 impl TopicManager {
     /// Creates a new topic manager.
-    pub fn new(kafka_opts: &KafkaOptions, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
         todo!()
     }
 

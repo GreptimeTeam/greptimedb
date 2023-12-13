@@ -12,15 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::default;
+
 use serde::{Deserialize, Serialize};
 
-use crate::wal::kafka::KafkaOptions;
+pub use crate::wal::kafka::KafkaConfig;
 
 pub mod kafka;
 pub mod region_wal_options;
 
-// TODO(niebayes): rename to WalConfig to differ from RegionWalOptions whose abbr is WalOptions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-pub struct WalOptions {
-    kafka: Option<KafkaOptions>,
+#[serde(tag = "provider")]
+pub enum WalConfig {
+    #[default]
+    #[serde(rename = "raft-engine")]
+    RaftEngine,
+    #[serde(rename = "kafka")]
+    Kafka(KafkaConfig),
 }
