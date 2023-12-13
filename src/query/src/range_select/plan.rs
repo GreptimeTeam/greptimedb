@@ -105,7 +105,7 @@ impl Fill {
     }
 
     /// The input `data` contains data on a complete time series.
-    /// If the filling strategy is `PREV` or `LINEAR`, caller must be ensured that the incoming `data` is ascending time order.
+    /// If the filling strategy is `PREV` or `LINEAR`, caller must be ensured that the incoming `ts`&`data` is ascending time order.
     pub fn apply_fill_strategy(&self, ts: &[i64], data: &mut [ScalarValue]) -> DfResult<()> {
         let len = data.len();
         if *self == Fill::Linear {
@@ -120,6 +120,8 @@ impl Fill {
                             data[i] = data[i - 1].clone()
                         }
                     }
+                    // The calculation of linear interpolation is relatively complicated.
+                    // `Self::fill_linear` is used to dispose `Fill::Linear`.
                     Fill::Linear => unreachable!(),
                     Fill::Const(v) => data[i] = v.clone(),
                 }
@@ -1431,45 +1433,41 @@ mod test {
         ];
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
-        let ts = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        // test linear interpolation on irregularly spaced ts/data
+        let ts = vec![
+            1,   // None
+            3,   // 1.0
+            8,   // 11.0
+            30,  // None
+            88,  // 10.0
+            108, // 5.0
+            128, // None
+        ];
         let mut test = vec![
-            ScalarValue::Float32(Some(1.0)),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(3.0)),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(5.0)),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(None),
+            ScalarValue::Float64(None),
+            ScalarValue::Float64(Some(1.0)),
+            ScalarValue::Float64(Some(11.0)),
+            ScalarValue::Float64(None),
+            ScalarValue::Float64(Some(10.0)),
+            ScalarValue::Float64(Some(5.0)),
+            ScalarValue::Float64(None),
         ];
         Fill::Linear.apply_fill_strategy(&ts, &mut test).unwrap();
-        let mut test1 = vec![
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(3.0)),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(7.0)),
-            ScalarValue::Float32(None),
-        ];
+        let data: Vec<_> = test
+            .into_iter()
+            .map(|x| {
+                let ScalarValue::Float64(Some(f)) = x else {
+                    unreachable!()
+                };
+                f
+            })
+            .collect();
+        assert_eq!(data, vec![-3.0, 1.0, 11.0, 10.725, 10.0, 5.0, 0.0]);
+        // test corner case
+        let ts = vec![1];
+        let test = vec![ScalarValue::Float32(None)];
+        let mut test1 = test.clone();
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
-    }
-
-    #[test]
-    fn test_fill_linear1() {
-        let ts = vec![1, 3, 11];
-        let mut test = vec![
-            ScalarValue::Float32(Some(1.0)),
-            ScalarValue::Float32(None),
-            ScalarValue::Float32(Some(3.0)),
-        ];
-        Fill::Linear.apply_fill_strategy(&ts, &mut test).unwrap();
-        assert_eq!(ScalarValue::Float32(Some(1.4)), test[1]);
-        let ts = vec![1];
-        let mut test = vec![ScalarValue::Float32(None)];
-        Fill::Linear.apply_fill_strategy(&ts, &mut test).unwrap();
-        assert_eq!(ScalarValue::Float32(None), test[0]);
     }
 }
