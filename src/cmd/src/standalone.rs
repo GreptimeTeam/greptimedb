@@ -244,7 +244,7 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -331,7 +331,7 @@ impl StartCommand {
     #[allow(unreachable_code)]
     #[allow(unused_variables)]
     #[allow(clippy::diverging_sub_expression)]
-    pub async fn build(self, opts: MixOptions) -> Result<Instance> {
+    async fn build(self, opts: MixOptions) -> Result<Instance> {
         let mut fe_opts = opts.frontend.clone();
         #[allow(clippy::unnecessary_mut_passed)]
         let fe_plugins = plugins::setup_frontend_plugins(&mut fe_opts) // mut ref is MUST, DO NOT change it

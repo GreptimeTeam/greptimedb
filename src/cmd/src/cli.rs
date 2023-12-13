@@ -27,8 +27,6 @@ mod repl;
 #[allow(deprecated)]
 mod upgrade;
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use bench::BenchTableMetadataCommand;
 use clap::Parser;
@@ -47,11 +45,11 @@ pub trait Tool: Send + Sync {
 }
 
 pub struct Instance {
-    tool: Arc<dyn Tool>,
+    tool: Box<dyn Tool>,
 }
 
 impl Instance {
-    fn new(tool: Arc<dyn Tool>) -> Self {
+    fn new(tool: Box<dyn Tool>) -> Self {
         Self { tool }
     }
 }

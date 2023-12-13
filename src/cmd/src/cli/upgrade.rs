@@ -76,7 +76,7 @@ impl UpgradeCommand {
             skip_schema_keys: self.skip_schema_keys,
             skip_table_route_keys: self.skip_table_route_keys,
         };
-        Ok(Instance::new(Arc::new(tool)))
+        Ok(Instance::new(Box::new(tool)))
     }
 }
 

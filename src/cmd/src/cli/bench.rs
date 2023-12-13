@@ -69,7 +69,7 @@ impl BenchTableMetadataCommand {
             table_metadata_manager,
             count: self.count,
         };
-        Ok(Instance::new(Arc::new(tool)))
+        Ok(Instance::new(Box::new(tool)))
     }
 }
 
