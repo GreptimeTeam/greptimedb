@@ -251,6 +251,7 @@ pub struct GreptimedbV1Response {
     code: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     output: Vec<JsonOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_time_ms: Option<u64>,
