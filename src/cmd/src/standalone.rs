@@ -175,7 +175,11 @@ pub struct Instance {
 
 #[async_trait]
 impl App for Instance {
-    async fn start(&self) -> Result<()> {
+    fn name(&self) -> &str {
+        "greptime-standalone"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         self.datanode.start_telemetry();
 
         self.procedure_manager

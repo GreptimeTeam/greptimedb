@@ -15,7 +15,6 @@
 #![doc = include_str!("../../../../README.md")]
 
 use std::fmt;
-use std::sync::Arc;
 
 use clap::{FromArgMatches, Parser, Subcommand};
 use cmd::error::Result;
@@ -39,27 +38,27 @@ enum SubCommand {
 }
 
 impl SubCommand {
-    async fn build(self, opts: Options) -> Result<Arc<dyn App>> {
-        let app: Arc<dyn App> = match (self, opts) {
+    async fn build(self, opts: Options) -> Result<Box<dyn App>> {
+        let app: Box<dyn App> = match (self, opts) {
             (SubCommand::Datanode(cmd), Options::Datanode(dn_opts)) => {
                 let app = cmd.build(*dn_opts).await?;
-                Arc::new(app) as _
+                Box::new(app) as _
             }
             (SubCommand::Frontend(cmd), Options::Frontend(fe_opts)) => {
                 let app = cmd.build(*fe_opts).await?;
-                Arc::new(app) as _
+                Box::new(app) as _
             }
             (SubCommand::Metasrv(cmd), Options::Metasrv(meta_opts)) => {
                 let app = cmd.build(*meta_opts).await?;
-                Arc::new(app) as _
+                Box::new(app) as _
             }
             (SubCommand::Standalone(cmd), Options::Standalone(opts)) => {
                 let app = cmd.build(*opts).await?;
-                Arc::new(app) as _
+                Box::new(app) as _
             }
             (SubCommand::Cli(cmd), Options::Cli(_)) => {
                 let app = cmd.build().await?;
-                Arc::new(app) as _
+                Box::new(app) as _
             }
 
             _ => unreachable!(),
@@ -126,5 +125,5 @@ async fn main() -> Result<()> {
 
     let app = subcmd.build(opts).await?;
 
-    start_app(app_name, app).await
+    start_app(app).await
 }

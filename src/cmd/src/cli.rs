@@ -58,7 +58,11 @@ impl Instance {
 
 #[async_trait]
 impl App for Instance {
-    async fn start(&self) -> Result<()> {
+    fn name(&self) -> &str {
+        "greptime-cli"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         self.tool.do_work().await
     }
 

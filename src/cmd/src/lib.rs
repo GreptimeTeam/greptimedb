@@ -14,8 +14,6 @@
 
 #![feature(assert_matches)]
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use clap::arg;
 use common_telemetry::{error, info};
@@ -35,21 +33,25 @@ lazy_static::lazy_static! {
 
 #[async_trait]
 pub trait App {
-    async fn start(&self) -> error::Result<()>;
+    fn name(&self) -> &str;
+
+    async fn start(&mut self) -> error::Result<()>;
 
     async fn stop(&self) -> error::Result<()>;
 }
 
-pub async fn start_app(app_name: String, app: Arc<dyn App>) -> error::Result<()> {
+pub async fn start_app(mut app: Box<dyn App>) -> error::Result<()> {
+    let name = app.name().to_string();
+
     tokio::select! {
         result = app.start() => {
             if let Err(err) = result {
-                error!(err; "Failed to start app {}!", app_name);
+                error!(err; "Failed to start app {name}!");
             }
         }
         _ = tokio::signal::ctrl_c() => {
             if let Err(err) = app.stop().await {
-                error!(err; "Failed to stop app {}!", app_name);
+                error!(err; "Failed to stop app {name}!");
             }
             info!("Goodbye!");
         }

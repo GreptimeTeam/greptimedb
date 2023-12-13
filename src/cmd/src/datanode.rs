@@ -24,40 +24,40 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use meta_client::MetaClientOptions;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
-use tokio::sync::Mutex;
 
 use crate::error::{MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu};
 use crate::options::{CliOptions, Options};
 use crate::App;
 
 pub struct Instance {
-    datanode: Arc<Mutex<Datanode>>,
+    datanode: Datanode,
 }
 
 impl Instance {
     fn new(datanode: Datanode) -> Self {
-        Self {
-            datanode: Arc::new(Mutex::new(datanode)),
-        }
+        Self { datanode }
     }
 }
 
 #[async_trait]
 impl App for Instance {
-    async fn start(&self) -> Result<()> {
-        let mut datanode = self.datanode.lock().await;
+    fn name(&self) -> &str {
+        "greptime-datanode"
+    }
 
-        plugins::start_datanode_plugins(datanode.plugins())
+    async fn start(&mut self) -> Result<()> {
+        plugins::start_datanode_plugins(self.datanode.plugins())
             .await
             .context(StartDatanodeSnafu)?;
 
-        datanode.start().await.context(StartDatanodeSnafu)
+        self.datanode.start().await.context(StartDatanodeSnafu)
     }
 
     async fn stop(&self) -> Result<()> {
-        let datanode = self.datanode.lock().await;
-
-        datanode.shutdown().await.context(ShutdownDatanodeSnafu)
+        self.datanode
+            .shutdown()
+            .await
+            .context(ShutdownDatanodeSnafu)
     }
 }
 

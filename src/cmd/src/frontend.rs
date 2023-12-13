@@ -37,20 +37,22 @@ use crate::options::{CliOptions, Options};
 use crate::App;
 
 pub struct Instance {
-    frontend: Arc<FeInstance>,
+    frontend: FeInstance,
 }
 
 impl Instance {
     fn new(frontend: FeInstance) -> Self {
-        Self {
-            frontend: Arc::new(frontend),
-        }
+        Self { frontend }
     }
 }
 
 #[async_trait]
 impl App for Instance {
-    async fn start(&self) -> Result<()> {
+    fn name(&self) -> &str {
+        "greptime-frontend"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         plugins::start_frontend_plugins(self.frontend.plugins().clone())
             .await
             .context(StartFrontendSnafu)?;

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,40 +20,37 @@ use common_telemetry::logging;
 use meta_srv::bootstrap::MetaSrvInstance;
 use meta_srv::metasrv::MetaSrvOptions;
 use snafu::ResultExt;
-use tokio::sync::Mutex;
 
 use crate::error::{self, Result, StartMetaServerSnafu};
 use crate::options::{CliOptions, Options};
 use crate::App;
 
 pub struct Instance {
-    instance: Arc<Mutex<MetaSrvInstance>>,
+    instance: MetaSrvInstance,
 }
 
 impl Instance {
     fn new(instance: MetaSrvInstance) -> Self {
-        Self {
-            instance: Arc::new(Mutex::new(instance)),
-        }
+        Self { instance }
     }
 }
 
 #[async_trait]
 impl App for Instance {
-    async fn start(&self) -> Result<()> {
-        let mut instance = self.instance.lock().await;
+    fn name(&self) -> &str {
+        "greptime-metasrv"
+    }
 
-        plugins::start_meta_srv_plugins(instance.plugins())
+    async fn start(&mut self) -> Result<()> {
+        plugins::start_meta_srv_plugins(self.instance.plugins())
             .await
             .context(StartMetaServerSnafu)?;
 
-        instance.start().await.context(StartMetaServerSnafu)
+        self.instance.start().await.context(StartMetaServerSnafu)
     }
 
     async fn stop(&self) -> Result<()> {
-        let instance = self.instance.lock().await;
-
-        instance
+        self.instance
             .shutdown()
             .await
             .context(error::ShutdownMetaServerSnafu)
