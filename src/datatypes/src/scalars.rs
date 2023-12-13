@@ -139,10 +139,10 @@ pub trait ScalarVectorBuilder: MutableVector {
     /// Push a value into the builder.
     fn push(&mut self, value: Option<<Self::VectorType as ScalarVector>::RefItem<'_>>);
 
-    /// Finish build a new vector and reset `self`.
+    /// Build a new vector and reset `self`.
     fn finish(&mut self) -> Self::VectorType;
 
-    /// Finish build a new vector without resetting `self`.
+    /// Build a new vector without resetting `self`.
     fn finish_cloned(&self) -> Self::VectorType;
 }
 
