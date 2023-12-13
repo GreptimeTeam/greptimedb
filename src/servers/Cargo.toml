@@ -54,10 +54,10 @@ lazy_static.workspace = true
 mime_guess = "2.0"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-opensrv-mysql = "0.5"
+opensrv-mysql = "0.6"
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.16"
+pgwire = "0.17"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
@@ -72,8 +72,9 @@ query.workspace = true
 rand.workspace = true
 regex.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
-rustls = "0.21"
-rustls-pemfile = "1.0"
+rustls = "0.22"
+rustls-pemfile = "2.0"
+rustls-pki-types = "1.0"
 schemars = "0.8"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
@@ -85,8 +86,8 @@ snap = "1"
 sql.workspace = true
 strum.workspace = true
 table.workspace = true
-tokio-rustls = "0.24"
 tokio-stream = { workspace = true, features = ["net"] }
+tokio-rustls = "0.25"
 tokio.workspace = true
 tonic-reflection = "0.10"
 tonic.workspace = true
@@ -108,13 +109,12 @@ mysql_async = { version = "0.33", default-features = false, features = [
     "default-rustls",
 ] }
 rand.workspace = true
-rustls = { version = "0.21", features = ["dangerous_configuration"] }
 script = { workspace = true, features = ["python"] }
 serde_json = "1.0"
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.10"
+tokio-postgres-rustls = { git = "https://github.com/ol-teuto/tokio-postgres-rustls.git", branch = "rustls-update"}
 tokio-test = "0.4"
 
 [build-dependencies]
