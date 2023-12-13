@@ -721,10 +721,8 @@ impl HttpServer {
                     ))
                     // auth layer
                     .layer(middleware::from_fn_with_state(
-                        AuthState {
-                            user_provider: self.user_provider.clone(),
-                        },
-                        authorize::auth,
+                        AuthState::new(self.user_provider.clone()),
+                        authorize::check_http_auth,
                     )),
             )
             // Handlers for debug, we don't expect a timeout.

@@ -37,9 +37,17 @@ use crate::error::{
 };
 use crate::http::HTTP_API_PREFIX;
 
+/// AuthState is a holder state for [`UserProviderRef`]
+/// during [`check_http_auth`] function in axum's middleware
 #[derive(Clone)]
 pub struct AuthState {
-    pub user_provider: Option<UserProviderRef>,
+    user_provider: Option<UserProviderRef>,
+}
+
+impl AuthState {
+    pub fn new(user_provider: Option<UserProviderRef>) -> Self {
+        Self { user_provider }
+    }
 }
 
 pub async fn inner_auth<B>(
@@ -97,7 +105,7 @@ pub async fn inner_auth<B>(
     }
 }
 
-pub async fn auth<B>(
+pub async fn check_http_auth<B>(
     State(auth_state): State<AuthState>,
     req: Request<B>,
     next: Next<B>,
