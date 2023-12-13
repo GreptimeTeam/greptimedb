@@ -79,15 +79,16 @@ impl TryFrom<(Option<Epoch>, Vec<RecordBatch>)> for InfluxdbRecordsOutput {
                     let value_row = row
                         .into_iter()
                         .map(|value| {
-                            if let Some(epoch) = epoch {
-                                if let datatypes::value::Value::Timestamp(ts) = &value {
+                            let value = match (epoch, &value) {
+                                (Some(epoch), datatypes::value::Value::Timestamp(ts)) => {
                                     if let Some(timestamp) = epoch.convert_timestamp(*ts) {
-                                        return Value::try_from(
-                                            datatypes::value::Value::Timestamp(timestamp),
-                                        );
+                                        datatypes::value::Value::Timestamp(timestamp)
+                                    } else {
+                                        value
                                     }
                                 }
-                            }
+                                _ => value,
+                            };
                             Value::try_from(value)
                         })
                         .collect::<Result<Vec<Value>, _>>()
