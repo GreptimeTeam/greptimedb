@@ -14,6 +14,7 @@
 
 //! Write ahead log of the engine.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -64,7 +65,12 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Scan entries of specific region starting from `start_id` (inclusive).
-    pub fn scan(&self, region_id: RegionId, start_id: EntryId) -> Result<WalEntryStream> {
+    pub fn scan(
+        &self,
+        region_id: RegionId,
+        start_id: EntryId,
+        _wal_options: &HashMap<String, String>,
+    ) -> Result<WalEntryStream> {
         let stream = try_stream!({
             let namespace = self.store.namespace(region_id.into());
             let mut stream = self
@@ -309,17 +315,17 @@ mod tests {
         writer.write_to_wal().await.unwrap();
 
         // Scan all contents region1
-        let stream = wal.scan(id1, 1).unwrap();
+        let stream = wal.scan(id1, 1, &HashMap::default()).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries, 1, &actual);
 
         // Scan parts of contents
-        let stream = wal.scan(id1, 2).unwrap();
+        let stream = wal.scan(id1, 2, &HashMap::default()).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[1..], 2, &actual);
 
         // Scan out of range
-        let stream = wal.scan(id1, 5).unwrap();
+        let stream = wal.scan(id1, 5, &HashMap::default()).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         assert!(actual.is_empty());
     }
@@ -347,7 +353,7 @@ mod tests {
         writer.write_to_wal().await.unwrap();
 
         // Scan all
-        let stream = wal.scan(region_id, 1).unwrap();
+        let stream = wal.scan(region_id, 1, &HashMap::default()).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[2..], 3, &actual);
     }

@@ -53,6 +53,7 @@ pub(crate) struct RegionOpener {
     region_dir: String,
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
+    wal_options: HashMap<String, String>,
     cache_manager: Option<CacheManagerRef>,
 }
 
@@ -73,6 +74,7 @@ impl RegionOpener {
             region_dir: normalize_dir(region_dir),
             scheduler,
             options: HashMap::new(),
+            wal_options: HashMap::new(),
             cache_manager: None,
         }
     }
@@ -86,6 +88,12 @@ impl RegionOpener {
     /// Sets options for the region.
     pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
         self.options = value;
+        self
+    }
+
+    /// Sets wal options for the region.
+    pub(crate) fn wal_options(mut self, wal_options: HashMap<String, String>) -> Self {
+        self.wal_options = wal_options;
         self
     }
 
@@ -235,7 +243,14 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        replay_memtable(
+            wal,
+            &self.wal_options,
+            region_id,
+            flushed_entry_id,
+            &version_control,
+        )
+        .await?;
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -334,6 +349,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
+    wal_options: &HashMap<String, String>,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
@@ -343,7 +359,7 @@ async fn replay_memtable<S: LogStore>(
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
+    let mut wal_stream = wal.scan(region_id, flushed_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);
