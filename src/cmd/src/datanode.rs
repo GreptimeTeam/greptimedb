@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
+use common_config::WalConfig;
 use common_telemetry::logging;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
@@ -154,7 +155,13 @@ impl StartCommand {
         }
 
         if let Some(wal_dir) = &self.wal_dir {
-            opts.wal.dir = Some(wal_dir.clone());
+            // `wal_dir` only affects raft-engine config.
+            match &mut opts.wal {
+                WalConfig::RaftEngine(raft_engine_config) => {
+                    raft_engine_config.dir.replace(wal_dir.clone());
+                }
+                WalConfig::Kafka(_) => {}
+            }
         }
 
         if let Some(http_addr) = &self.http_addr {
@@ -224,6 +231,7 @@ mod tests {
     #[test]
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
+        // TODO(niebayes): update wal stuff in toml str.
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false
@@ -281,12 +289,18 @@ mod tests {
 
         assert_eq!("127.0.0.1:3001".to_string(), options.rpc_addr);
         assert_eq!(Some(42), options.node_id);
-        assert_eq!("/other/wal", options.wal.dir.unwrap());
 
-        assert_eq!(Duration::from_secs(600), options.wal.purge_interval);
-        assert_eq!(1024 * 1024 * 1024, options.wal.file_size.0);
-        assert_eq!(1024 * 1024 * 1024 * 50, options.wal.purge_threshold.0);
-        assert!(!options.wal.sync_write);
+        let WalConfig::RaftEngine(raft_engine_config) = options.wal else {
+            unreachable!()
+        };
+        assert_eq!("/other/wal", raft_engine_config.dir.unwrap());
+        assert_eq!(Duration::from_secs(600), raft_engine_config.purge_interval);
+        assert_eq!(1024 * 1024 * 1024, raft_engine_config.file_size.0);
+        assert_eq!(
+            1024 * 1024 * 1024 * 50,
+            raft_engine_config.purge_threshold.0
+        );
+        assert!(!raft_engine_config.sync_write);
 
         let HeartbeatOptions {
             interval: heart_beat_interval,
@@ -383,6 +397,7 @@ mod tests {
     #[test]
     fn test_config_precedence_order() {
         let mut file = create_named_temp_file();
+        // TODO(niebayes): update wal stuff in toml str.
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false
@@ -461,7 +476,10 @@ mod tests {
                 };
 
                 // Should be read from env, env > default values.
-                assert_eq!(opts.wal.read_batch_size, 100,);
+                let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                    unreachable!()
+                };
+                assert_eq!(raft_engine_config.read_batch_size, 100,);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -472,10 +490,13 @@ mod tests {
                 );
 
                 // Should be read from config file, config file > env > default values.
-                assert_eq!(opts.wal.purge_interval, Duration::from_secs(60 * 10));
+                assert_eq!(
+                    raft_engine_config.purge_interval,
+                    Duration::from_secs(60 * 10)
+                );
 
                 // Should be read from cli, cli > config file > env > default values.
-                assert_eq!(opts.wal.dir.unwrap(), "/other/wal/dir");
+                assert_eq!(raft_engine_config.dir.unwrap(), "/other/wal/dir");
 
                 // Should be default value.
                 assert_eq!(opts.http.addr, DatanodeOptions::default().http.addr);

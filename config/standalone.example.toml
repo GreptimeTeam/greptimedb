@@ -82,6 +82,13 @@ enable = true
 
 # WAL options.
 [wal]
+# Available wal providers:
+# - "RaftEngine" (default)
+# - "Kafka"
+provider = "RaftEngine"
+
+# Raft-engine wal options.
+[wal.raft_engine]
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
@@ -94,6 +101,9 @@ purge_interval = "10m"
 read_batch_size = 128
 # Whether to sync log file after every write.
 sync_write = false
+
+# Kafka wal options.
+[wal.kafka]
 
 # Metadata storage options.
 [metadata_store]

@@ -148,6 +148,7 @@ impl Options {
 mod tests {
     use std::io::Write;
 
+    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 
@@ -156,6 +157,7 @@ mod tests {
     #[test]
     fn test_load_layered_options() {
         let mut file = create_named_temp_file();
+        // TODO(niebayes): update wal stuff in toml str.
         let toml_str = r#"
             mode = "distributed"
             enable_memory_catalog = false
@@ -254,7 +256,10 @@ mod tests {
                 );
 
                 // Should be the values from config file, not environment variables.
-                assert_eq!(opts.wal.dir.unwrap(), "/tmp/greptimedb/wal");
+                let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                    unreachable!()
+                };
+                assert_eq!(raft_engine_config.dir.unwrap(), "/tmp/greptimedb/wal");
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);

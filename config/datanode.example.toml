@@ -31,6 +31,10 @@ tcp_nodelay = true
 
 # WAL options, see `standalone.example.toml`.
 [wal]
+provider = "RaftEngine"
+
+# Raft-engine wal options, .
+[wal.raft_engine]
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 file_size = "256MB"
@@ -38,6 +42,9 @@ purge_threshold = "4GB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
+
+# Kafka wal options.
+[wal.kafka]
 
 # Storage options, see `standalone.example.toml`.
 [storage]

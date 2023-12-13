@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_config::wal::kafka::KafkaOptions;
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
@@ -26,7 +27,7 @@ use crate::kafka::{EntryImpl, NamespaceImpl};
 pub struct KafkaLogStore;
 
 impl KafkaLogStore {
-    pub async fn try_new() -> Result<Self> {
+    pub async fn try_new(options: KafkaOptions) -> Result<Self> {
         todo!()
     }
 }

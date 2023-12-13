@@ -462,6 +462,7 @@ mod tests {
     #[test]
     fn test_read_from_config_file() {
         let mut file = create_named_temp_file();
+        // TODO(niebayes): update wal stuff in toml str.
         let toml_str = r#"
             mode = "distributed"
 
@@ -531,7 +532,10 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
+        let WalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+            unreachable!()
+        };
+        assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());
 
         assert!(matches!(
             &dn_opts.storage.store,

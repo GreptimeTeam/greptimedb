@@ -19,6 +19,7 @@ use crate::wal::kafka::KafkaOptions;
 pub mod kafka;
 pub mod region_wal_options;
 
+// TODO(niebayes): rename to WalConfig to differ from RegionWalOptions whose abbr is WalOptions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct WalOptions {
     kafka: Option<KafkaOptions>,
