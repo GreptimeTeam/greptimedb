@@ -30,7 +30,8 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
+    BuildWalNamespaceSnafu, DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result,
+    WriteWalSnafu,
 };
 
 /// WAL entry id.
@@ -56,11 +57,12 @@ impl<S> Wal<S> {
 
 impl<S: LogStore> Wal<S> {
     /// Returns a writer to write to the WAL.
-    pub fn writer(&self) -> WalWriter<S> {
+    pub fn writer(&self, wal_options: &HashMap<String, String>) -> WalWriter<S> {
         WalWriter {
             store: self.store.clone(),
             entries: Vec::new(),
             entry_encode_buf: Vec::new(),
+            wal_options,
         }
     }
 
@@ -69,10 +71,10 @@ impl<S: LogStore> Wal<S> {
         &self,
         region_id: RegionId,
         start_id: EntryId,
-        _wal_options: &HashMap<String, String>,
+        wal_options: &HashMap<String, String>,
     ) -> Result<WalEntryStream> {
         let stream = try_stream!({
-            let namespace = self.store.namespace(region_id.into());
+            let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
             let mut stream = self
                 .store
                 .read(&namespace, start_id)
@@ -95,8 +97,13 @@ impl<S: LogStore> Wal<S> {
     }
 
     /// Mark entries whose ids `<= last_id` as deleted.
-    pub async fn obsolete(&self, region_id: RegionId, last_id: EntryId) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+    pub async fn obsolete(
+        &self,
+        region_id: RegionId,
+        last_id: EntryId,
+        wal_options: &HashMap<String, String>,
+    ) -> Result<()> {
+        let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
         self.store
             .obsolete(namespace, last_id)
             .await
@@ -116,16 +123,18 @@ fn decode_entry<E: Entry>(region_id: RegionId, entry: E) -> Result<(EntryId, Wal
 }
 
 /// WAL batch writer.
-pub struct WalWriter<S: LogStore> {
+pub struct WalWriter<'a, S: LogStore> {
     /// Log store of the WAL.
     store: Arc<S>,
     /// Entries to write.
     entries: Vec<S::Entry>,
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
+    /// Wal options.
+    wal_options: &'a HashMap<String, String>,
 }
 
-impl<S: LogStore> WalWriter<S> {
+impl<'a, S: LogStore> WalWriter<'a, S> {
     /// Add an wal entry for specific region to the writer's buffer.
     pub fn add_entry(
         &mut self,
@@ -133,7 +142,7 @@ impl<S: LogStore> WalWriter<S> {
         entry_id: EntryId,
         wal_entry: &WalEntry,
     ) -> Result<()> {
-        let namespace = self.store.namespace(region_id.into());
+        let namespace = try_build_wal_namespace(&self.store, region_id, &self.wal_options)?;
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
         wal_entry
@@ -158,7 +167,22 @@ impl<S: LogStore> WalWriter<S> {
             .await
             .map_err(BoxedError::new)
             .context(WriteWalSnafu)
+            .map(|_| ())
     }
+}
+
+fn try_build_wal_namespace<S: LogStore>(
+    store: &Arc<S>,
+    region_id: RegionId,
+    wal_options: &HashMap<String, String>,
+) -> Result<S::Namespace> {
+    store
+        .namespace(region_id.into(), wal_options)
+        .map_err(BoxedError::new)
+        .with_context(|_| BuildWalNamespaceSnafu {
+            region_id,
+            wal_options: wal_options.clone(),
+        })
 }
 
 #[cfg(test)]
@@ -248,7 +272,7 @@ mod tests {
                 new_mutation(OpType::Put, 2, &[("k3", 3), ("k4", 4)]),
             ],
         };
-        let mut writer = wal.writer();
+        let mut writer = wal.writer(&HashMap::default());
         // Region 1 entry 1.
         writer.add_entry(RegionId::new(1, 1), 1, &entry).unwrap();
         // Region 2 entry 1.
@@ -304,7 +328,7 @@ mod tests {
 
         let entries = sample_entries();
         let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
-        let mut writer = wal.writer();
+        let mut writer = wal.writer(&HashMap::default());
         writer.add_entry(id1, 1, &entries[0]).unwrap();
         // Insert one entry into region2. Scan should not return this entry.
         writer.add_entry(id2, 1, &entries[0]).unwrap();
@@ -334,9 +358,10 @@ mod tests {
     async fn test_obsolete_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
+        let wal_options = HashMap::default();
 
         let entries = sample_entries();
-        let mut writer = wal.writer();
+        let mut writer = wal.writer(&wal_options);
         let region_id = RegionId::new(1, 1);
         writer.add_entry(region_id, 1, &entries[0]).unwrap();
         writer.add_entry(region_id, 2, &entries[1]).unwrap();
@@ -345,15 +370,15 @@ mod tests {
         writer.write_to_wal().await.unwrap();
 
         // Delete 1, 2.
-        wal.obsolete(region_id, 2).await.unwrap();
+        wal.obsolete(region_id, 2, &wal_options).await.unwrap();
 
         // Put 4.
-        let mut writer = wal.writer();
+        let mut writer = wal.writer(&wal_options);
         writer.add_entry(region_id, 4, &entries[3]).unwrap();
         writer.write_to_wal().await.unwrap();
 
         // Scan all
-        let stream = wal.scan(region_id, 1, &HashMap::default()).unwrap();
+        let stream = wal.scan(region_id, 1, &wal_options).unwrap();
         let actual: Vec<_> = stream.try_collect().await.unwrap();
         check_entries(&entries[2..], 3, &actual);
     }

@@ -17,6 +17,7 @@ use common_error::ext::ErrorExt;
 use crate::logstore::namespace::Namespace;
 
 pub type Offset = usize;
+// TODO(niebayes): Consider removing `Epoch`.
 pub type Epoch = u64;
 pub type Id = u64;
 
