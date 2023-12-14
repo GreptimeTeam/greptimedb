@@ -21,7 +21,6 @@ use common_error::ext::ErrorExt;
 use crate::logstore::entry::{Entry, Id as EntryId, Offset as EntryOffset};
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::namespace::{Id as NamespaceId, Namespace};
-use crate::storage::RegionNumber;
 
 pub mod entry;
 pub mod entry_stream;
@@ -96,7 +95,7 @@ pub struct AppendResponse {
 /// The response of an `append_batch` operation.
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
-    /// Key: region number. Value: the known minimum start offset of the appended log entries belonging to the region.
+    /// Key: region id (as u64). Value: the known minimum start offset of the appended log entries belonging to the region.
     /// Depends on the `LogStore` implementation, the entry offsets may be missing.
-    pub offsets: HashMap<RegionNumber, EntryOffset>,
+    pub offsets: HashMap<u64, EntryOffset>,
 }
