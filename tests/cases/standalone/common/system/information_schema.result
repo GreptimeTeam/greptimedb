@@ -103,8 +103,48 @@ select * from engines;
 +--------+---------+-------------------------------------+--------------+----+------------+
 | engine | support | comment                             | transactions | xa | savepoints |
 +--------+---------+-------------------------------------+--------------+----+------------+
-| Mito   | DEFAULT | Storage engine for time-series data | NO           | NO | NO         |
+| mito   | DEFAULT | Storage engine for time-series data | NO           | NO | NO         |
 +--------+---------+-------------------------------------+--------------+----+------------+
+
+-- tables not implemented
+desc table COLUMN_PRIVILEGES;
+
++----------------+--------+-----+------+---------+---------------+
+| Column         | Type   | Key | Null | Default | Semantic Type |
++----------------+--------+-----+------+---------+---------------+
+| grantee        | String |     | NO   |         | FIELD         |
+| table_catalog  | String |     | NO   |         | FIELD         |
+| table_schema   | String |     | NO   |         | FIELD         |
+| table_name     | String |     | NO   |         | FIELD         |
+| column_name    | String |     | NO   |         | FIELD         |
+| privilege_type | String |     | NO   |         | FIELD         |
+| is_grantable   | String |     | NO   |         | FIELD         |
++----------------+--------+-----+------+---------+---------------+
+
+select * from COLUMN_PRIVILEGES;
+
++---------+---------------+--------------+------------+-------------+----------------+--------------+
+| grantee | table_catalog | table_schema | table_name | column_name | privilege_type | is_grantable |
++---------+---------------+--------------+------------+-------------+----------------+--------------+
++---------+---------------+--------------+------------+-------------+----------------+--------------+
+
+desc table COLUMN_STATISTICS;
+
++-------------+--------+-----+------+---------+---------------+
+| Column      | Type   | Key | Null | Default | Semantic Type |
++-------------+--------+-----+------+---------+---------------+
+| schema_name | String |     | NO   |         | FIELD         |
+| table_name  | String |     | NO   |         | FIELD         |
+| column_name | String |     | NO   |         | FIELD         |
+| histogram   | String |     | NO   |         | FIELD         |
++-------------+--------+-----+------+---------+---------------+
+
+select * from COLUMN_STATISTICS;
+
++-------------+------------+-------------+-----------+
+| schema_name | table_name | column_name | histogram |
++-------------+------------+-------------+-----------+
++-------------+------------+-------------+-----------+
 
 use public;
 

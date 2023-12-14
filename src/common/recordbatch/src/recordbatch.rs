@@ -57,6 +57,16 @@ impl RecordBatch {
         })
     }
 
+    /// Create an empty [`RecordBatch`] from `schema`.
+    pub fn new_empty(schema: SchemaRef) -> Result<RecordBatch> {
+        let df_record_batch = DfRecordBatch::new_empty(schema.arrow_schema().clone());
+        Ok(RecordBatch {
+            schema,
+            columns: vec![],
+            df_record_batch,
+        })
+    }
+
     pub fn try_project(&self, indices: &[usize]) -> Result<Self> {
         let schema = Arc::new(self.schema.try_project(indices).context(DataTypesSnafu)?);
         let mut columns = Vec::with_capacity(indices.len());

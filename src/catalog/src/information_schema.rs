@@ -13,16 +13,20 @@
 // limitations under the License.
 
 mod columns;
+mod empty_table;
+mod empty_table_schemas;
 mod engines;
+mod table_names;
 mod tables;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
+use common_catalog::consts::{self, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
+use empty_table_schemas::get_schema;
 use futures_util::StreamExt;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
@@ -33,16 +37,14 @@ use table::metadata::{
 };
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
+pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::empty_table::EmptyTable;
 use crate::information_schema::engines::InformationSchemaEngines;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
-
-pub const TABLES: &str = "tables";
-pub const COLUMNS: &str = "columns";
-pub const ENGINES: &str = "engines";
 
 pub struct InformationSchemaProvider {
     catalog_name: String,
@@ -69,6 +71,15 @@ impl InformationSchemaProvider {
         schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
         schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
         schema.insert(ENGINES.to_owned(), provider.table(ENGINES).unwrap());
+        // Tables not implemented
+        schema.insert(
+            COLUMN_PRIVILEGES.to_owned(),
+            provider.table(COLUMN_PRIVILEGES).unwrap(),
+        );
+        schema.insert(
+            COLUMN_STATISTICS.to_owned(),
+            provider.table(COLUMN_STATISTICS).unwrap(),
+        );
         schema
     }
 
@@ -94,6 +105,17 @@ impl InformationSchemaProvider {
                 self.catalog_manager.clone(),
             )) as _),
             ENGINES => Some(Arc::new(InformationSchemaEngines::new()) as _),
+            // Table not implemented
+            COLUMN_PRIVILEGES => Some(Arc::new(EmptyTable::new(
+                consts::INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID,
+                COLUMN_PRIVILEGES,
+                get_schema(COLUMN_PRIVILEGES),
+            ))),
+            COLUMN_STATISTICS => Some(Arc::new(EmptyTable::new(
+                consts::INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID,
+                COLUMN_STATISTICS,
+                get_schema(COLUMN_STATISTICS),
+            ))),
             _ => None,
         }
     }

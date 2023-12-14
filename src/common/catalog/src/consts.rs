@@ -29,12 +29,19 @@ pub const SYSTEM_CATALOG_TABLE_ID: u32 = 0;
 pub const SCRIPTS_TABLE_ID: u32 = 1;
 /// numbers table id
 pub const NUMBERS_TABLE_ID: u32 = 2;
+
+/// ----- Begin of information_schema tables ----
 /// id for information_schema.tables
 pub const INFORMATION_SCHEMA_TABLES_TABLE_ID: u32 = 3;
 /// id for information_schema.columns
 pub const INFORMATION_SCHEMA_COLUMNS_TABLE_ID: u32 = 4;
 /// id for information_schema.engines
 pub const INFORMATION_SCHEMA_ENGINES_TABLE_ID: u32 = 5;
+/// id for information_schema.column_privileges
+pub const INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID: u32 = 6;
+/// id for information_schema.column_statistics
+pub const INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID: u32 = 7;
+/// ----- End of information_schema tables ----
 
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
