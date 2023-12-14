@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use clap::ArgMatches;
 use common_config::KvBackendConfig;
-use common_telemetry::logging::LoggingOptions;
+use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
 use frontend::error::{Result as FeResult, TomlFormatSnafu};
@@ -28,7 +29,7 @@ pub const ENV_VAR_SEP: &str = "__";
 pub const ENV_LIST_SEP: &str = ",";
 
 /// Options mixed up from datanode, frontend and metasrv.
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct MixOptions {
     pub data_home: String,
     pub procedure: ProcedureConfig,
@@ -58,10 +59,32 @@ pub enum Options {
     Cli(Box<LoggingOptions>),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct TopLevelOptions {
+#[derive(Default)]
+pub struct CliOptions {
     pub log_dir: Option<String>,
     pub log_level: Option<String>,
+
+    #[cfg(feature = "tokio-console")]
+    pub tokio_console_addr: Option<String>,
+}
+
+impl CliOptions {
+    pub fn new(args: &ArgMatches) -> Self {
+        Self {
+            log_dir: args.get_one::<String>("log-dir").cloned(),
+            log_level: args.get_one::<String>("log-level").cloned(),
+
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: args.get_one::<String>("tokio-console-addr").cloned(),
+        }
+    }
+
+    pub fn tracing_options(&self) -> TracingOptions {
+        TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: self.tokio_console_addr.clone(),
+        }
+    }
 }
 
 impl Options {

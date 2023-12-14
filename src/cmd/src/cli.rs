@@ -13,9 +13,15 @@
 // limitations under the License.
 
 mod bench;
+
+// Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
+#[allow(unused)]
 mod cmd;
 mod export;
 mod helper;
+
+// Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373
+#[allow(unused)]
 mod repl;
 // TODO(weny): Removes it
 #[allow(deprecated)]
@@ -30,27 +36,35 @@ use upgrade::UpgradeCommand;
 
 use self::export::ExportCommand;
 use crate::error::Result;
-use crate::options::{Options, TopLevelOptions};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 #[async_trait]
-pub trait Tool {
+pub trait Tool: Send + Sync {
     async fn do_work(&self) -> Result<()>;
 }
 
-pub enum Instance {
-    Repl(Repl),
-    Tool(Box<dyn Tool>),
+pub struct Instance {
+    tool: Box<dyn Tool>,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
-        match self {
-            Instance::Repl(repl) => repl.run().await,
-            Instance::Tool(tool) => tool.do_work().await,
-        }
+    fn new(tool: Box<dyn Tool>) -> Self {
+        Self { tool }
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-cli"
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
+        self.tool.do_work().await
+    }
+
+    async fn stop(&self) -> Result<()> {
         Ok(())
     }
 }
@@ -66,14 +80,15 @@ impl Command {
         self.cmd.build().await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut logging_opts = LoggingOptions::default();
-        if let Some(dir) = top_level_opts.log_dir {
-            logging_opts.dir = dir;
+
+        if let Some(dir) = &cli_options.log_dir {
+            logging_opts.dir = dir.clone();
         }
-        if top_level_opts.log_level.is_some() {
-            logging_opts.level = top_level_opts.log_level;
-        }
+
+        logging_opts.level = cli_options.log_level.clone();
+
         Ok(Options::Cli(Box::new(logging_opts)))
     }
 }
@@ -110,7 +125,6 @@ pub(crate) struct AttachCommand {
 impl AttachCommand {
     #[allow(dead_code)]
     async fn build(self) -> Result<Instance> {
-        let repl = Repl::try_new(&self).await?;
-        Ok(Instance::Repl(repl))
+        unimplemented!("Wait for https://github.com/GreptimeTeam/greptimedb/issues/2373")
     }
 }

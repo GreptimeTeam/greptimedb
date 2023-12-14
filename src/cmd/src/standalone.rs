@@ -15,11 +15,12 @@
 use std::sync::Arc;
 use std::{fs, path};
 
+use async_trait::async_trait;
 use clap::Parser;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::DdlTaskExecutorRef;
+use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -49,7 +50,8 @@ use crate::error::{
     ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
-use crate::options::{MixOptions, Options, TopLevelOptions};
+use crate::options::{CliOptions, MixOptions, Options};
+use crate::App;
 
 #[derive(Parser)]
 pub struct Command {
@@ -62,8 +64,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_options)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -79,9 +81,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_options),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -171,8 +173,13 @@ pub struct Instance {
     procedure_manager: ProcedureManagerRef,
 }
 
-impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-standalone"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         self.datanode.start_telemetry();
 
         self.procedure_manager
@@ -184,7 +191,7 @@ impl Instance {
         Ok(())
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -206,7 +213,7 @@ impl Instance {
 }
 
 #[derive(Debug, Default, Parser)]
-struct StartCommand {
+pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
     #[clap(long)]
@@ -220,7 +227,7 @@ struct StartCommand {
     #[clap(short, long)]
     influxdb_enable: bool,
     #[clap(short, long)]
-    config_file: Option<String>,
+    pub config_file: Option<String>,
     #[clap(long)]
     tls_mode: Option<TlsMode>,
     #[clap(long)]
@@ -230,14 +237,14 @@ struct StartCommand {
     #[clap(long)]
     user_provider: Option<String>,
     #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
-    env_prefix: String,
+    pub env_prefix: String,
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_options: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
@@ -246,12 +253,12 @@ impl StartCommand {
 
         opts.mode = Mode::Standalone;
 
-        if let Some(dir) = top_level_options.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_options.log_level.is_some() {
-            opts.logging.level = top_level_options.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         let tls_opts = TlsOption::new(
@@ -357,10 +364,14 @@ impl StartCommand {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
+        let table_meta_allocator =
+            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone()));
+
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
             procedure_manager.clone(),
             datanode_manager.clone(),
+            table_meta_allocator,
         )
         .await?;
 
@@ -382,10 +393,11 @@ impl StartCommand {
         })
     }
 
-    async fn create_ddl_task_executor(
+    pub async fn create_ddl_task_executor(
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
+        table_meta_allocator: TableMetadataAllocatorRef,
     ) -> Result<DdlTaskExecutorRef> {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
@@ -396,7 +408,7 @@ impl StartCommand {
                 datanode_manager,
                 Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
-                Arc::new(StandaloneTableMetadataCreator::new(kv_backend)),
+                table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
             )
             .context(InitDdlManagerSnafu)?,
@@ -432,7 +444,7 @@ mod tests {
     use servers::Mode;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -515,8 +527,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Standalone(options) = cmd.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Standalone(options) = cmd.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
         let fe_opts = options.frontend;
@@ -561,16 +572,19 @@ mod tests {
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             user_provider: Some("static_user_provider:cmd:test=test".to_string()),
             ..Default::default()
         };
 
         let Options::Standalone(opts) = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap()
         else {
@@ -637,11 +651,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let top_level_opts = TopLevelOptions {
-                    log_dir: None,
-                    log_level: None,
-                };
-                let Options::Standalone(opts) = command.load_options(top_level_opts).unwrap()
+                let Options::Standalone(opts) =
+                    command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };
