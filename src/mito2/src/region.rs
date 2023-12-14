@@ -74,6 +74,9 @@ pub(crate) struct MitoRegion {
     pub(crate) manifest_manager: RegionManifestManager,
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
+    /// Wal options of this region.
+    #[allow(unused)]
+    pub(crate) wal_options: HashMap<String, String>,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Whether the region is writable.

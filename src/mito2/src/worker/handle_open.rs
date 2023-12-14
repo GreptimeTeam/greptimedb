@@ -70,6 +70,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.scheduler.clone(),
         )
         .options(request.options)
+        .wal_options(request.wal_options)
         .cache(Some(self.cache_manager.clone()))
         .open(&self.config, &self.wal)
         .await?;
