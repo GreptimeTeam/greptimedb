@@ -233,7 +233,6 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("mybucket"),
                 ),
-                // TODO(niebayes): update check for wal config.
                 (
                     // wal.dir = /other/wal/dir
                     [

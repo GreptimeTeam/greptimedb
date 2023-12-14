@@ -429,7 +429,7 @@ mod tests {
             provider = "raft-engine"
             file_size = "1GB"
             purge_threshold = "50GB"
-            purge_interval = "10m"
+            purge_interval = "5m"
             sync_write = false
 
             [storage]
@@ -445,7 +445,6 @@ mod tests {
         let env_prefix = "DATANODE_UT";
         temp_env::with_vars(
             [
-                // TODO(niebayes): update check for wal config.
                 (
                     // wal.purge_interval = 1m
                     [
@@ -494,7 +493,7 @@ mod tests {
                 let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
                     unreachable!()
                 };
-                assert_eq!(raft_engine_config.read_batch_size, 100,);
+                assert_eq!(raft_engine_config.read_batch_size, 100);
                 assert_eq!(
                     opts.meta_client.unwrap().metasrv_addrs,
                     vec![
@@ -507,7 +506,7 @@ mod tests {
                 // Should be read from config file, config file > env > default values.
                 assert_eq!(
                     raft_engine_config.purge_interval,
-                    Duration::from_secs(60 * 10)
+                    Duration::from_secs(60 * 5)
                 );
 
                 // Should be read from cli, cli > config file > env > default values.
