@@ -102,7 +102,9 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::test_util::{new_test_column_metadata, new_test_object_store, new_test_options};
+    use crate::test_util::{
+        new_test_column_metadata, new_test_object_store, new_test_options, new_test_wal_options,
+    };
 
     #[tokio::test]
     async fn test_create_region() {
@@ -113,6 +115,7 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
+            wal_options: new_test_wal_options(),
             region_dir: "create_region_dir/".to_string(),
         };
         let region_id = RegionId::new(1, 0);
@@ -151,6 +154,7 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
+            wal_options: new_test_wal_options(),
             region_dir: region_dir.clone(),
         };
         let region_id = RegionId::new(1, 0);
@@ -189,6 +193,7 @@ mod tests {
             column_metadatas: new_test_column_metadata(),
             primary_key: vec![1],
             options: new_test_options(),
+            wal_options: new_test_wal_options(),
             region_dir: region_dir.clone(),
         };
         let region_id = RegionId::new(1, 0);

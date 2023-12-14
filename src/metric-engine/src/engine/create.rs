@@ -345,6 +345,7 @@ impl MetricEngineInner {
             ],
             primary_key: vec![METADATA_SCHEMA_KEY_COLUMN_INDEX as _],
             options: HashMap::new(),
+            wal_options: HashMap::new(),
             region_dir: metadata_region_dir,
         }
     }
@@ -445,6 +446,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            wal_options: HashMap::new(),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
@@ -481,6 +483,7 @@ mod test {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
+            wal_options: HashMap::new(),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_ok());
@@ -494,6 +497,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             primary_key: vec![],
             options: HashMap::new(),
+            wal_options: HashMap::new(),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
@@ -541,6 +545,7 @@ mod test {
             ],
             primary_key: vec![0],
             options: HashMap::new(),
+            wal_options: HashMap::new(),
             region_dir: "test_dir".to_string(),
         };
 

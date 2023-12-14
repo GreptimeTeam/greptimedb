@@ -99,6 +99,7 @@ impl RegionRequest {
                         column_metadatas,
                         primary_key: create.primary_key,
                         options: create.options,
+                        wal_options: create.wal_options,
                         region_dir,
                     }),
                 )])
@@ -182,6 +183,8 @@ pub struct RegionCreateRequest {
     pub primary_key: Vec<ColumnId>,
     /// Options of the created region.
     pub options: HashMap<String, String>,
+    /// Wal options of the created region.
+    pub wal_options: HashMap<String, String>,
     /// Directory for region's data home. Usually is composed by catalog and table id
     pub region_dir: String,
 }

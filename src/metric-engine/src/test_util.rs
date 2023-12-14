@@ -14,6 +14,8 @@
 
 //! Utilities for testing.
 
+use std::collections::HashMap;
+
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use datatypes::prelude::ConcreteDataType;
@@ -107,6 +109,7 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
+            wal_options: HashMap::new(),
             region_dir: "test_metric_region".to_string(),
         };
 
@@ -221,6 +224,7 @@ pub fn create_logical_region_request(
         )]
         .into_iter()
         .collect(),
+        wal_options: HashMap::new(),
         region_dir: region_dir.to_string(),
     }
 }
