@@ -29,17 +29,17 @@ pub struct RegionWalOptions {
 pub type RegionWalOptionsMap = HashMap<RegionNumber, RegionWalOptions>;
 pub type EncodedRegionWalOptions = HashMap<String, String>;
 
-impl From<&RegionWalOptions> for EncodedRegionWalOptions {
-    fn from(value: &RegionWalOptions) -> Self {
+impl From<RegionWalOptions> for EncodedRegionWalOptions {
+    fn from(value: RegionWalOptions) -> Self {
         // TODO(niebayes): implement encoding/decoding for region wal options.
         EncodedRegionWalOptions::default()
     }
 }
 
-impl TryFrom<&EncodedRegionWalOptions> for RegionWalOptions {
+impl TryFrom<EncodedRegionWalOptions> for RegionWalOptions {
     type Error = crate::error::Error;
 
-    fn try_from(value: &EncodedRegionWalOptions) -> Result<Self> {
+    fn try_from(value: EncodedRegionWalOptions) -> Result<Self> {
         todo!()
     }
 }

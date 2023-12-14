@@ -30,7 +30,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
@@ -45,7 +45,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::region_wal_options::RegionWalOptionsMap;
+use crate::wal::region_wal_options::{EncodedRegionWalOptions, RegionWalOptionsMap};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -219,7 +219,7 @@ impl CreateTableProcedure {
                     create_region_request.path = storage_path.clone();
                     create_region_request.wal_options = region_wal_options_map
                         .get(region_number)
-                        .map(|wal_options| wal_options.into())
+                        .cloned()
                         .unwrap_or_default();
 
                     PbRegionRequest::Create(create_region_request)
@@ -325,6 +325,11 @@ impl TableCreator {
         region_routes: Vec<RegionRoute>,
         region_wal_options_map: RegionWalOptionsMap,
     ) -> Self {
+        let region_wal_options_map = region_wal_options_map
+            .into_iter()
+            .map(|(region_number, wal_options)| (region_number, wal_options.into()))
+            .collect();
+
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
@@ -380,7 +385,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub region_wal_options_map: RegionWalOptionsMap,
+    pub region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
     pub cluster_id: u64,
 }
 
