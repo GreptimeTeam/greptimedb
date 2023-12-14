@@ -211,7 +211,7 @@ mod tests {
             .unwrap()
         {
             Statement::CreateTable(CreateTable { columns, .. }) => {
-                let ts_col = columns.get(0).unwrap();
+                let ts_col = columns.first().unwrap();
                 assert_eq!(
                     expected_type,
                     sql_data_type_to_concrete_data_type(&ts_col.data_type).unwrap()

@@ -113,7 +113,7 @@ impl Function for PyUDF {
         _input_types: &[datatypes::prelude::ConcreteDataType],
     ) -> common_query::error::Result<datatypes::prelude::ConcreteDataType> {
         // TODO(discord9): use correct return annotation if exist
-        match self.copr.return_types.get(0) {
+        match self.copr.return_types.first() {
             Some(Some(AnnotationInfo {
                 datatype: Some(ty), ..
             })) => Ok(ty.clone()),

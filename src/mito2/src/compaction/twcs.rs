@@ -542,11 +542,11 @@ mod tests {
             .iter(),
             3,
         );
-        assert_eq!(files[0], windows.get(&0).unwrap().get(0).unwrap().file_id());
-        assert_eq!(files[1], windows.get(&3).unwrap().get(0).unwrap().file_id());
+        assert_eq!(files[0], windows.get(&0).unwrap().first().unwrap().file_id());
+        assert_eq!(files[1], windows.get(&3).unwrap().first().unwrap().file_id());
         assert_eq!(
             files[2],
-            windows.get(&12).unwrap().get(0).unwrap().file_id()
+            windows.get(&12).unwrap().first().unwrap().file_id()
         );
     }
 

@@ -58,7 +58,6 @@ impl From<DataPointRequest> for DataPoint {
         let tags = request
             .tags
             .into_iter()
-            .map(|(k, v)| (k, v))
             .collect::<Vec<(String, String)>>();
 
         DataPoint::new(request.metric, ts_millis, request.value, tags)

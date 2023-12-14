@@ -314,7 +314,7 @@ mod tests {
             node_id: 1,
         };
 
-        let key_bytes: Vec<u8> = key.try_into().unwrap();
+        let key_bytes: Vec<u8> = key.into();
         let new_key: StatKey = key_bytes.try_into().unwrap();
 
         assert_eq!(0, new_key.cluster_id);
@@ -338,7 +338,7 @@ mod tests {
 
         assert_eq!(1, stats.len());
 
-        let stat = stats.get(0).unwrap();
+        let stat = stats.first().unwrap();
         assert_eq!(0, stat.cluster_id);
         assert_eq!(101, stat.id);
         assert_eq!(100, stat.region_num);
@@ -452,7 +452,7 @@ mod tests {
             region_id: 2,
         };
 
-        let key_bytes: Vec<u8> = key.try_into().unwrap();
+        let key_bytes: Vec<u8> = key.into();
         let new_key: InactiveRegionKey = key_bytes.try_into().unwrap();
 
         assert_eq!(new_key, key);

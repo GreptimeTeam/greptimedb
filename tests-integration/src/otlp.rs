@@ -60,8 +60,7 @@ mod test {
             &format!("CREATE DATABASE IF NOT EXISTS {db}"),
             ctx.clone(),
         )
-        .await
-        .get(0)
+        .await.first()
         .unwrap()
         .is_ok());
 
