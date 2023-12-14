@@ -14,8 +14,9 @@
 
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
+use crate::wal::kafka::topic::Topic;
 use crate::wal::kafka::topic_selector::TopicSelectorRef;
-use crate::wal::kafka::{KafkaConfig, Topic};
+use crate::wal::kafka::KafkaConfig;
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {

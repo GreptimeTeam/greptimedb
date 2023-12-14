@@ -12,21 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod kafka;
-pub mod region_wal_options;
-
-use std::default;
-
-use serde::{Deserialize, Serialize};
-
-pub use crate::wal::kafka::KafkaConfig;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-#[serde(tag = "provider")]
-pub enum WalConfig {
-    #[default]
-    #[serde(rename = "raft-engine")]
-    RaftEngine,
-    #[serde(rename = "kafka")]
-    Kafka(KafkaConfig),
-}
+pub type Topic = String;

@@ -14,27 +14,27 @@
 
 use std::sync::Arc;
 
-use crate::wal::kafka::Topic;
+use crate::wal::kafka::topic::Topic;
 
 /// The type of the topic selector, i.e. with which strategy to select a topic.
-pub enum SelectorType {
+pub(super) enum SelectorType {
     RoundRobin,
 }
 
 /// Controls topic selection.
-pub trait TopicSelector {
+pub(super) trait TopicSelector {
     /// Selects a topic from the topic pool.
     fn select(&self, topic_pool: &[Topic]) -> &Topic;
 }
 
-pub type TopicSelectorRef = Arc<dyn TopicSelector>;
+pub(super) type TopicSelectorRef = Arc<dyn TopicSelector>;
 
 /// A topic selector with the round-robin strategy, i.e. selects topics in a round-robin manner.
-pub struct RoundRobinTopicSelector;
+pub(super) struct RoundRobinTopicSelector;
 
 impl RoundRobinTopicSelector {
     /// Creates a new round-robin topic selector.
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         todo!()
     }
 }

@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod topic;
 pub mod topic_manager;
 mod topic_selector;
 
 use serde::{Deserialize, Serialize};
 
-pub type Topic = String;
+pub use crate::wal::kafka::topic::Topic as KafkaTopic;
+pub use crate::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct KafkaConfig;
