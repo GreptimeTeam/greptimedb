@@ -44,4 +44,4 @@ first_heartbeat_estimate = "1000ms"
 # tcp_nodelay = true
 
 [wal]
-provider = "kafka"
+provider = "raft-engine"
