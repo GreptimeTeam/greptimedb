@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
     CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
@@ -181,6 +183,7 @@ impl CreateTableProcedure {
             primary_key,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
+            wal_options: HashMap::default(),
         })
     }
 
@@ -190,6 +193,7 @@ impl CreateTableProcedure {
 
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
+        let region_wal_options_map = &create_table_data.region_wal_options_map;
 
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
@@ -213,6 +217,11 @@ impl CreateTableProcedure {
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
+                    create_region_request.wal_options = region_wal_options_map
+                        .get(region_number)
+                        .map(|wal_options| wal_options.into())
+                        .unwrap_or_default();
+
                     PbRegionRequest::Create(create_region_request)
                 })
                 .collect::<Vec<_>>();
