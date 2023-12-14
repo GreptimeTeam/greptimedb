@@ -42,3 +42,6 @@ first_heartbeat_estimate = "1000ms"
 # timeout = "10s"
 # connect_timeout = "10s"
 # tcp_nodelay = true
+
+[wal]
+provider = "kafka"
