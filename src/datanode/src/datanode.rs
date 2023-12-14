@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
+use common_config::wal::RaftEngineConfig;
+use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
@@ -436,25 +438,36 @@ impl DatanodeBuilder {
 
     /// Build [RaftEngineLogStore]
     async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
-        let data_home = normalize_dir(&opts.storage.data_home);
-        let wal_dir = match &opts.wal.dir {
+        let WalConfig::RaftEngine(raft_engine_config) = &opts.wal else {
+            unreachable!()
+        };
+        Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config).await
+    }
+
+    /// Builds [RaftEngineLogStore].
+    async fn build_raft_engine_log_store(
+        data_home: &str,
+        config: &RaftEngineConfig,
+    ) -> Result<Arc<RaftEngineLogStore>> {
+        let data_home = normalize_dir(data_home);
+        let wal_dir = match &config.dir {
             Some(dir) => dir.clone(),
             None => format!("{}{WAL_DIR}", data_home),
         };
-        let wal_config = opts.wal.clone();
 
         // create WAL directory
         fs::create_dir_all(Path::new(&wal_dir))
             .await
             .context(CreateDirSnafu { dir: &wal_dir })?;
         info!(
-            "Creating logstore with config: {:?} and storage path: {}",
-            wal_config, &wal_dir
+            "Creating raft-engine logstore with config: {:?} and storage path: {}",
+            config, &wal_dir
         );
-        let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
+        let logstore = RaftEngineLogStore::try_new(wal_dir, config.clone())
             .await
             .map_err(Box::new)
             .context(OpenLogStoreSnafu)?;
+
         Ok(Arc::new(logstore))
     }
 

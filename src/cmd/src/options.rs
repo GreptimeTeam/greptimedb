@@ -171,6 +171,7 @@ impl Options {
 mod tests {
     use std::io::Write;
 
+    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{DatanodeOptions, ObjectStoreConfig};
 
@@ -194,6 +195,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
+            provider = "raft-engine"
             dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -231,6 +233,7 @@ mod tests {
                     .join(ENV_VAR_SEP),
                     Some("mybucket"),
                 ),
+                // TODO(niebayes): update check for wal config.
                 (
                     // wal.dir = /other/wal/dir
                     [
@@ -277,7 +280,10 @@ mod tests {
                 );
 
                 // Should be the values from config file, not environment variables.
-                assert_eq!(opts.wal.dir.unwrap(), "/tmp/greptimedb/wal");
+                let WalConfig::RaftEngine(raft_engine_config) = opts.wal else {
+                    unreachable!()
+                };
+                assert_eq!(raft_engine_config.dir.unwrap(), "/tmp/greptimedb/wal");
 
                 // Should be default values.
                 assert_eq!(opts.node_id, None);

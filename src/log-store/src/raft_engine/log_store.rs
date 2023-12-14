@@ -16,7 +16,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_stream::stream;
-use common_config::WalConfig;
+use common_config::wal::RaftEngineConfig;
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
@@ -37,7 +37,7 @@ use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace
 const NAMESPACE_PREFIX: &str = "$sys/";
 
 pub struct RaftEngineLogStore {
-    config: WalConfig,
+    config: RaftEngineConfig,
     engine: Arc<Engine>,
     gc_task: RepeatedTask<Error>,
 }
@@ -72,7 +72,7 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
 }
 
 impl RaftEngineLogStore {
-    pub async fn try_new(dir: String, config: WalConfig) -> Result<Self> {
+    pub async fn try_new(dir: String, config: RaftEngineConfig) -> Result<Self> {
         let raft_engine_config = Config {
             dir,
             purge_threshold: ReadableSize(config.purge_threshold.0),
@@ -386,7 +386,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            WalConfig::default(),
+            RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -399,7 +399,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            WalConfig::default(),
+            RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -425,7 +425,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            WalConfig::default(),
+            RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -466,7 +466,7 @@ mod tests {
         {
             let logstore = RaftEngineLogStore::try_new(
                 dir.path().to_str().unwrap().to_string(),
-                WalConfig::default(),
+                RaftEngineConfig::default(),
             )
             .await
             .unwrap();
@@ -486,7 +486,7 @@ mod tests {
 
         let logstore = RaftEngineLogStore::try_new(
             dir.path().to_str().unwrap().to_string(),
-            WalConfig::default(),
+            RaftEngineConfig::default(),
         )
         .await
         .unwrap();
@@ -521,7 +521,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let path = dir.path().to_str().unwrap().to_string();
 
-        let config = WalConfig {
+        let config = RaftEngineConfig {
             file_size: ReadableSize::mb(2),
             purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
@@ -553,7 +553,7 @@ mod tests {
         let dir = create_temp_dir("raft-engine-logstore-test");
         let path = dir.path().to_str().unwrap().to_string();
 
-        let config = WalConfig {
+        let config = RaftEngineConfig {
             file_size: ReadableSize::mb(2),
             purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
@@ -582,7 +582,7 @@ mod tests {
         let dir = create_temp_dir("logstore-append-batch-test");
         let path = dir.path().to_str().unwrap().to_string();
 
-        let config = WalConfig {
+        let config = RaftEngineConfig {
             file_size: ReadableSize::mb(2),
             purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),
@@ -613,7 +613,7 @@ mod tests {
         let dir = create_temp_dir("logstore-append-batch-test");
 
         let path = dir.path().to_str().unwrap().to_string();
-        let config = WalConfig {
+        let config = RaftEngineConfig {
             file_size: ReadableSize::mb(2),
             purge_threshold: ReadableSize::mb(4),
             purge_interval: Duration::from_secs(5),

@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+pub mod raft_engine;
 
-use common_base::readable_size::ReadableSize;
-use common_config::wal::RaftEngineConfig;
+use serde::{Deserialize, Serialize};
 
-use crate::raft_engine::log_store::RaftEngineLogStore;
+pub use crate::wal::raft_engine::RaftEngineConfig;
 
-/// Create a write log for the provided path, used for test.
-pub async fn create_tmp_local_file_log_store<P: AsRef<Path>>(path: P) -> RaftEngineLogStore {
-    let path = path.as_ref().display().to_string();
-    let cfg = RaftEngineConfig {
-        file_size: ReadableSize::kb(128),
-        ..Default::default()
-    };
-    RaftEngineLogStore::try_new(path, cfg).await.unwrap()
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider")]
+pub enum WalConfig {
+    #[serde(rename = "raft-engine")]
+    RaftEngine(RaftEngineConfig),
+    #[serde(rename = "kafka")]
+    Kafka,
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        WalConfig::RaftEngine(RaftEngineConfig::default())
+    }
 }
