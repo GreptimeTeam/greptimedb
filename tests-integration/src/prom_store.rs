@@ -62,7 +62,8 @@ mod tests {
             "CREATE DATABASE IF NOT EXISTS prometheus",
             ctx.clone(),
         )
-        .await.first()
+        .await
+        .first()
         .unwrap()
         .is_ok());
 

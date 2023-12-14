@@ -83,11 +83,13 @@ impl TwcsPicker {
     ) -> Vec<CompactionOutput> {
         let mut output = vec![];
         for (window, files) in time_windows {
-            if let Some(active_window) = active_window && *window == active_window {
+            if let Some(active_window) = active_window
+                && *window == active_window
+            {
                 if files.len() > self.max_active_window_files {
                     output.push(CompactionOutput {
                         output_file_id: FileId::random(),
-                        output_level: 1, // we only have two levels and always compact to l1 
+                        output_level: 1, // we only have two levels and always compact to l1
                         inputs: files.clone(),
                     });
                 } else {
@@ -102,7 +104,11 @@ impl TwcsPicker {
                         inputs: files.clone(),
                     });
                 } else {
-                    debug!("No enough files, current: {}, max_inactive_window_files: {}", files.len(), self.max_inactive_window_files)
+                    debug!(
+                        "No enough files, current: {}, max_inactive_window_files: {}",
+                        files.len(),
+                        self.max_inactive_window_files
+                    )
                 }
             }
         }
@@ -207,7 +213,9 @@ fn find_latest_window_in_seconds<'a>(
     let mut latest_timestamp = None;
     for f in files {
         let (_, end) = f.time_range();
-        if let Some(latest) = latest_timestamp && end > latest {
+        if let Some(latest) = latest_timestamp
+            && end > latest
+        {
             latest_timestamp = Some(end);
         } else {
             latest_timestamp = Some(end);
@@ -542,8 +550,14 @@ mod tests {
             .iter(),
             3,
         );
-        assert_eq!(files[0], windows.get(&0).unwrap().first().unwrap().file_id());
-        assert_eq!(files[1], windows.get(&3).unwrap().first().unwrap().file_id());
+        assert_eq!(
+            files[0],
+            windows.get(&0).unwrap().first().unwrap().file_id()
+        );
+        assert_eq!(
+            files[1],
+            windows.get(&3).unwrap().first().unwrap().file_id()
+        );
         assert_eq!(
             files[2],
             windows.get(&12).unwrap().first().unwrap().file_id()

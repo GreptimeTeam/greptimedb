@@ -55,10 +55,7 @@ impl From<DataPointRequest> for DataPoint {
     fn from(request: DataPointRequest) -> Self {
         let ts_millis = DataPoint::timestamp_to_millis(request.timestamp);
 
-        let tags = request
-            .tags
-            .into_iter()
-            .collect::<Vec<(String, String)>>();
+        let tags = request.tags.into_iter().collect::<Vec<(String, String)>>();
 
         DataPoint::new(request.metric, ts_millis, request.value, tags)
     }

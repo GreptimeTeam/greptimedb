@@ -130,9 +130,11 @@ mod tests {
         assert_eq!(stat_vals.len(), 1);
         assert_eq!(stat_vals.first().unwrap().stats.len(), 3);
         assert_eq!(
-            stat_vals.first()
+            stat_vals
+                .first()
                 .unwrap()
-                .stats.first()
+                .stats
+                .first()
                 .unwrap()
                 .timestamp_millis,
             3

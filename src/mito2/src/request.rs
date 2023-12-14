@@ -118,7 +118,8 @@ impl WriteRequest {
     pub(crate) fn estimated_size(&self) -> usize {
         let row_size = self
             .rows
-            .rows.first()
+            .rows
+            .first()
             .map(|row| row.encoded_len())
             .unwrap_or(0);
         row_size * self.rows.rows.len()

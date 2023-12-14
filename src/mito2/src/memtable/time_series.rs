@@ -1040,7 +1040,8 @@ mod tests {
             op_types.extend(values.op_type.iter_data().map(|v| v.unwrap()));
             v0.extend(
                 values
-                    .fields.first()
+                    .fields
+                    .first()
                     .unwrap()
                     .as_any()
                     .downcast_ref::<Int64Vector>()
@@ -1123,7 +1124,8 @@ mod tests {
             let batch = res.unwrap();
             assert_eq!(1, batch.fields().len());
             let v0 = batch
-                .fields().first()
+                .fields()
+                .first()
                 .unwrap()
                 .data
                 .as_any()
