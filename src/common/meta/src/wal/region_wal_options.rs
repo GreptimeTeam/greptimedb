@@ -43,12 +43,18 @@ impl TryFrom<&EncodedRegionWalOptions> for RegionWalOptions {
 }
 
 pub struct RegionWalOptionsAllocator {
-    kafka_topic_manager: KafkaTopicManager,
+    // TODO(niebayes): uncomment this.
+    // kafka_topic_manager: KafkaTopicManager,
 }
 
 impl RegionWalOptionsAllocator {
-    /// Tries to create a RegionWalOptionsAllocator.
-    pub fn try_new(config: &WalConfig) -> Result<Self> {
+    /// Creates a RegionWalOptionsAllocator.
+    pub fn new(config: &WalConfig) -> Self {
+        // TODO(niebayes): properly init.
+        Self {}
+    }
+
+    pub fn try_init(&self) -> Result<()> {
         todo!()
     }
 
@@ -59,7 +65,7 @@ impl RegionWalOptionsAllocator {
 
     /// Allocates a wal options for each region.
     pub fn alloc_batch(&self, num_regions: usize) -> Vec<RegionWalOptions> {
-        // TODO(niebayes): properly allocate a batch of region wal options.
+        // TODO(niebayes): allocate a batch of region wal options.
         vec![RegionWalOptions::default(); num_regions]
     }
 }
