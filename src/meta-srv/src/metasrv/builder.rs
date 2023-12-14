@@ -27,7 +27,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
-use common_meta::sequence::Sequence;
+use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
@@ -190,7 +190,10 @@ impl MetaSrvBuilder {
         let pushers = Pushers::default();
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
-        let table_id_sequence = Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend.clone()));
+
+        let table_id_sequence =
+            Arc::new(SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone()).build());
+
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
@@ -328,7 +331,11 @@ fn build_default_meta_peer_client(
 }
 
 fn build_mailbox(kv_backend: &KvBackendRef, pushers: &Pushers) -> MailboxRef {
-    let mailbox_sequence = Sequence::new("heartbeat_mailbox", 1, 100, kv_backend.clone());
+    let mailbox_sequence = SequenceBuilder::new("heartbeat_mailbox", kv_backend.clone())
+        .initial(1)
+        .step(100)
+        .build();
+
     HeartbeatMailbox::create(pushers.clone(), mailbox_sequence)
 }
 

@@ -22,10 +22,9 @@ use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
 use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
-use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::sequence::{Sequence, SequenceRef};
+use common_meta::sequence::SequenceRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -36,8 +35,6 @@ use store_api::storage::{RegionId, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
-
-const TABLE_ID_SEQ: &str = "table_id";
 
 pub struct StandaloneDatanodeManager(pub RegionServer);
 
@@ -112,10 +109,8 @@ pub struct StandaloneTableMetadataCreator {
 }
 
 impl StandaloneTableMetadataCreator {
-    pub fn new(kv_backend: KvBackendRef) -> Self {
-        Self {
-            table_id_sequence: Arc::new(Sequence::new(TABLE_ID_SEQ, 1024, 10, kv_backend)),
-        }
+    pub fn new(table_id_sequence: SequenceRef) -> Self {
+        Self { table_id_sequence }
     }
 }
 

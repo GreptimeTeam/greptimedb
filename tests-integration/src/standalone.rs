@@ -21,6 +21,7 @@ use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::sequence::SequenceBuilder;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -109,13 +110,17 @@ impl GreptimeDbStandaloneBuilder {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
+        let table_id_sequence =
+            Arc::new(SequenceBuilder::new("table_id", kv_backend.clone()).build());
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataCreator::new(table_id_sequence));
+
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
                 procedure_manager.clone(),
                 datanode_manager.clone(),
                 Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
-                Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+                table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
             )
             .unwrap(),
