@@ -399,6 +399,7 @@ impl TableMetadataManager {
             &engine,
             &region_storage_path,
             region_options,
+            HashMap::default(),
             distribution,
         )?;
 

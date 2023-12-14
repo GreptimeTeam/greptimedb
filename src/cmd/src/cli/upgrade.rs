@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -395,6 +396,9 @@ impl MigrateTableMetadata {
         let region_distribution: RegionDistribution =
             value.regions_id_map.clone().into_iter().collect();
 
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options_map = HashMap::default();
+
         let datanode_table_kvs = region_distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
@@ -410,6 +414,7 @@ impl MigrateTableMetadata {
                             region_storage_path: region_storage_path.clone(),
                             region_options: (&value.table_info.meta.options).into(),
                         },
+                        region_wal_options_map.clone(),
                     ),
                 )
             })
