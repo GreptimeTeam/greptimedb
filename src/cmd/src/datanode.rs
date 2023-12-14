@@ -173,7 +173,7 @@ impl StartCommand {
                 WalConfig::RaftEngine(raft_engine_config) => {
                     raft_engine_config.dir.replace(wal_dir.clone());
                 }
-                WalConfig::Kafka => {}
+                WalConfig::Kafka(_) => {}
             }
         }
 

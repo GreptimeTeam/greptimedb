@@ -12,25 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod kafka;
-pub mod raft_engine;
-
 use serde::{Deserialize, Serialize};
 
-pub use crate::wal::kafka::KafkaConfig;
-pub use crate::wal::raft_engine::RaftEngineConfig;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "provider")]
-pub enum WalConfig {
-    #[serde(rename = "raft-engine")]
-    RaftEngine(RaftEngineConfig),
-    #[serde(rename = "kafka")]
-    Kafka(KafkaConfig),
-}
-
-impl Default for WalConfig {
-    fn default() -> Self {
-        WalConfig::RaftEngine(RaftEngineConfig::default())
-    }
-}
+pub struct KafkaConfig;
