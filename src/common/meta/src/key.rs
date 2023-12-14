@@ -85,6 +85,7 @@ use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
+use crate::wal::region_wal_options::EncodedRegionWalOptions;
 use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
@@ -364,6 +365,7 @@ impl TableMetadataManager {
         &self,
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
+        region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
     ) -> Result<()> {
         let region_numbers = region_routes
             .iter()
@@ -399,7 +401,7 @@ impl TableMetadataManager {
             &engine,
             &region_storage_path,
             region_options,
-            HashMap::default(),
+            region_wal_options_map,
             distribution,
         )?;
 
@@ -828,19 +830,31 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
         // if metadata was already created, it should be ok.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
         let mut modified_region_routes = region_routes.clone();
         modified_region_routes.push(region_route.clone());
         // if remote metadata was exists, it should return an error.
         assert!(table_metadata_manager
-            .create_table_metadata(table_info.clone(), modified_region_routes)
+            .create_table_metadata(
+                table_info.clone(),
+                modified_region_routes,
+                HashMap::default()
+            )
             .await
             .is_err());
 
@@ -874,7 +888,11 @@ mod tests {
 
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
 
@@ -945,7 +963,11 @@ mod tests {
         let table_id = table_info.ident.table_id;
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
         let new_table_name = "another_name".to_string();
@@ -1013,7 +1035,11 @@ mod tests {
         let table_id = table_info.ident.table_id;
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
         let mut new_table_info = table_info.clone();
@@ -1090,7 +1116,11 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
 
@@ -1156,7 +1186,11 @@ mod tests {
             DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes.clone()));
         // creates metadata.
         table_metadata_manager
-            .create_table_metadata(table_info.clone(), region_routes.clone())
+            .create_table_metadata(
+                table_info.clone(),
+                region_routes.clone(),
+                HashMap::default(),
+            )
             .await
             .unwrap();
         assert_datanode_table(&table_metadata_manager, table_id, &region_routes).await;

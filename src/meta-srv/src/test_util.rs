@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::DateTime;
@@ -143,7 +144,7 @@ pub(crate) async fn prepare_table_region_and_info_value(
         region_route_factory(4, 3),
     ];
     table_metadata_manager
-        .create_table_metadata(table_info, region_routes)
+        .create_table_metadata(table_info, region_routes, HashMap::default())
         .await
         .unwrap();
 }

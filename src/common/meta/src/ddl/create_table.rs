@@ -96,6 +96,10 @@ impl CreateTableProcedure {
         &self.creator.data.region_routes
     }
 
+    pub fn region_wal_options_map(&self) -> &HashMap<RegionNumber, EncodedRegionWalOptions> {
+        &self.creator.data.region_wal_options_map
+    }
+
     /// Checks whether the table exists.
     async fn on_prepare(&mut self) -> Result<Status> {
         let expr = &self.creator.data.task.create_table;
@@ -265,8 +269,9 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
+        let region_wal_options_map = self.region_wal_options_map().clone();
         manager
-            .create_table_metadata(raw_table_info, region_routes)
+            .create_table_metadata(raw_table_info, region_routes, region_wal_options_map)
             .await?;
         info!("Created table metadata for table {table_id}");
 
