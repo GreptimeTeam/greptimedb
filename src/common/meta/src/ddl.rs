@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
 use common_telemetry::tracing_context::W3cTrace;
-use store_api::storage::TableId;
+use store_api::storage::{RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -26,6 +27,7 @@ use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
+use crate::wal::region_wal_options::RegionWalOptions;
 
 pub mod alter_table;
 pub mod create_table;
@@ -54,6 +56,12 @@ pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
+pub struct TableMetadata {
+    pub table_id: TableId,
+    pub region_routes: Vec<RegionRoute>,
+    pub region_wal_options_map: HashMap<RegionNumber, RegionWalOptions>,
+}
+
 #[async_trait::async_trait]
 pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
@@ -61,7 +69,7 @@ pub trait TableMetadataAllocator: Send + Sync {
         ctx: &TableMetadataAllocatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> Result<(TableId, Vec<RegionRoute>)>;
+    ) -> Result<TableMetadata>;
 }
 
 pub type TableMetadataAllocatorRef = Arc<dyn TableMetadataAllocator>;

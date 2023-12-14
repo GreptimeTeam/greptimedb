@@ -26,7 +26,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
     TableMetadataAllocatorRef,
 };
 use crate::error::{
@@ -374,7 +374,7 @@ async fn handle_create_table_task(
     cluster_id: u64,
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let (table_id, region_routes) = ddl_manager
+    let table_meta = ddl_manager
         .table_meta_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
@@ -382,6 +382,12 @@ async fn handle_create_table_task(
             &create_table_task.partitions,
         )
         .await?;
+
+    let TableMetadata {
+        table_id,
+        region_routes,
+        region_wal_options_map: _region_wal_options_map,
+    } = table_meta;
 
     let id = ddl_manager
         .submit_create_table_task(cluster_id, create_table_task, region_routes)
@@ -437,7 +443,7 @@ mod tests {
 
     use api::v1::meta::Partition;
     use common_procedure::local::LocalManager;
-    use table::metadata::{RawTableInfo, TableId};
+    use table::metadata::RawTableInfo;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -446,13 +452,12 @@ mod tests {
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::truncate_table::TruncateTableProcedure;
-    use crate::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+    use crate::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
     use crate::error::Result;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
-    use crate::rpc::router::RegionRoute;
     use crate::state_store::KvStateStore;
 
     /// A dummy implemented [DatanodeManager].
@@ -475,7 +480,7 @@ mod tests {
             _ctx: &TableMetadataAllocatorContext,
             _table_info: &mut RawTableInfo,
             _partitions: &[Partition],
-        ) -> Result<(TableId, Vec<RegionRoute>)> {
+        ) -> Result<TableMetadata> {
             unimplemented!()
         }
     }

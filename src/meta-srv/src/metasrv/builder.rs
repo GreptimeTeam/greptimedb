@@ -205,12 +205,13 @@ impl MetaSrvBuilder {
             table_id: None,
         };
 
-        let _region_wal_options_allocator = build_region_wal_options_allocator(&options.wal).await?;
+        let region_wal_options_allocator = build_region_wal_options_allocator(&options.wal).await?;
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             Arc::new(MetaSrvTableMetadataAllocator::new(
                 selector_ctx.clone(),
                 selector.clone(),
                 table_id_sequence.clone(),
+                region_wal_options_allocator,
             ))
         });
 
