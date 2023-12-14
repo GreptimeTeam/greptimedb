@@ -30,7 +30,7 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::GreptimeDbName;
-use super::{JsonResponse, PUBLIC_APIS};
+use super::{JsonResponse, ResponseFormat, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
@@ -58,6 +58,7 @@ pub async fn inner_auth<B>(
     let (catalog, schema) = extract_catalog_and_schema(&req);
     let query_ctx = QueryContext::with(catalog, schema);
     let need_auth = need_auth(&req);
+    let is_influxdb = req.uri().path().contains("influxdb");
 
     // 2. check if auth is needed
     let user_provider = if let Some(user_provider) = user_provider.filter(|_| need_auth) {
@@ -69,14 +70,14 @@ pub async fn inner_auth<B>(
     };
 
     // 3. get username and pwd
-    let (username, password) = match extract_username_and_password(&req) {
+    let (username, password) = match extract_username_and_password(is_influxdb, &req) {
         Ok((username, password)) => (username, password),
         Err(e) => {
             warn!("extract username and password failed: {}", e);
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            return Err(err_response(e).into_response());
+            return Err(err_response(is_influxdb, e).into_response());
         }
     };
 
@@ -100,7 +101,7 @@ pub async fn inner_auth<B>(
             crate::metrics::METRIC_AUTH_FAILURE
                 .with_label_values(&[e.status_code().as_ref()])
                 .inc();
-            Err(err_response(e).into_response())
+            Err(err_response(is_influxdb, e).into_response())
         }
     }
 }
@@ -116,8 +117,14 @@ pub async fn check_http_auth<B>(
     }
 }
 
-fn err_response(err: impl ErrorExt) -> impl IntoResponse {
-    let body = JsonResponse::with_error(err);
+fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
+    let format = if is_influxdb {
+        ResponseFormat::InfluxdbV1
+    } else {
+        ResponseFormat::GreptimedbV1
+    };
+
+    let body = JsonResponse::with_error(err, format);
     (StatusCode::UNAUTHORIZED, Json(body))
 }
 
@@ -178,8 +185,11 @@ fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username,
     }
 }
 
-fn extract_username_and_password<B>(request: &Request<B>) -> Result<(Username, Password)> {
-    Ok(if request.uri().path().contains("influxdb") {
+fn extract_username_and_password<B>(
+    is_influxdb: bool,
+    request: &Request<B>,
+) -> Result<(Username, Password)> {
+    Ok(if is_influxdb {
         // compatible with influxdb auth
         get_influxdb_credentials(request)?.context(NotFoundInfluxAuthSnafu)?
     } else {

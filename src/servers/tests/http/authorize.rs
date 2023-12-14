@@ -49,7 +49,7 @@ async fn test_http_auth() {
     let mut resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
-        b"{\"code\":7003,\"error\":\"Not found http or grpc authorization header\"}",
+        b"{\"type\":\"GreptimedbV1\",\"code\":7003,\"error\":\"Not found http or grpc authorization header\"}",
         resp.data().await.unwrap().unwrap().as_ref()
     );
 
@@ -60,7 +60,7 @@ async fn test_http_auth() {
     let mut resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
-        b"{\"code\":7000,\"error\":\"User not found, username: username\"}",
+        b"{\"type\":\"GreptimedbV1\",\"code\":7000,\"error\":\"User not found, username: username\"}",
         resp.data().await.unwrap().unwrap().as_ref(),
     );
 }
@@ -95,7 +95,7 @@ async fn test_schema_validating() {
     let mut resp = result.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
-        b"{\"code\":7005,\"error\":\"Access denied for user 'greptime' to database 'greptime-wrong'\"}",
+        b"{\"type\":\"GreptimedbV1\",\"code\":7005,\"error\":\"Access denied for user 'greptime' to database 'greptime-wrong'\"}",
         resp.data().await.unwrap().unwrap().as_ref()
     );
 }
@@ -113,7 +113,7 @@ async fn test_whitelist_no_auth() {
     let mut resp = auth_res.unwrap_err();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
-        b"{\"code\":7003,\"error\":\"Not found http or grpc authorization header\"}",
+        b"{\"type\":\"GreptimedbV1\",\"code\":7003,\"error\":\"Not found http or grpc authorization header\"}",
         resp.data().await.unwrap().unwrap().as_ref()
     );
 

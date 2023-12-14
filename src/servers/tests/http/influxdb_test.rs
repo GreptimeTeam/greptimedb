@@ -168,6 +168,10 @@ async fn test_influxdb_write() {
         .send()
         .await;
     assert_eq!(result.status(), 401);
+    assert_eq!(
+        "{\"type\":\"InfluxdbV1\",\"results\":[],\"error\":\"Username and password does not match, username: greptime\"}",
+        result.text().await
+    );
 
     // no auth
     let result = client
@@ -176,6 +180,10 @@ async fn test_influxdb_write() {
         .send()
         .await;
     assert_eq!(result.status(), 401);
+    assert_eq!(
+        "{\"type\":\"InfluxdbV1\",\"results\":[],\"error\":\"Not found influx http authorization info\"}",
+        result.text().await
+    );
 
     // make new app for db=influxdb
     let app = make_test_app(tx, Some("influxdb"));
