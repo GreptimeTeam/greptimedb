@@ -12,33 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
-#![feature(btree_extract_if)]
-#![feature(async_closure)]
+pub mod kafka;
 
-pub mod cache_invalidator;
-pub mod datanode_manager;
-pub mod ddl;
-pub mod ddl_manager;
-pub mod distributed_time_constants;
-pub mod error;
-pub mod heartbeat;
-pub mod instruction;
-pub mod key;
-pub mod kv_backend;
-pub mod metrics;
-pub mod peer;
-pub mod range_stream;
-pub mod region_keeper;
-pub mod rpc;
-pub mod sequence;
-pub mod state_store;
-pub mod table_name;
-pub mod util;
-#[allow(unused)]
-pub mod wal;
+use std::default;
 
-pub type ClusterId = u64;
-pub type DatanodeId = u64;
+use serde::{Deserialize, Serialize};
 
-pub use instruction::RegionIdent;
+pub use crate::wal::kafka::KafkaConfig;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "provider")]
+pub enum WalConfig {
+    #[default]
+    #[serde(rename = "raft-engine")]
+    RaftEngine,
+    #[serde(rename = "kafka")]
+    Kafka(KafkaConfig),
+}
