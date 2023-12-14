@@ -116,6 +116,7 @@ impl RegionRequest {
                         engine: open.engine,
                         region_dir,
                         options: open.options,
+                        wal_options: open.wal_options,
                     }),
                 )])
             }
@@ -197,6 +198,8 @@ pub struct RegionOpenRequest {
     pub region_dir: String,
     /// Options of the opened region.
     pub options: HashMap<String, String>,
+    /// Wal options of the opened region.
+    pub wal_options: HashMap<String, String>,
 }
 
 /// Close region request.
