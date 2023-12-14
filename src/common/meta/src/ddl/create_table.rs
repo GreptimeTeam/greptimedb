@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
     CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
@@ -179,6 +181,7 @@ impl CreateTableProcedure {
             primary_key,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
+            wal_options: HashMap::default(),
         })
     }
 
