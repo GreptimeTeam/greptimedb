@@ -93,3 +93,20 @@ drop schema my_db;
 
 Error: 1001(Unsupported), SQL statement is not supported: drop schema my_db;, keyword: schema
 
+use information_schema;
+
+Affected Rows: 0
+
+-- test engines
+select * from engines;
+
++--------+---------+-------------------------------------+--------------+----+------------+
+| engine | support | comment                             | transactions | xa | savepoints |
++--------+---------+-------------------------------------+--------------+----+------------+
+| Mito   | DEFAULT | Storage engine for time-series data | NO           | NO | NO         |
++--------+---------+-------------------------------------+--------------+----+------------+
+
+use public;
+
+Affected Rows: 0
+

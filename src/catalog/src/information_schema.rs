@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod columns;
+mod engines;
 mod tables;
 
 use std::collections::HashMap;
@@ -35,11 +36,13 @@ use table::TableRef;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::engines::InformationSchemaEngines;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 
 pub const TABLES: &str = "tables";
 pub const COLUMNS: &str = "columns";
+pub const ENGINES: &str = "engines";
 
 pub struct InformationSchemaProvider {
     catalog_name: String,
@@ -65,6 +68,7 @@ impl InformationSchemaProvider {
         let mut schema = HashMap::new();
         schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
         schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
+        schema.insert(ENGINES.to_owned(), provider.table(ENGINES).unwrap());
         schema
     }
 
@@ -89,6 +93,7 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            ENGINES => Some(Arc::new(InformationSchemaEngines::new()) as _),
             _ => None,
         }
     }

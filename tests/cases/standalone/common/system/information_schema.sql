@@ -38,3 +38,10 @@ order by table_schema, table_name;
 use public;
 
 drop schema my_db;
+
+use information_schema;
+
+-- test engines
+select * from engines;
+
+use public;

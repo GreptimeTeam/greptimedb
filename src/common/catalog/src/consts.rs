@@ -33,6 +33,8 @@ pub const NUMBERS_TABLE_ID: u32 = 2;
 pub const INFORMATION_SCHEMA_TABLES_TABLE_ID: u32 = 3;
 /// id for information_schema.columns
 pub const INFORMATION_SCHEMA_COLUMNS_TABLE_ID: u32 = 4;
+/// id for information_schema.engines
+pub const INFORMATION_SCHEMA_ENGINES_TABLE_ID: u32 = 5;
 
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
