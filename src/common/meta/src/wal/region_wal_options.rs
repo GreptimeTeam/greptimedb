@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionNumber;
 
 use crate::error::Result;
 use crate::wal::kafka::{KafkaTopic, KafkaTopicManager};
@@ -25,6 +26,7 @@ pub struct RegionWalOptions {
     pub kafka_topic: Option<KafkaTopic>,
 }
 
+pub type RegionWalOptionsMap = HashMap<RegionNumber, RegionWalOptions>;
 pub type EncodedRegionWalOptions = HashMap<String, String>;
 
 impl From<&RegionWalOptions> for EncodedRegionWalOptions {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
@@ -27,6 +26,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::{Sequence, SequenceRef};
+use common_meta::wal::region_wal_options::RegionWalOptionsMap;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
@@ -154,7 +154,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
         Ok(TableMetadata {
             table_id,
             region_routes,
-            region_wal_options_map: HashMap::default(),
+            region_wal_options_map: RegionWalOptionsMap::default(),
         })
     }
 }

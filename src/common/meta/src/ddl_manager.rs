@@ -44,6 +44,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
+use crate::wal::region_wal_options::RegionWalOptionsMap;
 pub type DdlManagerRef = Arc<DdlManager>;
 
 /// The [DdlManager] provides the ability to execute Ddl.
@@ -176,11 +177,17 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_wal_options_map: RegionWalOptionsMap,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure =
-            CreateTableProcedure::new(cluster_id, create_table_task, region_routes, context);
+        let procedure = CreateTableProcedure::new(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options_map,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -386,11 +393,16 @@ async fn handle_create_table_task(
     let TableMetadata {
         table_id,
         region_routes,
-        region_wal_options_map: _region_wal_options_map,
+        region_wal_options_map,
     } = table_meta;
 
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, region_routes)
+        .submit_create_table_task(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options_map,
+        )
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");

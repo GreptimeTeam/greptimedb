@@ -43,6 +43,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
+use crate::wal::region_wal_options::RegionWalOptionsMap;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -56,11 +57,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_wal_options_map: RegionWalOptionsMap,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes),
+            creator: TableCreator::new(cluster_id, task, region_routes, region_wal_options_map),
         }
     }
 
@@ -308,13 +310,19 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask, region_routes: Vec<RegionRoute>) -> Self {
+    pub fn new(
+        cluster_id: u64,
+        task: CreateTableTask,
+        region_routes: Vec<RegionRoute>,
+        region_wal_options_map: RegionWalOptionsMap,
+    ) -> Self {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
                 region_routes,
+                region_wal_options_map,
             },
             opening_regions: vec![],
         }
@@ -363,6 +371,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
+    pub region_wal_options_map: RegionWalOptionsMap,
     pub cluster_id: u64,
 }
 
