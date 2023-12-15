@@ -85,7 +85,7 @@ enable = true
 # Available wal providers:
 # - "RaftEngine" (default)
 # - "Kafka"
-provider = "RaftEngine"
+provider = "raft-engine"
 
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"

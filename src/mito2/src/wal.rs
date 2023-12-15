@@ -175,7 +175,7 @@ fn try_build_wal_namespace<S: LogStore>(
     wal_options: &HashMap<String, String>,
 ) -> Result<S::Namespace> {
     store
-        .namespace(region_id.into(), &wal_options)
+        .namespace(region_id.into(), wal_options)
         .map_err(BoxedError::new)
         .with_context(|_| BuildWalNamespaceSnafu {
             region_id,
