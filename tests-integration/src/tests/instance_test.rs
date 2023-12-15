@@ -1732,7 +1732,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, table_type, table_id, engine from information_schema.tables where table_type != 'SYSTEM VIEW' order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, table_type, table_id, engine from information_schema.tables where table_type != 'SYSTEM VIEW' and table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
 
     let output = execute_sql(&instance, sql).await;
     let expected = "\
@@ -1760,6 +1760,7 @@ async fn test_information_schema_dot_tables(instance: Arc<dyn MockInstance>) {
 
 #[apply(both_instances_cases)]
 async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
+    logging::init_default_ut_logging();
     let instance = instance.frontend();
 
     let sql = "create table another_table(i timestamp time index)";
@@ -1769,7 +1770,7 @@ async fn test_information_schema_dot_columns(instance: Arc<dyn MockInstance>) {
 
     // User can only see information schema under current catalog.
     // A necessary requirement to GreptimeCloud.
-    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns  order by table_name";
+    let sql = "select table_catalog, table_schema, table_name, column_name, data_type, semantic_type from information_schema.columns where table_name in ('columns', 'numbers', 'tables', 'another_table') order by table_name";
 
     let output = execute_sql(&instance, sql).await;
     let expected = "\

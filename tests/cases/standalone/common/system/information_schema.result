@@ -4,33 +4,53 @@ from information_schema.tables
 where table_name != 'scripts'
 order by table_schema, table_name;
 
-+---------------+--------------------+------------+-----------------+----------+-------------+
-| table_catalog | table_schema       | table_name | table_type      | table_id | engine      |
-+---------------+--------------------+------------+-----------------+----------+-------------+
-| greptime      | information_schema | columns    | LOCAL TEMPORARY | 4        |             |
-| greptime      | information_schema | tables     | LOCAL TEMPORARY | 3        |             |
-| greptime      | public             | numbers    | LOCAL TEMPORARY | 2        | test_engine |
-+---------------+--------------------+------------+-----------------+----------+-------------+
++---------------+--------------------+-------------------+-----------------+----------+-------------+
+| table_catalog | table_schema       | table_name        | table_type      | table_id | engine      |
++---------------+--------------------+-------------------+-----------------+----------+-------------+
+| greptime      | information_schema | column_privileges | LOCAL TEMPORARY | 6        |             |
+| greptime      | information_schema | column_statistics | LOCAL TEMPORARY | 7        |             |
+| greptime      | information_schema | columns           | LOCAL TEMPORARY | 4        |             |
+| greptime      | information_schema | engines           | LOCAL TEMPORARY | 5        |             |
+| greptime      | information_schema | tables            | LOCAL TEMPORARY | 3        |             |
+| greptime      | public             | numbers           | LOCAL TEMPORARY | 2        | test_engine |
++---------------+--------------------+-------------------+-----------------+----------+-------------+
 
 select * from information_schema.columns order by table_schema, table_name;
 
-+---------------+--------------------+------------+---------------+-----------+---------------+
-| table_catalog | table_schema       | table_name | column_name   | data_type | semantic_type |
-+---------------+--------------------+------------+---------------+-----------+---------------+
-| greptime      | information_schema | columns    | table_catalog | String    | FIELD         |
-| greptime      | information_schema | columns    | table_schema  | String    | FIELD         |
-| greptime      | information_schema | columns    | table_name    | String    | FIELD         |
-| greptime      | information_schema | columns    | column_name   | String    | FIELD         |
-| greptime      | information_schema | columns    | data_type     | String    | FIELD         |
-| greptime      | information_schema | columns    | semantic_type | String    | FIELD         |
-| greptime      | information_schema | tables     | table_catalog | String    | FIELD         |
-| greptime      | information_schema | tables     | table_schema  | String    | FIELD         |
-| greptime      | information_schema | tables     | table_name    | String    | FIELD         |
-| greptime      | information_schema | tables     | table_type    | String    | FIELD         |
-| greptime      | information_schema | tables     | table_id      | UInt32    | FIELD         |
-| greptime      | information_schema | tables     | engine        | String    | FIELD         |
-| greptime      | public             | numbers    | number        | UInt32    | TAG           |
-+---------------+--------------------+------------+---------------+-----------+---------------+
++---------------+--------------------+-------------------+----------------+-----------+---------------+
+| table_catalog | table_schema       | table_name        | column_name    | data_type | semantic_type |
++---------------+--------------------+-------------------+----------------+-----------+---------------+
+| greptime      | information_schema | column_privileges | grantee        | String    | FIELD         |
+| greptime      | information_schema | column_privileges | is_grantable   | String    | FIELD         |
+| greptime      | information_schema | column_privileges | privilege_type | String    | FIELD         |
+| greptime      | information_schema | column_privileges | column_name    | String    | FIELD         |
+| greptime      | information_schema | column_privileges | table_name     | String    | FIELD         |
+| greptime      | information_schema | column_privileges | table_schema   | String    | FIELD         |
+| greptime      | information_schema | column_privileges | table_catalog  | String    | FIELD         |
+| greptime      | information_schema | column_statistics | histogram      | String    | FIELD         |
+| greptime      | information_schema | column_statistics | column_name    | String    | FIELD         |
+| greptime      | information_schema | column_statistics | table_name     | String    | FIELD         |
+| greptime      | information_schema | column_statistics | schema_name    | String    | FIELD         |
+| greptime      | information_schema | columns           | table_catalog  | String    | FIELD         |
+| greptime      | information_schema | columns           | semantic_type  | String    | FIELD         |
+| greptime      | information_schema | columns           | data_type      | String    | FIELD         |
+| greptime      | information_schema | columns           | column_name    | String    | FIELD         |
+| greptime      | information_schema | columns           | table_name     | String    | FIELD         |
+| greptime      | information_schema | columns           | table_schema   | String    | FIELD         |
+| greptime      | information_schema | engines           | engine         | String    | FIELD         |
+| greptime      | information_schema | engines           | support        | String    | FIELD         |
+| greptime      | information_schema | engines           | comment        | String    | FIELD         |
+| greptime      | information_schema | engines           | transactions   | String    | FIELD         |
+| greptime      | information_schema | engines           | xa             | String    | FIELD         |
+| greptime      | information_schema | engines           | savepoints     | String    | FIELD         |
+| greptime      | information_schema | tables            | table_catalog  | String    | FIELD         |
+| greptime      | information_schema | tables            | engine         | String    | FIELD         |
+| greptime      | information_schema | tables            | table_id       | UInt32    | FIELD         |
+| greptime      | information_schema | tables            | table_type     | String    | FIELD         |
+| greptime      | information_schema | tables            | table_name     | String    | FIELD         |
+| greptime      | information_schema | tables            | table_schema   | String    | FIELD         |
+| greptime      | public             | numbers           | number         | UInt32    | TAG           |
++---------------+--------------------+-------------------+----------------+-----------+---------------+
 
 create
 database my_db;

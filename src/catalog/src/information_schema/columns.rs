@@ -16,8 +16,8 @@ use std::sync::{Arc, Weak};
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
 use common_catalog::consts::{
-    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD,
-    SEMANTIC_TYPE_PRIMARY_KEY, SEMANTIC_TYPE_TIME_INDEX,
+    INFORMATION_SCHEMA_COLUMNS_TABLE_ID, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
+    SEMANTIC_TYPE_TIME_INDEX,
 };
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
@@ -33,8 +33,7 @@ use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::TableId;
 
-use super::tables::InformationSchemaTables;
-use super::{InformationTable, COLUMNS, TABLES};
+use super::{InformationTable, COLUMNS};
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
@@ -102,7 +101,7 @@ impl InformationTable for InformationSchemaColumns {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_tables()
+                    .make_columns()
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -148,8 +147,8 @@ impl InformationSchemaColumnsBuilder {
         }
     }
 
-    /// Construct the `information_schema.tables` virtual table
-    async fn make_tables(&mut self) -> Result<RecordBatch> {
+    /// Construct the `information_schema.columns` virtual table
+    async fn make_columns(&mut self) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
@@ -163,48 +162,38 @@ impl InformationSchemaColumnsBuilder {
             {
                 continue;
             }
+
             for table_name in catalog_manager
                 .table_names(&catalog_name, &schema_name)
                 .await?
             {
-                let (keys, schema) = if let Some(table) = catalog_manager
+                if let Some(table) = catalog_manager
                     .table(&catalog_name, &schema_name, &table_name)
                     .await?
                 {
                     let keys = &table.table_info().meta.primary_key_indices;
                     let schema = table.schema();
-                    (keys.clone(), schema)
-                } else {
-                    // TODO: this specific branch is only a workaround for FrontendCatalogManager.
-                    if schema_name == INFORMATION_SCHEMA_NAME {
-                        if table_name == COLUMNS {
-                            (vec![], InformationSchemaColumns::schema())
-                        } else if table_name == TABLES {
-                            (vec![], InformationSchemaTables::schema())
-                        } else {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                };
 
-                for (idx, column) in schema.column_schemas().iter().enumerate() {
-                    let semantic_type = if column.is_time_index() {
-                        SEMANTIC_TYPE_TIME_INDEX
-                    } else if keys.contains(&idx) {
-                        SEMANTIC_TYPE_PRIMARY_KEY
-                    } else {
-                        SEMANTIC_TYPE_FIELD
-                    };
-                    self.add_column(
-                        &catalog_name,
-                        &schema_name,
-                        &table_name,
-                        &column.name,
-                        &column.data_type.name(),
-                        semantic_type,
-                    );
+                    for (idx, column) in schema.column_schemas().iter().enumerate() {
+                        let semantic_type = if column.is_time_index() {
+                            SEMANTIC_TYPE_TIME_INDEX
+                        } else if keys.contains(&idx) {
+                            SEMANTIC_TYPE_PRIMARY_KEY
+                        } else {
+                            SEMANTIC_TYPE_FIELD
+                        };
+
+                        self.add_column(
+                            &catalog_name,
+                            &schema_name,
+                            &table_name,
+                            &column.name,
+                            &column.data_type.name(),
+                            semantic_type,
+                        );
+                    }
+                } else {
+                    unreachable!();
                 }
             }
         }
@@ -238,6 +227,7 @@ impl InformationSchemaColumnsBuilder {
             Arc::new(self.data_types.finish()),
             Arc::new(self.semantic_types.finish()),
         ];
+
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }
 }
@@ -254,7 +244,7 @@ impl DfPartitionStream for InformationSchemaColumns {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_tables()
+                    .make_columns()
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

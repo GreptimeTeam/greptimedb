@@ -243,10 +243,11 @@ impl MemoryCatalogManager {
     }
 
     fn create_catalog_entry(self: &Arc<Self>, catalog: String) -> SchemaEntries {
-        let information_schema = InformationSchemaProvider::build(
+        let information_schema_provider = InformationSchemaProvider::new(
             catalog,
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
         );
+        let information_schema = information_schema_provider.tables();
         let mut catalog = HashMap::new();
         catalog.insert(INFORMATION_SCHEMA_NAME.to_string(), information_schema);
         catalog
