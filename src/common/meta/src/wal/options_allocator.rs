@@ -16,12 +16,14 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
-use crate::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
+use crate::wal::kafka::TopicManager as KafkaTopicManager;
 use crate::wal::{WalConfig, WalOptions};
 
 #[derive(Default)]
-pub struct WalOptionsAllocator {
-    kafka_topic_manager: Option<KafkaTopicManager>,
+pub enum WalOptionsAllocator {
+    #[default]
+    RaftEngine,
+    Kafka(KafkaTopicManager),
 }
 
 pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
@@ -44,6 +46,15 @@ impl WalOptionsAllocator {
 
     /// Allocates a batch of wal options where each wal options goes to a region.
     pub fn alloc_batch(&self, num_regions: usize) -> Vec<WalOptions> {
-        vec![WalOptions::default(); num_regions]
+        match self {
+            WalOptionsAllocator::RaftEngine => vec![WalOptions::RaftEngine; num_regions],
+            WalOptionsAllocator::Kafka(topic_manager) => {
+                let topics = topic_manager.select_batch(num_regions);
+                topics
+                    .into_iter()
+                    .map(|topic| WalOptions::Kafka { topic })
+                    .collect()
+            }
+        }
     }
 }

@@ -18,10 +18,9 @@ pub mod options_allocator;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use store_api::storage::RegionNumber;
 
 use crate::error::Result;
-use crate::wal::kafka::{KafkaConfig, KafkaOptions};
+use crate::wal::kafka::{KafkaConfig, Topic as KafkaTopic};
 pub use crate::wal::options_allocator::WalOptionsAllocator;
 
 /// Wal configurations for bootstraping meta srv.
@@ -43,7 +42,7 @@ pub enum WalOptions {
     #[serde(rename = "raft-engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
-    Kafka(KafkaOptions),
+    Kafka { topic: KafkaTopic },
 }
 
 // TODO(niebayes): determine how to encode/decode wal options.
@@ -114,17 +113,21 @@ mod tests {
         let toml_str = r#"
             provider = "raft-engine"
         "#;
-        let wal_config: WalOptions = toml::from_str(toml_str).unwrap();
+        let wal_options: WalOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(wal_options, WalOptions::RaftEngine);
 
         // Test serde kafka wal options.
         let toml_str = r#"
             provider = "kafka"
             topic = "test_topic"
         "#;
-        let wal_config: WalOptions = toml::from_str(toml_str).unwrap();
-        let expected_kafka_options = KafkaOptions {
-            topic: "test_topic".to_string(),
-        };
-        assert_eq!(wal_config, WalOptions::Kafka(expected_kafka_options));
+        let wal_options: WalOptions = toml::from_str(toml_str).unwrap();
+        let expected_kafka_topic = "test_topic".to_string();
+        assert_eq!(
+            wal_options,
+            WalOptions::Kafka {
+                topic: expected_kafka_topic
+            }
+        );
     }
 }

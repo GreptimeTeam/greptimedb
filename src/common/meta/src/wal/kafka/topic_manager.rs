@@ -21,7 +21,7 @@ use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRe
 use crate::wal::kafka::KafkaConfig;
 
 /// Manages topic initialization and selection.
-pub(crate) struct TopicManager {
+pub struct TopicManager {
     topic_pool: Vec<Topic>,
     topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
@@ -29,7 +29,7 @@ pub(crate) struct TopicManager {
 
 impl TopicManager {
     /// Creates a new topic manager.
-    pub(crate) fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
         Self {
             topic_pool: Vec::new(),
             topic_selector: Arc::new(RoundRobinTopicSelector::new()),
@@ -40,17 +40,17 @@ impl TopicManager {
     /// Tries to initialize the topic pool.
     /// The initializer first tries to restore persisted topics from the kv backend.
     /// If not enough topics retrieved, the initializer would try to contact with Kafka cluster and request more topics.
-    pub(crate) async fn try_init(&mut self) -> Result<()> {
+    pub async fn try_init(&mut self) -> Result<()> {
         todo!()
     }
 
     /// Selects one topic from the topic pool through the topic selector.
-    pub(crate) fn select(&self) -> &Topic {
+    pub fn select(&self) -> &Topic {
         self.topic_selector.select(&self.topic_pool)
     }
 
     /// Selects a batch of topics from the topic pool through the topic selector.
-    pub(crate) fn select_batch(&self, num_topics: usize) -> Vec<Topic> {
-        todo!()
+    pub fn select_batch(&self, num_topics: usize) -> Vec<Topic> {
+        vec!["tmp_topic".to_string(); num_topics]
     }
 }

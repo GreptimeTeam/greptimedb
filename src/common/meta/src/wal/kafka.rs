@@ -18,7 +18,8 @@ pub mod topic_selector;
 
 use serde::{Deserialize, Serialize};
 
-use crate::wal::kafka::topic::Topic;
+pub use crate::wal::kafka::topic::Topic;
+pub use crate::wal::kafka::topic_manager::TopicManager;
 use crate::wal::kafka::topic_selector::SelectorType as TopicSelectorType;
 
 /// Configurations for bootstraping a kafka wal.
@@ -49,12 +50,4 @@ impl Default for KafkaConfig {
             replication_factor: 3,
         }
     }
-}
-
-/// Kafka wal options allocated to a region.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct KafkaOptions {
-    /// Kafka wal topic.
-    /// Publishers publish log entries to the topic while subscribers pull log entries from the topic.
-    pub topic: Topic,
 }

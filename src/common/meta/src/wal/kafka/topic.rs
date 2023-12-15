@@ -13,5 +13,6 @@
 // limitations under the License.
 
 /// Kafka wal topic.
+/// Publishers publish log entries to the topic while subscribers pull log entries from the topic.
 // A topic is simply a string right now. But it may be more complex in the future.
 pub type Topic = String;
