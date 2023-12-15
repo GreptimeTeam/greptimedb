@@ -32,7 +32,7 @@ pub use tables::get_schema_columns;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::InformationTable;
 
-/// A memory table with specific schema and columns.
+/// A memory table with specified schema and columns.
 pub(super) struct MemoryTable {
     table_id: TableId,
     table_name: &'static str,
@@ -134,5 +134,81 @@ impl DfPartitionStream for MemoryTable {
                     .map_err(Into::into)
             }),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_recordbatch::RecordBatches;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::StringVector;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_table() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
+        ]));
+
+        let table = MemoryTable::new(
+            42,
+            "test",
+            schema.clone(),
+            vec![
+                Arc::new(StringVector::from(vec!["a1", "a2"])),
+                Arc::new(StringVector::from(vec!["b1", "b2"])),
+            ],
+        );
+
+        assert_eq!(42, table.table_id());
+        assert_eq!("test", table.table_name());
+        assert_eq!(schema, InformationTable::schema(&table));
+
+        let stream = table.to_stream().unwrap();
+
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+        assert_eq!(
+            "\
++----+----+
+| a  | b  |
++----+----+
+| a1 | b1 |
+| a2 | b2 |
++----+----+",
+            batches.pretty_print().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_memory_table() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
+        ]));
+
+        let table = MemoryTable::new(42, "test", schema.clone(), vec![]);
+
+        assert_eq!(42, table.table_id());
+        assert_eq!("test", table.table_name());
+        assert_eq!(schema, InformationTable::schema(&table));
+
+        let stream = table.to_stream().unwrap();
+
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+
+        assert_eq!(
+            "\
++---+---+
+| a | b |
++---+---+
++---+---+",
+            batches.pretty_print().unwrap()
+        );
     }
 }

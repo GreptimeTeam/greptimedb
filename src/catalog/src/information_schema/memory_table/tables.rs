@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use common_catalog::consts::MITO_ENGINE;
-/// Return the schemas of tables which are not implemented.
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::StringVector;
@@ -90,4 +89,20 @@ fn string_column(name: &str) -> ColumnSchema {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_string_columns() {
+        let columns = ["a", "b", "c"];
+        let column_schemas = string_columns(&columns);
+
+        assert_eq!(3, column_schemas.len());
+        for (i, name) in columns.iter().enumerate() {
+            let cs = column_schemas.get(i).unwrap();
+
+            assert_eq!(*name, cs.name);
+            assert_eq!(ConcreteDataType::string_datatype(), cs.data_type);
+        }
+    }
+}
