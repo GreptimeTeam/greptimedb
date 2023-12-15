@@ -15,12 +15,12 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use chrono::{NaiveDate, NaiveDateTime};
+use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{self, Value};
 use itertools::Itertools;
-use opensrv_mysql::{ParamValue, ValueInner};
+use opensrv_mysql::{to_naive_datetime, ParamValue, ValueInner};
 use snafu::ResultExt;
 use sql::ast::{visit_expressions_mut, Expr, Value as ValueExpr, VisitMut};
 use sql::statements::statement::Statement;
@@ -171,9 +171,18 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             let date: common_time::Date = NaiveDate::from(param.value).into();
             Ok(ScalarValue::Date32(Some(date.val())))
         }
-        ValueInner::Datetime(_) => Ok(ScalarValue::Date64(Some(
-            NaiveDateTime::from(param.value).timestamp_millis(),
-        ))),
+        ValueInner::Datetime(_) => {
+            let datetime = to_naive_datetime(param.value).map_err(|e| {
+                error::MysqlValueConversionSnafu {
+                    err_msg: e.to_string(),
+                }
+                .build()
+            })?;
+            Ok(ScalarValue::TimestampMillisecond(
+                Some(datetime.timestamp_millis()),
+                None,
+            ))
+        }
         ValueInner::Time(_) => Ok(ScalarValue::Time64Nanosecond(Some(
             Duration::from(param.value).as_millis() as i64,
         ))),
