@@ -14,6 +14,8 @@
 
 //! Handling truncate related requests.
 
+use std::collections::HashMap;
+
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::region_request::AffectedRows;
@@ -59,7 +61,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         // Make all data obsolete.
-        self.wal.obsolete(region_id, truncated_entry_id).await?;
+        // TODO(niebayes): properly fetch or construct wal options.
+        self.wal
+            .obsolete(region_id, truncated_entry_id, &HashMap::default())
+            .await?;
         info!(
             "Complete truncating region: {}, entry id: {} and sequence: {}.",
             region_id, truncated_entry_id, truncated_sequence

@@ -351,7 +351,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
-    _wal_options: &HashMap<String, String>,
+    wal_options: &HashMap<String, String>,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
@@ -360,8 +360,8 @@ async fn replay_memtable<S: LogStore>(
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
-    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
+    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control, wal_options.clone());
+    let mut wal_stream = wal.scan(region_id, flushed_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);
