@@ -40,7 +40,9 @@ pub enum WalConfig {
 #[serde(tag = "provider")]
 pub enum WalOptions {
     #[default]
+    #[serde(rename = "raft-engine")]
     RaftEngine,
+    #[serde(rename = "kafka")]
     Kafka(KafkaOptions),
 }
 
@@ -95,7 +97,7 @@ mod tests {
             replication_factor = 3
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
-        let expected_kafka_wal_config = KafkaConfig {
+        let expected_kafka_config = KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 32,
             selector_type: KafkaTopicSelectorType::RoundRobin,
@@ -103,8 +105,26 @@ mod tests {
             num_partitions: 1,
             replication_factor: 3,
         };
-        assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_wal_config));
+        assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));
     }
 
-    fn test_serde_wal_options() {}
+    #[test]
+    fn test_serde_wal_options() {
+        // Test serde raft-engine wal options.
+        let toml_str = r#"
+            provider = "raft-engine"
+        "#;
+        let wal_config: WalOptions = toml::from_str(toml_str).unwrap();
+
+        // Test serde kafka wal options.
+        let toml_str = r#"
+            provider = "kafka"
+            topic = "test_topic"
+        "#;
+        let wal_config: WalOptions = toml::from_str(toml_str).unwrap();
+        let expected_kafka_options = KafkaOptions {
+            topic: "test_topic".to_string(),
+        };
+        assert_eq!(wal_config, WalOptions::Kafka(expected_kafka_options));
+    }
 }
