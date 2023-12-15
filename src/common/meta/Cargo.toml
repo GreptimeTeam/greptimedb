@@ -39,6 +39,7 @@ store-api.workspace = true
 strum.workspace = true
 table.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tonic.workspace = true
 
 [dev-dependencies]

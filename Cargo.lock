@@ -1817,6 +1817,7 @@ dependencies = [
  "strum 0.25.0",
  "table",
  "tokio",
+ "toml 0.7.8",
  "tonic 0.10.2",
 ]
 

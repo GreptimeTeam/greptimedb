@@ -14,7 +14,7 @@
 
 pub mod topic;
 pub mod topic_manager;
-mod topic_selector;
+pub mod topic_selector;
 
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +44,7 @@ impl Default for KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal".to_string(),
+            topic_name_prefix: "greptimedb_kafka_wal".to_string(),
             num_partitions: 1,
             replication_factor: 3,
         }
@@ -53,7 +53,7 @@ impl Default for KafkaConfig {
 
 /// Kafka wal options allocated to a region.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct KafkaWalOptions {
+pub struct KafkaOptions {
     /// Kafka wal topic.
     /// Publishers publish log entries to the topic while subscribers pull log entries from the topic.
     pub topic: Topic,
