@@ -25,10 +25,11 @@ use crate::inverted_index::Bytes;
 
 /// A [`Stream`] implementation that merges two sorted streams into a single sorted stream
 pub struct MergeSortedStream {
-    stream1: SortedStream,
-    stream2: SortedStream,
-    res1: Option<(Bytes, BitVec)>,
-    res2: Option<(Bytes, BitVec)>,
+    stream1: Option<SortedStream>,
+    peek1: Option<(Bytes, BitVec)>,
+
+    stream2: Option<SortedStream>,
+    peek2: Option<(Bytes, BitVec)>,
 }
 
 impl MergeSortedStream {
@@ -36,10 +37,11 @@ impl MergeSortedStream {
     /// in sorted order, merging duplicate items by unioning their bitmaps
     pub fn merge(stream1: SortedStream, stream2: SortedStream) -> SortedStream {
         Box::new(MergeSortedStream {
-            stream1,
-            stream2,
-            res1: None,
-            res2: None,
+            stream1: Some(stream1),
+            peek1: None,
+
+            stream2: Some(stream2),
+            peek2: None,
         })
     }
 }
@@ -50,25 +52,28 @@ impl Stream for MergeSortedStream {
     /// Polls both streams and returns the next item from the stream that has the smaller next item.
     /// If both streams have the same next item, the bitmaps are unioned together.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.res1.is_none() {
-            if let Some(item) = ready!(self.stream1.poll_next_unpin(cx)) {
-                self.res1 = Some(item?);
-            }
-        }
-        if self.res2.is_none() {
-            if let Some(item) = ready!(self.stream2.poll_next_unpin(cx)) {
-                self.res2 = Some(item?);
+        if let (true, Some(stream1)) = (self.peek1.is_none(), self.stream1.as_mut()) {
+            match ready!(stream1.poll_next_unpin(cx)) {
+                Some(item) => self.peek1 = Some(item?),
+                None => self.stream1 = None, // `stream1` is exhausted, don't poll it next time
             }
         }
 
-        Poll::Ready(match (self.res1.take(), self.res2.take()) {
+        if let (true, Some(stream2)) = (self.peek2.is_none(), self.stream2.as_mut()) {
+            match ready!(stream2.poll_next_unpin(cx)) {
+                Some(item) => self.peek2 = Some(item?),
+                None => self.stream2 = None, // `stream2` is exhausted, don't poll it next time
+            }
+        }
+
+        Poll::Ready(match (self.peek1.take(), self.peek2.take()) {
             (Some((v1, b1)), Some((v2, b2))) => match v1.cmp(&v2) {
                 Ordering::Less => {
-                    self.res2 = Some((v2, b2)); // Preserve the rest of stream2
+                    self.peek2 = Some((v2, b2)); // Preserve the rest of `stream2`
                     Some(Ok((v1, b1)))
                 }
                 Ordering::Greater => {
-                    self.res1 = Some((v1, b1)); // Preserve the rest of stream1
+                    self.peek1 = Some((v1, b1)); // Preserve the rest of `stream1`
                     Some(Ok((v2, b2)))
                 }
                 Ordering::Equal => Some(Ok((v1, merge_bitmaps(b1, b2)))),
