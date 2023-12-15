@@ -18,11 +18,12 @@ mod topic_selector;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::wal::kafka::topic::Topic as KafkaTopic;
-pub use crate::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
+use crate::wal::kafka::topic::Topic;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct KafkaConfig;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
-pub struct KafkaWalOptions;
+pub struct KafkaWalOptions {
+    topic: Topic,
+}

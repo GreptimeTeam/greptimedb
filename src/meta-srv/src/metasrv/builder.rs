@@ -204,7 +204,7 @@ impl MetaSrvBuilder {
             table_id: None,
         };
 
-        let wal_options_allocator = build_wal_options_allocator(&options.wal).await?;
+        let wal_options_allocator = build_wal_options_allocator(&options.wal, &kv_backend).await?;
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             Arc::new(MetaSrvTableMetadataAllocator::new(
                 selector_ctx.clone(),
@@ -348,9 +348,13 @@ fn build_procedure_manager(
     Arc::new(LocalManager::new(manager_config, state_store))
 }
 
-async fn build_wal_options_allocator(config: &WalConfig) -> Result<WalOptionsAllocator> {
-    // TODO(niebayes): init the allocator.
-    Ok(WalOptionsAllocator::new(config))
+async fn build_wal_options_allocator(
+    config: &WalConfig,
+    kv_backend: &KvBackendRef,
+) -> Result<WalOptionsAllocator> {
+    let _ = config;
+    let _ = kv_backend;
+    Ok(WalOptionsAllocator::default())
 }
 
 fn build_ddl_manager(

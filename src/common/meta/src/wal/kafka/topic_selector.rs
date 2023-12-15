@@ -22,7 +22,7 @@ pub(super) enum SelectorType {
 }
 
 /// Controls topic selection.
-pub(super) trait TopicSelector {
+pub(super) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.
     fn select(&self, topic_pool: &[Topic]) -> &Topic;
 }

@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::topic::Topic;
-use crate::wal::kafka::topic_selector::TopicSelectorRef;
+use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
 use crate::wal::kafka::KafkaConfig;
 
 /// Manages topic initialization and selection.
-pub struct TopicManager {
+pub(crate) struct TopicManager {
     topic_pool: Vec<Topic>,
     topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
@@ -27,24 +29,28 @@ pub struct TopicManager {
 
 impl TopicManager {
     /// Creates a new topic manager.
-    pub fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
-        todo!()
+    pub(crate) fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
+        Self {
+            topic_pool: Vec::new(),
+            topic_selector: Arc::new(RoundRobinTopicSelector::new()),
+            kv_backend,
+        }
     }
 
     /// Tries to initialize the topic pool.
     /// The initializer first tries to restore persisted topics from the kv backend.
     /// If not enough topics retrieved, the initializer would try to contact with Kafka cluster and request more topics.
-    pub async fn try_init(&mut self) -> Result<()> {
+    pub(crate) async fn try_init(&mut self) -> Result<()> {
         todo!()
     }
 
     /// Selects one topic from the topic pool through the topic selector.
-    pub fn select(&self) -> &Topic {
+    pub(crate) fn select(&self) -> &Topic {
         self.topic_selector.select(&self.topic_pool)
     }
 
     /// Selects a batch of topics from the topic pool through the topic selector.
-    pub fn select_batch(&self, num_topics: usize) -> Vec<Topic> {
+    pub(crate) fn select_batch(&self, num_topics: usize) -> Vec<Topic> {
         todo!()
     }
 }
