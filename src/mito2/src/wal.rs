@@ -14,12 +14,12 @@
 
 //! Write ahead log of the engine.
 
-use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
 use api::v1::WalEntry;
 use async_stream::try_stream;
+use common_config::wal::WalOptions;
 use common_error::ext::BoxedError;
 use futures::stream::BoxStream;
 use futures::StreamExt;
@@ -70,7 +70,7 @@ impl<S: LogStore> Wal<S> {
         &'a self,
         region_id: RegionId,
         start_id: EntryId,
-        wal_options: &'a HashMap<String, String>,
+        wal_options: &'a WalOptions,
     ) -> Result<WalEntryStream> {
         let stream = try_stream!({
             let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
@@ -100,7 +100,7 @@ impl<S: LogStore> Wal<S> {
         &self,
         region_id: RegionId,
         last_id: EntryId,
-        wal_options: &HashMap<String, String>,
+        wal_options: &WalOptions,
     ) -> Result<()> {
         let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
         self.store
@@ -138,7 +138,7 @@ impl<S: LogStore> WalWriter<S> {
         region_id: RegionId,
         entry_id: EntryId,
         wal_entry: &WalEntry,
-        wal_options: &HashMap<String, String>,
+        wal_options: &WalOptions,
     ) -> Result<()> {
         let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
         // Encode wal entry to log store entry.
@@ -172,7 +172,7 @@ impl<S: LogStore> WalWriter<S> {
 fn try_build_wal_namespace<S: LogStore>(
     store: &Arc<S>,
     region_id: RegionId,
-    wal_options: &HashMap<String, String>,
+    wal_options: &WalOptions,
 ) -> Result<S::Namespace> {
     store
         .namespace(region_id.into(), wal_options)

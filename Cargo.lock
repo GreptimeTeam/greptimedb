@@ -1797,6 +1797,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-grpc-expr",
  "common-macro",
@@ -3589,7 +3590,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=28725502aa3de91858da16cd4bd23c4066cebc6a#28725502aa3de91858da16cd4bd23c4066cebc6a"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b1d403088f02136bcebde53d604f491c260ca8e2#b1d403088f02136bcebde53d604f491c260ca8e2"
 dependencies = [
  "prost 0.12.2",
  "serde",
@@ -4726,6 +4727,7 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-greptimedb-telemetry",
  "common-grpc",
@@ -4878,6 +4880,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-decimal",
  "common-error",
@@ -8956,6 +8959,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "common-base",
+ "common-config",
  "common-error",
  "common-macro",
  "common-query",

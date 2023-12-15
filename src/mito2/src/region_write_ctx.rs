@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
 use api::v1::{Mutation, OpType, Rows, WalEntry};
+use common_config::wal::WalOptions;
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::storage::{RegionId, SequenceNumber};
@@ -88,7 +88,7 @@ pub(crate) struct RegionWriteCtx {
     /// out of the context to construct the wal entry when we write to the wal.
     wal_entry: WalEntry,
     /// Wal options of the region being written to.
-    wal_options: HashMap<String, String>,
+    wal_options: WalOptions,
     /// Notifiers to send write results to waiters.
     ///
     /// The i-th notify is for i-th mutation.
@@ -108,7 +108,7 @@ impl RegionWriteCtx {
     pub(crate) fn new(
         region_id: RegionId,
         version_control: &VersionControlRef,
-        wal_options: HashMap<String, String>,
+        wal_options: WalOptions,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,

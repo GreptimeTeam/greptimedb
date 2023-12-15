@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_config::wal::WalOptions;
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
@@ -111,11 +112,7 @@ impl LogStore for NoopLogStore {
         EntryImpl
     }
 
-    fn namespace(
-        &self,
-        ns_id: NamespaceId,
-        wal_options: &HashMap<String, String>,
-    ) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
         let _ = ns_id;
         let _ = wal_options;
         Ok(NamespaceImpl)

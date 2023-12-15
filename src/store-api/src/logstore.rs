@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use common_config::wal::WalOptions;
 use common_error::ext::ErrorExt;
 
 use crate::logstore::entry::{Entry, Id as EntryId, Offset as EntryOffset};
@@ -73,7 +74,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     fn namespace(
         &self,
         ns_id: NamespaceId,
-        wal_options: &HashMap<String, String>,
+        wal_options: &WalOptions,
     ) -> Result<Self::Namespace, Self::Error>;
 
     /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete

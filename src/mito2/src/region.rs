@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, RwLock};
 
+use common_config::wal::WalOptions;
 use common_telemetry::info;
 use common_time::util::current_time_millis;
 use snafu::{ensure, OptionExt};
@@ -76,7 +77,7 @@ pub(crate) struct MitoRegion {
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.
     #[allow(unused)]
-    pub(crate) wal_options: HashMap<String, String>,
+    pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
     /// Whether the region is writable.

@@ -117,7 +117,6 @@ async fn test_region_replay() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
-                wal_options: HashMap::default(),
             }),
         )
         .await

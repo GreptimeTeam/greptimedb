@@ -10,6 +10,7 @@ aquamarine.workspace = true
 async-trait.workspace = true
 bytes = "1.1"
 common-base.workspace = true
+common-config.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-query.workspace = true

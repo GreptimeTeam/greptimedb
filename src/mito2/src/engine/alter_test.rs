@@ -119,7 +119,6 @@ async fn test_alter_region() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
-                wal_options: HashMap::default(),
             }),
         )
         .await
@@ -202,7 +201,6 @@ async fn test_put_after_alter() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
-                wal_options: HashMap::default(),
             }),
         )
         .await

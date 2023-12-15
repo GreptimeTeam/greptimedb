@@ -21,6 +21,7 @@ bytes = "1.4"
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true
+common-config.workspace = true
 common-datasource.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true

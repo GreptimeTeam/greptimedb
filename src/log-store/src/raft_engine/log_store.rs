@@ -12,12 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_stream::stream;
-use common_config::wal::RaftEngineConfig;
+use common_config::wal::{RaftEngineConfig, WalOptions};
 use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
@@ -342,11 +341,7 @@ impl LogStore for RaftEngineLogStore {
         }
     }
 
-    fn namespace(
-        &self,
-        ns_id: NamespaceId,
-        wal_options: &HashMap<String, String>,
-    ) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
         let _ = wal_options;
         Ok(Namespace {
             id: ns_id,

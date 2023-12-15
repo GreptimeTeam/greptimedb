@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use common_config::wal::KafkaConfig;
+use common_config::wal::{KafkaConfig, WalOptions};
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
@@ -73,11 +73,7 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Create a namespace of the associate Namespace type
-    fn namespace(
-        &self,
-        ns_id: NamespaceId,
-        wal_options: &HashMap<String, String>,
-    ) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
         todo!()
     }
 

@@ -13,9 +13,9 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_config::wal::WalOptions;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -228,7 +228,7 @@ pub enum Error {
     ))]
     BuildWalNamespace {
         region_id: RegionId,
-        wal_options: HashMap<String, String>,
+        wal_options: WalOptions,
         source: BoxedError,
     },
 

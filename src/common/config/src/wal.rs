@@ -20,6 +20,10 @@ use serde::{Deserialize, Serialize};
 pub use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::raft_engine::RaftEngineConfig;
 
+// TODO(niebayes): redirect to actual types.
+pub type WalOptions = String;
+pub type EncodedWalOptions = String;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider")]
 pub enum WalConfig {

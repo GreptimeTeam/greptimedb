@@ -14,9 +14,9 @@
 
 //! Handling flush related requests.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_config::wal::WalOptions;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
@@ -205,7 +205,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // TODO(niebayes): properly fetch or construct wal options.
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &HashMap::default())
+            .obsolete(region_id, request.flushed_entry_id, &WalOptions::default())
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);

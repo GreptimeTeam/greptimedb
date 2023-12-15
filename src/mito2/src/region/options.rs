@@ -24,6 +24,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, JsonOptionsSnafu, Result};
 
+// TODO(niebayes): integrate wal options into region options.
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.

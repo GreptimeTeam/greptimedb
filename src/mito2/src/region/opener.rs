@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
+use common_config::wal::WalOptions;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
@@ -53,7 +54,6 @@ pub(crate) struct RegionOpener {
     region_dir: String,
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
-    wal_options: HashMap<String, String>,
     cache_manager: Option<CacheManagerRef>,
 }
 
@@ -74,7 +74,6 @@ impl RegionOpener {
             region_dir: normalize_dir(region_dir),
             scheduler,
             options: HashMap::new(),
-            wal_options: HashMap::new(),
             cache_manager: None,
         }
     }
@@ -88,12 +87,6 @@ impl RegionOpener {
     /// Sets options for the region.
     pub(crate) fn options(mut self, options: HashMap<String, String>) -> Self {
         self.options = options;
-        self
-    }
-
-    /// Sets wal options for the region.
-    pub(crate) fn wal_options(mut self, wal_options: HashMap<String, String>) -> Self {
-        self.wal_options = wal_options;
         self
     }
 
@@ -145,6 +138,8 @@ impl RegionOpener {
             }
         }
         let options = RegionOptions::try_from(&self.options)?;
+        // TODO(niebayes): decode wal options from options.
+        let wal_options = WalOptions::default();
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -171,7 +166,7 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
             )),
-            wal_options: self.wal_options,
+            wal_options,
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
@@ -244,9 +239,11 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
+        // TODO(niebayes): decode wal options from region options.
+        let wal_options = WalOptions::default();
         replay_memtable(
             wal,
-            &self.wal_options,
+            &wal_options,
             region_id,
             flushed_entry_id,
             &version_control,
@@ -259,7 +256,7 @@ impl RegionOpener {
             access_layer,
             manifest_manager,
             file_purger,
-            wal_options: self.wal_options.clone(),
+            wal_options,
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
@@ -351,7 +348,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
-    wal_options: &HashMap<String, String>,
+    wal_options: &WalOptions,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,

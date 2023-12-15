@@ -42,7 +42,6 @@ async fn test_engine_open_empty() {
                 engine: String::new(),
                 region_dir: "empty".to_string(),
                 options: HashMap::default(),
-                wal_options: HashMap::default(),
             }),
         )
         .await
@@ -74,7 +73,6 @@ async fn test_engine_open_existing() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
-                wal_options: HashMap::default(),
             }),
         )
         .await
@@ -163,7 +161,6 @@ async fn test_engine_region_open_with_options() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
-                wal_options: HashMap::default(),
             }),
         )
         .await
@@ -208,7 +205,6 @@ async fn test_engine_region_open_with_custom_store() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
-                wal_options: HashMap::default(),
             }),
         )
         .await

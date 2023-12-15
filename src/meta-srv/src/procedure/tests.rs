@@ -162,7 +162,6 @@ fn test_create_region_request_template() {
         primary_key: vec![2, 1],
         path: String::new(),
         options: HashMap::new(),
-        wal_options: HashMap::new(),
     };
     assert_eq!(template, expected);
 }
