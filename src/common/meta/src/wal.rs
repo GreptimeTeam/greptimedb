@@ -25,7 +25,7 @@ pub use crate::wal::options_allocator::WalOptionsAllocator;
 
 pub const WAL_OPTIONS_KEY: &str = "wal_options";
 
-/// Wal configurations for bootstraping meta srv.
+/// Wal configurations for bootstrapping meta srv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
