@@ -451,7 +451,7 @@ impl CreateRequestBuilder {
             let physical_region_id = RegionId::new(table_id, region_id.region_number());
             request.options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
-                physical_region_id.to_string(),
+                physical_region_id.as_u64().to_string(),
             );
         }
 

@@ -2633,6 +2633,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
+ "metric-engine",
  "mito2",
  "object-store",
  "pin-project",
