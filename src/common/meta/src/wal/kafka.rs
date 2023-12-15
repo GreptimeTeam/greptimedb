@@ -20,10 +20,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::wal::kafka::topic::Topic;
 
+/// Configurations for bootstraping a kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct KafkaConfig;
 
+/// Kafka wal options allocated to a region.
 #[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
 pub struct KafkaWalOptions {
-    topic: Topic,
+    /// Kafka wal topic.
+    /// Publishers publish log entries to the topic while subscribers pull log entries from the topic.
+    pub topic: Topic,
 }
