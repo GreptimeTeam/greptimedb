@@ -3988,6 +3988,7 @@ dependencies = [
  "greptime-proto",
  "mockall",
  "prost 0.12.2",
+ "rand",
  "regex",
  "regex-automata 0.1.10",
  "snafu",

@@ -12,13 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod external_provider;
+mod external_sort;
+mod intermediate_rw;
+mod merge_stream;
+
+use async_trait::async_trait;
 use common_base::BitVec;
 use futures::Stream;
 
 use crate::inverted_index::error::Result;
 use crate::inverted_index::Bytes;
 
-mod intermediate_rw;
-
 /// A stream of sorted values along with their associated bitmap
 pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
+
+/// Output of a sorting operation, encapsulating a bitmap for null values and a stream of sorted items
+pub struct SortOutput {
+    /// Bitmap indicating positions of null values
+    pub null_bitmap: BitVec,
+
+    /// Stream of sorted items
+    pub sorted_stream: SortedStream,
+}
+
+/// Handles data sorting, supporting incremental input and retrieval of sorted output
+#[async_trait]
+pub trait Sorter: Send {
+    /// Inputs a non-null or null value into the sorter
+    async fn push(&mut self, value: Option<Bytes>) -> Result<()>;
+
+    /// Completes the sorting process and returns the sorted data
+    async fn output(&mut self) -> Result<SortOutput>;
+}
