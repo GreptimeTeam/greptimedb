@@ -19,10 +19,12 @@ use common_meta::key::datanode_table::RegionInfo;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
+use common_meta::wal::EncodedWalOptions;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
@@ -35,6 +37,7 @@ pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
+    wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
 }
 
 impl UpdateRegionMetadata {
@@ -42,11 +45,13 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
+        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     ) -> Self {
         Self {
             candidate,
             region_storage_path,
             region_options,
+            wal_options_map,
         }
     }
 
@@ -104,6 +109,7 @@ impl UpdateRegionMetadata {
                     engine: engine.to_string(),
                     region_storage_path: self.region_storage_path.to_string(),
                     region_options: self.region_options.clone(),
+                    wal_options_map: self.wal_options_map.clone(),
                 },
                 &table_route_value,
                 new_region_routes,
@@ -188,8 +194,12 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let mut state =
-            UpdateRegionMetadata::new(Peer::new(2, ""), env.path.clone(), HashMap::new());
+        let mut state = UpdateRegionMetadata::new(
+            Peer::new(2, ""),
+            env.path.clone(),
+            HashMap::new(),
+            HashMap::new(),
+        );
 
         let next_state = state.next(&env.context, &failed_region).await.unwrap();
         assert_eq!(format!("{next_state:?}"), "InvalidateCache");
@@ -205,6 +215,7 @@ mod tests {
             let state = UpdateRegionMetadata::new(
                 Peer::new(candidate, ""),
                 env.path.clone(),
+                HashMap::new(),
                 HashMap::new(),
             );
             state
@@ -348,7 +359,12 @@ mod tests {
             let path = env.path.clone();
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(2, ""), path, HashMap::new());
+                    let state = UpdateRegionMetadata::new(
+                        Peer::new(2, ""),
+                        path,
+                        HashMap::new(),
+                        HashMap::new(),
+                    );
                     state
                         .update_metadata(&ctx_1, &failed_region_1)
                         .await
@@ -358,6 +374,7 @@ mod tests {
                     let state = UpdateRegionMetadata::new(
                         Peer::new(3, ""),
                         env.path.clone(),
+                        HashMap::new(),
                         HashMap::new(),
                     );
                     state

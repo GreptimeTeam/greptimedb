@@ -20,10 +20,12 @@ use async_trait::async_trait;
 use common_meta::ddl::utils::region_storage_path;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::peer::Peer;
+use common_meta::wal::EncodedWalOptions;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
@@ -43,6 +45,7 @@ pub(super) struct ActivateRegion {
     remark_inactive_region: bool,
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
+    wal_options_map: Option<HashMap<RegionNumber, EncodedWalOptions>>,
 }
 
 impl ActivateRegion {
@@ -52,6 +55,7 @@ impl ActivateRegion {
             remark_inactive_region: false,
             region_storage_path: None,
             region_options: None,
+            wal_options_map: None,
         }
     }
 
@@ -136,6 +140,11 @@ impl ActivateRegion {
                             .clone()
                             .context(error::UnexpectedSnafu {
                                 violated: "expected region_options",
+                            })?,
+                        self.wal_options_map
+                            .clone()
+                            .context(error::UnexpectedSnafu {
+                                violated: "expected wal_options_map",
                             })?,
                     )))
                 } else {

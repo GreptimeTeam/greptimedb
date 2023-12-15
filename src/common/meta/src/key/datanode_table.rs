@@ -39,14 +39,17 @@ use crate::DatanodeId;
 /// For compatible reason, DON'T modify the field name.
 pub struct RegionInfo {
     #[serde(default)]
-    // The table engine, it SHOULD be immutable after created.
+    /// The table engine, it SHOULD be immutable after created.
     pub engine: String,
-    // The region storage path, it SHOULD be immutable after created.
+    /// The region storage path, it SHOULD be immutable after created.
     #[serde(default)]
     pub region_storage_path: String,
-    // The region options.
+    /// The region options.
     #[serde(default)]
     pub region_options: HashMap<String, String>,
+    /// The per-region wal options.
+    #[serde(default)]
+    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
 }
 
 pub struct DatanodeTableKey {
@@ -104,24 +107,16 @@ pub struct DatanodeTableValue {
     pub regions: Vec<RegionNumber>,
     #[serde(flatten)]
     pub region_info: RegionInfo,
-    #[serde(default)]
-    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     version: u64,
 }
 
 impl DatanodeTableValue {
-    pub fn new(
-        table_id: TableId,
-        regions: Vec<RegionNumber>,
-        region_info: RegionInfo,
-        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
-    ) -> Self {
+    pub fn new(table_id: TableId, regions: Vec<RegionNumber>, region_info: RegionInfo) -> Self {
         Self {
             table_id,
             regions,
             region_info,
             version: 0,
-            wal_options_map,
         }
     }
 }
@@ -198,8 +193,8 @@ impl DatanodeTableManager {
                         engine: engine.to_string(),
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
+                        wal_options_map,
                     },
-                    wal_options_map,
                 );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
@@ -222,9 +217,6 @@ impl DatanodeTableManager {
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
-        // TODO(niebayes): properly fetch old wal options.
-        let wal_options_map = HashMap::new();
-
         // Removes the old datanode table key value pairs
         for current_datanode in current_region_distribution.keys() {
             if !new_region_distribution.contains_key(current_datanode) {
@@ -245,13 +237,8 @@ impl DatanodeTableManager {
             if need_update {
                 let key = DatanodeTableKey::new(datanode, table_id);
                 let raw_key = key.as_raw_key();
-                let val = DatanodeTableValue::new(
-                    table_id,
-                    regions,
-                    region_info.clone(),
-                    wal_options_map.clone(),
-                )
-                .try_as_raw_value()?;
+                let val = DatanodeTableValue::new(table_id, regions, region_info.clone())
+                    .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
             }
         }
@@ -299,7 +286,6 @@ mod tests {
             table_id: 42,
             regions: vec![1, 2, 3],
             region_info: RegionInfo::default(),
-            wal_options_map: HashMap::default(),
             version: 1,
         };
         let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"wal_options_map":{},"version":1}"#;

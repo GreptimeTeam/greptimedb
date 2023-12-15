@@ -136,6 +136,9 @@ impl UpdateMetadata {
         let engine = table_info.meta.engine.clone();
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
 
+        // TODO(niebayes): properly fetch or construct wal options map.
+        let wal_options_map = HashMap::new();
+
         // No remote fetch.
         let table_route_value = ctx.get_table_route_value().await?;
 
@@ -146,6 +149,7 @@ impl UpdateMetadata {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: region_options.clone(),
+                    wal_options_map,
                 },
                 table_route_value,
                 region_routes,

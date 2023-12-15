@@ -413,8 +413,8 @@ impl MigrateTableMetadata {
                             engine: engine.to_string(),
                             region_storage_path: region_storage_path.clone(),
                             region_options: (&value.table_info.meta.options).into(),
+                            wal_options_map: wal_options_map.clone(),
                         },
-                        wal_options_map.clone(),
                     ),
                 )
             })
