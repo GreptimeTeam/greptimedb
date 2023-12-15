@@ -47,7 +47,8 @@ impl MergeSortedStream {
 impl Stream for MergeSortedStream {
     type Item = Result<(Bytes, BitVec)>;
 
-    /// Polls both streams and returns the next item from the stream that has the smaller next item
+    /// Polls both streams and returns the next item from the stream that has the smaller next item.
+    /// If both streams have the same next item, the bitmaps are unioned together.
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.res1.is_none() {
             if let Some(item) = ready!(self.stream1.poll_next_unpin(cx)) {
