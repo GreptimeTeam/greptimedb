@@ -22,7 +22,7 @@ pub use crate::wal::kafka::topic::Topic;
 pub use crate::wal::kafka::topic_manager::TopicManager;
 use crate::wal::kafka::topic_selector::SelectorType as TopicSelectorType;
 
-/// Configurations for bootstraping a kafka wal.
+/// Configurations for bootstrapping a kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KafkaConfig {
     /// The broker endpoints of the Kafka cluster.
