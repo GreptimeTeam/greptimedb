@@ -22,10 +22,10 @@ use crate::inverted_index::error::Result;
 #[async_trait]
 pub trait ExternalTempFileProvider: Send + Sync {
     /// Creates and opens a new intermediate file associated with a specific index for writing.
-    /// Should return an error if the file already exists.
+    /// The implementation should ensure that the file does not already exist.
     ///
-    /// - `index_name`: the name of the index for which the file will be associated.
-    /// - `file_id`: a unique identifier for the new file.
+    /// - `index_name`: the name of the index for which the file will be associated
+    /// - `file_id`: a unique identifier for the new file
     async fn create(
         &self,
         index_name: &str,
@@ -34,6 +34,6 @@ pub trait ExternalTempFileProvider: Send + Sync {
 
     /// Retrieves all intermediate files associated with a specific index for an external sorting operation.
     ///
-    /// `index_name`: the name of the index to retrieve intermediate files for.
+    /// `index_name`: the name of the index to retrieve intermediate files for
     async fn read_all(&self, index_name: &str) -> Result<Vec<Box<dyn AsyncRead + Unpin + Send>>>;
 }

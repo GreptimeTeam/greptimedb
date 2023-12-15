@@ -76,7 +76,8 @@ impl Sorter for ExternalSorter {
         }
     }
 
-    /// Finalizes the sorting operation, merging data from both memory and external files into a sorted stream
+    /// Finalizes the sorting operation, merging data from both in-memory buffer and external files
+    /// into a sorted stream
     async fn output(&mut self) -> Result<SortOutput> {
         let readers = self.temp_file_provider.read_all(&self.index_name).await?;
 
