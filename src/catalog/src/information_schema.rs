@@ -91,12 +91,12 @@ impl InformationSchemaProvider {
         let provider = Self::new(catalog_name, catalog_manager);
 
         let mut schema = HashMap::new();
-        schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
-        schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
+        schema.insert(TABLES.to_string(), provider.table(TABLES).unwrap());
+        schema.insert(COLUMNS.to_string(), provider.table(COLUMNS).unwrap());
 
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
-            schema.insert((*name).to_owned(), provider.table(name).unwrap());
+            schema.insert((*name).to_string(), provider.table(name).unwrap());
         }
 
         schema
@@ -140,9 +140,9 @@ impl InformationSchemaProvider {
             .unwrap();
         let table_info = TableInfoBuilder::default()
             .table_id(table.table_id())
-            .name(table.table_name().to_owned())
+            .name(table.table_name().to_string())
             .catalog_name(catalog_name)
-            .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
+            .schema_name(INFORMATION_SCHEMA_NAME.to_string())
             .meta(table_meta)
             .table_type(table.table_type())
             .build()
