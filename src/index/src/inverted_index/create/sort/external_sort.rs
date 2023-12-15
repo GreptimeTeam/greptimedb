@@ -27,6 +27,7 @@ use crate::inverted_index::create::sort::intermediate_rw::{
 };
 use crate::inverted_index::create::sort::merge_stream::MergeSortedStream;
 use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
+use crate::inverted_index::create::sort_create::SorterFactory;
 use crate::inverted_index::error::Result;
 use crate::inverted_index::Bytes;
 
@@ -119,6 +120,21 @@ impl ExternalSorter {
             current_memory_usage: 0,
             memory_usage_threshold,
         }
+    }
+
+    /// Generates a factory function that creates new `ExternalSorter` instances
+    pub fn factory(
+        temp_file_provider: Arc<dyn ExternalTempFileProvider>,
+        memory_usage_threshold: usize,
+    ) -> SorterFactory {
+        Box::new(move |index_name, segment_row_count| {
+            Box::new(Self::new(
+                index_name,
+                temp_file_provider.clone(),
+                segment_row_count,
+                memory_usage_threshold,
+            ))
+        })
     }
 
     /// Determines the current data segment based on processed rows

@@ -39,10 +39,12 @@ pub struct InvertedIndexBlobWriter<W> {
 
 #[async_trait]
 impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWriter<W> {
-    async fn add_index<S>(&mut self, name: String, null_bitmap: BitVec, values: S) -> Result<()>
-    where
-        S: Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin,
-    {
+    async fn add_index(
+        &mut self,
+        name: String,
+        null_bitmap: BitVec,
+        values: Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>,
+    ) -> Result<()> {
         let single_writer = SingleIndexWriter::new(
             name.clone(),
             self.written_size,
@@ -98,6 +100,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
 #[cfg(test)]
 mod tests {
     use futures::io::Cursor;
+    use futures::stream;
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
@@ -128,11 +131,11 @@ mod tests {
             .add_index(
                 "tag0".to_string(),
                 BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
-                futures::stream::iter(vec![
+                Box::new(stream::iter(vec![
                     Ok((Bytes::from("a"), BitVec::from_slice(&[0b0000_0001]))),
                     Ok((Bytes::from("b"), BitVec::from_slice(&[0b0010_0000]))),
                     Ok((Bytes::from("c"), BitVec::from_slice(&[0b0000_0001]))),
-                ]),
+                ])),
             )
             .await
             .unwrap();
@@ -140,11 +143,11 @@ mod tests {
             .add_index(
                 "tag1".to_string(),
                 BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
-                futures::stream::iter(vec![
+                Box::new(stream::iter(vec![
                     Ok((Bytes::from("x"), BitVec::from_slice(&[0b0000_0001]))),
                     Ok((Bytes::from("y"), BitVec::from_slice(&[0b0010_0000]))),
                     Ok((Bytes::from("z"), BitVec::from_slice(&[0b0000_0001]))),
-                ]),
+                ])),
             )
             .await
             .unwrap();
