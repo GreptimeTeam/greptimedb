@@ -22,7 +22,9 @@ use common_base::BitVec;
 use futures::stream;
 
 use crate::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
-use crate::inverted_index::create::sort::intermediate_rw::{IntermediaReader, IntermediateWriter};
+use crate::inverted_index::create::sort::intermediate_rw::{
+    IntermediateReader, IntermediateWriter,
+};
 use crate::inverted_index::create::sort::merge_stream::MergeSortedStream;
 use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
 use crate::inverted_index::error::Result;
@@ -81,10 +83,10 @@ impl Sorter for ExternalSorter {
         let buf_values = mem::take(&mut self.values_buffer).into_iter();
         let mut merging_sorted_stream: SortedStream = Box::new(stream::iter(buf_values.map(Ok)));
 
-        // Sequentially merge each intermedia file's stream into the merged stream
+        // Sequentially merge each intermediate file's stream into the merged stream
         for reader in readers {
-            let intermedia = IntermediaReader::new(reader).into_stream().await?;
-            merging_sorted_stream = MergeSortedStream::merge(merging_sorted_stream, intermedia);
+            let intermediate = IntermediateReader::new(reader).into_stream().await?;
+            merging_sorted_stream = MergeSortedStream::merge(merging_sorted_stream, intermediate);
         }
 
         Ok(SortOutput {
