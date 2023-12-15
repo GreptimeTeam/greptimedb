@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
-use common_catalog::consts::{INFORMATION_SCHEMA_ENGINES_TABLE_ID, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_query::physical_plan::TaskContext;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -23,56 +22,50 @@ use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::prelude::{ConcreteDataType, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::StringVector;
+use datatypes::schema::SchemaRef;
+use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 use store_api::storage::TableId;
 
-use super::ENGINES;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::InformationTable;
 
-pub(super) struct InformationSchemaEngines {
+/// A memory table with specific schema and columns.
+pub(super) struct MemoryTable {
+    table_id: TableId,
+    table_name: &'static str,
     schema: SchemaRef,
+    columns: Vec<VectorRef>,
 }
 
-impl InformationSchemaEngines {
-    pub(super) fn new() -> Self {
+impl MemoryTable {
+    /// Creates a memory table with table id, name, schema and columns.
+    pub(super) fn new(
+        table_id: TableId,
+        table_name: &'static str,
+        schema: SchemaRef,
+        columns: Vec<VectorRef>,
+    ) -> Self {
         Self {
-            schema: Self::schema(),
+            table_id,
+            table_name,
+            schema,
+            columns,
         }
     }
 
-    pub(crate) fn schema() -> SchemaRef {
-        Arc::new(Schema::new(vec![
-            // The name of the storage engine.
-            ColumnSchema::new("engine", ConcreteDataType::string_datatype(), false),
-            // The level of support that the server has on the storage engine
-            ColumnSchema::new("support", ConcreteDataType::string_datatype(), false),
-            // The brief comment on the storage engine
-            ColumnSchema::new("comment", ConcreteDataType::string_datatype(), false),
-            // Whether the storage engine supports transactions.
-            ColumnSchema::new("transactions", ConcreteDataType::string_datatype(), false),
-            // Whether the storage engine supports XA transactions.
-            ColumnSchema::new("xa", ConcreteDataType::string_datatype(), true),
-            // Whether the storage engine supports `savepoints`.
-            ColumnSchema::new("savepoints", ConcreteDataType::string_datatype(), true),
-        ]))
-    }
-
-    fn builder(&self) -> InformationSchemaEnginesBuilder {
-        InformationSchemaEnginesBuilder::new(self.schema.clone())
+    fn builder(&self) -> MemoryTableBuilder {
+        MemoryTableBuilder::new(self.schema.clone(), self.columns.clone())
     }
 }
 
-impl InformationTable for InformationSchemaEngines {
+impl InformationTable for MemoryTable {
     fn table_id(&self) -> TableId {
-        INFORMATION_SCHEMA_ENGINES_TABLE_ID
+        self.table_id
     }
 
     fn table_name(&self) -> &'static str {
-        ENGINES
+        self.table_name
     }
 
     fn schema(&self) -> SchemaRef {
@@ -86,7 +79,7 @@ impl InformationTable for InformationSchemaEngines {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_engines()
+                    .memory_records()
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -100,32 +93,28 @@ impl InformationTable for InformationSchemaEngines {
     }
 }
 
-struct InformationSchemaEnginesBuilder {
+struct MemoryTableBuilder {
     schema: SchemaRef,
+    columns: Vec<VectorRef>,
 }
 
-impl InformationSchemaEnginesBuilder {
-    fn new(schema: SchemaRef) -> Self {
-        Self { schema }
+impl MemoryTableBuilder {
+    fn new(schema: SchemaRef, columns: Vec<VectorRef>) -> Self {
+        Self { schema, columns }
     }
 
-    /// Construct the `information_schema.engines` virtual table
-    async fn make_engines(&mut self) -> Result<RecordBatch> {
-        let columns: Vec<VectorRef> = vec![
-            Arc::new(StringVector::from(vec![MITO_ENGINE])),
-            Arc::new(StringVector::from(vec!["DEFAULT"])),
-            Arc::new(StringVector::from(vec![
-                "Storage engine for time-series data",
-            ])),
-            Arc::new(StringVector::from(vec!["NO"])),
-            Arc::new(StringVector::from(vec!["NO"])),
-            Arc::new(StringVector::from(vec!["NO"])),
-        ];
-        RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
+    /// Construct the `information_schema.{table_name}` virtual table
+    async fn memory_records(&mut self) -> Result<RecordBatch> {
+        if self.columns.is_empty() {
+            RecordBatch::new_empty(self.schema.clone()).context(CreateRecordBatchSnafu)
+        } else {
+            RecordBatch::new(self.schema.clone(), std::mem::take(&mut self.columns))
+                .context(CreateRecordBatchSnafu)
+        }
     }
 }
 
-impl DfPartitionStream for InformationSchemaEngines {
+impl DfPartitionStream for MemoryTable {
     fn schema(&self) -> &ArrowSchemaRef {
         self.schema.arrow_schema()
     }
@@ -137,7 +126,7 @@ impl DfPartitionStream for InformationSchemaEngines {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_engines()
+                    .memory_records()
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

@@ -13,9 +13,8 @@
 // limitations under the License.
 
 mod columns;
-mod empty_table;
-mod empty_table_schemas;
-mod engines;
+mod memory_table;
+mod memory_tables;
 mod table_names;
 mod tables;
 
@@ -26,8 +25,10 @@ use common_catalog::consts::{self, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
-use empty_table_schemas::get_schema;
 use futures_util::StreamExt;
+use lazy_static::lazy_static;
+use memory_tables::get_schema_columns;
+use paste::paste;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
@@ -41,10 +42,34 @@ pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
-use crate::information_schema::empty_table::EmptyTable;
-use crate::information_schema::engines::InformationSchemaEngines;
+use crate::information_schema::memory_table::MemoryTable;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
+
+lazy_static! {
+    // Memory tables in `information_schema`.
+    static ref MEMORY_TABLES: Vec<&'static str> = vec![
+        ENGINES,
+        COLUMN_PRIVILEGES,
+        COLUMN_STATISTICS
+    ];
+}
+
+macro_rules! setup_memory_table {
+    ($name: expr) => {
+        paste! {
+            {
+                let (schema, columns) = get_schema_columns($name);
+                Some(Arc::new(MemoryTable::new(
+                    consts::[<INFORMATION_SCHEMA_ $name  _TABLE_ID>],
+                    $name,
+                    schema,
+                    columns
+                )) as _)
+            }
+        }
+    };
+}
 
 pub struct InformationSchemaProvider {
     catalog_name: String,
@@ -70,16 +95,12 @@ impl InformationSchemaProvider {
         let mut schema = HashMap::new();
         schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
         schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
-        schema.insert(ENGINES.to_owned(), provider.table(ENGINES).unwrap());
-        // Tables not implemented
-        schema.insert(
-            COLUMN_PRIVILEGES.to_owned(),
-            provider.table(COLUMN_PRIVILEGES).unwrap(),
-        );
-        schema.insert(
-            COLUMN_STATISTICS.to_owned(),
-            provider.table(COLUMN_STATISTICS).unwrap(),
-        );
+
+        // Add memory tables
+        for name in MEMORY_TABLES.iter() {
+            schema.insert((*name).to_owned(), provider.table(name).unwrap());
+        }
+
         schema
     }
 
@@ -95,7 +116,8 @@ impl InformationSchemaProvider {
     }
 
     fn information_table(&self, name: &str) -> Option<InformationTableRef> {
-        match name.to_ascii_lowercase().as_str() {
+        let name = name.to_ascii_lowercase();
+        match name.clone().as_str() {
             TABLES => Some(Arc::new(InformationSchemaTables::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -104,18 +126,9 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
-            ENGINES => Some(Arc::new(InformationSchemaEngines::new()) as _),
-            // Table not implemented
-            COLUMN_PRIVILEGES => Some(Arc::new(EmptyTable::new(
-                consts::INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID,
-                COLUMN_PRIVILEGES,
-                get_schema(COLUMN_PRIVILEGES),
-            ))),
-            COLUMN_STATISTICS => Some(Arc::new(EmptyTable::new(
-                consts::INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID,
-                COLUMN_STATISTICS,
-                get_schema(COLUMN_STATISTICS),
-            ))),
+            ENGINES => setup_memory_table!(ENGINES),
+            COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
+            COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
             _ => None,
         }
     }
