@@ -14,7 +14,6 @@
 
 mod columns;
 mod memory_table;
-mod memory_tables;
 mod table_names;
 mod tables;
 
@@ -27,7 +26,6 @@ use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
-use memory_tables::get_schema_columns;
 use paste::paste;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
@@ -42,7 +40,7 @@ pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
-use crate::information_schema::memory_table::MemoryTable;
+use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 

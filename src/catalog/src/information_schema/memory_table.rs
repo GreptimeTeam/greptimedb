@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod tables;
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef as ArrowSchemaRef;
@@ -26,6 +27,7 @@ use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
 use store_api::storage::TableId;
+pub use tables::get_schema_columns;
 
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::InformationTable;
