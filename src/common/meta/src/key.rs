@@ -365,7 +365,7 @@ impl TableMetadataManager {
         &self,
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     ) -> Result<()> {
         let region_numbers = region_routes
             .iter()
@@ -401,7 +401,7 @@ impl TableMetadataManager {
             &engine,
             &region_storage_path,
             region_options,
-            region_wal_options_map,
+            wal_options_map,
             distribution,
         )?;
 

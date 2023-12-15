@@ -43,12 +43,11 @@ pub enum WalOptions {
     Kafka(KafkaWalOptions),
 }
 
-// TODO(niebayes): determine how to encode wal options.
+// TODO(niebayes): determine how to encode/decode wal options.
 pub type EncodedWalOptions = HashMap<String, String>;
 
 impl From<WalOptions> for EncodedWalOptions {
     fn from(value: WalOptions) -> Self {
-        // TODO(niebayes): implement encoding/decoding for wal options.
         EncodedWalOptions::default()
     }
 }

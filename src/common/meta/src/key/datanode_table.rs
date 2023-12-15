@@ -105,7 +105,7 @@ pub struct DatanodeTableValue {
     #[serde(flatten)]
     pub region_info: RegionInfo,
     #[serde(default)]
-    pub region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     version: u64,
 }
 
@@ -114,14 +114,14 @@ impl DatanodeTableValue {
         table_id: TableId,
         regions: Vec<RegionNumber>,
         region_info: RegionInfo,
-        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     ) -> Self {
         Self {
             table_id,
             regions,
             region_info,
             version: 0,
-            region_wal_options_map,
+            wal_options_map,
         }
     }
 }
@@ -174,17 +174,16 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
-                let region_wal_options_map = regions
+                let wal_options_map = regions
                     .iter()
                     .filter_map(|region_number| {
-                        let Some(wal_options) = region_wal_options_map.get(region_number).cloned()
-                        else {
+                        let Some(wal_options) = wal_options_map.get(region_number).cloned() else {
                             return None;
                         };
                         Some((*region_number, wal_options))
@@ -200,7 +199,7 @@ impl DatanodeTableManager {
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
                     },
-                    region_wal_options_map,
+                    wal_options_map,
                 );
 
                 Ok(TxnOp::Put(key.as_raw_key(), val.try_as_raw_value()?))
@@ -223,8 +222,8 @@ impl DatanodeTableManager {
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
-        // TODO(niebayes): properly fetch old region wal options.
-        let region_wal_options_map = HashMap::new();
+        // TODO(niebayes): properly fetch old wal options.
+        let wal_options_map = HashMap::new();
 
         // Removes the old datanode table key value pairs
         for current_datanode in current_region_distribution.keys() {
@@ -250,7 +249,7 @@ impl DatanodeTableManager {
                     table_id,
                     regions,
                     region_info.clone(),
-                    region_wal_options_map.clone(),
+                    wal_options_map.clone(),
                 )
                 .try_as_raw_value()?;
                 opts.push(TxnOp::Put(raw_key, val));
@@ -300,10 +299,10 @@ mod tests {
             table_id: 42,
             regions: vec![1, 2, 3],
             region_info: RegionInfo::default(),
-            region_wal_options_map: HashMap::default(),
+            wal_options_map: HashMap::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"region_wal_options_map":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"wal_options_map":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);

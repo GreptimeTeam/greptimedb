@@ -163,10 +163,8 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
     region_routes
 }
 
-fn create_region_wal_options_map(
-    regions: Vec<RegionNumber>,
-) -> HashMap<RegionNumber, EncodedWalOptions> {
-    // TODO(niebayes): construct region wal options for benchmark.
+fn create_wal_options_map(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, EncodedWalOptions> {
+    // TODO(niebayes): construct wal options for benchmark.
     let _ = regions;
     HashMap::default()
 }

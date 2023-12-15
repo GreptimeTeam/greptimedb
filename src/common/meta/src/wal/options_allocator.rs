@@ -44,7 +44,6 @@ impl WalOptionsAllocator {
 
     /// Allocates a batch of wal options where each wal options goes to a region.
     pub fn alloc_batch(&self, num_regions: usize) -> Vec<WalOptions> {
-        // TODO(niebayes): allocate a batch of region wal options.
         vec![WalOptions::default(); num_regions]
     }
 }

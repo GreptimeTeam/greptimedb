@@ -150,7 +150,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
             })
             .collect::<Vec<_>>();
 
-        // There're no region wal options involved in standalone mode currently.
+        // There're no wal options involved in standalone mode currently.
         Ok(TableMetadata {
             table_id,
             region_routes,
