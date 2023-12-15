@@ -45,7 +45,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::{EncodedWalOptions, WalOptions};
+use crate::wal::{EncodedWalOptions, WalOptions, WAL_OPTIONS_KEY};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -187,7 +187,6 @@ impl CreateTableProcedure {
             primary_key,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
-            wal_options: HashMap::default(),
         })
     }
 
@@ -221,10 +220,12 @@ impl CreateTableProcedure {
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
-                    create_region_request.wal_options = wal_options_map
-                        .get(region_number)
-                        .cloned()
-                        .unwrap_or_default();
+                    // Stores the encoded wal options into the request options.
+                    wal_options_map.get(region_number).and_then(|wal_options| {
+                        create_region_request
+                            .options
+                            .insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+                    });
 
                     PbRegionRequest::Create(create_region_request)
                 })
@@ -330,6 +331,7 @@ impl TableCreator {
         region_routes: Vec<RegionRoute>,
         wal_options_map: HashMap<RegionNumber, WalOptions>,
     ) -> Self {
+        // Encodes each wal options.
         let wal_options_map = wal_options_map
             .into_iter()
             .map(|(region_number, wal_options)| (region_number, wal_options.into()))

@@ -23,6 +23,8 @@ use crate::error::Result;
 use crate::wal::kafka::{KafkaConfig, Topic as KafkaTopic};
 pub use crate::wal::options_allocator::WalOptionsAllocator;
 
+pub const WAL_OPTIONS_KEY: &str = "wal_options";
+
 /// Wal configurations for bootstraping meta srv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "provider")]
@@ -45,8 +47,7 @@ pub enum WalOptions {
     Kafka { topic: KafkaTopic },
 }
 
-// TODO(niebayes): determine how to encode/decode wal options.
-pub type EncodedWalOptions = HashMap<String, String>;
+pub type EncodedWalOptions = String;
 
 impl From<WalOptions> for EncodedWalOptions {
     fn from(value: WalOptions) -> Self {
