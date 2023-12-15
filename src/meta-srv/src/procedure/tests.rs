@@ -163,7 +163,7 @@ fn test_create_region_request_template() {
         path: String::new(),
         options: HashMap::new(),
     };
-    assert_eq!(template, expected);
+    assert_eq!(template.template(), &expected);
 }
 
 async fn new_datanode_manager(

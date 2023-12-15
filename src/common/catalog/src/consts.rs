@@ -36,6 +36,7 @@ pub const INFORMATION_SCHEMA_COLUMNS_TABLE_ID: u32 = 4;
 
 pub const MITO_ENGINE: &str = "mito";
 pub const MITO2_ENGINE: &str = "mito2";
+pub const METRIC_ENGINE: &str = "metric";
 
 pub fn default_engine() -> &'static str {
     MITO_ENGINE
