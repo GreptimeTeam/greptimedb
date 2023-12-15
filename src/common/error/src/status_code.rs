@@ -59,6 +59,7 @@ pub enum StatusCode {
     RegionNotFound = 4005,
     RegionAlreadyExists = 4006,
     RegionReadonly = 4007,
+    RegionNotReady = 4008,
     // ====== End of catalog related status code =======
 
     // ====== Begin of storage related status code =====
@@ -103,7 +104,8 @@ impl StatusCode {
         match self {
             StatusCode::StorageUnavailable
             | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::Internal => true,
+            | StatusCode::Internal
+            | StatusCode::RegionNotReady => true,
 
             StatusCode::Success
             | StatusCode::Unknown
@@ -152,6 +154,7 @@ impl StatusCode {
             | StatusCode::TableAlreadyExists
             | StatusCode::TableNotFound
             | StatusCode::RegionNotFound
+            | StatusCode::RegionNotReady
             | StatusCode::RegionAlreadyExists
             | StatusCode::RegionReadonly
             | StatusCode::TableColumnNotFound
@@ -183,6 +186,7 @@ impl StatusCode {
             v if v == StatusCode::TableAlreadyExists as u32 => Some(StatusCode::TableAlreadyExists),
             v if v == StatusCode::TableNotFound as u32 => Some(StatusCode::TableNotFound),
             v if v == StatusCode::RegionNotFound as u32 => Some(StatusCode::RegionNotFound),
+            v if v == StatusCode::RegionNotReady as u32 => Some(StatusCode::RegionNotReady),
             v if v == StatusCode::RegionAlreadyExists as u32 => {
                 Some(StatusCode::RegionAlreadyExists)
             }
