@@ -24,8 +24,8 @@ use crate::inverted_index::Bytes;
 
 const U64_LENGTH: usize = std::mem::size_of::<u64>();
 
-/// Magic number for this intermediate codec version
-pub const MAGIC_CODEC_V1: &[u8; 4] = b"im01";
+/// Magic bytes for this intermediate codec version
+pub const CODEC_V1_MAGIC: &[u8; 4] = b"im01";
 
 /// Codec for serializing and deserializing intermediate data for external sorting.
 ///

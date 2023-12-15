@@ -40,7 +40,7 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
 
     /// Serializes and writes all provided values to the wrapped writer
     pub async fn write_all(mut self, values: BTreeMap<Bytes, BitVec>) -> Result<()> {
-        let (codec_magic, encoder) = (codec_v1::MAGIC_CODEC_V1, codec_v1::IntermediateCodecV1);
+        let (codec_magic, encoder) = (codec_v1::CODEC_V1_MAGIC, codec_v1::IntermediateCodecV1);
 
         self.writer
             .write_all(codec_magic)
@@ -75,7 +75,7 @@ impl<R: AsyncRead + Unpin + Send + 'static> IntermediaReader<R> {
             .context(ReadSnafu)?;
 
         let decoder = match &magic {
-            codec_v1::MAGIC_CODEC_V1 => codec_v1::IntermediateCodecV1,
+            codec_v1::CODEC_V1_MAGIC => codec_v1::IntermediateCodecV1,
             _ => return UnknownIntermediateCodecMagicSnafu { magic }.fail(),
         };
 
