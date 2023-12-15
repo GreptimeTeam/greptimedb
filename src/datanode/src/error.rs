@@ -210,6 +210,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("RegionId {} not ready", region_id))]
+    RegionNotReady {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Region engine {} is not registered", name))]
     RegionEngineNotFound { name: String, location: Location },
 
@@ -295,6 +301,7 @@ impl ErrorExt for Error {
             | GetRegionMetadata { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
+            RegionNotReady { .. } => StatusCode::RegionNotReady,
 
             StartServer { source, .. } | ShutdownServer { source, .. } => source.status_code(),
 

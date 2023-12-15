@@ -36,6 +36,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use table::TableRef;
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::error::Error;
 use crate::event_listener::NoopRegionServerEventListener;
 use crate::region_server::RegionServer;
 
@@ -87,15 +88,39 @@ pub fn mock_region_server() -> RegionServer {
     )
 }
 
+pub type MockRequestHandler =
+    Box<dyn Fn(RegionId, RegionRequest) -> Result<AffectedRows, Error> + Send + Sync>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
+    handle_request_mock_fn: Option<MockRequestHandler>,
 }
 
 impl MockRegionEngine {
     pub fn new() -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
 
-        (Arc::new(Self { sender: tx }), rx)
+        (
+            Arc::new(Self {
+                sender: tx,
+                handle_request_mock_fn: None,
+            }),
+            rx,
+        )
+    }
+
+    pub fn with_mock_fn(
+        mock_fn: MockRequestHandler,
+    ) -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+        (
+            Arc::new(Self {
+                sender: tx,
+                handle_request_mock_fn: Some(mock_fn),
+            }),
+            rx,
+        )
     }
 }
 
@@ -110,6 +135,10 @@ impl RegionEngine for MockRegionEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows, BoxedError> {
+        if let Some(mock_fn) = &self.handle_request_mock_fn {
+            return mock_fn(region_id, request).map_err(BoxedError::new);
+        };
+
         let _ = self.sender.send((region_id, request)).await;
         Ok(0)
     }
