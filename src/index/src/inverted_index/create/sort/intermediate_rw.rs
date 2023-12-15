@@ -57,13 +57,13 @@ impl<W: AsyncWrite + Unpin> IntermediateWriter<W> {
 }
 
 /// Reads intermediate serialized data from an `AsyncRead` source and converts it to a [`SortedStream`]
-pub struct IntermediaReader<R> {
+pub struct IntermediateReader<R> {
     reader: R,
 }
 
-impl<R: AsyncRead + Unpin + Send + 'static> IntermediaReader<R> {
-    pub fn new(reader: R) -> IntermediaReader<R> {
-        IntermediaReader { reader }
+impl<R: AsyncRead + Unpin + Send + 'static> IntermediateReader<R> {
+    pub fn new(reader: R) -> IntermediateReader<R> {
+        IntermediateReader { reader }
     }
 
     /// Reads the magic header, determines the codec, and returns a stream of deserialized values.
@@ -91,7 +91,7 @@ mod tests {
     use crate::inverted_index::error::Error;
 
     #[tokio::test]
-    async fn test_intermedia_read_write_basic() {
+    async fn test_intermediate_read_write_basic() {
         let mut buf = vec![];
 
         let values = BTreeMap::from_iter([
@@ -102,7 +102,7 @@ mod tests {
         let writer = IntermediateWriter::new(&mut buf);
         writer.write_all(values.clone()).await.unwrap();
 
-        let reader = IntermediaReader::new(Cursor::new(buf));
+        let reader = IntermediateReader::new(Cursor::new(buf));
         let mut stream = reader.into_stream().await.unwrap();
 
         let a = stream.next().await.unwrap().unwrap();
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_intermedia_read_write_empty() {
+    async fn test_intermediate_read_write_empty() {
         let mut buf = vec![];
 
         let values = BTreeMap::new();
@@ -121,17 +121,17 @@ mod tests {
         let writer = IntermediateWriter::new(&mut buf);
         writer.write_all(values.clone()).await.unwrap();
 
-        let reader = IntermediaReader::new(Cursor::new(buf));
+        let reader = IntermediateReader::new(Cursor::new(buf));
         let mut stream = reader.into_stream().await.unwrap();
 
         assert!(stream.next().await.is_none());
     }
 
     #[tokio::test]
-    async fn test_intermedia_read_with_invalid_magic() {
+    async fn test_intermediate_read_with_invalid_magic() {
         let buf = b"invalid".to_vec();
 
-        let reader = IntermediaReader::new(Cursor::new(buf));
+        let reader = IntermediateReader::new(Cursor::new(buf));
         let result = reader.into_stream().await;
         assert!(matches!(
             result,
