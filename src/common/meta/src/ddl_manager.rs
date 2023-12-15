@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -44,7 +46,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
-use crate::wal::WalOptionsMap;
+use crate::wal::WalOptions;
 pub type DdlManagerRef = Arc<DdlManager>;
 
 /// The [DdlManager] provides the ability to execute Ddl.
@@ -53,7 +55,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_meta_allocator: TableMetadataAllocatorRef,
+    table_metadata_allocator: TableMetadataAllocatorRef,
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
@@ -64,7 +66,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
+        table_metadata_allocator: TableMetadataAllocatorRef,
         memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Result<Self> {
         let manager = Self {
@@ -72,7 +74,7 @@ impl DdlManager {
             datanode_manager: datanode_clients,
             cache_invalidator,
             table_metadata_manager,
-            table_meta_allocator,
+            table_metadata_allocator,
             memory_region_keeper,
         };
         manager.register_loaders()?;
@@ -177,7 +179,7 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: WalOptionsMap,
+        wal_options_map: HashMap<RegionNumber, WalOptions>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -185,7 +187,7 @@ impl DdlManager {
             cluster_id,
             create_table_task,
             region_routes,
-            region_wal_options_map,
+            wal_options_map,
             context,
         );
 
@@ -382,7 +384,7 @@ async fn handle_create_table_task(
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_meta = ddl_manager
-        .table_meta_allocator
+        .table_metadata_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
             &mut create_table_task.table_info,
@@ -393,7 +395,7 @@ async fn handle_create_table_task(
     let TableMetadata {
         table_id,
         region_routes,
-        region_wal_options_map,
+        wal_options_map,
     } = table_meta;
 
     let id = ddl_manager
@@ -401,7 +403,7 @@ async fn handle_create_table_task(
             cluster_id,
             create_table_task,
             region_routes,
-            region_wal_options_map,
+            wal_options_map,
         )
         .await?;
 

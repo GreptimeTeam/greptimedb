@@ -33,7 +33,7 @@ pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
-    region_wal_options_allocator: WalOptionsAllocator,
+    wal_options_allocator: WalOptionsAllocator,
 }
 
 impl MetaSrvTableMetadataAllocator {
@@ -41,13 +41,13 @@ impl MetaSrvTableMetadataAllocator {
         ctx: SelectorContext,
         selector: SelectorRef,
         table_id_sequence: SequenceRef,
-        region_wal_options_allocator: WalOptionsAllocator,
+        wal_options_allocator: WalOptionsAllocator,
     ) -> Self {
         Self {
             ctx,
             selector,
             table_id_sequence,
-            region_wal_options_allocator,
+            wal_options_allocator,
         }
     }
 }
@@ -73,17 +73,17 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         .context(meta_error::ExternalSnafu)?;
 
         let num_regions = region_routes.len();
-        let region_wal_options = self.region_wal_options_allocator.alloc_batch(num_regions);
-        let region_wal_options_map = region_routes
+        let wal_options = self.wal_options_allocator.alloc_batch(num_regions);
+        let wal_options_map = region_routes
             .iter()
             .map(|route| route.region.id.region_number())
-            .zip(region_wal_options)
+            .zip(wal_options)
             .collect();
 
         Ok(TableMetadata {
             table_id,
             region_routes,
-            region_wal_options_map,
+            wal_options_map,
         })
     }
 }

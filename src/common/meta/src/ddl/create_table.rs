@@ -45,7 +45,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::{EncodedWalOptions, WalOptionsMap};
+use crate::wal::{EncodedWalOptions, WalOptions};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -59,12 +59,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: WalOptionsMap,
+        wal_options_map: HashMap<RegionNumber, WalOptions>,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes, region_wal_options_map),
+            creator: TableCreator::new(cluster_id, task, region_routes, wal_options_map),
         }
     }
 
@@ -96,8 +96,8 @@ impl CreateTableProcedure {
         &self.creator.data.region_routes
     }
 
-    pub fn region_wal_options_map(&self) -> &HashMap<RegionNumber, EncodedWalOptions> {
-        &self.creator.data.region_wal_options_map
+    pub fn wal_options_map(&self) -> &HashMap<RegionNumber, EncodedWalOptions> {
+        &self.creator.data.wal_options_map
     }
 
     /// Checks whether the table exists.
@@ -197,7 +197,7 @@ impl CreateTableProcedure {
 
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
-        let region_wal_options_map = &create_table_data.region_wal_options_map;
+        let wal_options_map = &create_table_data.wal_options_map;
 
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
@@ -221,7 +221,7 @@ impl CreateTableProcedure {
                     let mut create_region_request = request_template.clone();
                     create_region_request.region_id = region_id.as_u64();
                     create_region_request.path = storage_path.clone();
-                    create_region_request.wal_options = region_wal_options_map
+                    create_region_request.wal_options = wal_options_map
                         .get(region_number)
                         .cloned()
                         .unwrap_or_default();
@@ -269,9 +269,9 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
-        let region_wal_options_map = self.region_wal_options_map().clone();
+        let wal_options_map = self.wal_options_map().clone();
         manager
-            .create_table_metadata(raw_table_info, region_routes, region_wal_options_map)
+            .create_table_metadata(raw_table_info, region_routes, wal_options_map)
             .await?;
         info!("Created table metadata for table {table_id}");
 
@@ -328,9 +328,9 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: WalOptionsMap,
+        wal_options_map: HashMap<RegionNumber, WalOptions>,
     ) -> Self {
-        let region_wal_options_map = region_wal_options_map
+        let wal_options_map = wal_options_map
             .into_iter()
             .map(|(region_number, wal_options)| (region_number, wal_options.into()))
             .collect();
@@ -341,7 +341,7 @@ impl TableCreator {
                 cluster_id,
                 task,
                 region_routes,
-                region_wal_options_map,
+                wal_options_map,
             },
             opening_regions: vec![],
         }
@@ -390,7 +390,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     pub cluster_id: u64,
 }
 

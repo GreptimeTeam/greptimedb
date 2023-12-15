@@ -44,7 +44,6 @@ pub enum WalOptions {
 }
 
 // TODO(niebayes): determine how to encode wal options.
-pub type WalOptionsMap = HashMap<RegionNumber, WalOptions>;
 pub type EncodedWalOptions = HashMap<String, String>;
 
 impl From<WalOptions> for EncodedWalOptions {

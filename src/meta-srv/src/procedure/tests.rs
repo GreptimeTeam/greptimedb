@@ -34,7 +34,6 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::DeserializedValueWithBytes;
 use common_meta::rpc::ddl::{AlterTableTask, CreateTableTask, DropTableTask};
 use common_meta::rpc::router::{find_leaders, RegionRoute};
-use common_meta::wal::WalOptionsMap;
 use common_procedure::Status;
 use store_api::storage::RegionId;
 
@@ -102,7 +101,7 @@ fn test_create_region_request_template() {
         1,
         create_table_task(),
         test_data::new_region_routes(),
-        WalOptionsMap::default(),
+        HashMap::default(),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     );
 
@@ -194,7 +193,7 @@ async fn test_on_datanode_create_regions() {
         1,
         create_table_task(),
         region_routes,
-        WalOptionsMap::default(),
+        HashMap::default(),
         test_data::new_ddl_context(datanode_manager),
     );
 
