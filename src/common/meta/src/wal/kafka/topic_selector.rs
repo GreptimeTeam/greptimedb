@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::default;
 use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
 
 use crate::wal::kafka::topic::Topic;
 
 /// The type of the topic selector, i.e. with which strategy to select a topic.
-pub(super) enum SelectorType {
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SelectorType {
+    #[default]
     RoundRobin,
 }
 
