@@ -44,7 +44,7 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
-use crate::wal::region_wal_options::RegionWalOptionsMap;
+use crate::wal::WalOptionsMap;
 pub type DdlManagerRef = Arc<DdlManager>;
 
 /// The [DdlManager] provides the ability to execute Ddl.
@@ -177,7 +177,7 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: RegionWalOptionsMap,
+        region_wal_options_map: WalOptionsMap,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 

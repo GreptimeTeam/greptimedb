@@ -19,7 +19,7 @@ use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAlloc
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::region_wal_options::RegionWalOptionsAllocator;
+use common_meta::wal::WalOptionsAllocator;
 use common_telemetry::warn;
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
@@ -33,7 +33,7 @@ pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
-    region_wal_options_allocator: RegionWalOptionsAllocator,
+    region_wal_options_allocator: WalOptionsAllocator,
 }
 
 impl MetaSrvTableMetadataAllocator {
@@ -41,7 +41,7 @@ impl MetaSrvTableMetadataAllocator {
         ctx: SelectorContext,
         selector: SelectorRef,
         table_id_sequence: SequenceRef,
-        region_wal_options_allocator: RegionWalOptionsAllocator,
+        region_wal_options_allocator: WalOptionsAllocator,
     ) -> Self {
         Self {
             ctx,

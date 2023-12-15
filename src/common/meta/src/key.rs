@@ -85,7 +85,7 @@ use crate::error::{self, Result, SerdeJsonSnafu};
 use crate::kv_backend::txn::Txn;
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::router::{region_distribution, RegionRoute, RegionStatus};
-use crate::wal::region_wal_options::EncodedRegionWalOptions;
+use crate::wal::EncodedWalOptions;
 use crate::DatanodeId;
 
 pub const REMOVED_PREFIX: &str = "__removed";
@@ -365,7 +365,7 @@ impl TableMetadataManager {
         &self,
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
+        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     ) -> Result<()> {
         let region_numbers = region_routes
             .iter()

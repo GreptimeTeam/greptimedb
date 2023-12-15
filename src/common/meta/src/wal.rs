@@ -13,14 +13,18 @@
 // limitations under the License.
 
 pub mod kafka;
-pub mod region_wal_options;
+pub mod options_allocator;
 
-use std::default;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use store_api::storage::RegionNumber;
 
-pub use crate::wal::kafka::KafkaConfig;
+use crate::error::Result;
+use crate::wal::kafka::{KafkaConfig, KafkaWalOptions};
+pub use crate::wal::options_allocator::WalOptionsAllocator;
 
+/// Wal configurations for bootstraping meta srv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
@@ -29,4 +33,31 @@ pub enum WalConfig {
     RaftEngine,
     #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
+}
+
+/// Wal options for a region.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub enum WalOptions {
+    #[default]
+    RaftEngine,
+    Kafka(KafkaWalOptions),
+}
+
+// TODO(niebayes): determine how to encode wal options.
+pub type WalOptionsMap = HashMap<RegionNumber, WalOptions>;
+pub type EncodedWalOptions = HashMap<String, String>;
+
+impl From<WalOptions> for EncodedWalOptions {
+    fn from(value: WalOptions) -> Self {
+        // TODO(niebayes): implement encoding/decoding for wal options.
+        EncodedWalOptions::default()
+    }
+}
+
+impl TryFrom<EncodedWalOptions> for WalOptions {
+    type Error = crate::error::Error;
+
+    fn try_from(value: EncodedWalOptions) -> Result<Self> {
+        todo!()
+    }
 }

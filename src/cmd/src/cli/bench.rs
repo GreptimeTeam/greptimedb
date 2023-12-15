@@ -24,7 +24,7 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::table_name::TableName;
-use common_meta::wal::region_wal_options::EncodedRegionWalOptions;
+use common_meta::wal::EncodedWalOptions;
 use common_telemetry::info;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, RawSchema};
@@ -165,7 +165,7 @@ fn create_region_routes(regions: Vec<RegionNumber>) -> Vec<RegionRoute> {
 
 fn create_region_wal_options_map(
     regions: Vec<RegionNumber>,
-) -> HashMap<RegionNumber, EncodedRegionWalOptions> {
+) -> HashMap<RegionNumber, EncodedWalOptions> {
     // TODO(niebayes): construct region wal options for benchmark.
     let _ = regions;
     HashMap::default()

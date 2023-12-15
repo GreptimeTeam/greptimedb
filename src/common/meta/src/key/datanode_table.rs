@@ -31,7 +31,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
-use crate::wal::region_wal_options::EncodedRegionWalOptions;
+use crate::wal::EncodedWalOptions;
 use crate::DatanodeId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -105,7 +105,7 @@ pub struct DatanodeTableValue {
     #[serde(flatten)]
     pub region_info: RegionInfo,
     #[serde(default)]
-    pub region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
+    pub region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     version: u64,
 }
 
@@ -114,7 +114,7 @@ impl DatanodeTableValue {
         table_id: TableId,
         regions: Vec<RegionNumber>,
         region_info: RegionInfo,
-        region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
+        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     ) -> Self {
         Self {
             table_id,
@@ -174,7 +174,7 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
+        region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution

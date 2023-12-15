@@ -23,3 +23,6 @@ pub use crate::wal::kafka::topic_manager::TopicManager as KafkaTopicManager;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct KafkaConfig;
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone, PartialEq)]
+pub struct KafkaWalOptions;

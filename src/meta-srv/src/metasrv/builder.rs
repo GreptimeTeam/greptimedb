@@ -29,8 +29,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::sequence::Sequence;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal::region_wal_options::RegionWalOptionsAllocator;
-use common_meta::wal::WalConfig;
+use common_meta::wal::{WalConfig, WalOptionsAllocator};
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
@@ -205,13 +204,13 @@ impl MetaSrvBuilder {
             table_id: None,
         };
 
-        let region_wal_options_allocator = build_region_wal_options_allocator(&options.wal).await?;
+        let wal_options_allocator = build_wal_options_allocator(&options.wal).await?;
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             Arc::new(MetaSrvTableMetadataAllocator::new(
                 selector_ctx.clone(),
                 selector.clone(),
                 table_id_sequence.clone(),
-                region_wal_options_allocator,
+                wal_options_allocator,
             ))
         });
 
@@ -349,11 +348,9 @@ fn build_procedure_manager(
     Arc::new(LocalManager::new(manager_config, state_store))
 }
 
-async fn build_region_wal_options_allocator(
-    config: &WalConfig,
-) -> Result<RegionWalOptionsAllocator> {
+async fn build_wal_options_allocator(config: &WalConfig) -> Result<WalOptionsAllocator> {
     // TODO(niebayes): init the allocator.
-    Ok(RegionWalOptionsAllocator::new(config))
+    Ok(WalOptionsAllocator::new(config))
 }
 
 fn build_ddl_manager(

@@ -45,7 +45,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::region_wal_options::{EncodedRegionWalOptions, RegionWalOptionsMap};
+use crate::wal::{EncodedWalOptions, WalOptionsMap};
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -59,7 +59,7 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: RegionWalOptionsMap,
+        region_wal_options_map: WalOptionsMap,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -96,7 +96,7 @@ impl CreateTableProcedure {
         &self.creator.data.region_routes
     }
 
-    pub fn region_wal_options_map(&self) -> &HashMap<RegionNumber, EncodedRegionWalOptions> {
+    pub fn region_wal_options_map(&self) -> &HashMap<RegionNumber, EncodedWalOptions> {
         &self.creator.data.region_wal_options_map
     }
 
@@ -328,7 +328,7 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        region_wal_options_map: RegionWalOptionsMap,
+        region_wal_options_map: WalOptionsMap,
     ) -> Self {
         let region_wal_options_map = region_wal_options_map
             .into_iter()
@@ -390,7 +390,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub region_wal_options_map: HashMap<RegionNumber, EncodedRegionWalOptions>,
+    pub region_wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
     pub cluster_id: u64,
 }
 
