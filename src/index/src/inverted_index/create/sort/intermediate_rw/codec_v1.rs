@@ -59,10 +59,11 @@ impl Decoder for IntermediateCodecV1 {
     type Item = (Bytes, BitVec);
     type Error = Error;
 
-    /// Decodes the buffer into a tuple of bytes and a bitmap. Returns `None` if
-    /// the buffer does not contain enough data for a complete item.
+    /// Decodes the `src` into `(Bytes, BitVec)`. Returns `None` if
+    /// the `src` does not contain enough data for a complete item.
     ///
-    /// After successful decoding, the buffer is advanced.
+    /// Only after successful decoding, the `src` is advanced. Otherwise,
+    /// it is left untouched to wait for filling more data and retrying.
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
         // [value len][value][bitmap len][bitmap]
         //     [8]     [?]       [8]       [?]
