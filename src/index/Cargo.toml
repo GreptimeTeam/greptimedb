@@ -7,11 +7,13 @@ license.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytemuck.workspace = true
+bytes = "0.5.6"
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 fst.workspace = true
 futures.workspace = true
+futures_codec = "0.4.1"
 greptime-proto.workspace = true
 mockall.workspace = true
 prost.workspace = true

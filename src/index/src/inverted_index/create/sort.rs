@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(iter_partition_in_place)]
-// TODO(zhongzc): remove once further code is added
-#![allow(dead_code)]
+use common_base::BitVec;
+use futures::Stream;
 
-pub mod inverted_index;
+use crate::inverted_index::error::Result;
+use crate::inverted_index::Bytes;
+
+mod intermediate_rw;
+
+/// A stream of sorted values along with their associated bitmap
+pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
