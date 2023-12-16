@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use snafu::ensure;
 
 use crate::inverted_index::create::sort::{SortOutput, Sorter};
-use crate::inverted_index::create::IndexCreator;
+use crate::inverted_index::create::InvertedIndexCreator;
 use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
 use crate::inverted_index::Bytes;
@@ -38,15 +38,12 @@ pub struct SortIndexCreator {
     /// Map of index names to sorters
     sorters: HashMap<IndexName, Box<dyn Sorter>>,
 
-    /// Writer for inverted index data
-    index_writer: Box<dyn InvertedIndexWriter>,
-
     /// Number of rows in each segment, used to produce sorters
     segment_row_count: usize,
 }
 
 #[async_trait]
-impl IndexCreator for SortIndexCreator {
+impl InvertedIndexCreator for SortIndexCreator {
     /// Inserts a value or null into the sorter for the specified index
     async fn push_with_name(&mut self, index_name: &str, value: Option<Bytes>) -> Result<()> {
         match self.sorters.get_mut(index_name) {
@@ -62,7 +59,7 @@ impl IndexCreator for SortIndexCreator {
     }
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
-    async fn finish(&mut self) -> Result<()> {
+    async fn finish(&mut self, writer: &mut dyn InvertedIndexWriter) -> Result<()> {
         let mut row_count = None;
 
         for (index_name, mut sorter) in self.sorters.drain() {
@@ -82,12 +79,12 @@ impl IndexCreator for SortIndexCreator {
                 }
             );
 
-            self.index_writer
+            writer
                 .add_index(index_name, null_bitmap, sorted_stream)
                 .await?;
         }
 
-        self.index_writer
+        writer
             .finish(
                 row_count.unwrap_or_default() as _,
                 self.segment_row_count as _,
@@ -98,15 +95,10 @@ impl IndexCreator for SortIndexCreator {
 
 impl SortIndexCreator {
     /// Creates a new `SortIndexCreator` with the given sorter factory and index writer
-    pub fn new(
-        sorter_factory: SorterFactory,
-        index_writer: Box<dyn InvertedIndexWriter>,
-        segment_row_count: usize,
-    ) -> Self {
+    pub fn new(sorter_factory: SorterFactory, segment_row_count: usize) -> Self {
         Self {
             sorter_factory,
             sorters: HashMap::new(),
-            index_writer,
             segment_row_count,
         }
     }
@@ -132,6 +124,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_index_creator_basic() {
+        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), 1);
+
+        let index_values = vec![
+            ("a", vec![b"3", b"2", b"1"]),
+            ("b", vec![b"6", b"5", b"4"]),
+            ("c", vec![b"1", b"2", b"3"]),
+        ];
+
+        for (index_name, values) in index_values {
+            for value in values {
+                creator
+                    .push_with_name(index_name, Some(value.into()))
+                    .await
+                    .unwrap();
+            }
+        }
+
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer
             .expect_add_index()
@@ -155,44 +164,12 @@ mod tests {
                 Ok(())
             });
 
-        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), Box::new(mock_writer), 1);
-
-        let index_values = vec![
-            ("a", vec![b"3", b"2", b"1"]),
-            ("b", vec![b"6", b"5", b"4"]),
-            ("c", vec![b"1", b"2", b"3"]),
-        ];
-
-        for (index_name, values) in index_values {
-            for value in values {
-                creator
-                    .push_with_name(index_name, Some(value.into()))
-                    .await
-                    .unwrap();
-            }
-        }
-
-        creator.finish().await.unwrap();
+        creator.finish(&mut mock_writer).await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_sort_index_creator_inconsistant_row_count() {
-        let mut mock_writer = MockInvertedIndexWriter::new();
-        mock_writer
-            .expect_add_index()
-            .returning(|name, null_bitmap, stream| {
-                assert!(null_bitmap.is_empty());
-                match name.as_str() {
-                    "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
-                    "b" => assert_eq!(stream_to_values(stream), vec![b"4", b"5", b"6"]),
-                    "c" => assert_eq!(stream_to_values(stream), vec![b"1", b"2"]),
-                    _ => panic!("unexpected index name: {}", name),
-                }
-                Ok(())
-            });
-        mock_writer.expect_finish().never();
-
-        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), Box::new(mock_writer), 1);
+    async fn test_sort_index_creator_inconsistent_row_count() {
+        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), 1);
 
         let index_values = vec![
             ("a", vec![b"3", b"2", b"1"]),
@@ -209,7 +186,22 @@ mod tests {
             }
         }
 
-        let res = creator.finish().await;
+        let mut mock_writer = MockInvertedIndexWriter::new();
+        mock_writer
+            .expect_add_index()
+            .returning(|name, null_bitmap, stream| {
+                assert!(null_bitmap.is_empty());
+                match name.as_str() {
+                    "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
+                    "b" => assert_eq!(stream_to_values(stream), vec![b"4", b"5", b"6"]),
+                    "c" => assert_eq!(stream_to_values(stream), vec![b"1", b"2"]),
+                    _ => panic!("unexpected index name: {}", name),
+                }
+                Ok(())
+            });
+        mock_writer.expect_finish().never();
+
+        let res = creator.finish(&mut mock_writer).await;
         assert!(matches!(res, Err(Error::InconsistentRowCount { .. })));
     }
 

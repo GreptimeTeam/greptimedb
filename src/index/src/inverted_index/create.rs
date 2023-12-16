@@ -18,11 +18,12 @@ mod sort_create;
 use async_trait::async_trait;
 
 use crate::inverted_index::error::Result;
+use crate::inverted_index::format::writer::InvertedIndexWriter;
 use crate::inverted_index::Bytes;
 
-/// `IndexCreator` provides functionality to construct an inverted index
+/// `InvertedIndexCreator` provides functionality to construct an inverted index
 #[async_trait]
-pub trait IndexCreator {
+pub trait InvertedIndexCreator {
     /// Adds a value to the named index. A `None` value represents an absence of data (null)
     ///
     /// - `index_name`: Identifier for the index being built
@@ -32,5 +33,6 @@ pub trait IndexCreator {
     async fn push_with_name(&mut self, index_name: &str, value: Option<Bytes>) -> Result<()>;
 
     /// Finalizes the index creation process, ensuring all data is properly indexed and stored
-    async fn finish(&mut self) -> Result<()>;
+    /// in the provided writer
+    async fn finish(&mut self, writer: &mut dyn InvertedIndexWriter) -> Result<()>;
 }
