@@ -105,14 +105,20 @@ impl Decimal128 {
     /// the precision, scale information is discarded.
     ///
     /// Return: (high-64 bit, low-64 bit)
-    pub fn split_value(&self) -> (i64, i64) {
-        ((self.value >> 64) as i64, self.value as i64)
+    pub fn split_value(&self) -> (i64, u64) {
+        ((self.value >> 64) as i64, self.value as u64)
     }
 
     /// Convert from precision, scale, a i128 value which
-    /// represents by two i64 value(high-64 bit, low-64 bit).
-    pub fn from_value_precision_scale(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
-        let value = (hi as i128) << 64 | lo as i128;
+    /// represents by i64 + u64 value(high-64 bit, low-64 bit).
+    pub fn from_value_precision_scale(hi: i64, lo: u64, precision: u8, scale: i8) -> Self {
+        // 128                             64                              0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |               hi              |               lo              |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let hi = ((hi as u128) & u64::MAX as u128) << 64;
+        let lo = (lo as u128) & u64::MAX as u128;
+        let value = (hi | lo) as i128;
         Self::new(value, precision, scale)
     }
 }
@@ -428,5 +434,27 @@ mod tests {
         let decimal1 = Decimal128::from_str("1234567890.123456789012345678999").unwrap();
         let decimal2 = Decimal128::from_str("1234567890.123").unwrap();
         assert_eq!(decimal1.partial_cmp(&decimal2), None);
+    }
+
+    #[test]
+    fn test_convert_with_i128() {
+        let test_decimal128_eq = |value| {
+            let decimal1 =
+                Decimal128::new(value, DECIMAL128_MAX_PRECISION, DECIMAL128_DEFAULT_SCALE);
+            let (hi, lo) = decimal1.split_value();
+            let decimal2 = Decimal128::from_value_precision_scale(
+                hi,
+                lo,
+                DECIMAL128_MAX_PRECISION,
+                DECIMAL128_DEFAULT_SCALE,
+            );
+            assert_eq!(decimal1, decimal2);
+        };
+
+        test_decimal128_eq(0);
+        test_decimal128_eq(1234567890);
+        test_decimal128_eq(-1234567890);
+        test_decimal128_eq(i128::MAX);
+        test_decimal128_eq(i128::MIN);
     }
 }

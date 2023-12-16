@@ -258,21 +258,24 @@ impl Interval {
     }
 
     pub fn to_i128(&self) -> i128 {
-        let mut result = 0;
-        result |= self.months as i128;
-        result <<= 32;
-        result |= self.days as i128;
-        result <<= 64;
-        result |= self.nsecs as i128;
-        result
+        // 128            96              64                               0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |     months    |      days     |             nanos             |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let m = (self.months as u128 & u32::MAX as u128) << 96;
+        let d = (self.days as u128 & u32::MAX as u128) << 64;
+        let n = self.nsecs as u128 & u64::MAX as u128;
+        (m | d | n) as i128
     }
 
     pub fn to_i64(&self) -> i64 {
-        let mut result = 0;
-        result |= self.days as i64;
-        result <<= 32;
-        result |= self.nsecs / NANOS_PER_MILLI;
-        result
+        // 64                              32                              0
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        // |             days              |         milliseconds          |
+        // +-------+-------+-------+-------+-------+-------+-------+-------+
+        let days = (self.days as u64 & u32::MAX as u64) << 32;
+        let milliseconds = (self.nsecs / NANOS_PER_MILLI) as u64 & u32::MAX as u64;
+        (days | milliseconds) as i64
     }
 
     pub fn to_i32(&self) -> i32 {
@@ -635,9 +638,22 @@ mod tests {
 
     #[test]
     fn test_interval_i128_convert() {
-        let interval = Interval::from_month_day_nano(1, 1, 1);
-        let interval_i128 = interval.to_i128();
-        assert_eq!(interval_i128, 79228162532711081667253501953);
+        let test_interval_eq = |month, day, nano| {
+            let interval = Interval::from_month_day_nano(month, day, nano);
+            let interval_i128 = interval.to_i128();
+            let interval2 = Interval::from_i128(interval_i128);
+            assert_eq!(interval, interval2);
+        };
+
+        test_interval_eq(1, 2, 3);
+        test_interval_eq(1, -2, 3);
+        test_interval_eq(1, -2, -3);
+        test_interval_eq(-1, -2, -3);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
     }
 
     #[test]

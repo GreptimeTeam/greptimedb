@@ -538,7 +538,7 @@ pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
     let value = v.val();
     v1::Decimal128 {
         hi: (value >> 64) as i64,
-        lo: value as i64,
+        lo: value as u64,
     }
 }
 
@@ -580,9 +580,9 @@ pub fn pb_value_to_value_ref<'a>(
         ValueData::TimeMillisecondValue(t) => ValueRef::Time(Time::new_millisecond(*t)),
         ValueData::TimeMicrosecondValue(t) => ValueRef::Time(Time::new_microsecond(*t)),
         ValueData::TimeNanosecondValue(t) => ValueRef::Time(Time::new_nanosecond(*t)),
-        ValueData::IntervalYearMonthValues(v) => ValueRef::Interval(Interval::from_i32(*v)),
-        ValueData::IntervalDayTimeValues(v) => ValueRef::Interval(Interval::from_i64(*v)),
-        ValueData::IntervalMonthDayNanoValues(v) => {
+        ValueData::IntervalYearMonthValue(v) => ValueRef::Interval(Interval::from_i32(*v)),
+        ValueData::IntervalDayTimeValue(v) => ValueRef::Interval(Interval::from_i64(*v)),
+        ValueData::IntervalMonthDayNanoValue(v) => {
             let interval = Interval::from_month_day_nano(v.months, v.days, v.nanoseconds);
             ValueRef::Interval(interval)
         }
@@ -986,13 +986,13 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
         },
         Value::Interval(v) => match v.unit() {
             IntervalUnit::YearMonth => v1::Value {
-                value_data: Some(ValueData::IntervalYearMonthValues(v.to_i32())),
+                value_data: Some(ValueData::IntervalYearMonthValue(v.to_i32())),
             },
             IntervalUnit::DayTime => v1::Value {
-                value_data: Some(ValueData::IntervalDayTimeValues(v.to_i64())),
+                value_data: Some(ValueData::IntervalDayTimeValue(v.to_i64())),
             },
             IntervalUnit::MonthDayNano => v1::Value {
-                value_data: Some(ValueData::IntervalMonthDayNanoValues(
+                value_data: Some(ValueData::IntervalMonthDayNanoValue(
                     convert_i128_to_interval(v.to_i128()),
                 )),
             },
@@ -1051,9 +1051,9 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::TimeMillisecondValue(_) => ColumnDataType::TimeMillisecond,
         ValueData::TimeMicrosecondValue(_) => ColumnDataType::TimeMicrosecond,
         ValueData::TimeNanosecondValue(_) => ColumnDataType::TimeNanosecond,
-        ValueData::IntervalYearMonthValues(_) => ColumnDataType::IntervalYearMonth,
-        ValueData::IntervalDayTimeValues(_) => ColumnDataType::IntervalDayTime,
-        ValueData::IntervalMonthDayNanoValues(_) => ColumnDataType::IntervalMonthDayNano,
+        ValueData::IntervalYearMonthValue(_) => ColumnDataType::IntervalYearMonth,
+        ValueData::IntervalDayTimeValue(_) => ColumnDataType::IntervalDayTime,
+        ValueData::IntervalMonthDayNanoValue(_) => ColumnDataType::IntervalMonthDayNano,
         ValueData::DurationSecondValue(_) => ColumnDataType::DurationSecond,
         ValueData::DurationMillisecondValue(_) => ColumnDataType::DurationMillisecond,
         ValueData::DurationMicrosecondValue(_) => ColumnDataType::DurationMicrosecond,
@@ -1109,10 +1109,10 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Nanosecond => ValueData::TimeNanosecondValue(v.value()),
             }),
             Value::Interval(v) => Some(match v.unit() {
-                IntervalUnit::YearMonth => ValueData::IntervalYearMonthValues(v.to_i32()),
-                IntervalUnit::DayTime => ValueData::IntervalDayTimeValues(v.to_i64()),
+                IntervalUnit::YearMonth => ValueData::IntervalYearMonthValue(v.to_i32()),
+                IntervalUnit::DayTime => ValueData::IntervalDayTimeValue(v.to_i64()),
                 IntervalUnit::MonthDayNano => {
-                    ValueData::IntervalMonthDayNanoValues(convert_i128_to_interval(v.to_i128()))
+                    ValueData::IntervalMonthDayNanoValue(convert_i128_to_interval(v.to_i128()))
                 }
             }),
             Value::Duration(v) => Some(match v.unit() {
