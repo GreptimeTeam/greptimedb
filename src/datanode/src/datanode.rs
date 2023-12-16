@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
-use common_config::wal::{KafkaConfig, RaftEngineConfig};
+use common_config::wal::{EncodedWalOptions, KafkaConfig, RaftEngineConfig, WAL_OPTIONS_KEY};
 use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -51,7 +51,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -345,15 +345,22 @@ impl DatanodeBuilder {
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
             for region_number in table_value.regions {
-                // TODO(niebayes): fetch wal options from region info.
-                let wal_options: HashMap<String, String> = HashMap::default();
+                // TODO(niebayes): fetch wal options map from region info.
+                // Augments region options with an encoded wal options.
+                // let wal_options_map = &table_value.region_info.wal_options_map;
+                let wal_options_map: HashMap<RegionNumber, EncodedWalOptions> = HashMap::default();
+                let wal_options = wal_options_map
+                    .get(&region_number)
+                    .cloned()
+                    .unwrap_or_default();
+                let mut region_options = table_value.region_info.region_options.clone();
+                region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options);
 
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
                     table_value.region_info.engine.clone(),
                     table_value.region_info.region_storage_path.clone(),
-                    table_value.region_info.region_options.clone(),
-                    wal_options,
+                    region_options,
                 ));
             }
         }
@@ -361,8 +368,7 @@ impl DatanodeBuilder {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
         let mut tasks = vec![];
 
-        // TODO(niebayes): integrate wal options into options.
-        for (region_id, engine, store_path, options, _wal_options) in regions {
+        for (region_id, engine, store_path, options) in regions {
             let region_dir = region_dir(&store_path, region_id);
             let semaphore_moved = semaphore.clone();
             tasks.push(async move {

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::raft_engine::RaftEngineConfig;
 
-// TODO(niebayes): redirect to actual types.
+pub const WAL_OPTIONS_KEY: &str = "wal_options";
 pub type WalOptions = String;
 pub type EncodedWalOptions = String;
 
