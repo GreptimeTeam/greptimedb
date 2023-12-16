@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_intermediate_codec_parital() {
+    fn test_intermediate_codec_partial() {
         let mut codec = IntermediateCodecV1;
         let mut buf = BytesMut::new();
 
