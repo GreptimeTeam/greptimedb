@@ -116,8 +116,8 @@ impl Decimal128 {
         // +-------+-------+-------+-------+-------+-------+-------+-------+
         // |               hi              |               lo              |
         // +-------+-------+-------+-------+-------+-------+-------+-------+
-        let hi = ((hi as u128) & u64::MAX as u128) << 64;
-        let lo = (lo as u128) & u64::MAX as u128;
+        let hi = (hi as u128 & u64::MAX as u128) << 64;
+        let lo = lo as u128 & u64::MAX as u128;
         let value = (hi | lo) as i128;
         Self::new(value, precision, scale)
     }

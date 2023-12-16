@@ -535,11 +535,8 @@ pub fn convert_i128_to_interval(v: i128) -> v1::IntervalMonthDayNano {
 
 /// Convert common decimal128 to grpc decimal128 without precision and scale.
 pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
-    let value = v.val();
-    v1::Decimal128 {
-        hi: (value >> 64) as i64,
-        lo: value as u64,
-    }
+    let (hi, lo) = v.split_value();
+    v1::Decimal128 { hi, lo }
 }
 
 pub fn pb_value_to_value_ref<'a>(
@@ -1011,12 +1008,9 @@ pub fn to_proto_value(value: Value) -> Option<v1::Value> {
                 value_data: Some(ValueData::DurationNanosecondValue(v.value())),
             },
         },
-        Value::Decimal128(v) => {
-            let (hi, lo) = v.split_value();
-            v1::Value {
-                value_data: Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo })),
-            }
-        }
+        Value::Decimal128(v) => v1::Value {
+            value_data: Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
+        },
         Value::List(_) => return None,
     };
 
@@ -1121,10 +1115,7 @@ pub fn value_to_grpc_value(value: Value) -> GrpcValue {
                 TimeUnit::Microsecond => ValueData::DurationMicrosecondValue(v.value()),
                 TimeUnit::Nanosecond => ValueData::DurationNanosecondValue(v.value()),
             }),
-            Value::Decimal128(v) => {
-                let (hi, lo) = v.split_value();
-                Some(ValueData::Decimal128Value(v1::Decimal128 { hi, lo }))
-            }
+            Value::Decimal128(v) => Some(ValueData::Decimal128Value(convert_to_pb_decimal128(v))),
             Value::List(_) => unreachable!(),
         },
     }
