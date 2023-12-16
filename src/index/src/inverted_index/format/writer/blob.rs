@@ -58,10 +58,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
         Ok(())
     }
 
-    async fn finish(&mut self, total_row_count: u64, segment_row_count: u64) -> Result<()> {
-        self.metas.segment_row_count = segment_row_count;
-        self.metas.total_row_count = total_row_count;
-
+    async fn finish(&mut self) -> Result<()> {
         let metas_bytes = self.metas.encode_to_vec();
         self.blob_writer
             .write_all(&metas_bytes)
@@ -81,11 +78,19 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
 }
 
 impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
-    pub fn new(blob_writer: W) -> InvertedIndexBlobWriter<W> {
+    pub fn new(
+        blob_writer: W,
+        total_row_count: u64,
+        segment_row_count: u64,
+    ) -> InvertedIndexBlobWriter<W> {
         InvertedIndexBlobWriter {
             blob_writer,
             written_size: 0,
-            metas: InvertedIndexMetas::default(),
+            metas: InvertedIndexMetas {
+                total_row_count,
+                segment_row_count,
+                ..Default::default()
+            },
         }
     }
 }
@@ -104,8 +109,8 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_writer_write_empty() {
         let mut blob = Vec::new();
-        let mut writer = InvertedIndexBlobWriter::new(&mut blob);
-        writer.finish(8, 1).await.unwrap();
+        let mut writer = InvertedIndexBlobWriter::new(&mut blob, 8, 1);
+        writer.finish().await.unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);
@@ -118,7 +123,7 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_writer_write_basic() {
         let mut blob = Vec::new();
-        let mut writer = InvertedIndexBlobWriter::new(&mut blob);
+        let mut writer = InvertedIndexBlobWriter::new(&mut blob, 8, 1);
         writer
             .add_index(
                 "tag0".to_string(),
@@ -143,7 +148,7 @@ mod tests {
             )
             .await
             .unwrap();
-        writer.finish(8, 1).await.unwrap();
+        writer.finish().await.unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);
