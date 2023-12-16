@@ -57,9 +57,38 @@ pub type EncodedWalOptions = HashMap<String, String>;
 
 #[cfg(test)]
 mod tests {
-    use itertools::Itertools;
+    use std::time::Duration;
 
-    use crate::wal::{KafkaWalOptions, WalOptions};
+    use common_base::readable_size::ReadableSize;
+    use itertools::Itertools;
+    use rskafka::client::partition::Compression as RsKafkaCompression;
+
+    use crate::wal::{KafkaConfig, KafkaWalOptions, WalOptions};
+
+    #[test]
+    fn test_serde_kafka_config() {
+        let toml_str = r#"
+            broker_endpoints = ["127.0.0.1:9090"]
+            num_topics = 32
+            topic_name_prefix = "greptimedb_wal_kafka_topic"
+            num_partitions = 1
+            max_batch_size = "4MB"
+            linger = "200ms"
+            max_wait_time = "100ms"
+        "#;
+        let decoded: KafkaConfig = toml::from_str(toml_str).unwrap();
+        let expected = KafkaConfig {
+            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            num_topics: 32,
+            topic_name_prefix: "greptimedb_wal_kafka_topic".to_string(),
+            num_partitions: 1,
+            compression: RsKafkaCompression::default(),
+            max_batch_size: ReadableSize::mb(4),
+            linger: Duration::from_millis(200),
+            max_wait_time: Duration::from_millis(100),
+        };
+        assert_eq!(decoded, expected);
+    }
 
     fn make_json_string(items: &[(&str, &str)]) -> String {
         let body = items
