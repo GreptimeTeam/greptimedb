@@ -15,10 +15,11 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use snafu::ensure;
 
 use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::create::IndexCreator;
-use crate::inverted_index::error::Result;
+use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
 use crate::inverted_index::Bytes;
 
@@ -62,18 +63,36 @@ impl IndexCreator for SortIndexCreator {
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
     async fn finish(&mut self) -> Result<()> {
+        let mut row_count = None;
+
         for (index_name, mut sorter) in self.sorters.drain() {
             let SortOutput {
                 null_bitmap,
                 sorted_stream,
+                total_row_count,
             } = sorter.output().await?;
+
+            let expected_row_count = *row_count.get_or_insert(total_row_count);
+            ensure!(
+                expected_row_count == total_row_count,
+                InconsistentRowCountSnafu {
+                    index_name,
+                    total_row_count,
+                    expected_row_count,
+                }
+            );
 
             self.index_writer
                 .add_index(index_name, null_bitmap, sorted_stream)
                 .await?;
         }
 
-        self.index_writer.finish().await
+        self.index_writer
+            .finish(
+                row_count.unwrap_or_default() as _,
+                self.segment_row_count as _,
+            )
+            .await
     }
 }
 
@@ -102,6 +121,7 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::create::sort::SortedStream;
+    use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::MockInvertedIndexWriter;
 
     fn stream_to_values(stream: SortedStream) -> Vec<Bytes> {
@@ -126,7 +146,14 @@ mod tests {
                 }
                 Ok(())
             });
-        mock_writer.expect_finish().times(1).returning(|| Ok(()));
+        mock_writer
+            .expect_finish()
+            .times(1)
+            .returning(|total_row_count, segment_row_count| {
+                assert_eq!(total_row_count, 3);
+                assert_eq!(segment_row_count, 1);
+                Ok(())
+            });
 
         let mut creator = SortIndexCreator::new(NaiveSorter::factory(), Box::new(mock_writer), 1);
 
@@ -146,6 +173,44 @@ mod tests {
         }
 
         creator.finish().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sort_index_creator_inconsistant_row_count() {
+        let mut mock_writer = MockInvertedIndexWriter::new();
+        mock_writer
+            .expect_add_index()
+            .returning(|name, null_bitmap, stream| {
+                assert!(null_bitmap.is_empty());
+                match name.as_str() {
+                    "a" => assert_eq!(stream_to_values(stream), vec![b"1", b"2", b"3"]),
+                    "b" => assert_eq!(stream_to_values(stream), vec![b"4", b"5", b"6"]),
+                    "c" => assert_eq!(stream_to_values(stream), vec![b"1", b"2"]),
+                    _ => panic!("unexpected index name: {}", name),
+                }
+                Ok(())
+            });
+        mock_writer.expect_finish().never();
+
+        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), Box::new(mock_writer), 1);
+
+        let index_values = vec![
+            ("a", vec![b"3", b"2", b"1"]),
+            ("b", vec![b"6", b"5", b"4"]),
+            ("c", vec![b"1", b"2"]),
+        ];
+
+        for (index_name, values) in index_values {
+            for value in values {
+                creator
+                    .push_with_name(index_name, Some(value.into()))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let res = creator.finish().await;
+        assert!(matches!(res, Err(Error::InconsistentRowCount { .. })));
     }
 
     fn set_bit(bit_vec: &mut BitVec, index: usize) {
@@ -195,6 +260,7 @@ mod tests {
                         .into_iter()
                         .map(|(v, b)| Ok((v.unwrap(), b))),
                 )),
+                total_row_count: self.total_row_count,
             })
         }
     }
