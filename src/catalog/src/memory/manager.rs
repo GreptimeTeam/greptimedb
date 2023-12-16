@@ -247,7 +247,7 @@ impl MemoryCatalogManager {
             catalog,
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
         );
-        let information_schema = information_schema_provider.tables();
+        let information_schema = information_schema_provider.tables().clone();
         let mut catalog = HashMap::new();
         catalog.insert(INFORMATION_SCHEMA_NAME.to_string(), information_schema);
         catalog

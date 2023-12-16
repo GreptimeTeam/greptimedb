@@ -69,10 +69,11 @@ macro_rules! setup_memory_table {
     };
 }
 
+/// The `information_schema` tables info provider.
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
-    tables: Option<HashMap<String, TableRef>>,
+    tables: HashMap<String, TableRef>,
 }
 
 impl InformationSchemaProvider {
@@ -80,7 +81,7 @@ impl InformationSchemaProvider {
         let mut provider = Self {
             catalog_name,
             catalog_manager,
-            tables: None,
+            tables: HashMap::new(),
         };
 
         provider.build_tables();
@@ -90,14 +91,14 @@ impl InformationSchemaProvider {
 
     /// Returns table names in the order of table id.
     pub fn table_names(&self) -> Vec<String> {
-        let mut tables = self.tables().into_values().collect::<Vec<_>>();
+        let mut tables = self.tables.values().clone().collect::<Vec<_>>();
+
         tables.sort_by(|t1, t2| {
             t1.table_info()
                 .table_id()
                 .partial_cmp(&t2.table_info().table_id())
                 .unwrap()
         });
-
         tables
             .into_iter()
             .map(|t| t.table_info().name.clone())
@@ -105,17 +106,18 @@ impl InformationSchemaProvider {
     }
 
     /// Returns a map of [TableRef] in information schema.
-    pub fn tables(&self) -> HashMap<String, TableRef> {
-        // Safety: already built in `new`.
-        self.tables.clone().unwrap()
+    pub fn tables(&self) -> &HashMap<String, TableRef> {
+        assert!(!self.tables.is_empty());
+
+        &self.tables
     }
 
     /// Returns the [TableRef] by table name.
     pub fn table(&self, name: &str) -> Option<TableRef> {
-        self.tables().get(name).cloned()
+        self.tables.get(name).cloned()
     }
 
-    fn build_tables(&mut self) -> HashMap<String, TableRef> {
+    fn build_tables(&mut self) {
         let mut tables = HashMap::new();
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
@@ -125,9 +127,7 @@ impl InformationSchemaProvider {
             tables.insert((*name).to_string(), self.build_table(name).unwrap());
         }
 
-        self.tables = Some(tables.clone());
-
-        tables
+        self.tables = tables;
     }
 
     fn build_table(&self, name: &str) -> Option<TableRef> {
