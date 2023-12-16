@@ -14,6 +14,7 @@
 
 //! Write ahead log of the engine.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 
@@ -62,6 +63,7 @@ impl<S: LogStore> Wal<S> {
             store: self.store.clone(),
             entries: Vec::new(),
             entry_encode_buf: Vec::new(),
+            namespaces: HashMap::new(),
         }
     }
 
@@ -129,6 +131,8 @@ pub struct WalWriter<S: LogStore> {
     entries: Vec<S::Entry>,
     /// Buffer to encode WAL entry.
     entry_encode_buf: Vec<u8>,
+    /// Namespaces of regions being written into.
+    namespaces: HashMap<RegionId, S::Namespace>,
 }
 
 impl<S: LogStore> WalWriter<S> {
@@ -140,7 +144,17 @@ impl<S: LogStore> WalWriter<S> {
         wal_entry: &WalEntry,
         wal_options: &WalOptions,
     ) -> Result<()> {
-        let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
+        // Gets or inserts with a newly built namespace.
+        let namespace = self
+            .namespaces
+            .entry(region_id)
+            .or_insert(try_build_wal_namespace(
+                &self.store,
+                region_id,
+                wal_options,
+            )?)
+            .clone();
+
         // Encode wal entry to log store entry.
         self.entry_encode_buf.clear();
         wal_entry
@@ -156,6 +170,7 @@ impl<S: LogStore> WalWriter<S> {
     }
 
     /// Write all buffered entries to the WAL.
+    // TODO(niebayes): returns an `AppendBatchResponse` and handle it properly.
     pub async fn write_to_wal(&mut self) -> Result<()> {
         // TODO(yingwen): metrics.
 

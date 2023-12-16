@@ -211,6 +211,8 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
         let region_options = RegionOptions::try_from(&self.options)?;
+        let wal_options = region_options.wal_options.clone();
+
         let region_manifest_options = self.manifest_options(config, &region_options)?;
         let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
         else {
@@ -239,8 +241,6 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        // TODO(niebayes): decode wal options from region options.
-        let wal_options = WalOptions::default();
         replay_memtable(
             wal,
             &wal_options,
