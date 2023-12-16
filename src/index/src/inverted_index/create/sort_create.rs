@@ -84,12 +84,9 @@ impl InvertedIndexCreator for SortIndexCreator {
                 .await?;
         }
 
-        writer
-            .finish(
-                row_count.unwrap_or_default() as _,
-                self.segment_row_count as _,
-            )
-            .await
+        let total_row_count = row_count.unwrap_or_default() as _;
+        let segment_row_count = self.segment_row_count as _;
+        writer.finish(total_row_count, segment_row_count).await
     }
 }
 
