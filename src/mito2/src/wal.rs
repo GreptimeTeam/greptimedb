@@ -263,7 +263,7 @@ mod tests {
     async fn test_write_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
-        let wal_options = HashMap::default();
+        let wal_options = WalOptions::default();
 
         let entry = WalEntry {
             mutations: vec![
@@ -330,7 +330,7 @@ mod tests {
     async fn test_scan_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
-        let wal_options = HashMap::default();
+        let wal_options = WalOptions::default();
 
         let entries = sample_entries();
         let (id1, id2) = (RegionId::new(1, 1), RegionId::new(1, 2));
@@ -364,7 +364,7 @@ mod tests {
     async fn test_obsolete_wal() {
         let env = WalEnv::new().await;
         let wal = env.new_wal();
-        let wal_options = HashMap::default();
+        let wal_options = WalOptions::default();
 
         let entries = sample_entries();
         let mut writer = wal.writer();

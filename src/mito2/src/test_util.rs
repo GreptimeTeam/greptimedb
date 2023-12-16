@@ -345,12 +345,6 @@ impl CreateRequestBuilder {
     }
 
     #[must_use]
-    pub fn insert_wal_option(mut self, key: &str, value: &str) -> Self {
-        self.wal_options.insert(key.to_string(), value.to_string());
-        self
-    }
-
-    #[must_use]
     pub fn all_not_null(mut self, value: bool) -> Self {
         self.all_not_null = value;
         self

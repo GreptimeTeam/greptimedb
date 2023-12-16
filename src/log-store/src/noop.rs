@@ -151,7 +151,7 @@ mod tests {
         store.delete_namespace(&NamespaceImpl).await.unwrap();
         assert_eq!(
             NamespaceImpl,
-            store.namespace(0, &HashMap::default()).unwrap()
+            store.namespace(0, &WalOptions::default()).unwrap()
         );
         store.obsolete(NamespaceImpl, 1).await.unwrap();
     }

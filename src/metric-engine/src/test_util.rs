@@ -14,8 +14,6 @@
 
 //! Utilities for testing.
 
-use std::collections::HashMap;
-
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema, Row, SemanticType, Value};
 use datatypes::prelude::ConcreteDataType;
