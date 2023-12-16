@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use common_config::wal::WalOptions;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
@@ -24,7 +25,6 @@ use snafu::ResultExt;
 
 use crate::error::{Error, JsonOptionsSnafu, Result};
 
-// TODO(niebayes): integrate wal options into region options.
 /// Options that affect the entire region.
 ///
 /// Users need to specify the options while creating/opening a region.
@@ -38,6 +38,8 @@ pub struct RegionOptions {
     pub compaction: CompactionOptions,
     /// Custom storage.
     pub storage: Option<String>,
+    /// Wal options.
+    pub wal_options: WalOptions,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -53,11 +55,13 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
         let options: RegionOptionsWithoutEnum =
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
         let compaction: CompactionOptions = serde_json::from_str(&json).unwrap_or_default();
+        let wal_options: WalOptions = serde_json::from_str(&json).unwrap_or_default();
 
         Ok(RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
+            wal_options,
         })
     }
 }
@@ -162,6 +166,8 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use common_config::wal::KafkaWalOptions;
+
     use super::*;
 
     fn make_map(options: &[(&str, &str)]) -> HashMap<String, String> {
@@ -234,6 +240,29 @@ mod tests {
     }
 
     #[test]
+    fn test_with_wal_options() {
+        // With raft-engine wal options.
+        let map = make_map(&[("wal.provider", "raft-engine")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            wal_options: WalOptions::RaftEngine,
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+
+        // With kafka wal options.
+        let map = make_map(&[("wal.provider", "kafka"), ("wal.kafka.topic", "test_topic")]);
+        let options = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
     fn test_with_all() {
         let map = make_map(&[
             ("ttl", "7d"),
@@ -252,6 +281,9 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
             storage: Some("s3".to_string()),
+            wal_options: WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
         };
         assert_eq!(expect, options);
     }

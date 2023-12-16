@@ -30,7 +30,6 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
 use common_datasource::compression::CompressionType;
-use common_query::Output;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt64Array, UInt8Array};
 use datatypes::prelude::ConcreteDataType;

@@ -7,4 +7,7 @@ license.workspace = true
 [dependencies]
 common-base.workspace = true
 humantime-serde.workspace = true
+itertools.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+serde_with = "3"

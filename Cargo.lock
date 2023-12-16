@@ -1609,7 +1609,10 @@ version = "0.4.4"
 dependencies = [
  "common-base",
  "humantime-serde",
+ "itertools 0.10.5",
  "serde",
+ "serde_json",
+ "serde_with",
 ]
 
 [[package]]

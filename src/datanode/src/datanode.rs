@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
-use common_config::wal::{EncodedWalOptions, KafkaConfig, RaftEngineConfig, WAL_OPTIONS_KEY};
+use common_config::wal::{EncodedWalOptions, KafkaConfig, RaftEngineConfig};
 use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -345,8 +345,8 @@ impl DatanodeBuilder {
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
             for region_number in table_value.regions {
+                // Augments region options with wal options.
                 // TODO(niebayes): fetch wal options map from region info.
-                // Augments region options with an encoded wal options.
                 // let wal_options_map = &table_value.region_info.wal_options_map;
                 let wal_options_map: HashMap<RegionNumber, EncodedWalOptions> = HashMap::default();
                 let wal_options = wal_options_map
@@ -354,7 +354,7 @@ impl DatanodeBuilder {
                     .cloned()
                     .unwrap_or_default();
                 let mut region_options = table_value.region_info.region_options.clone();
-                region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options);
+                region_options.extend(wal_options);
 
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),
