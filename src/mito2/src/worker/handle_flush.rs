@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use common_config::wal::WalOptions;
 use common_telemetry::{error, info, warn};
 use common_time::util::current_time_millis;
 use store_api::logstore::LogStore;
@@ -202,10 +201,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Region {} flush finished, tries to bump wal to {}",
             region_id, request.flushed_entry_id
         );
-        // TODO(niebayes): properly fetch or construct wal options.
         if let Err(e) = self
             .wal
-            .obsolete(region_id, request.flushed_entry_id, &WalOptions::default())
+            .obsolete(region_id, request.flushed_entry_id, &region.wal_options)
             .await
         {
             error!(e; "Failed to write wal, region: {}", region_id);
