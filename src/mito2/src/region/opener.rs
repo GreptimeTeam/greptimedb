@@ -85,8 +85,8 @@ impl RegionOpener {
     }
 
     /// Sets options for the region.
-    pub(crate) fn options(mut self, options: HashMap<String, String>) -> Self {
-        self.options = options;
+    pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
+        self.options = value;
         self
     }
 
@@ -138,8 +138,8 @@ impl RegionOpener {
             }
         }
         let options = RegionOptions::try_from(&self.options)?;
-        // TODO(niebayes): decode wal options from options.
-        let wal_options = WalOptions::default();
+        let wal_options = options.wal_options.clone();
+
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.

@@ -89,7 +89,6 @@ impl ActivateRegion {
 
         self.region_storage_path = Some(region_storage_path);
         self.region_options = Some(region_options);
-
         let msg = MailboxMessage::json_message(
             "Activate Region",
             &format!("Metasrv@{}", ctx.selector_ctx.server_addr),

@@ -4747,7 +4747,6 @@ dependencies = [
  "client",
  "common-base",
  "common-catalog",
- "common-config",
  "common-error",
  "common-greptimedb-telemetry",
  "common-grpc",

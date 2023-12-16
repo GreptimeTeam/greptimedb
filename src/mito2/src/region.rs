@@ -76,7 +76,6 @@ pub(crate) struct MitoRegion {
     /// SST file purger.
     pub(crate) file_purger: FilePurgerRef,
     /// Wal options of this region.
-    #[allow(unused)]
     pub(crate) wal_options: WalOptions,
     /// Last flush time in millis.
     last_flush_millis: AtomicI64,
