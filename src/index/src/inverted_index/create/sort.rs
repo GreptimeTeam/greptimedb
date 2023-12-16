@@ -34,6 +34,9 @@ pub struct SortOutput {
 
     /// Stream of sorted items
     pub sorted_stream: SortedStream,
+
+    /// Total number of rows in the sorted data
+    pub total_row_count: usize,
 }
 
 /// Handles data sorting, supporting incremental input and retrieval of sorted output

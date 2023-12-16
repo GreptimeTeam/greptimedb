@@ -93,6 +93,7 @@ impl Sorter for ExternalSorter {
         Ok(SortOutput {
             null_bitmap: mem::take(&mut self.null_bitmap),
             sorted_stream: merging_sorted_stream,
+            total_row_count: self.total_row_count,
         })
     }
 }
@@ -245,7 +246,9 @@ mod tests {
         let SortOutput {
             null_bitmap,
             mut sorted_stream,
+            total_row_count,
         } = sorter.output().await.unwrap();
+        assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
             null_bitmap.iter_ones().collect::<Vec<_>>(),
@@ -303,7 +306,9 @@ mod tests {
         let SortOutput {
             null_bitmap,
             mut sorted_stream,
+            total_row_count,
         } = sorter.output().await.unwrap();
+        assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
             null_bitmap.iter_ones().collect::<Vec<_>>(),
@@ -361,7 +366,9 @@ mod tests {
         let SortOutput {
             null_bitmap,
             mut sorted_stream,
+            total_row_count,
         } = sorter.output().await.unwrap();
+        assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
             null_bitmap.iter_ones().collect::<Vec<_>>(),

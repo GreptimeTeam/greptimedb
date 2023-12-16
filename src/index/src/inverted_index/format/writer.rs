@@ -37,5 +37,6 @@ pub trait InvertedIndexWriter {
         S: Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin;
 
     /// Finalizes the index writing process, ensuring all data is written.
-    async fn finish(&mut self) -> Result<()>;
+    /// `total_row_count` and `segment_row_count` is used to fill in the metadata.
+    async fn finish(&mut self, total_row_count: u64, segment_row_count: u64) -> Result<()>;
 }
