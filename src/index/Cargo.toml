@@ -16,6 +16,7 @@ futures.workspace = true
 futures_codec = "0.4.1"
 greptime-proto.workspace = true
 mockall.workspace = true
+pin-project.workspace = true
 prost.workspace = true
 regex-automata.workspace = true
 regex.workspace = true

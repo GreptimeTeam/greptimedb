@@ -3987,6 +3987,7 @@ dependencies = [
  "futures_codec",
  "greptime-proto",
  "mockall",
+ "pin-project 1.1.3",
  "prost 0.12.2",
  "rand",
  "regex",
