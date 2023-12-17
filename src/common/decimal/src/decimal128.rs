@@ -454,6 +454,8 @@ mod tests {
         test_decimal128_eq(0);
         test_decimal128_eq(1234567890);
         test_decimal128_eq(-1234567890);
+        test_decimal128_eq(32781372819372817382183218i128);
+        test_decimal128_eq(-32781372819372817382183218i128);
         test_decimal128_eq(i128::MAX);
         test_decimal128_eq(i128::MIN);
     }

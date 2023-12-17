@@ -260,12 +260,12 @@ impl Interval {
     pub fn to_i128(&self) -> i128 {
         // 128            96              64                               0
         // +-------+-------+-------+-------+-------+-------+-------+-------+
-        // |     months    |      days     |             nanos             |
+        // |     months    |      days     |          nanoseconds          |
         // +-------+-------+-------+-------+-------+-------+-------+-------+
-        let m = (self.months as u128 & u32::MAX as u128) << 96;
-        let d = (self.days as u128 & u32::MAX as u128) << 64;
-        let n = self.nsecs as u128 & u64::MAX as u128;
-        (m | d | n) as i128
+        let months = (self.months as u128 & u32::MAX as u128) << 96;
+        let days = (self.days as u128 & u32::MAX as u128) << 64;
+        let nsecs = self.nsecs as u128 & u64::MAX as u128;
+        (months | days | nsecs) as i128
     }
 
     pub fn to_i64(&self) -> i64 {
@@ -650,9 +650,11 @@ mod tests {
         test_interval_eq(1, -2, -3);
         test_interval_eq(-1, -2, -3);
         test_interval_eq(i32::MAX, i32::MAX, i64::MAX);
-        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
-        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
         test_interval_eq(i32::MIN, i32::MAX, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
+        test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
         test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
     }
 
