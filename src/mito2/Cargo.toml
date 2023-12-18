@@ -14,7 +14,6 @@ api.workspace = true
 aquamarine.workspace = true
 arc-swap = "1.6"
 async-channel = "1.9"
-async-compat = "0.2"
 async-stream.workspace = true
 async-trait = "0.1"
 bytes = "1.4"

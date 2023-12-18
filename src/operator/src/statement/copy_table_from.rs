@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 
-use async_compat::CompatExt;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::csv::{CsvConfigBuilder, CsvOpener};
 use common_datasource::file_format::json::JsonOpener;
@@ -205,8 +204,7 @@ impl StatementExecutor {
                     .reader(path)
                     .await
                     .context(error::ReadObjectSnafu { path })?;
-
-                let buf_reader = BufReader::new(reader.compat());
+                let buf_reader = BufReader::new(reader);
 
                 let builder = ParquetRecordBatchStreamBuilder::new(buf_reader)
                     .await

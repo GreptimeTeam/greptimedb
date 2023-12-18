@@ -4873,7 +4873,6 @@ dependencies = [
  "aquamarine",
  "arc-swap",
  "async-channel",
- "async-compat",
  "async-stream",
  "async-trait",
  "bytes",
