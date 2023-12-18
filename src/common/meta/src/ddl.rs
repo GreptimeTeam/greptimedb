@@ -55,10 +55,15 @@ pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
+/// Metadata allocated to a table.
 pub struct TableMetadata {
+    /// Table id.
     pub table_id: TableId,
+    /// Route information for each region of the table.
     pub region_routes: Vec<RegionRoute>,
-    pub wal_options_map: HashMap<RegionNumber, String>,
+    /// The encoded wal options for regions of the table.
+    // If a region does not have an associated wal options, no key for the region would be found in the map.
+    pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
 #[async_trait::async_trait]

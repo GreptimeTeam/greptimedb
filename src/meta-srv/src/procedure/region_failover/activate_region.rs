@@ -42,9 +42,10 @@ pub(super) struct ActivateRegion {
     // the new leader node needs to remark the failed region as "inactive"
     // to prevent it from renewing the lease.
     remark_inactive_region: bool,
+    // An `None` option stands for unintialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
-    wal_options_map: Option<HashMap<RegionNumber, String>>,
+    region_wal_options: Option<HashMap<RegionNumber, String>>,
 }
 
 impl ActivateRegion {
@@ -54,7 +55,7 @@ impl ActivateRegion {
             remark_inactive_region: false,
             region_storage_path: None,
             region_options: None,
-            wal_options_map: None,
+            region_wal_options: None,
         }
     }
 
@@ -140,10 +141,10 @@ impl ActivateRegion {
                             .context(error::UnexpectedSnafu {
                                 violated: "expected region_options",
                             })?,
-                        self.wal_options_map
+                        self.region_wal_options
                             .clone()
                             .context(error::UnexpectedSnafu {
-                                violated: "expected wal_options_map",
+                                violated: "expected region_wal_options",
                             })?,
                     )))
                 } else {

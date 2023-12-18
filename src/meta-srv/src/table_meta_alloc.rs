@@ -83,7 +83,7 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
                     .context(EncodeWalOptionsToJsonSnafu { wal_options })
             })
             .collect::<MetaResult<Vec<_>>>()?;
-        let wal_options_map = region_routes
+        let region_wal_options = region_routes
             .iter()
             .map(|route| route.region.id.region_number())
             .zip(wal_options)
@@ -92,7 +92,7 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         Ok(TableMetadata {
             table_id,
             region_routes,
-            wal_options_map,
+            region_wal_options,
         })
     }
 }

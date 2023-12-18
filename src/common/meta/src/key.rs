@@ -364,7 +364,7 @@ impl TableMetadataManager {
         &self,
         mut table_info: RawTableInfo,
         region_routes: Vec<RegionRoute>,
-        wal_options_map: HashMap<RegionNumber, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<()> {
         let region_numbers = region_routes
             .iter()
@@ -400,7 +400,7 @@ impl TableMetadataManager {
             &engine,
             &region_storage_path,
             region_options,
-            wal_options_map,
+            region_wal_options,
             distribution,
         )?;
 
@@ -1206,7 +1206,7 @@ mod tests {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
-                    wal_options_map: HashMap::new(),
+                    region_wal_options: HashMap::new(),
                 },
                 &current_table_route_value,
                 new_region_routes.clone(),
@@ -1224,7 +1224,7 @@ mod tests {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
-                    wal_options_map: HashMap::new(),
+                    region_wal_options: HashMap::new(),
                 },
                 &current_table_route_value,
                 new_region_routes.clone(),
@@ -1247,7 +1247,7 @@ mod tests {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
-                    wal_options_map: HashMap::new(),
+                    region_wal_options: HashMap::new(),
                 },
                 &current_table_route_value,
                 new_region_routes.clone(),
@@ -1273,7 +1273,7 @@ mod tests {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: HashMap::new(),
-                    wal_options_map: HashMap::new(),
+                    region_wal_options: HashMap::new(),
                 },
                 &wrong_table_route_value,
                 new_region_routes,

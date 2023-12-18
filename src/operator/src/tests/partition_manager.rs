@@ -80,8 +80,8 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
-fn new_test_wal_options_map(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
-    // TODO(niebayes): construct wal options for test.
+fn new_test_region_wal_options(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
+    // TODO(niebayes): construct region wal options for test.
     let _ = regions;
     HashMap::default()
 }
@@ -109,7 +109,7 @@ pub(crate) async fn create_partition_rule_manager(
     let partition_manager = Arc::new(PartitionRuleManager::new(kv_backend));
 
     let regions = vec![1u32, 2, 3];
-    let wal_options_map = new_test_wal_options_map(regions.clone());
+    let region_wal_options = new_test_region_wal_options(regions.clone());
 
     table_metadata_manager
         .create_table_metadata(
@@ -170,7 +170,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
-            wal_options_map.clone(),
+            region_wal_options.clone(),
         )
         .await
         .unwrap();
@@ -240,7 +240,7 @@ pub(crate) async fn create_partition_rule_manager(
                     leader_status: None,
                 },
             ],
-            wal_options_map,
+            region_wal_options,
         )
         .await
         .unwrap();

@@ -36,7 +36,7 @@ pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
-    wal_options_map: HashMap<RegionNumber, String>,
+    region_wal_options: HashMap<RegionNumber, String>,
 }
 
 impl UpdateRegionMetadata {
@@ -44,13 +44,13 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
-        wal_options_map: HashMap<RegionNumber, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Self {
         Self {
             candidate,
             region_storage_path,
             region_options,
-            wal_options_map,
+            region_wal_options,
         }
     }
 
@@ -108,7 +108,7 @@ impl UpdateRegionMetadata {
                     engine: engine.to_string(),
                     region_storage_path: self.region_storage_path.to_string(),
                     region_options: self.region_options.clone(),
-                    wal_options_map: self.wal_options_map.clone(),
+                    region_wal_options: self.region_wal_options.clone(),
                 },
                 &table_route_value,
                 new_region_routes,

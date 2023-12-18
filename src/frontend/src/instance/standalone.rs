@@ -154,7 +154,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
         Ok(TableMetadata {
             table_id,
             region_routes,
-            wal_options_map: HashMap::default(),
+            region_wal_options: HashMap::default(),
         })
     }
 }

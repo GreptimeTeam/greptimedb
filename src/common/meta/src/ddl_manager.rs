@@ -178,7 +178,7 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_options_map: HashMap<RegionNumber, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
@@ -186,7 +186,7 @@ impl DdlManager {
             cluster_id,
             create_table_task,
             region_routes,
-            wal_options_map,
+            region_wal_options,
             context,
         );
 
@@ -394,7 +394,7 @@ async fn handle_create_table_task(
     let TableMetadata {
         table_id,
         region_routes,
-        wal_options_map,
+        region_wal_options,
     } = table_meta;
 
     let id = ddl_manager
@@ -402,7 +402,7 @@ async fn handle_create_table_task(
             cluster_id,
             create_table_task,
             region_routes,
-            wal_options_map,
+            region_wal_options,
         )
         .await?;
 

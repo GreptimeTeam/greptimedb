@@ -51,6 +51,7 @@ impl TopicManager {
 
     /// Selects a batch of topics from the topic pool through the topic selector.
     pub fn select_batch(&self, num_topics: usize) -> Vec<Topic> {
+        // TODO(niebayes): calls `select` to select a collection of topics in a batching manner.
         vec!["tmp_topic".to_string(); num_topics]
     }
 }

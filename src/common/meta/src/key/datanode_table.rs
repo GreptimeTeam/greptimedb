@@ -48,7 +48,7 @@ pub struct RegionInfo {
     pub region_options: HashMap<String, String>,
     /// The per-region wal options.
     #[serde(default)]
-    pub wal_options_map: HashMap<RegionNumber, String>,
+    pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
 pub struct DatanodeTableKey {
@@ -168,16 +168,16 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        wal_options_map: HashMap<RegionNumber, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
-                let wal_options_map = regions
+                let filtered_region_wal_options = regions
                     .iter()
                     .filter_map(|region_number| {
-                        wal_options_map
+                        region_wal_options
                             .get(region_number)
                             .map(|wal_options| (*region_number, wal_options.clone()))
                     })
@@ -191,7 +191,7 @@ impl DatanodeTableManager {
                         engine: engine.to_string(),
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
-                        wal_options_map,
+                        region_wal_options: filtered_region_wal_options,
                     },
                 );
 
@@ -286,7 +286,7 @@ mod tests {
             region_info: RegionInfo::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"wal_options_map":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
