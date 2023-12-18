@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
@@ -93,20 +93,27 @@ impl Sorter for ExternalSorter {
     async fn output(&mut self) -> Result<SortOutput> {
         let readers = self.temp_file_provider.read_all(&self.index_name).await?;
 
-        let buf_values = mem::take(&mut self.values_buffer).into_iter();
-        let mut merging_sorted_stream: SortedStream = Box::new(stream::iter(buf_values.map(Ok)));
+        // TODO(zhongzc): k-way merge instead of 2-way merge
 
-        // Sequentially merge each intermediate file's stream into the merged stream
-        //
-        // TODO(zhongzc): k-way merge
+        let mut tree_nodes: VecDeque<SortedStream> = VecDeque::with_capacity(readers.len() + 1);
+        tree_nodes.push_back(Box::new(stream::iter(
+            mem::take(&mut self.values_buffer).into_iter().map(Ok),
+        )));
         for reader in readers {
-            let intermediate = IntermediateReader::new(reader).into_stream().await?;
-            merging_sorted_stream = MergeSortedStream::merge(merging_sorted_stream, intermediate);
+            tree_nodes.push_back(IntermediateReader::new(reader).into_stream().await?);
+        }
+
+        while tree_nodes.len() >= 2 {
+            // every turn, the length of tree_nodes will be reduced by 1 until only one stream left
+            let stream1 = tree_nodes.pop_front().unwrap();
+            let stream2 = tree_nodes.pop_front().unwrap();
+            let merged_stream = MergeSortedStream::merge(stream1, stream2);
+            tree_nodes.push_back(merged_stream);
         }
 
         Ok(SortOutput {
             segment_null_bitmap: mem::take(&mut self.segment_null_bitmap),
-            sorted_stream: merging_sorted_stream,
+            sorted_stream: tree_nodes.pop_front().unwrap(),
             total_row_count: self.total_row_count,
         })
     }
@@ -222,45 +229,11 @@ mod tests {
     use super::*;
     use crate::inverted_index::create::sort::external_provider::MockExternalTempFileProvider;
 
-    fn random_option_bytes(size: usize) -> Option<Vec<u8>> {
-        let mut rng = rand::thread_rng();
-
-        if rng.gen() {
-            let mut buffer = vec![0u8; size];
-            rng.fill(&mut buffer[..]);
-            Some(buffer)
-        } else {
-            None
-        }
-    }
-
-    type ValueSegIds = BTreeMap<Option<Vec<u8>>, Vec<usize>>;
-
-    fn shuffle_values_and_sorted_result(
-        row_count: usize,
-        segment_row_count: usize,
-    ) -> (Vec<Option<Vec<u8>>>, ValueSegIds) {
-        let mut mock_values = iter::repeat_with(|| random_option_bytes(100))
-            .take(row_count)
-            .collect::<Vec<_>>();
-
-        let mut sorted_result = BTreeMap::new();
-        for (row_index, value) in mock_values.iter_mut().enumerate() {
-            let to_add_segment_index = row_index / segment_row_count;
-            let indices = sorted_result.entry(value.clone()).or_insert_with(Vec::new);
-
-            if indices.last() != Some(&to_add_segment_index) {
-                indices.push(to_add_segment_index);
-            }
-        }
-
-        (mock_values, sorted_result)
-    }
-
     async fn test_external_sorter(
         memory_usage_threshold: Option<usize>,
         segment_row_count: usize,
         row_count: usize,
+        batch_push: bool,
     ) {
         let mut mock_provider = MockExternalTempFileProvider::new();
 
@@ -294,12 +267,25 @@ mod tests {
             memory_usage_threshold,
         );
 
-        let (mock_values, mut sorted_result) =
-            shuffle_values_and_sorted_result(row_count, segment_row_count);
+        let mut sorted_result = if batch_push {
+            let (dic_values, sorted_result) =
+                dictionary_values_and_sorted_result(row_count, segment_row_count);
 
-        for value in mock_values {
-            sorter.push(value.as_deref()).await.unwrap();
-        }
+            for (value, n) in dic_values {
+                sorter.push_n(value.as_deref(), n).await.unwrap();
+            }
+
+            sorted_result
+        } else {
+            let (mock_values, sorted_result) =
+                shuffle_values_and_sorted_result(row_count, segment_row_count);
+
+            for value in mock_values {
+                sorter.push(value.as_deref()).await.unwrap();
+            }
+
+            sorted_result
+        };
 
         let SortOutput {
             segment_null_bitmap,
@@ -324,11 +310,19 @@ mod tests {
         let memory_usage_threshold = None;
         let total_row_count_cases = vec![0, 100, 1000, 10000];
         let segment_row_count_cases = vec![1, 10, 100, 1000];
+        let batch_push_cases = vec![false, true];
 
         for total_row_count in total_row_count_cases {
             for segment_row_count in &segment_row_count_cases {
-                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                for batch_push in &batch_push_cases {
+                    test_external_sorter(
+                        memory_usage_threshold,
+                        *segment_row_count,
+                        total_row_count,
+                        *batch_push,
+                    )
                     .await;
+                }
             }
         }
     }
@@ -338,11 +332,19 @@ mod tests {
         let memory_usage_threshold = Some(0);
         let total_row_count_cases = vec![0, 100, 1000, 10000];
         let segment_row_count_cases = vec![1, 10, 100, 1000];
+        let batch_push_cases = vec![false, true];
 
         for total_row_count in total_row_count_cases {
             for segment_row_count in &segment_row_count_cases {
-                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                for batch_push in &batch_push_cases {
+                    test_external_sorter(
+                        memory_usage_threshold,
+                        *segment_row_count,
+                        total_row_count,
+                        *batch_push,
+                    )
                     .await;
+                }
             }
         }
     }
@@ -352,12 +354,86 @@ mod tests {
         let memory_usage_threshold = Some(1024);
         let total_row_count_cases = vec![0, 100, 1000, 10000];
         let segment_row_count_cases = vec![1, 10, 100, 1000];
+        let batch_push_cases = vec![false, true];
 
         for total_row_count in total_row_count_cases {
             for segment_row_count in &segment_row_count_cases {
-                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                for batch_push in &batch_push_cases {
+                    test_external_sorter(
+                        memory_usage_threshold,
+                        *segment_row_count,
+                        total_row_count,
+                        *batch_push,
+                    )
                     .await;
+                }
             }
         }
+    }
+
+    fn random_option_bytes(size: usize) -> Option<Vec<u8>> {
+        let mut rng = rand::thread_rng();
+
+        if rng.gen() {
+            let mut buffer = vec![0u8; size];
+            rng.fill(&mut buffer[..]);
+            Some(buffer)
+        } else {
+            None
+        }
+    }
+
+    type Values = Vec<Option<Bytes>>;
+    type DictionaryValues = Vec<(Option<Bytes>, usize)>;
+    type ValueSegIds = BTreeMap<Option<Bytes>, Vec<usize>>;
+
+    fn shuffle_values_and_sorted_result(
+        row_count: usize,
+        segment_row_count: usize,
+    ) -> (Values, ValueSegIds) {
+        let mock_values = iter::repeat_with(|| random_option_bytes(100))
+            .take(row_count)
+            .collect::<Vec<_>>();
+
+        let sorted_result = sorted_result(&mock_values, segment_row_count);
+        (mock_values, sorted_result)
+    }
+
+    fn dictionary_values_and_sorted_result(
+        row_count: usize,
+        segment_row_count: usize,
+    ) -> (DictionaryValues, ValueSegIds) {
+        let mut n = row_count;
+        let mut rng = rand::thread_rng();
+        let mut dic_values = Vec::new();
+
+        while n > 0 {
+            let size = rng.gen_range(1..=n);
+            let value = random_option_bytes(100);
+            dic_values.push((value, size));
+            n -= size;
+        }
+
+        let mock_values = dic_values
+            .iter()
+            .flat_map(|(value, size)| iter::repeat(value.clone()).take(*size))
+            .collect::<Vec<_>>();
+
+        let sorted_result = sorted_result(&mock_values, segment_row_count);
+        (dic_values, sorted_result)
+    }
+
+    fn sorted_result(values: &Values, segment_row_count: usize) -> ValueSegIds {
+        let mut sorted_result = BTreeMap::new();
+        for (row_index, value) in values.iter().enumerate() {
+            let to_add_segment_index = row_index / segment_row_count;
+            let indices = sorted_result.entry(value.clone()).or_insert_with(Vec::new);
+
+            if indices.last() != Some(&to_add_segment_index) {
+                indices.push(to_add_segment_index);
+            }
+        }
+
+        sorted_result
     }
 }
