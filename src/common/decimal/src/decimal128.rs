@@ -105,13 +105,13 @@ impl Decimal128 {
     /// the precision, scale information is discarded.
     ///
     /// Return: (high-64 bit, low-64 bit)
-    pub fn split_value(&self) -> (i64, u64) {
-        ((self.value >> 64) as i64, self.value as u64)
+    pub fn split_value(&self) -> (i64, i64) {
+        ((self.value >> 64) as i64, self.value as i64)
     }
 
     /// Convert from precision, scale, a i128 value which
-    /// represents by i64 + u64 value(high-64 bit, low-64 bit).
-    pub fn from_value_precision_scale(hi: i64, lo: u64, precision: u8, scale: i8) -> Self {
+    /// represents by i64 + i64 value(high-64 bit, low-64 bit).
+    pub fn from_value_precision_scale(hi: i64, lo: i64, precision: u8, scale: i8) -> Self {
         // 128                             64                              0
         // +-------+-------+-------+-------+-------+-------+-------+-------+
         // |               hi              |               lo              |
