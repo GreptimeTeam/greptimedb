@@ -328,7 +328,7 @@ mod tests {
         let vals = values(&[Arc::new(array)]).unwrap();
         (0..3).for_each(|i| {
             assert_eq!(vals.decimal128_values[i].hi, 0);
-            assert_eq!(vals.decimal128_values[i].lo, i as u64 + 1);
+            assert_eq!(vals.decimal128_values[i].lo, i as i64 + 1);
         });
     }
 

@@ -655,6 +655,7 @@ mod tests {
         test_interval_eq(i32::MAX, i32::MAX, i64::MIN);
         test_interval_eq(i32::MIN, i32::MIN, i64::MAX);
         test_interval_eq(i32::MAX, i32::MIN, i64::MIN);
+        test_interval_eq(i32::MIN, i32::MAX, i64::MIN);
         test_interval_eq(i32::MIN, i32::MIN, i64::MIN);
     }
 
