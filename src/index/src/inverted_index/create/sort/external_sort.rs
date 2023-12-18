@@ -97,6 +97,8 @@ impl Sorter for ExternalSorter {
         let mut merging_sorted_stream: SortedStream = Box::new(stream::iter(buf_values.map(Ok)));
 
         // Sequentially merge each intermediate file's stream into the merged stream
+        //
+        // TODO(zhongzc): k-way merge
         for reader in readers {
             let intermediate = IntermediateReader::new(reader).into_stream().await?;
             merging_sorted_stream = MergeSortedStream::merge(merging_sorted_stream, intermediate);
