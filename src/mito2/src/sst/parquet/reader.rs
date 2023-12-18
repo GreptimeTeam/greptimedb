@@ -18,7 +18,6 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use async_compat::{Compat, CompatExt};
 use async_trait::async_trait;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
@@ -123,8 +122,7 @@ impl ParquetReaderBuilder {
             .object_store
             .reader(&file_path)
             .await
-            .context(OpenDalSnafu)?
-            .compat();
+            .context(OpenDalSnafu)?;
         let mut reader = BufReader::new(reader);
         // Loads parquet metadata of the file.
         let parquet_meta = self.read_parquet_metadata(&mut reader, &file_path).await?;
@@ -288,7 +286,7 @@ struct RowGroupReaderBuilder {
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
     /// Reader to get data.
-    file_reader: BufReader<Compat<Reader>>,
+    file_reader: BufReader<Reader>,
     /// Projection mask.
     projection: ProjectionMask,
     /// Field levels to read.

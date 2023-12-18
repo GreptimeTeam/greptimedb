@@ -4888,7 +4888,6 @@ dependencies = [
  "aquamarine",
  "arc-swap",
  "async-channel",
- "async-compat",
  "async-stream",
  "async-trait",
  "bytes",
@@ -5622,7 +5621,6 @@ name = "operator"
 version = "0.4.4"
 dependencies = [
  "api",
- "async-compat",
  "async-trait",
  "auth",
  "catalog",
