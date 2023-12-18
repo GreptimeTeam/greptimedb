@@ -16,10 +16,13 @@ Affected Rows: 0
 
 show tables;
 
-+---------+
-| Tables  |
-+---------+
-| columns |
-| tables  |
-+---------+
++-------------------+
+| Tables            |
++-------------------+
+| column_privileges |
+| column_statistics |
+| columns           |
+| engines           |
+| tables            |
++-------------------+
 

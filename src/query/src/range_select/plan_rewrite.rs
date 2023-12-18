@@ -132,14 +132,15 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// Parse the `align to` clause and return a UTC timestamp with unit of millisecond,
 /// which is used as the basis for dividing time slot during the align operation.
 /// 1. NOW: align to current execute time
-/// 2. CALENDAR (as Default Option): align to timestamp `0`
 /// 2. Timestamp string: align to specific timestamp
+/// 3. leave empty (as Default Option): align to unix epoch 0
 fn parse_align_to(args: &[Expr], i: usize) -> DFResult<i64> {
     let s = parse_str_expr(args, i)?;
     let upper = s.to_uppercase();
     match upper.as_str() {
         "NOW" => return Ok(Timestamp::current_millis().value()),
-        "CALENDAR" | "" => return Ok(0),
+        // default align to unix epoch 0
+        "" => return Ok(0),
         _ => (),
     }
     Timestamp::from_str(s)
@@ -748,16 +749,10 @@ mod test {
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some("NOW".into())))];
         let epsinon = parse_align_to(&args, 0).unwrap() - Timestamp::current_millis().value();
         assert!(epsinon.abs() < 100);
-        // test CALENDAR
-        let args = vec![
-            Expr::Literal(ScalarValue::Utf8(Some("".into()))),
-            Expr::Literal(ScalarValue::Utf8(Some("CALENDAR".into()))),
-        ];
-        assert!(
-            parse_align_to(&args, 0).unwrap() == parse_align_to(&args, 1).unwrap()
-                && parse_align_to(&args, 0).unwrap() == 0
-        );
-        // test CALENDAR
+        // test default
+        let args = vec![Expr::Literal(ScalarValue::Utf8(Some("".into())))];
+        assert!(parse_align_to(&args, 0).unwrap() == 0);
+        // test Timestamp
         let args = vec![Expr::Literal(ScalarValue::Utf8(Some(
             "1970-01-01T00:00:00+08:00".into(),
         )))];

@@ -16,7 +16,7 @@ async-compression = { version = "0.3", features = [
     "tokio",
 ] }
 async-trait.workspace = true
-bytes = "1.1"
+bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-runtime.workspace = true

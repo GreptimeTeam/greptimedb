@@ -29,17 +29,6 @@ SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
 | 1970-01-03T00:00:00 | host2 | 6                                |
 +---------------------+-------+----------------------------------+
 
-SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO CALENDAR ORDER BY host, ts;
-
-+---------------------+-------+----------------------------------+
-| ts                  | host  | MIN(host.val) RANGE 1d FILL NULL |
-+---------------------+-------+----------------------------------+
-| 1970-01-02T00:00:00 | host1 | 0                                |
-| 1970-01-03T00:00:00 | host1 | 2                                |
-| 1970-01-02T00:00:00 | host2 | 4                                |
-| 1970-01-03T00:00:00 | host2 | 6                                |
-+---------------------+-------+----------------------------------+
-
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO UNKNOWN ORDER BY host, ts;
 
 Error: 3000(PlanQuery), DataFusion error: Error during planning: Illegal `align to` argument `UNKNOWN` in range select query, can't be parse as NOW/CALENDAR/Timestamp, error: Failed to parse a string into Timestamp, raw string: UNKNOWN

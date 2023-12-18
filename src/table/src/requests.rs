@@ -25,6 +25,7 @@ use common_time::range::TimestampRange;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, RawSchema};
 use serde::{Deserialize, Serialize};
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::storage::RegionNumber;
 
 use crate::engine::TableReference;
@@ -342,6 +343,8 @@ pub fn valid_table_option(key: &str) -> bool {
             | TTL_KEY
             | REGIONS_KEY
             | STORAGE_KEY
+            | PHYSICAL_TABLE_METADATA_KEY
+            | LOGICAL_TABLE_METADATA_KEY
     ) | is_supported_in_s3(key)
 }
 
