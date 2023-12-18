@@ -5606,7 +5606,6 @@ name = "operator"
 version = "0.4.4"
 dependencies = [
  "api",
- "async-compat",
  "async-trait",
  "auth",
  "catalog",
