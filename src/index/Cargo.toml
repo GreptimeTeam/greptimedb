@@ -6,7 +6,9 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+asynchronous-codec = "0.7.0"
 bytemuck.workspace = true
+bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true

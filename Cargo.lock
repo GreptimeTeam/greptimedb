@@ -634,6 +634,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atoi"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3961,7 +3974,9 @@ name = "index"
 version = "0.4.4"
 dependencies = [
  "async-trait",
+ "asynchronous-codec",
  "bytemuck",
+ "bytes",
  "common-base",
  "common-error",
  "common-macro",
