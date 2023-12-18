@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 use std::mem;
 use std::num::NonZeroUsize;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -65,14 +66,24 @@ impl Sorter for ExternalSorter {
     /// Pushes a value into the sorter, adding it to the in-memory buffer and dumping the buffer to
     /// an external file if necessary
     async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
-        self.total_row_count += 1;
-        let bitmap_offset = self.current_segment_index();
+        self.push_n(value, 1).await
+    }
+
+    /// Pushes n identical values into the sorter, adding them to the in-memory buffer and dumping
+    /// the buffer to an external file if necessary
+    async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+
+        let segment_index_range = self.segment_index_range(n);
+        self.total_row_count += n;
 
         if let Some(value) = value {
-            let memory_diff = self.push_not_null(value, bitmap_offset);
+            let memory_diff = self.push_not_null(value, segment_index_range);
             self.may_dump_buffer(memory_diff).await
         } else {
-            set_bit(&mut self.segment_null_bitmap, bitmap_offset);
+            set_bits(&mut self.segment_null_bitmap, segment_index_range);
             Ok(())
         }
     }
@@ -122,24 +133,24 @@ impl ExternalSorter {
         }
     }
 
-    /// Determines the current data segment based on processed rows
-    fn current_segment_index(&self) -> usize {
-        (self.total_row_count - 1) / self.segment_row_count
-    }
-
-    /// Adds a non-null value to the buffer or updates an existing value's bitmap.
+    /// Pushes the non-null values to the values buffer and sets the bits within
+    /// the specified range in the given BitVec to true.
     /// Returns the memory usage difference of the buffer after the operation.
-    fn push_not_null(&mut self, value: BytesRef<'_>, offset: usize) -> usize {
+    fn push_not_null(
+        &mut self,
+        value: BytesRef<'_>,
+        segment_index_range: RangeInclusive<usize>,
+    ) -> usize {
         match self.values_buffer.get_mut(value) {
             Some(bitmap) => {
                 let old_len = bitmap.as_raw_slice().len();
-                set_bit(bitmap, offset);
+                set_bits(bitmap, segment_index_range);
 
                 bitmap.as_raw_slice().len() - old_len
             }
             None => {
                 let mut bitmap = BitVec::default();
-                set_bit(&mut bitmap, offset);
+                set_bits(&mut bitmap, segment_index_range);
 
                 let mem_diff = bitmap.as_raw_slice().len() + value.len();
                 self.values_buffer.insert(value.to_vec(), bitmap);
@@ -170,14 +181,29 @@ impl ExternalSorter {
         self.current_memory_usage = 0;
         Ok(())
     }
+
+    /// Determines the segment index range for the row index range
+    /// [self.total_row_count, self.total_row_count + n - 1]
+    fn segment_index_range(&self, n: usize) -> RangeInclusive<usize> {
+        let start = self.segment_index(self.total_row_count);
+        let end = self.segment_index(self.total_row_count + n - 1);
+        start..=end
+    }
+
+    /// Determines the segment index for the given row index
+    fn segment_index(&self, row_index: usize) -> usize {
+        row_index / self.segment_row_count
+    }
 }
 
-/// Sets or appends a bit at the specified offset within the bitmap
-fn set_bit(bitmap: &mut BitVec, offset: usize) {
-    if offset >= bitmap.len() {
-        bitmap.resize(offset + 1, false);
+/// Sets the bits within the specified range in the given `BitVec` to true
+fn set_bits(bitmap: &mut BitVec, index_range: RangeInclusive<usize>) {
+    if *index_range.end() >= bitmap.len() {
+        bitmap.resize(index_range.end() + 1, false);
     }
-    bitmap.set(offset, true);
+    for index in index_range {
+        bitmap.set(index, true);
+    }
 }
 
 #[cfg(test)]
