@@ -45,9 +45,9 @@ first_heartbeat_estimate = "1000ms"
 
 [wal]
 # Available wal providers:
-# - "raft-engine" (default)
+# - "raft_engine" (default)
 # - "kafka"
-provider = "raft-engine"
+provider = "raft_engine"
 
 # There're none raft-engine wal config since meta srv only involves in remote wal currently.
 
@@ -58,8 +58,8 @@ broker_endpoints = ["127.0.0.1:9090"]
 num_topics = 64
 # Topic selector type.
 # Available selector types: 
-# - "round-robin" (default)
-selector_type = "round-robin"
+# - "round_robin" (default)
+selector_type = "round_robin"
 # A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
 topic_name_prefix = "greptimedb_kafka_wal"
 # Number of partitions per topic.

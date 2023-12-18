@@ -34,7 +34,7 @@ pub const WAL_OPTIONS_KEY: &str = "wal_options";
 #[serde(tag = "provider")]
 pub enum WalConfig {
     #[default]
-    #[serde(rename = "raft-engine")]
+    #[serde(rename = "raft_engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
@@ -48,7 +48,7 @@ pub enum WalConfig {
 #[serde(tag = "wal.provider")]
 pub enum WalOptions {
     #[default]
-    #[serde(rename = "raft-engine")]
+    #[serde(rename = "raft_engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
     #[serde(with = "prefix_wal_kafka")]
@@ -66,14 +66,14 @@ mod tests {
     fn test_serde_wal_config() {
         // Test serde raft-engine wal config with none other wal config.
         let toml_str = r#"
-            provider = "raft-engine"
+            provider = "raft_engine"
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(wal_config, WalConfig::RaftEngine);
 
         // Test serde raft-engine wal config with extra other wal config.
         let toml_str = r#"
-            provider = "raft-engine"
+            provider = "raft_engine"
             broker_endpoints = ["127.0.0.1:9090"]
             num_topics = 32
         "#;
@@ -85,7 +85,7 @@ mod tests {
             provider = "kafka"
             broker_endpoints = ["127.0.0.1:9090"]
             num_topics = 32
-            selector_type = "round-robin"
+            selector_type = "round_robin"
             topic_name_prefix = "greptimedb_kafka_wal"
             num_partitions = 1
             replication_factor = 3
@@ -107,7 +107,7 @@ mod tests {
         // Test serde raft-engine wal options.
         let wal_options = WalOptions::RaftEngine;
         let encoded = serde_json::to_string(&wal_options).unwrap();
-        let expected = r#"{"wal.provider":"raft-engine"}"#;
+        let expected = r#"{"wal.provider":"raft_engine"}"#;
         assert_eq!(&encoded, expected);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();

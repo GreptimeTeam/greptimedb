@@ -22,7 +22,7 @@ use crate::wal::kafka::topic::Topic;
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SelectorType {
     #[default]
-    #[serde(rename = "round-robin")]
+    #[serde(rename = "round_robin")]
     RoundRobin,
 }
 
