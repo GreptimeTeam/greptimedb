@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::inverted_index::create::sort::external_provider::MockExternalTempFileProvider;
 
-    fn generate_random_bytes_option(size: usize) -> Option<Vec<u8>> {
+    fn random_option_bytes(size: usize) -> Option<Vec<u8>> {
         let mut rng = rand::thread_rng();
 
         if rng.gen() {
@@ -236,65 +236,32 @@ mod tests {
 
     type ValueSegIds = BTreeMap<Option<Vec<u8>>, Vec<usize>>;
 
-    fn shuffle_values_and_sorted_result(row_count: usize) -> (Vec<Option<Vec<u8>>>, ValueSegIds) {
-        let mut mock_values = iter::repeat_with(|| generate_random_bytes_option(100))
+    fn shuffle_values_and_sorted_result(
+        row_count: usize,
+        segment_row_count: usize,
+    ) -> (Vec<Option<Vec<u8>>>, ValueSegIds) {
+        let mut mock_values = iter::repeat_with(|| random_option_bytes(100))
             .take(row_count)
             .collect::<Vec<_>>();
 
         let mut sorted_result = BTreeMap::new();
-        for (i, value) in mock_values.iter_mut().enumerate() {
-            sorted_result
-                .entry(value.clone())
-                .or_insert_with(Vec::new)
-                .push(i);
+        for (row_index, value) in mock_values.iter_mut().enumerate() {
+            let to_add_segment_index = row_index / segment_row_count;
+            let indices = sorted_result.entry(value.clone()).or_insert_with(Vec::new);
+
+            if indices.last() != Some(&to_add_segment_index) {
+                indices.push(to_add_segment_index);
+            }
         }
 
         (mock_values, sorted_result)
     }
 
-    #[tokio::test]
-    async fn test_external_sorter_pure_in_memory() {
-        let memory_usage_threshold = None;
-
-        let mut mock_provider = MockExternalTempFileProvider::new();
-        mock_provider.expect_create().never();
-        mock_provider.expect_read_all().returning(|_| Ok(vec![]));
-
-        let mut sorter = ExternalSorter::new(
-            "test".to_owned(),
-            Arc::new(mock_provider),
-            NonZeroUsize::new(1).unwrap(),
-            memory_usage_threshold,
-        );
-
-        let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
-
-        for value in mock_values {
-            sorter.push(value.as_deref()).await.unwrap();
-        }
-
-        let SortOutput {
-            segment_null_bitmap,
-            mut sorted_stream,
-            total_row_count,
-        } = sorter.output().await.unwrap();
-        assert_eq!(total_row_count, 100);
-        let n = sorted_result.remove(&None);
-        assert_eq!(
-            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
-            n.unwrap_or_default()
-        );
-        for (value, offsets) in sorted_result {
-            let item = sorted_stream.next().await.unwrap().unwrap();
-            assert_eq!(item.0, value.unwrap());
-            assert_eq!(item.1.iter_ones().collect::<Vec<_>>(), offsets);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_external_sorter_pure_external() {
-        let memory_usage_threshold = Some(0);
-
+    async fn test_external_sorter(
+        memory_usage_threshold: Option<usize>,
+        segment_row_count: usize,
+        row_count: usize,
+    ) {
         let mut mock_provider = MockExternalTempFileProvider::new();
 
         let mock_files: Arc<Mutex<HashMap<String, Box<dyn AsyncRead + Unpin + Send>>>> =
@@ -323,11 +290,12 @@ mod tests {
         let mut sorter = ExternalSorter::new(
             "test".to_owned(),
             Arc::new(mock_provider),
-            NonZeroUsize::new(1).unwrap(),
+            NonZeroUsize::new(segment_row_count).unwrap(),
             memory_usage_threshold,
         );
 
-        let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
+        let (mock_values, mut sorted_result) =
+            shuffle_values_and_sorted_result(row_count, segment_row_count);
 
         for value in mock_values {
             sorter.push(value.as_deref()).await.unwrap();
@@ -338,7 +306,7 @@ mod tests {
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
-        assert_eq!(total_row_count, 100);
+        assert_eq!(total_row_count, row_count);
         let n = sorted_result.remove(&None);
         assert_eq!(
             segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
@@ -352,62 +320,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_external_sorter_pure_in_memory() {
+        let memory_usage_threshold = None;
+        let total_row_count_cases = vec![0, 100, 1000, 10000];
+        let segment_row_count_cases = vec![1, 10, 100, 1000];
+
+        for total_row_count in total_row_count_cases {
+            for segment_row_count in &segment_row_count_cases {
+                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_external_sorter_pure_external() {
+        let memory_usage_threshold = Some(0);
+        let total_row_count_cases = vec![0, 100, 1000, 10000];
+        let segment_row_count_cases = vec![1, 10, 100, 1000];
+
+        for total_row_count in total_row_count_cases {
+            for segment_row_count in &segment_row_count_cases {
+                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                    .await;
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_external_sorter_mixed() {
         let memory_usage_threshold = Some(1024);
+        let total_row_count_cases = vec![0, 100, 1000, 10000];
+        let segment_row_count_cases = vec![1, 10, 100, 1000];
 
-        let mut mock_provider = MockExternalTempFileProvider::new();
-
-        let mock_files: Arc<Mutex<HashMap<String, Box<dyn AsyncRead + Unpin + Send>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        mock_provider.expect_create().times(1..).returning({
-            let files = Arc::clone(&mock_files);
-            move |index_name, file_id| {
-                assert_eq!(index_name, "test");
-                let mut files = files.lock().unwrap();
-                let (writer, reader) = duplex(8 * 1024);
-                files.insert(file_id.to_string(), Box::new(reader.compat()));
-                Ok(Box::new(writer.compat_write()))
+        for total_row_count in total_row_count_cases {
+            for segment_row_count in &segment_row_count_cases {
+                test_external_sorter(memory_usage_threshold, *segment_row_count, total_row_count)
+                    .await;
             }
-        });
-
-        mock_provider.expect_read_all().returning({
-            let files = Arc::clone(&mock_files);
-            move |index_name| {
-                assert_eq!(index_name, "test");
-                let mut files = files.lock().unwrap();
-                Ok(files.drain().map(|f| f.1).collect::<Vec<_>>())
-            }
-        });
-
-        let mut sorter = ExternalSorter::new(
-            "test".to_owned(),
-            Arc::new(mock_provider),
-            NonZeroUsize::new(1).unwrap(),
-            memory_usage_threshold,
-        );
-
-        let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
-
-        for value in &mock_values {
-            sorter.push(value.as_deref()).await.unwrap();
-        }
-
-        let SortOutput {
-            segment_null_bitmap,
-            mut sorted_stream,
-            total_row_count,
-        } = sorter.output().await.unwrap();
-        assert_eq!(total_row_count, 100);
-        let n = sorted_result.remove(&None);
-        assert_eq!(
-            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
-            n.unwrap_or_default()
-        );
-        for (value, offsets) in sorted_result {
-            let item = sorted_stream.next().await.unwrap().unwrap();
-            assert_eq!(item.0, value.unwrap());
-            assert_eq!(item.1.iter_ones().collect::<Vec<_>>(), offsets);
         }
     }
 }
