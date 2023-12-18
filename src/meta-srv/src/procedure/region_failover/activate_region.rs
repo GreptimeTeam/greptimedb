@@ -42,7 +42,7 @@ pub(super) struct ActivateRegion {
     // the new leader node needs to remark the failed region as "inactive"
     // to prevent it from renewing the lease.
     remark_inactive_region: bool,
-    // An `None` option stands for unintialized.
+    // An `None` option stands for uninitialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
     region_wal_options: Option<HashMap<RegionNumber, String>>,
