@@ -75,6 +75,7 @@ base64 = "0.21"
 bigdecimal = "0.4.2"
 bitflags = "2.4.1"
 bytemuck = "1.12"
+bytes = { version = "1.1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 datafusion = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }
 datafusion-common = { git = "https://github.com/apache/arrow-datafusion.git", rev = "26e43acac3a96cec8dd4c8365f22dfb1a84306e9" }

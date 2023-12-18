@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-bytes = "1.4"
+bytes.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
 common-runtime.workspace = true
