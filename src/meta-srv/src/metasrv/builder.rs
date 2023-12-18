@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::TableMetadataAllocatorRef;
@@ -191,9 +192,6 @@ impl MetaSrvBuilder {
         let mailbox = build_mailbox(&kv_backend, &pushers);
         let procedure_manager = build_procedure_manager(&options, &kv_backend);
 
-        let table_id_sequence =
-            Arc::new(SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone()).build());
-
         let table_metadata_manager = Arc::new(TableMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
@@ -207,10 +205,16 @@ impl MetaSrvBuilder {
         };
 
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
+            let sequence = Arc::new(
+                SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                    .initial(MIN_USER_TABLE_ID as u64)
+                    .step(10)
+                    .build(),
+            );
             Arc::new(MetaSrvTableMetadataAllocator::new(
                 selector_ctx.clone(),
                 selector.clone(),
-                table_id_sequence.clone(),
+                sequence,
             ))
         });
 
@@ -296,7 +300,6 @@ impl MetaSrvBuilder {
             kv_backend,
             leader_cached_kv_backend,
             meta_peer_client: meta_peer_client.clone(),
-            table_id_sequence,
             selector,
             handler_group,
             election,

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use cmd::options::MixOptions;
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl_manager::DdlManager;
@@ -110,8 +111,12 @@ impl GreptimeDbStandaloneBuilder {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
-        let table_id_sequence =
-            Arc::new(SequenceBuilder::new("table_id", kv_backend.clone()).build());
+        let table_id_sequence = Arc::new(
+            SequenceBuilder::new("table_id", kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
         let table_meta_allocator = Arc::new(StandaloneTableMetadataCreator::new(table_id_sequence));
 
         let ddl_task_executor = Arc::new(

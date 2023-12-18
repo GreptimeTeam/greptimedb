@@ -38,8 +38,8 @@ impl SequenceBuilder {
     pub fn new(name: impl AsRef<str>, generator: KvBackendRef) -> Self {
         Self {
             name: format!("{}-{}", SEQ_PREFIX, name.as_ref()),
-            initial: 1024,
-            step: 10,
+            initial: 0,
+            step: 1,
             generator,
             max: u64::MAX,
         }
@@ -213,7 +213,9 @@ mod tests {
     async fn test_sequence() {
         let kv_backend = Arc::new(MemoryKvBackend::default());
         let initial = 1024;
-        let seq = SequenceBuilder::new("test_seq", kv_backend).build();
+        let seq = SequenceBuilder::new("test_seq", kv_backend)
+            .initial(initial)
+            .build();
 
         for i in initial..initial + 100 {
             assert_eq!(i, seq.next().await.unwrap());
@@ -224,6 +226,7 @@ mod tests {
     async fn test_sequence_out_of_rage() {
         let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::default()))
             .initial(u64::MAX - 10)
+            .step(10)
             .build();
 
         for _ in 0..10 {
