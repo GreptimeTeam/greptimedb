@@ -55,8 +55,9 @@ pub struct ExternalSorter {
     /// Tracks memory usage of the buffer
     current_memory_usage: usize,
 
-    /// The memory usage threshold at which the buffer should be dumped to an external file
-    memory_usage_threshold: usize,
+    /// The memory usage threshold at which the buffer should be dumped to an external file.
+    /// `None` indicates that the buffer should never be dumped.
+    memory_usage_threshold: Option<usize>,
 }
 
 #[async_trait]
@@ -104,7 +105,7 @@ impl ExternalSorter {
         index_name: String,
         temp_file_provider: Arc<dyn ExternalTempFileProvider>,
         segment_row_count: usize,
-        memory_usage_threshold: usize,
+        memory_usage_threshold: Option<usize>,
     ) -> Self {
         Self {
             index_name,
@@ -151,7 +152,9 @@ impl ExternalSorter {
     /// Checks if the in-memory buffer exceeds the threshold and offloads it to external storage if necessary
     async fn may_dump_buffer(&mut self, memory_diff: usize) -> Result<()> {
         self.current_memory_usage += memory_diff;
-        if self.current_memory_usage < self.memory_usage_threshold {
+        if self.memory_usage_threshold.is_none()
+            || self.current_memory_usage < self.memory_usage_threshold.unwrap()
+        {
             return Ok(());
         }
 
@@ -223,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_external_sorter_pure_in_memory() {
-        let memory_usage_threshold = usize::MAX;
+        let memory_usage_threshold = None;
 
         let mut mock_provider = MockExternalTempFileProvider::new();
         mock_provider.expect_create().never();
@@ -262,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_external_sorter_pure_external() {
-        let memory_usage_threshold = 0;
+        let memory_usage_threshold = Some(0);
 
         let mut mock_provider = MockExternalTempFileProvider::new();
 
@@ -322,7 +325,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_external_sorter_mixed() {
-        let memory_usage_threshold = 1024;
+        let memory_usage_threshold = Some(1024);
 
         let mut mock_provider = MockExternalTempFileProvider::new();
 
