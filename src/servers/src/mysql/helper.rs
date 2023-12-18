@@ -172,16 +172,27 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
             Ok(ScalarValue::Date32(Some(date.val())))
         }
         ValueInner::Datetime(_) => {
-            let datetime = to_naive_datetime(param.value).map_err(|e| {
-                error::MysqlValueConversionSnafu {
-                    err_msg: e.to_string(),
+            let timestamp_millis = to_naive_datetime(param.value)
+                .map_err(|e| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?
+                .timestamp_millis();
+
+            match t {
+                ConcreteDataType::DateTime(_) => Ok(ScalarValue::Date64(Some(timestamp_millis))),
+                ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
+                    Some(timestamp_millis),
+                    None,
+                )),
+                _ => error::PreparedStmtTypeMismatchSnafu {
+                    expected: t,
+                    actual: param.coltype,
                 }
-                .build()
-            })?;
-            Ok(ScalarValue::TimestampMillisecond(
-                Some(datetime.timestamp_millis()),
-                None,
-            ))
+                .fail(),
+            }
         }
         ValueInner::Time(_) => Ok(ScalarValue::Time64Nanosecond(Some(
             Duration::from(param.value).as_millis() as i64,
