@@ -451,6 +451,8 @@ mod tests {
             assert_eq!(decimal1, decimal2);
         };
 
+        test_decimal128_eq(1 << 63);
+
         test_decimal128_eq(0);
         test_decimal128_eq(1234567890);
         test_decimal128_eq(-1234567890);
