@@ -15,7 +15,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use snafu::{ensure, OptionExt};
+use snafu::ensure;
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
@@ -26,30 +26,66 @@ pub type SequenceRef = Arc<Sequence>;
 
 pub(crate) const SEQ_PREFIX: &str = "__meta_seq";
 
+pub struct SequenceBuilder {
+    name: String,
+    initial: u64,
+    step: u64,
+    generator: KvBackendRef,
+    max: u64,
+}
+
+impl SequenceBuilder {
+    pub fn new(name: impl AsRef<str>, generator: KvBackendRef) -> Self {
+        Self {
+            name: format!("{}-{}", SEQ_PREFIX, name.as_ref()),
+            initial: 0,
+            step: 1,
+            generator,
+            max: u64::MAX,
+        }
+    }
+
+    pub fn initial(self, initial: u64) -> Self {
+        Self { initial, ..self }
+    }
+
+    pub fn step(self, step: u64) -> Self {
+        Self { step, ..self }
+    }
+
+    pub fn max(self, max: u64) -> Self {
+        Self { max, ..self }
+    }
+
+    pub fn build(self) -> Sequence {
+        Sequence {
+            inner: Mutex::new(Inner {
+                name: self.name,
+                generator: self.generator,
+                initial: self.initial,
+                next: self.initial,
+                step: self.step,
+                range: None,
+                force_quit: 1024,
+                max: self.max,
+            }),
+        }
+    }
+}
+
 pub struct Sequence {
     inner: Mutex<Inner>,
 }
 
 impl Sequence {
-    pub fn new(name: impl AsRef<str>, initial: u64, step: u64, generator: KvBackendRef) -> Self {
-        let name = format!("{}-{}", SEQ_PREFIX, name.as_ref());
-        let step = step.max(1);
-        Self {
-            inner: Mutex::new(Inner {
-                name,
-                generator,
-                initial,
-                next: initial,
-                step,
-                range: None,
-                force_quit: 1024,
-            }),
-        }
-    }
-
     pub async fn next(&self) -> Result<u64> {
         let mut inner = self.inner.lock().await;
         inner.next().await
+    }
+
+    pub async fn min_max(&self) -> Range<u64> {
+        let inner = self.inner.lock().await;
+        inner.initial..inner.max
     }
 }
 
@@ -67,6 +103,7 @@ struct Inner {
     range: Option<Range<u64>>,
     // Used to avoid dead loops.
     force_quit: usize,
+    max: u64,
 }
 
 impl Inner {
@@ -108,14 +145,17 @@ impl Inner {
                 u64::to_le_bytes(start).to_vec()
             };
 
-            let value = start
-                .checked_add(self.step)
-                .context(error::SequenceOutOfRangeSnafu {
-                    name: &self.name,
-                    start,
-                    step: self.step,
-                })?;
-            let value = u64::to_le_bytes(value);
+            let step = self.step.min(self.max - start);
+
+            ensure!(
+                step > 0,
+                error::NextSequenceSnafu {
+                    err_msg: format!("next sequence exhausted, max: {}", self.max)
+                }
+            );
+
+            // No overflow: step <= self.max - start -> step + start <= self.max <= u64::MAX
+            let value = u64::to_le_bytes(start + step);
 
             let req = CompareAndPutRequest {
                 key: key.to_vec(),
@@ -143,7 +183,7 @@ impl Inner {
 
             return Ok(Range {
                 start,
-                end: start + self.step,
+                end: start + step,
             });
         }
 
@@ -173,7 +213,9 @@ mod tests {
     async fn test_sequence() {
         let kv_backend = Arc::new(MemoryKvBackend::default());
         let initial = 1024;
-        let seq = Sequence::new("test_seq", initial, 10, kv_backend);
+        let seq = SequenceBuilder::new("test_seq", kv_backend)
+            .initial(initial)
+            .build();
 
         for i in initial..initial + 100 {
             assert_eq!(i, seq.next().await.unwrap());
@@ -182,9 +224,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequence_out_of_rage() {
-        let kv_backend = Arc::new(MemoryKvBackend::default());
-        let initial = u64::MAX - 10;
-        let seq = Sequence::new("test_seq", initial, 10, kv_backend);
+        let seq = SequenceBuilder::new("test_seq", Arc::new(MemoryKvBackend::default()))
+            .initial(u64::MAX - 10)
+            .step(10)
+            .build();
 
         for _ in 0..10 {
             let _ = seq.next().await.unwrap();
@@ -192,10 +235,7 @@ mod tests {
 
         let res = seq.next().await;
         assert!(res.is_err());
-        assert!(matches!(
-            res.unwrap_err(),
-            error::Error::SequenceOutOfRange { .. }
-        ))
+        assert!(matches!(res.unwrap_err(), Error::NextSequence { .. }))
     }
 
     #[tokio::test]
@@ -248,8 +288,7 @@ mod tests {
             }
         }
 
-        let kv_backend = Arc::new(Noop {});
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend);
+        let seq = SequenceBuilder::new("test_seq", Arc::new(Noop)).build();
 
         let next = seq.next().await;
         assert!(next.is_err());

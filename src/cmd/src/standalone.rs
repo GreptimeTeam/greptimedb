@@ -17,6 +17,7 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
@@ -25,6 +26,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::sequence::SequenceBuilder;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -364,8 +366,13 @@ impl StartCommand {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
-        let table_meta_allocator =
-            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone()));
+        let table_id_sequence = Arc::new(
+            SequenceBuilder::new("table_id", kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataCreator::new(table_id_sequence));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
