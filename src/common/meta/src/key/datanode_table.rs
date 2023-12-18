@@ -31,7 +31,6 @@ use crate::kv_backend::KvBackendRef;
 use crate::range_stream::{PaginationStream, DEFAULT_PAGE_SIZE};
 use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
-use crate::wal::EncodedWalOptions;
 use crate::DatanodeId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -49,7 +48,7 @@ pub struct RegionInfo {
     pub region_options: HashMap<String, String>,
     /// The per-region wal options.
     #[serde(default)]
-    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+    pub wal_options_map: HashMap<RegionNumber, String>,
 }
 
 pub struct DatanodeTableKey {
@@ -169,7 +168,7 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
-        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+        wal_options_map: HashMap<RegionNumber, String>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
@@ -178,10 +177,9 @@ impl DatanodeTableManager {
                 let wal_options_map = regions
                     .iter()
                     .filter_map(|region_number| {
-                        let Some(wal_options) = wal_options_map.get(region_number).cloned() else {
-                            return None;
-                        };
-                        Some((*region_number, wal_options))
+                        wal_options_map
+                            .get(region_number)
+                            .map(|wal_options| (*region_number, wal_options.clone()))
                     })
                     .collect();
 

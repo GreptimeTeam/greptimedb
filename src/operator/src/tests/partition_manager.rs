@@ -22,7 +22,6 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::wal::EncodedWalOptions;
 use common_query::prelude::Expr;
 use datafusion_expr::expr_fn::{and, binary_expr, col, or};
 use datafusion_expr::{lit, Operator};
@@ -81,9 +80,7 @@ pub fn new_test_table_info(
         .unwrap()
 }
 
-fn new_test_wal_options_map(
-    regions: Vec<RegionNumber>,
-) -> HashMap<RegionNumber, EncodedWalOptions> {
+fn new_test_wal_options_map(regions: Vec<RegionNumber>) -> HashMap<RegionNumber, String> {
     // TODO(niebayes): construct wal options for test.
     let _ = regions;
     HashMap::default()

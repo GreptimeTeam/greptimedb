@@ -19,7 +19,6 @@ use common_meta::key::datanode_table::RegionInfo;
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
-use common_meta::wal::EncodedWalOptions;
 use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -37,7 +36,7 @@ pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
-    wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+    wal_options_map: HashMap<RegionNumber, String>,
 }
 
 impl UpdateRegionMetadata {
@@ -45,7 +44,7 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
-        wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+        wal_options_map: HashMap<RegionNumber, String>,
     ) -> Self {
         Self {
             candidate,

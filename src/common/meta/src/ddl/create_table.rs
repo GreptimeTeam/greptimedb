@@ -45,7 +45,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::{EncodedWalOptions, WalOptions, WAL_OPTIONS_KEY};
+use crate::wal::WAL_OPTIONS_KEY;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -59,7 +59,7 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_options_map: HashMap<RegionNumber, WalOptions>,
+        wal_options_map: HashMap<RegionNumber, String>,
         context: DdlContext,
     ) -> Self {
         Self {
@@ -96,7 +96,7 @@ impl CreateTableProcedure {
         &self.creator.data.region_routes
     }
 
-    pub fn wal_options_map(&self) -> &HashMap<RegionNumber, EncodedWalOptions> {
+    pub fn wal_options_map(&self) -> &HashMap<RegionNumber, String> {
         &self.creator.data.wal_options_map
     }
 
@@ -329,16 +329,8 @@ impl TableCreator {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
-        wal_options_map: HashMap<RegionNumber, WalOptions>,
+        wal_options_map: HashMap<RegionNumber, String>,
     ) -> Self {
-        // Encodes each wal options.
-        let wal_options_map = wal_options_map
-            .into_iter()
-            .map(|(region_number, wal_options)| {
-                (region_number, serde_json::to_string(&wal_options).unwrap())
-            })
-            .collect();
-
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
@@ -394,7 +386,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
-    pub wal_options_map: HashMap<RegionNumber, EncodedWalOptions>,
+    pub wal_options_map: HashMap<RegionNumber, String>,
     pub cluster_id: u64,
 }
 

@@ -16,7 +16,7 @@ use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
-use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::error::{self as meta_error, EncodeWalOptionsToJsonSnafu, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
 use common_meta::wal::WalOptionsAllocator;
@@ -72,8 +72,17 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         .map_err(BoxedError::new)
         .context(meta_error::ExternalSnafu)?;
 
+        // Allocates a wal options for each region. The allocated wal options is encoded immediately.
         let num_regions = region_routes.len();
-        let wal_options = self.wal_options_allocator.alloc_batch(num_regions);
+        let wal_options = self
+            .wal_options_allocator
+            .alloc_batch(num_regions)
+            .into_iter()
+            .map(|wal_options| {
+                serde_json::to_string(&wal_options)
+                    .context(EncodeWalOptionsToJsonSnafu { wal_options })
+            })
+            .collect::<MetaResult<Vec<_>>>()?;
         let wal_options_map = region_routes
             .iter()
             .map(|route| route.region.id.region_number())

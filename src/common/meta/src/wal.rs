@@ -25,6 +25,8 @@ use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::kafka::{KafkaOptions as KafkaWalOptions, Topic as KafkaWalTopic};
 pub use crate::wal::options_allocator::WalOptionsAllocator;
 
+// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
+// and inserted into the options of a `RegionCreateRequest`.
 pub const WAL_OPTIONS_KEY: &str = "wal_options";
 
 /// Wal configurations for bootstrapping meta srv.
@@ -39,6 +41,9 @@ pub enum WalConfig {
 }
 
 /// Wal options allocated to a region.
+// A wal options is encoded by meta srv into a `String` with `serde_json::to_string`.
+// It's then decoded by datanode to a `HashMap<String, String>` with `serde_json::from_str`.
+// Such a encoding/decoding scheme is inspired by the encoding/decoding of `RegionOptions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "wal.provider")]
 pub enum WalOptions {
@@ -51,8 +56,6 @@ pub enum WalOptions {
 }
 
 with_prefix!(prefix_wal_kafka "wal.kafka.");
-
-pub type EncodedWalOptions = String;
 
 #[cfg(test)]
 mod tests {

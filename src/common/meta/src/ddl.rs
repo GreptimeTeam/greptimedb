@@ -27,7 +27,6 @@ use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
 use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
-use crate::wal::WalOptions;
 
 pub mod alter_table;
 pub mod create_table;
@@ -59,7 +58,7 @@ pub struct TableMetadataAllocatorContext {
 pub struct TableMetadata {
     pub table_id: TableId,
     pub region_routes: Vec<RegionRoute>,
-    pub wal_options_map: HashMap<RegionNumber, WalOptions>,
+    pub wal_options_map: HashMap<RegionNumber, String>,
 }
 
 #[async_trait::async_trait]
