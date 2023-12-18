@@ -203,10 +203,9 @@ mod tests {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn shuffle_values_and_sorted_result(
-        row_count: usize,
-    ) -> (Vec<Option<Vec<u8>>>, BTreeMap<Option<Vec<u8>>, Vec<usize>>) {
+    type ValueSegIds = BTreeMap<Option<Vec<u8>>, Vec<usize>>;
+
+    fn shuffle_values_and_sorted_result(row_count: usize) -> (Vec<Option<Vec<u8>>>, ValueSegIds) {
         let mut mock_values = iter::repeat_with(|| generate_random_bytes_option(100))
             .take(row_count)
             .collect::<Vec<_>>();
