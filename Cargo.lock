@@ -1198,6 +1198,7 @@ dependencies = [
  "object-store",
  "parking_lot 0.12.1",
  "partition",
+ "paste",
  "prometheus",
  "regex",
  "serde",
