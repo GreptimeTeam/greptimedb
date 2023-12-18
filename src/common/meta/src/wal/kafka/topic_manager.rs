@@ -39,7 +39,7 @@ impl TopicManager {
 
     /// Tries to initialize the topic pool.
     /// The initializer first tries to restore persisted topics from the kv backend.
-    /// If not enough topics retrieved, the initializer would try to contact with Kafka cluster and request more topics.
+    /// If not enough topics retrieved, the initializer will try to contact the Kafka cluster and request more topics.
     pub async fn try_init(&mut self) -> Result<()> {
         todo!()
     }
