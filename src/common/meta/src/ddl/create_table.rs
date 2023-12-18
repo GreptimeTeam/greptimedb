@@ -124,7 +124,7 @@ impl CreateTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub fn create_region_request_template(&self) -> Result<CreateRequestBuilder> {
+    pub fn new_region_request_builder(&self) -> Result<CreateRequestBuilder> {
         let create_table_expr = &self.creator.data.task.create_table;
 
         let column_defs = create_table_expr
@@ -199,7 +199,7 @@ impl CreateTableProcedure {
         let schema = &create_table_expr.schema_name;
         let storage_path = region_storage_path(catalog, schema);
 
-        let mut request_builder = self.create_region_request_template()?;
+        let mut request_builder = self.new_region_request_builder()?;
 
         let leaders = find_leaders(region_routes);
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
@@ -427,15 +427,15 @@ impl CreateRequestBuilder {
         request: &mut PbCreateRegionRequest,
     ) -> Result<()> {
         if let Some(physical_table_name) = request.options.get(LOGICAL_TABLE_METADATA_KEY) {
-            let table_name_manager = self.context.table_metadata_manager.table_name_manager();
-            let table_name_key = TableNameKey::new(
-                &create_expr.catalog_name,
-                &create_expr.schema_name,
-                physical_table_name,
-            );
             let table_id = if let Some(table_id) = self.physical_table_id {
                 table_id
             } else {
+                let table_name_manager = self.context.table_metadata_manager.table_name_manager();
+                let table_name_key = TableNameKey::new(
+                    &create_expr.catalog_name,
+                    &create_expr.schema_name,
+                    physical_table_name,
+                );
                 let table_id = table_name_manager
                     .get(table_name_key)
                     .await?
