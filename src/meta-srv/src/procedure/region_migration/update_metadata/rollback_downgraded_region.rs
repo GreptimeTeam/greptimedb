@@ -166,15 +166,14 @@ mod tests {
 
         state.rollback_downgraded_region(&mut ctx).await.unwrap();
 
-        let region_routes = table_metadata_manager
+        let table_route = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner()
-            .region_routes;
-        assert_eq!(expected_region_routes, region_routes);
+            .into_inner();
+        assert_eq!(&expected_region_routes, table_route.region_routes());
     }
 
     #[tokio::test]
@@ -229,14 +228,13 @@ mod tests {
 
         assert!(ctx.volatile_ctx.table_route.is_none());
 
-        let region_routes = table_metadata_manager
+        let table_route = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner()
-            .region_routes;
-        assert_eq!(expected_region_routes, region_routes);
+            .into_inner();
+        assert_eq!(&expected_region_routes, table_route.region_routes());
     }
 }

@@ -84,7 +84,7 @@ impl RegionMigrationStart {
         let table_route = ctx.get_table_route_value().await?;
 
         let region_route = table_route
-            .region_routes
+            .region_routes()
             .iter()
             .find(|route| route.region.id == region_id)
             .cloned()

@@ -38,41 +38,74 @@ impl TableRouteKey {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct TableRouteValue {
+pub enum TableRouteValue {
+    Mito(MitoTableRouteValue),
+    File(FileTableRouteValue),
+    Metrics(MetricsTableRouteValue),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct MitoTableRouteValue {
     pub region_routes: Vec<RegionRoute>,
     version: u64,
 }
 
+// TODO(LFC): Make file engine table use its own table route.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct FileTableRouteValue;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct MetricsTableRouteValue {
+    // TODO(LFC): Add table route for MetricsEngine table.
+}
+
 impl TableRouteValue {
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
-        Self {
+        Self::Mito(MitoTableRouteValue {
             region_routes,
             version: 0,
-        }
+        })
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
-        Self {
+        let version = self.mito_table_route().version;
+        Self::Mito(MitoTableRouteValue {
             region_routes,
-            version: self.version + 1,
-        }
+            version: version + 1,
+        })
     }
 
     /// Returns the version.
     ///
     /// For test purpose.
-    #[cfg(any(tets, feature = "testing"))]
+    #[cfg(any(test, feature = "testing"))]
     pub fn version(&self) -> u64 {
-        self.version
+        self.mito_table_route().version
     }
 
     /// Returns the corresponding [RegionRoute].
     pub fn region_route(&self, region_id: RegionId) -> Option<RegionRoute> {
-        self.region_routes
+        self.mito_table_route()
+            .region_routes
             .iter()
             .find(|route| route.region.id == region_id)
             .cloned()
+    }
+
+    /// Gets the [RegionRoute]s of this table route.
+    ///
+    /// # Panics
+    /// The engine type of this table is not "`Mito`".
+    pub fn region_routes(&self) -> &Vec<RegionRoute> {
+        &self.mito_table_route().region_routes
+    }
+
+    fn mito_table_route(&self) -> &MitoTableRouteValue {
+        match self {
+            TableRouteValue::Mito(x) => x,
+            _ => unreachable!("Mistakenly been treated as a Mito TableRoute: {:?}", self),
+        }
     }
 }
 
@@ -269,7 +302,7 @@ impl TableRouteManager {
     ) -> Result<Option<RegionDistribution>> {
         self.get(table_id)
             .await?
-            .map(|table_route| region_distribution(&table_route.into_inner().region_routes))
+            .map(|table_route| region_distribution(table_route.region_routes()))
             .transpose()
     }
 }

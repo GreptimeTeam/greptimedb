@@ -45,7 +45,6 @@ use crate::error::{
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
@@ -185,7 +184,7 @@ impl AlterTableProcedure {
         let table_id = self.data.table_id();
         let table_ref = self.data.table_ref();
 
-        let TableRouteValue { region_routes, .. } = self
+        let table_route = self
             .context
             .table_metadata_manager
             .table_route_manager()
@@ -195,13 +194,14 @@ impl AlterTableProcedure {
                 table_name: table_ref.to_string(),
             })?
             .into_inner();
+        let region_routes = table_route.region_routes();
 
-        let leaders = find_leaders(&region_routes);
+        let leaders = find_leaders(region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(&region_routes, &datanode);
+            let regions = find_leader_regions(region_routes, &datanode);
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);

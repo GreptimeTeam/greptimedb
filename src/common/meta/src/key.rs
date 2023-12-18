@@ -468,7 +468,7 @@ impl TableMetadataManager {
             .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(&table_route_value.region_routes)?;
+        let distribution = region_distribution(table_route_value.region_routes())?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -593,7 +593,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
-            region_distribution(&current_table_route_value.region_routes)?;
+            region_distribution(current_table_route_value.region_routes())?;
         let new_region_distribution = region_distribution(&new_region_routes)?;
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
@@ -641,7 +641,7 @@ impl TableMetadataManager {
     where
         F: Fn(&RegionRoute) -> Option<Option<RegionStatus>>,
     {
-        let mut new_region_routes = current_table_route_value.region_routes.clone();
+        let mut new_region_routes = current_table_route_value.region_routes().clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
@@ -826,7 +826,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
-        let region_routes = vec![region_route.clone()];
+        let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo =
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         // creates metadata.
@@ -869,7 +869,7 @@ mod tests {
             table_info
         );
         assert_eq!(
-            remote_table_route.unwrap().into_inner().region_routes,
+            remote_table_route.unwrap().into_inner().region_routes(),
             region_routes
         );
     }
@@ -879,7 +879,7 @@ mod tests {
         let mem_kv = Arc::new(MemoryKvBackend::default());
         let table_metadata_manager = TableMetadataManager::new(mem_kv);
         let region_route = new_test_region_route();
-        let region_routes = vec![region_route.clone()];
+        let region_routes = &vec![region_route.clone()];
         let table_info: RawTableInfo =
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
@@ -950,7 +950,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(removed_table_route.region_routes, region_routes);
+        assert_eq!(removed_table_route.region_routes(), region_routes);
     }
 
     #[tokio::test]
@@ -1144,11 +1144,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            updated_route_value.region_routes[0].leader_status,
+            updated_route_value.region_routes()[0].leader_status,
             Some(RegionStatus::Downgraded)
         );
         assert_eq!(
-            updated_route_value.region_routes[1].leader_status,
+            updated_route_value.region_routes()[1].leader_status,
             Some(RegionStatus::Downgraded)
         );
     }
