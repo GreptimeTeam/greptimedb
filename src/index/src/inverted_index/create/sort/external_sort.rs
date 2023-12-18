@@ -40,7 +40,7 @@ pub struct ExternalSorter {
     temp_file_provider: Arc<dyn ExternalTempFileProvider>,
 
     /// Bitmap indicating which segments have null values
-    null_bitmap: BitVec,
+    segment_null_bitmap: BitVec,
 
     /// In-memory buffer to hold values and their corresponding bitmaps until memory threshold is exceeded
     values_buffer: BTreeMap<Bytes, BitVec>,
@@ -71,7 +71,7 @@ impl Sorter for ExternalSorter {
             let memory_diff = self.push_not_null(value, bitmap_offset);
             self.may_dump_buffer(memory_diff).await
         } else {
-            set_bit(&mut self.null_bitmap, bitmap_offset);
+            set_bit(&mut self.segment_null_bitmap, bitmap_offset);
             Ok(())
         }
     }
@@ -91,7 +91,7 @@ impl Sorter for ExternalSorter {
         }
 
         Ok(SortOutput {
-            null_bitmap: mem::take(&mut self.null_bitmap),
+            segment_null_bitmap: mem::take(&mut self.segment_null_bitmap),
             sorted_stream: merging_sorted_stream,
             total_row_count: self.total_row_count,
         })
@@ -110,7 +110,7 @@ impl ExternalSorter {
             index_name,
             temp_file_provider,
 
-            null_bitmap: BitVec::new(),
+            segment_null_bitmap: BitVec::new(),
             values_buffer: BTreeMap::new(),
 
             total_row_count: 0,
@@ -244,14 +244,14 @@ mod tests {
         }
 
         let SortOutput {
-            null_bitmap,
+            segment_null_bitmap,
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
         assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
-            null_bitmap.iter_ones().collect::<Vec<_>>(),
+            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
             n.unwrap_or_default()
         );
         for (value, offsets) in sorted_result {
@@ -304,14 +304,14 @@ mod tests {
         }
 
         let SortOutput {
-            null_bitmap,
+            segment_null_bitmap,
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
         assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
-            null_bitmap.iter_ones().collect::<Vec<_>>(),
+            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
             n.unwrap_or_default()
         );
         for (value, offsets) in sorted_result {
@@ -364,14 +364,14 @@ mod tests {
         }
 
         let SortOutput {
-            null_bitmap,
+            segment_null_bitmap,
             mut sorted_stream,
             total_row_count,
         } = sorter.output().await.unwrap();
         assert_eq!(total_row_count, 100);
         let n = sorted_result.remove(&None);
         assert_eq!(
-            null_bitmap.iter_ones().collect::<Vec<_>>(),
+            segment_null_bitmap.iter_ones().collect::<Vec<_>>(),
             n.unwrap_or_default()
         );
         for (value, offsets) in sorted_result {

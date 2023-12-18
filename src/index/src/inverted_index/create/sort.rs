@@ -29,8 +29,8 @@ pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + 
 
 /// Output of a sorting operation, encapsulating a bitmap for null values and a stream of sorted items
 pub struct SortOutput {
-    /// Bitmap indicating positions of null values
-    pub null_bitmap: BitVec,
+    /// Bitmap indicating which segments have null values
+    pub segment_null_bitmap: BitVec,
 
     /// Stream of sorted items
     pub sorted_stream: SortedStream,
