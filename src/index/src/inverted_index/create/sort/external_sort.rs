@@ -15,6 +15,7 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::mem;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -50,7 +51,7 @@ pub struct ExternalSorter {
 
     /// The number of rows per group for bitmap indexing which determines how rows are
     /// batched for indexing. It is used to determine which segment a row belongs to.
-    segment_row_count: usize,
+    segment_row_count: NonZeroUsize,
 
     /// Tracks memory usage of the buffer
     current_memory_usage: usize,
@@ -104,7 +105,7 @@ impl ExternalSorter {
     pub fn new(
         index_name: String,
         temp_file_provider: Arc<dyn ExternalTempFileProvider>,
-        segment_row_count: usize,
+        segment_row_count: NonZeroUsize,
         memory_usage_threshold: Option<usize>,
     ) -> Self {
         Self {
@@ -235,7 +236,7 @@ mod tests {
         let mut sorter = ExternalSorter::new(
             "test".to_owned(),
             Arc::new(mock_provider),
-            1,
+            NonZeroUsize::new(1).unwrap(),
             memory_usage_threshold,
         );
 
@@ -295,7 +296,7 @@ mod tests {
         let mut sorter = ExternalSorter::new(
             "test".to_owned(),
             Arc::new(mock_provider),
-            1,
+            NonZeroUsize::new(1).unwrap(),
             memory_usage_threshold,
         );
 
@@ -355,7 +356,7 @@ mod tests {
         let mut sorter = ExternalSorter::new(
             "test".to_owned(),
             Arc::new(mock_provider),
-            1,
+            NonZeroUsize::new(1).unwrap(),
             memory_usage_threshold,
         );
 
