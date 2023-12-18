@@ -14,7 +14,7 @@
 
 //! Constants used in metric engine.
 
-use store_api::storage::RegionGroup;
+use crate::storage::RegionGroup;
 
 /// region group value for data region inside a metric region
 pub const METRIC_DATA_REGION_GROUP: RegionGroup = 0;
@@ -66,6 +66,3 @@ pub const PHYSICAL_TABLE_METADATA_KEY: &str = "physical_metric_table";
 /// ```
 /// And this key will be translated to corresponding physical **REGION** id in metasrv.
 pub const LOGICAL_TABLE_METADATA_KEY: &str = "on_physical_table";
-
-/// Fixed random state for generating tsid
-pub(crate) const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);

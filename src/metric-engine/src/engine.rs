@@ -27,15 +27,18 @@ use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::RwLock;
 
 use self::state::MetricEngineState;
-use crate::consts::METRIC_ENGINE_NAME;
 use crate::data_region::DataRegion;
 use crate::metadata_region::MetadataRegion;
+
+/// Fixed random state for generating tsid
+pub(crate) const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine

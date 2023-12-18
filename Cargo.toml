@@ -169,6 +169,7 @@ frontend = { path = "src/frontend" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
+metric-engine = { path = "src/metric-engine" }
 mito2 = { path = "src/mito2" }
 object-store = { path = "src/object-store" }
 operator = { path = "src/operator" }

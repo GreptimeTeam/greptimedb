@@ -17,11 +17,11 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{error, info, tracing};
 use datafusion::logical_expr;
 use snafu::{OptionExt, ResultExt};
+use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use store_api::region_engine::RegionEngine;
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, ScanRequest};
 
-use crate::consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
 use crate::engine::MetricEngineInner;
 use crate::error::{LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, Result};
 use crate::utils;
