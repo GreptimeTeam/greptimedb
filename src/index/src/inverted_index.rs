@@ -19,3 +19,4 @@ pub mod search;
 
 pub type FstMap = fst::Map<Vec<u8>>;
 pub type Bytes = Vec<u8>;
+pub type BytesRef<'a> = &'a [u8];

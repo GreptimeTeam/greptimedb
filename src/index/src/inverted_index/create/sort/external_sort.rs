@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::mem;
 use std::num::NonZeroUsize;
@@ -29,7 +28,7 @@ use crate::inverted_index::create::sort::intermediate_rw::{
 use crate::inverted_index::create::sort::merge_stream::MergeSortedStream;
 use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
 use crate::inverted_index::error::Result;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::{Bytes, BytesRef};
 
 /// `ExternalSorter` manages the sorting of data using both in-memory structures and external files.
 /// It dumps data to external files when the in-memory buffer crosses a certain memory threshold.
@@ -65,7 +64,7 @@ pub struct ExternalSorter {
 impl Sorter for ExternalSorter {
     /// Pushes a value into the sorter, adding it to the in-memory buffer and dumping the buffer to
     /// an external file if necessary
-    async fn push(&mut self, value: Option<Bytes>) -> Result<()> {
+    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
         self.total_row_count += 1;
         let bitmap_offset = self.current_segment_index();
 
@@ -130,22 +129,22 @@ impl ExternalSorter {
 
     /// Adds a non-null value to the buffer or updates an existing value's bitmap.
     /// Returns the memory usage difference of the buffer after the operation.
-    fn push_not_null(&mut self, value: Bytes, offset: usize) -> usize {
-        match self.values_buffer.entry(value) {
-            Entry::Occupied(mut entry) => {
-                let bitmap = entry.get_mut();
+    fn push_not_null(&mut self, value: BytesRef<'_>, offset: usize) -> usize {
+        match self.values_buffer.get_mut(value) {
+            Some(bitmap) => {
                 let old_len = bitmap.as_raw_slice().len();
                 set_bit(bitmap, offset);
 
                 bitmap.as_raw_slice().len() - old_len
             }
-            Entry::Vacant(entry) => {
-                let key_len = entry.key().len();
+            None => {
+                let mut bitmap = BitVec::default();
+                set_bit(&mut bitmap, offset);
 
-                let bitmap = entry.insert(BitVec::default());
-                set_bit(bitmap, offset);
+                let mem_diff = bitmap.as_raw_slice().len() + value.len();
+                self.values_buffer.insert(value.to_vec(), bitmap);
 
-                bitmap.as_raw_slice().len() + key_len
+                mem_diff
             }
         }
     }
@@ -243,7 +242,7 @@ mod tests {
         let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
 
         for value in mock_values {
-            sorter.push(value).await.unwrap();
+            sorter.push(value.as_deref()).await.unwrap();
         }
 
         let SortOutput {
@@ -303,7 +302,7 @@ mod tests {
         let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
 
         for value in mock_values {
-            sorter.push(value).await.unwrap();
+            sorter.push(value.as_deref()).await.unwrap();
         }
 
         let SortOutput {
@@ -362,8 +361,8 @@ mod tests {
 
         let (mock_values, mut sorted_result) = shuffle_values_and_sorted_result(100);
 
-        for value in mock_values {
-            sorter.push(value).await.unwrap();
+        for value in &mock_values {
+            sorter.push(value.as_deref()).await.unwrap();
         }
 
         let SortOutput {

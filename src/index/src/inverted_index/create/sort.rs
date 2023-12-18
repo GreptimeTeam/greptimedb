@@ -22,7 +22,7 @@ use common_base::BitVec;
 use futures::Stream;
 
 use crate::inverted_index::error::Result;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::{Bytes, BytesRef};
 
 /// A stream of sorted values along with their associated bitmap
 pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
@@ -43,7 +43,7 @@ pub struct SortOutput {
 #[async_trait]
 pub trait Sorter: Send {
     /// Inputs a non-null or null value into the sorter
-    async fn push(&mut self, value: Option<Bytes>) -> Result<()>;
+    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()>;
 
     /// Completes the sorting process and returns the sorted data
     async fn output(&mut self) -> Result<SortOutput>;
