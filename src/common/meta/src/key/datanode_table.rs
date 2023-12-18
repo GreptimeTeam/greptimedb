@@ -47,8 +47,9 @@ pub struct RegionInfo {
     #[serde(default)]
     pub region_options: HashMap<String, String>,
     /// The per-region wal options.
+    /// Key: region number (in string representation). Value: the encoded wal options of the region.
     #[serde(default)]
-    pub region_wal_options: HashMap<RegionNumber, String>,
+    pub region_wal_options: HashMap<String, String>,
 }
 
 pub struct DatanodeTableKey {
@@ -179,7 +180,7 @@ impl DatanodeTableManager {
                     .filter_map(|region_number| {
                         region_wal_options
                             .get(region_number)
-                            .map(|wal_options| (*region_number, wal_options.clone()))
+                            .map(|wal_options| (region_number.to_string(), wal_options.clone()))
                     })
                     .collect();
 
@@ -223,6 +224,7 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
+        // TODO(niebayes): maybe also check any update on region_wal_options.
         let need_update_options = region_info.region_options != *new_region_options;
         for (datanode, regions) in new_region_distribution.into_iter() {
             let need_update =
@@ -298,6 +300,41 @@ mod tests {
         let raw_str = br#"{"table_id":42,"regions":[1,2,3],"version":1}"#;
         let parsed = DatanodeTableValue::try_from_raw_value(raw_str);
         assert!(parsed.is_ok());
+    }
+
+    // This test intends to ensure both the `serde_json::to_string` + `serde_json::from_str`
+    // and `serde_json::to_vec` + `serde_json::from_slice` works for `DatanodeTableValue`.
+    // Warning: if the key of `region_wal_options` is of type non-String, this test would fail.
+    #[test]
+    fn test_serde_with_region_info() {
+        let region_info = RegionInfo {
+            engine: "test_engine".to_string(),
+            region_storage_path: "test_storage_path".to_string(),
+            region_options: HashMap::from([
+                ("a".to_string(), "aa".to_string()),
+                ("b".to_string(), "bb".to_string()),
+                ("c".to_string(), "cc".to_string()),
+            ]),
+            region_wal_options: HashMap::from([
+                ("1".to_string(), "aaa".to_string()),
+                ("2".to_string(), "bbb".to_string()),
+                ("3".to_string(), "ccc".to_string()),
+            ]),
+        };
+        let table_value = DatanodeTableValue {
+            table_id: 1,
+            regions: vec![],
+            region_info,
+            version: 1,
+        };
+
+        let encoded = serde_json::to_string(&table_value).unwrap();
+        let decoded = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(table_value, decoded);
+
+        let encoded = serde_json::to_vec(&table_value).unwrap();
+        let decoded = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(table_value, decoded);
     }
 
     #[test]

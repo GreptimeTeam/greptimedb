@@ -24,7 +24,6 @@ use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
@@ -42,10 +41,10 @@ pub(super) struct ActivateRegion {
     // the new leader node needs to remark the failed region as "inactive"
     // to prevent it from renewing the lease.
     remark_inactive_region: bool,
-    // An `None` option stands for uninitialized.
+    // An `None` option stands for unintialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
-    region_wal_options: Option<HashMap<RegionNumber, String>>,
+    region_wal_options: Option<HashMap<String, String>>,
 }
 
 impl ActivateRegion {
@@ -85,14 +84,19 @@ impl ActivateRegion {
         };
         info!("Activating region: {candidate_ident:?}");
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options = HashMap::new();
         let instruction = Instruction::OpenRegion(OpenRegion::new(
             candidate_ident.clone(),
             &region_storage_path,
             region_options.clone(),
+            region_wal_options.clone(),
         ));
 
         self.region_storage_path = Some(region_storage_path);
         self.region_options = Some(region_options);
+        self.region_wal_options = Some(region_wal_options);
+
         let msg = MailboxMessage::json_message(
             "Activate Region",
             &format!("Metasrv@{}", ctx.selector_ctx.server_addr),
@@ -231,6 +235,7 @@ mod tests {
                     },
                     &env.path,
                     HashMap::new(),
+                    HashMap::new(),
                 )))
                 .unwrap(),
             ))
@@ -265,7 +270,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {} }"#
+            r#"UpdateRegionMetadata { candidate: Peer { id: 2, addr: "" }, region_storage_path: "greptime/public", region_options: {}, region_wal_options: {} }"#
         );
     }
 
@@ -300,6 +305,7 @@ mod tests {
                         ..failed_region.clone()
                     },
                     &env.path,
+                    HashMap::new(),
                     HashMap::new(),
                 )))
                 .unwrap(),

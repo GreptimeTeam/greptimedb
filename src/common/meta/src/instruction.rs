@@ -96,14 +96,21 @@ pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
     pub options: HashMap<String, String>,
+    pub region_wal_options: HashMap<String, String>,
 }
 
 impl OpenRegion {
-    pub fn new(region_ident: RegionIdent, path: &str, options: HashMap<String, String>) -> Self {
+    pub fn new(
+        region_ident: RegionIdent,
+        path: &str,
+        options: HashMap<String, String>,
+        region_wal_options: HashMap<String, String>,
+    ) -> Self {
         Self {
             region_ident,
             region_storage_path: path.to_string(),
             options,
+            region_wal_options,
         }
     }
 }
@@ -218,12 +225,13 @@ mod tests {
             },
             "test/foo",
             HashMap::new(),
+            HashMap::new(),
         ));
 
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","options":{}}}"#,
+            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","options":{},"region_wal_options":{}}}"#,
             serialized
         );
 

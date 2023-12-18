@@ -54,9 +54,12 @@ impl RegionHeartbeatResponseHandler {
                 region_ident,
                 region_storage_path,
                 options,
+                region_wal_options,
             }) => Ok(Box::new(|region_server| {
                 Box::pin(async move {
                     let region_id = Self::region_ident_to_region_id(&region_ident);
+                    // TODO(niebayes): extends options with region_wal_options.
+                    let _ = region_wal_options;
                     let request = RegionRequest::Open(RegionOpenRequest {
                         engine: region_ident.engine,
                         region_dir: region_dir(&region_storage_path, region_id),
@@ -238,6 +241,7 @@ mod tests {
                 engine: MITO_ENGINE_NAME.to_string(),
             },
             path,
+            HashMap::new(),
             HashMap::new(),
         ))
     }

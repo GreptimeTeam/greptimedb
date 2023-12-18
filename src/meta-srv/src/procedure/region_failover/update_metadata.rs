@@ -23,7 +23,6 @@ use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::RegionNumber;
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
@@ -36,7 +35,7 @@ pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
-    region_wal_options: HashMap<RegionNumber, String>,
+    region_wal_options: HashMap<String, String>,
 }
 
 impl UpdateRegionMetadata {
@@ -44,7 +43,7 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: HashMap<String, String>,
     ) -> Self {
         Self {
             candidate,
