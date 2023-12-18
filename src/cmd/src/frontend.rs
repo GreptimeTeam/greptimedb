@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use catalog::kvbackend::CachedMetaKvBackend;
 use clap::Parser;
 use client::client_manager::DatanodeClients;
@@ -32,14 +33,26 @@ use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, MissingConfigSnafu, Result, StartFrontendSnafu};
-use crate::options::{Options, TopLevelOptions};
+use crate::options::{CliOptions, Options};
+use crate::App;
 
 pub struct Instance {
     frontend: FeInstance,
 }
 
 impl Instance {
-    pub async fn start(&mut self) -> Result<()> {
+    fn new(frontend: FeInstance) -> Self {
+        Self { frontend }
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        "greptime-frontend"
+    }
+
+    async fn start(&mut self) -> Result<()> {
         plugins::start_frontend_plugins(self.frontend.plugins().clone())
             .await
             .context(StartFrontendSnafu)?;
@@ -47,7 +60,7 @@ impl Instance {
         self.frontend.start().await.context(StartFrontendSnafu)
     }
 
-    pub async fn stop(&self) -> Result<()> {
+    async fn stop(&self) -> Result<()> {
         self.frontend
             .shutdown()
             .await
@@ -66,8 +79,8 @@ impl Command {
         self.subcmd.build(opts).await
     }
 
-    pub fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
-        self.subcmd.load_options(top_level_opts)
+    pub fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
+        self.subcmd.load_options(cli_options)
     }
 }
 
@@ -83,9 +96,9 @@ impl SubCommand {
         }
     }
 
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         match self {
-            SubCommand::Start(cmd) => cmd.load_options(top_level_opts),
+            SubCommand::Start(cmd) => cmd.load_options(cli_options),
         }
     }
 }
@@ -125,19 +138,19 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
-    fn load_options(&self, top_level_opts: TopLevelOptions) -> Result<Options> {
+    fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
         let mut opts: FrontendOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             FrontendOptions::env_list_keys(),
         )?;
 
-        if let Some(dir) = top_level_opts.log_dir {
-            opts.logging.dir = dir;
+        if let Some(dir) = &cli_options.log_dir {
+            opts.logging.dir = dir.clone();
         }
 
-        if top_level_opts.log_level.is_some() {
-            opts.logging.level = top_level_opts.log_level;
+        if cli_options.log_level.is_some() {
+            opts.logging.level = cli_options.log_level.clone();
         }
 
         let tls_opts = TlsOption::new(
@@ -241,7 +254,7 @@ impl StartCommand {
             .await
             .context(StartFrontendSnafu)?;
 
-        Ok(Instance { frontend: instance })
+        Ok(Instance::new(instance))
     }
 }
 
@@ -257,7 +270,7 @@ mod tests {
     use servers::http::HttpOptions;
 
     use super::*;
-    use crate::options::ENV_VAR_SEP;
+    use crate::options::{CliOptions, ENV_VAR_SEP};
 
     #[test]
     fn test_try_from_start_command() {
@@ -271,8 +284,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(opts) = command.load_options(TopLevelOptions::default()).unwrap()
-        else {
+        let Options::Frontend(opts) = command.load_options(&CliOptions::default()).unwrap() else {
             unreachable!()
         };
 
@@ -324,7 +336,7 @@ mod tests {
             ..Default::default()
         };
 
-        let Options::Frontend(fe_opts) = command.load_options(TopLevelOptions::default()).unwrap()
+        let Options::Frontend(fe_opts) = command.load_options(&CliOptions::default()).unwrap()
         else {
             unreachable!()
         };
@@ -363,16 +375,19 @@ mod tests {
     }
 
     #[test]
-    fn test_top_level_options() {
+    fn test_load_log_options_from_cli() {
         let cmd = StartCommand {
             disable_dashboard: Some(false),
             ..Default::default()
         };
 
         let options = cmd
-            .load_options(TopLevelOptions {
+            .load_options(&CliOptions {
                 log_dir: Some("/tmp/greptimedb/test/logs".to_string()),
                 log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
             })
             .unwrap();
 
@@ -452,11 +467,8 @@ mod tests {
                     ..Default::default()
                 };
 
-                let top_level_opts = TopLevelOptions {
-                    log_dir: None,
-                    log_level: Some("error".to_string()),
-                };
-                let Options::Frontend(fe_opts) = command.load_options(top_level_opts).unwrap()
+                let Options::Frontend(fe_opts) =
+                    command.load_options(&CliOptions::default()).unwrap()
                 else {
                     unreachable!()
                 };

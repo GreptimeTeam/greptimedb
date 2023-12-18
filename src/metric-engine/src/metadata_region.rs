@@ -22,15 +22,15 @@ use common_recordbatch::util::collect;
 use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
-use store_api::region_engine::RegionEngine;
-use store_api::region_request::RegionPutRequest;
-use store_api::storage::{RegionId, ScanRequest};
-
-use crate::consts::{
+use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
     METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::RegionPutRequest;
+use store_api::storage::{RegionId, ScanRequest};
+
 use crate::error::{
     CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu,
     MitoReadOperationSnafu, MitoWriteOperationSnafu, ParseRegionIdSnafu, RegionAlreadyExistsSnafu,

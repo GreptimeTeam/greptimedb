@@ -15,8 +15,9 @@
 use std::fs::File;
 use std::io::{BufReader, Error, ErrorKind};
 
-use rustls::{Certificate, PrivateKey, ServerConfig};
+use rustls::ServerConfig;
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use strum::EnumString;
 
@@ -77,19 +78,20 @@ impl TlsOption {
             return Ok(None);
         }
         let cert = certs(&mut BufReader::new(File::open(&self.cert_path)?))
-            .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid cert"))
-            .map(|mut certs| certs.drain(..).map(Certificate).collect())?;
+            .collect::<Result<Vec<CertificateDer>, Error>>()?;
 
         let key = {
             let mut pkcs8 = pkcs8_private_keys(&mut BufReader::new(File::open(&self.key_path)?))
-                .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid key"))?;
+                .map(|key| key.map(PrivateKeyDer::from))
+                .collect::<Result<Vec<PrivateKeyDer>, Error>>()?;
             if !pkcs8.is_empty() {
-                PrivateKey(pkcs8.remove(0))
+                pkcs8.remove(0)
             } else {
                 let mut rsa = rsa_private_keys(&mut BufReader::new(File::open(&self.key_path)?))
-                    .map_err(|_| Error::new(ErrorKind::InvalidInput, "invalid key"))?;
+                    .map(|key| key.map(PrivateKeyDer::from))
+                    .collect::<Result<Vec<PrivateKeyDer>, Error>>()?;
                 if !rsa.is_empty() {
-                    PrivateKey(rsa.remove(0))
+                    rsa.remove(0)
                 } else {
                     return Err(Error::new(ErrorKind::InvalidInput, "invalid key"));
                 }
@@ -98,7 +100,6 @@ impl TlsOption {
 
         // TODO(SSebo): with_client_cert_verifier if TlsMode is Required.
         let config = ServerConfig::builder()
-            .with_safe_defaults()
             .with_no_client_auth()
             .with_single_cert(cert, key)
             .map_err(|err| std::io::Error::new(ErrorKind::InvalidInput, err))?;

@@ -36,7 +36,6 @@ use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use auth::UserProviderRef;
-use axum::body::BoxBody;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
@@ -62,12 +61,11 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
-use tower_http::auth::AsyncRequireAuthorizationLayer;
 use tower_http::trace::TraceLayer;
 
+use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
-use crate::http::authorize::HttpAuth;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -721,9 +719,10 @@ impl HttpServer {
                             .try_into()
                             .unwrap_or_else(|_| DEFAULT_BODY_LIMIT.as_bytes() as usize),
                     ))
-                    // custom layer
-                    .layer(AsyncRequireAuthorizationLayer::new(
-                        HttpAuth::<BoxBody>::new(self.user_provider.clone()),
+                    // auth layer
+                    .layer(middleware::from_fn_with_state(
+                        AuthState::new(self.user_provider.clone()),
+                        authorize::check_http_auth,
                     )),
             )
             // Handlers for debug, we don't expect a timeout.

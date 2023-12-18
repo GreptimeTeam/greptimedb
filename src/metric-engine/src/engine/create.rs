@@ -24,18 +24,18 @@ use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::RegionEngine;
-use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
-use store_api::storage::consts::ReservedColumnId;
-use store_api::storage::RegionId;
-
-use crate::consts::{
+use store_api::metric_engine_consts::{
     DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
     LOGICAL_TABLE_METADATA_KEY, METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX,
     METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
     METADATA_SCHEMA_VALUE_COLUMN_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{AffectedRows, RegionCreateRequest, RegionRequest};
+use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::RegionId;
+
 use crate::engine::MetricEngineInner;
 use crate::error::{
     ConflictRegionOptionSnafu, CreateMitoRegionSnafu, InternalColumnOccupiedSnafu,
@@ -412,8 +412,9 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+
     use super::*;
-    use crate::consts::METRIC_ENGINE_NAME;
     use crate::engine::MetricEngine;
     use crate::test_util::TestEnv;
 

@@ -13,16 +13,20 @@
 // limitations under the License.
 
 mod columns;
+mod memory_table;
+mod table_names;
 mod tables;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
-use common_catalog::consts::INFORMATION_SCHEMA_NAME;
+use common_catalog::consts::{self, INFORMATION_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
+use lazy_static::lazy_static;
+use paste::paste;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
@@ -32,43 +36,101 @@ use table::metadata::{
 };
 use table::thin_table::{ThinTable, ThinTableAdapter};
 use table::TableRef;
+pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 
-pub const TABLES: &str = "tables";
-pub const COLUMNS: &str = "columns";
+lazy_static! {
+    // Memory tables in `information_schema`.
+    static ref MEMORY_TABLES: &'static [&'static str] = &[
+        ENGINES,
+        COLUMN_PRIVILEGES,
+        COLUMN_STATISTICS
+    ];
+}
 
+macro_rules! setup_memory_table {
+    ($name: expr) => {
+        paste! {
+            {
+                let (schema, columns) = get_schema_columns($name);
+                Some(Arc::new(MemoryTable::new(
+                    consts::[<INFORMATION_SCHEMA_ $name  _TABLE_ID>],
+                    $name,
+                    schema,
+                    columns
+                )) as _)
+            }
+        }
+    };
+}
+
+/// The `information_schema` tables info provider.
 pub struct InformationSchemaProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
+    tables: HashMap<String, TableRef>,
 }
 
 impl InformationSchemaProvider {
     pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
-        Self {
+        let mut provider = Self {
             catalog_name,
             catalog_manager,
-        }
+            tables: HashMap::new(),
+        };
+
+        provider.build_tables();
+
+        provider
     }
 
-    /// Build a map of [TableRef] in information schema.
-    /// Including `tables` and `columns`.
-    pub fn build(
-        catalog_name: String,
-        catalog_manager: Weak<dyn CatalogManager>,
-    ) -> HashMap<String, TableRef> {
-        let provider = Self::new(catalog_name, catalog_manager);
+    /// Returns table names in the order of table id.
+    pub fn table_names(&self) -> Vec<String> {
+        let mut tables = self.tables.values().clone().collect::<Vec<_>>();
 
-        let mut schema = HashMap::new();
-        schema.insert(TABLES.to_owned(), provider.table(TABLES).unwrap());
-        schema.insert(COLUMNS.to_owned(), provider.table(COLUMNS).unwrap());
-        schema
+        tables.sort_by(|t1, t2| {
+            t1.table_info()
+                .table_id()
+                .partial_cmp(&t2.table_info().table_id())
+                .unwrap()
+        });
+        tables
+            .into_iter()
+            .map(|t| t.table_info().name.clone())
+            .collect()
     }
 
+    /// Returns a map of [TableRef] in information schema.
+    pub fn tables(&self) -> &HashMap<String, TableRef> {
+        assert!(!self.tables.is_empty());
+
+        &self.tables
+    }
+
+    /// Returns the [TableRef] by table name.
     pub fn table(&self, name: &str) -> Option<TableRef> {
+        self.tables.get(name).cloned()
+    }
+
+    fn build_tables(&mut self) {
+        let mut tables = HashMap::new();
+        tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
+        tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
+
+        // Add memory tables
+        for name in MEMORY_TABLES.iter() {
+            tables.insert((*name).to_string(), self.build_table(name).unwrap());
+        }
+
+        self.tables = tables;
+    }
+
+    fn build_table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
             let filter_pushdown = FilterPushDownType::Unsupported;
@@ -89,6 +151,9 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            ENGINES => setup_memory_table!(ENGINES),
+            COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
+            COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
             _ => None,
         }
     }
@@ -102,9 +167,9 @@ impl InformationSchemaProvider {
             .unwrap();
         let table_info = TableInfoBuilder::default()
             .table_id(table.table_id())
-            .name(table.table_name().to_owned())
+            .name(table.table_name().to_string())
             .catalog_name(catalog_name)
-            .schema_name(INFORMATION_SCHEMA_NAME.to_owned())
+            .schema_name(INFORMATION_SCHEMA_NAME.to_string())
             .meta(table_meta)
             .table_type(table.table_type())
             .build()
@@ -176,6 +241,7 @@ impl DataSource for InformationTableDataSource {
             stream: Box::pin(stream),
             output_ordering: None,
         };
+
         Ok(Box::pin(stream))
     }
 }

@@ -16,8 +16,6 @@ INSERT INTO TABLE host VALUES
 
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' ORDER BY host, ts;
 
-SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO CALENDAR ORDER BY host, ts;
-
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO UNKNOWN ORDER BY host, ts;
 
 SELECT ts, host, min(val) RANGE '1d' FROM host ALIGN '1d' TO '1900-01-01T00:00:00+01:00' ORDER BY host, ts;

@@ -23,6 +23,15 @@ pub fn build_fs_backend(root: &str) -> Result<ObjectStore> {
     let _ = builder.root(root);
     let object_store = ObjectStore::new(builder)
         .context(BuildBackendSnafu)?
+        .layer(
+            object_store::layers::LoggingLayer::default()
+                // Print the expected error only in DEBUG level.
+                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
+                .with_error_level(Some("debug"))
+                .expect("input error level must be valid"),
+        )
+        .layer(object_store::layers::TracingLayer)
+        .layer(object_store::layers::PrometheusMetricsLayer)
         .finish();
     Ok(object_store)
 }

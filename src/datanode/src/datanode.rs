@@ -34,6 +34,7 @@ use futures_util::future::try_join_all;
 use futures_util::StreamExt;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
+use metric_engine::engine::MetricEngine;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
@@ -471,12 +472,14 @@ impl DatanodeBuilder {
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let engine: MitoEngine = MitoEngine::new(
+                    let mito_engine: MitoEngine = MitoEngine::new(
                         config.clone(),
                         log_store.clone(),
                         object_store_manager.clone(),
                     );
-                    engines.push(Arc::new(engine) as _);
+                    let metric_engine = MetricEngine::new(mito_engine.clone());
+                    engines.push(Arc::new(mito_engine) as _);
+                    engines.push(Arc::new(metric_engine) as _);
                 }
                 RegionEngineConfig::File(config) => {
                     let engine = FileRegionEngine::new(

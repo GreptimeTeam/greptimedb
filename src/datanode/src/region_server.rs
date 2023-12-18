@@ -399,9 +399,20 @@ impl RegionServerInner {
     }
 
     async fn stop(&self) -> Result<()> {
-        for region in self.region_map.iter() {
-            let region_id = *region.key();
-            let engine = region.value();
+        // Calling async functions while iterating inside the Dashmap could easily cause the Rust
+        // complains "higher-ranked lifetime error". Rust can't prove some future is legit.
+        // Possible related issue: https://github.com/rust-lang/rust/issues/102211
+        //
+        // The walkaround is to put the async functions in the `common_runtime::spawn_bg`. Or like
+        // it here, collect the values first then use later separately.
+
+        let regions = self
+            .region_map
+            .iter()
+            .map(|x| (*x.key(), x.value().clone()))
+            .collect::<Vec<_>>();
+
+        for (region_id, engine) in regions {
             let closed = engine
                 .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
                 .await;

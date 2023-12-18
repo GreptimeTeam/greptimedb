@@ -96,7 +96,7 @@ fn create_table_task() -> CreateTableTask {
 }
 
 #[test]
-fn test_create_region_request_template() {
+fn test_region_request_builder() {
     let procedure = CreateTableProcedure::new(
         1,
         create_table_task(),
@@ -105,7 +105,7 @@ fn test_create_region_request_template() {
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     );
 
-    let template = procedure.create_region_request_template().unwrap();
+    let template = procedure.new_region_request_builder().unwrap();
 
     let expected = PbCreateRegionRequest {
         region_id: 0,
@@ -164,7 +164,7 @@ fn test_create_region_request_template() {
         path: String::new(),
         options: HashMap::new(),
     };
-    assert_eq!(template, expected);
+    assert_eq!(template.template(), &expected);
 }
 
 async fn new_datanode_manager(

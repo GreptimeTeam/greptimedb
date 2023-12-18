@@ -33,6 +33,7 @@ meta-client.workspace = true
 moka = { workspace = true, features = ["future"] }
 parking_lot = "0.12"
 partition.workspace = true
+paste = "1.0"
 prometheus.workspace = true
 regex.workspace = true
 serde.workspace = true

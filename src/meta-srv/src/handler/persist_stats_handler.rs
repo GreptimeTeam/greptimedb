@@ -147,7 +147,7 @@ mod tests {
 
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
@@ -162,7 +162,7 @@ mod tests {
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
             kv_backend.clone(),
         ));
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
+        let seq = SequenceBuilder::new("test_seq", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
             .election(None)

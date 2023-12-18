@@ -45,6 +45,7 @@ hyper = { version = "0.14", features = ["full"] }
 lazy_static.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
+metric-engine.workspace = true
 mito2.workspace = true
 object-store.workspace = true
 pin-project = "1.0"

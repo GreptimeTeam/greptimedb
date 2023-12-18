@@ -1,4 +1,3 @@
-#![feature(let_chains)]
 // Copyright 2023 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,14 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Storage related APIs
+/// All table names in `information_schema`.
 
-pub mod data_source;
-pub mod logstore;
-pub mod manifest;
-pub mod metadata;
-pub mod metric_engine_consts;
-pub mod path_utils;
-pub mod region_engine;
-pub mod region_request;
-pub mod storage;
+pub const TABLES: &str = "tables";
+pub const COLUMNS: &str = "columns";
+pub const ENGINES: &str = "engines";
+pub const COLUMN_PRIVILEGES: &str = "column_privileges";
+pub const COLUMN_STATISTICS: &str = "column_statistics";

@@ -47,6 +47,12 @@ pub enum Error {
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
     InvalidTxnResult { err_msg: String, location: Location },
 
+    #[snafu(display("Invalid engine type: {}", engine_type))]
+    InvalidEngineType {
+        engine_type: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to connect to Etcd"))]
     ConnectEtcd {
         #[snafu(source)]
@@ -335,7 +341,9 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | &EmptyKey { .. } => StatusCode::InvalidArguments,
+            PrimaryKeyNotFound { .. } | EmptyKey { .. } | InvalidEngineType { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
