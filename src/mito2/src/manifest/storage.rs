@@ -26,6 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
 use store_api::manifest::ManifestVersion;
+use tokio::sync::Semaphore;
 
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, OpenDalSnafu, Result,
@@ -42,6 +43,7 @@ const DEFAULT_MANIFEST_COMPRESSION_TYPE: CompressionType = CompressionType::Gzip
 /// Due to backward compatibility, it is possible that the user's manifest file has not been compressed.
 /// So when we encounter problems, we need to fall back to `FALL_BACK_COMPRESS_TYPE` for processing.
 const FALL_BACK_COMPRESS_TYPE: CompressionType = CompressionType::Uncompressed;
+const FETCH_MANIFEST_PARALLELISM: usize = 16;
 
 /// Returns the [CompressionType] according to whether to compress manifest files.
 #[inline]
@@ -200,7 +202,13 @@ impl ManifestObjectStore {
         &self,
         manifests: &[(u64, Entry)],
     ) -> Result<Vec<(ManifestVersion, Vec<u8>)>> {
+        // TODO(weny): Make it configurable.
+        let semaphore = Semaphore::new(FETCH_MANIFEST_PARALLELISM);
+
         let tasks = manifests.iter().map(|(v, entry)| async {
+            // Safety: semaphore must exist.
+            let _permit = semaphore.acquire().await.unwrap();
+
             let compress_type = file_compress_type(entry.name());
             let bytes = self
                 .object_store
