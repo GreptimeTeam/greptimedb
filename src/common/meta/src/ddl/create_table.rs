@@ -334,7 +334,9 @@ impl TableCreator {
         // Encodes each wal options.
         let wal_options_map = wal_options_map
             .into_iter()
-            .map(|(region_number, wal_options)| (region_number, wal_options.into()))
+            .map(|(region_number, wal_options)| {
+                (region_number, serde_json::to_string(&wal_options).unwrap())
+            })
             .collect();
 
         Self {

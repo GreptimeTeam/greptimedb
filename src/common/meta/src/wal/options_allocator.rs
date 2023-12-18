@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
-use crate::wal::kafka::TopicManager as KafkaTopicManager;
+use crate::wal::kafka::{KafkaOptions, TopicManager as KafkaTopicManager};
 use crate::wal::{WalConfig, WalOptions};
 
 #[derive(Default)]
@@ -52,7 +52,7 @@ impl WalOptionsAllocator {
                 let topics = topic_manager.select_batch(num_regions);
                 topics
                     .into_iter()
-                    .map(|topic| WalOptions::Kafka { topic })
+                    .map(|topic| WalOptions::Kafka(KafkaOptions { topic }))
                     .collect()
             }
         }

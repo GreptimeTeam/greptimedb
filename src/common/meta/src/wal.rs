@@ -18,9 +18,11 @@ pub mod options_allocator;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_with::with_prefix;
 
 use crate::error::Result;
-use crate::wal::kafka::{KafkaConfig, Topic as KafkaTopic};
+use crate::wal::kafka::KafkaConfig;
+pub use crate::wal::kafka::{KafkaOptions as KafkaWalOptions, Topic as KafkaWalTopic};
 pub use crate::wal::options_allocator::WalOptionsAllocator;
 
 pub const WAL_OPTIONS_KEY: &str = "wal_options";
@@ -36,32 +38,21 @@ pub enum WalConfig {
     Kafka(KafkaConfig),
 }
 
-/// Wal options for a region.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
-#[serde(tag = "provider")]
+/// Wal options allocated to a region.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "wal.provider")]
 pub enum WalOptions {
     #[default]
     #[serde(rename = "raft-engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
-    Kafka { topic: KafkaTopic },
+    #[serde(with = "prefix_wal_kafka")]
+    Kafka(KafkaWalOptions),
 }
+
+with_prefix!(prefix_wal_kafka "wal.kafka.");
 
 pub type EncodedWalOptions = String;
-
-impl From<WalOptions> for EncodedWalOptions {
-    fn from(value: WalOptions) -> Self {
-        EncodedWalOptions::default()
-    }
-}
-
-impl TryFrom<EncodedWalOptions> for WalOptions {
-    type Error = crate::error::Error;
-
-    fn try_from(value: EncodedWalOptions) -> Result<Self> {
-        todo!()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -111,24 +102,23 @@ mod tests {
     #[test]
     fn test_serde_wal_options() {
         // Test serde raft-engine wal options.
-        let toml_str = r#"
-            provider = "raft-engine"
-        "#;
-        let wal_options: WalOptions = toml::from_str(toml_str).unwrap();
-        assert_eq!(wal_options, WalOptions::RaftEngine);
+        let wal_options = WalOptions::RaftEngine;
+        let encoded = serde_json::to_string(&wal_options).unwrap();
+        let expected = r#"{"wal.provider":"raft-engine"}"#;
+        assert_eq!(&encoded, expected);
+
+        let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, wal_options);
 
         // Test serde kafka wal options.
-        let toml_str = r#"
-            provider = "kafka"
-            topic = "test_topic"
-        "#;
-        let wal_options: WalOptions = toml::from_str(toml_str).unwrap();
-        let expected_kafka_topic = "test_topic".to_string();
-        assert_eq!(
-            wal_options,
-            WalOptions::Kafka {
-                topic: expected_kafka_topic
-            }
-        );
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: "test_topic".to_string(),
+        });
+        let encoded = serde_json::to_string(&wal_options).unwrap();
+        let expected = r#"{"wal.provider":"kafka","wal.kafka.topic":"test_topic"}"#;
+        assert_eq!(&encoded, expected);
+
+        let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, wal_options);
     }
 }
