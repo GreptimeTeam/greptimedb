@@ -271,6 +271,8 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
+            ("wal.provider", "kafka"),
+            ("wal.kafka.topic", "test_topic"),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
