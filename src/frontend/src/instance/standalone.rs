@@ -26,9 +26,11 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
+use common_meta::wal::options_allocator::build_region_wal_options;
+use common_meta::wal::WalOptionsAllocator;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{debug, tracing};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{OptionExt, ResultExt};
@@ -105,18 +107,22 @@ impl Datanode for RegionInvoker {
     }
 }
 
-pub struct StandaloneTableMetadataCreator {
+pub struct StandaloneTableMetadataAllocator {
     table_id_sequence: SequenceRef,
+    wal_options_allocator: WalOptionsAllocator,
 }
 
-impl StandaloneTableMetadataCreator {
-    pub fn new(table_id_sequence: SequenceRef) -> Self {
-        Self { table_id_sequence }
+impl StandaloneTableMetadataAllocator {
+    pub fn new(table_id_sequence: SequenceRef, wal_options_allocator: WalOptionsAllocator) -> Self {
+        Self {
+            table_id_sequence,
+            wal_options_allocator,
+        }
     }
 }
 
 #[async_trait]
-impl TableMetadataAllocator for StandaloneTableMetadataCreator {
+impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
     async fn create(
         &self,
         _ctx: &TableMetadataAllocatorContext,
@@ -145,7 +151,18 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
             })
             .collect::<Vec<_>>();
 
-        // There're no wal options involved in standalone mode currently.
+        let region_numbers = region_routes
+            .iter()
+            .map(|route| route.region.id.region_number())
+            .collect();
+        let region_wal_options =
+            build_region_wal_options(region_numbers, &self.wal_options_allocator)?;
+
+        debug!(
+            "Allocated region wal options {:?} for table {}",
+            region_wal_options, table_id
+        );
+
         Ok(TableMetadata {
             table_id,
             region_routes,

@@ -23,13 +23,14 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
+use common_meta::wal::build_wal_options_allocator;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataCreator;
+use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -117,7 +118,15 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let table_meta_allocator = Arc::new(StandaloneTableMetadataCreator::new(table_id_sequence));
+        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
+        let wal_options_allocator =
+            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
+                .await
+                .unwrap();
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator,
+        ));
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(

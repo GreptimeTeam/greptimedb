@@ -23,7 +23,7 @@ use serde_with::with_prefix;
 use crate::error::Result;
 use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::kafka::{KafkaOptions as KafkaWalOptions, Topic as KafkaWalTopic};
-pub use crate::wal::options_allocator::WalOptionsAllocator;
+pub use crate::wal::options_allocator::{build_wal_options_allocator, WalOptionsAllocator};
 
 /// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
 /// and inserted into the options of a `RegionCreateRequest`.

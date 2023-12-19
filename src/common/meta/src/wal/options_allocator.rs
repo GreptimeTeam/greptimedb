@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::error::Result;
+use snafu::ResultExt;
+use store_api::storage::RegionNumber;
+
+use crate::error::{EncodeWalOptionsToJsonSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::{KafkaOptions, TopicManager as KafkaTopicManager};
 use crate::wal::{WalConfig, WalOptions};
@@ -26,8 +30,6 @@ pub enum WalOptionsAllocator {
     RaftEngine,
     Kafka(KafkaTopicManager),
 }
-
-pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
 
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
@@ -58,4 +60,31 @@ impl WalOptionsAllocator {
             }
         }
     }
+}
+
+/// Allocates a wal options for each region. The allocated wal options is encoded immediately.
+pub fn build_region_wal_options(
+    regions: Vec<RegionNumber>,
+    wal_options_allocator: &WalOptionsAllocator,
+) -> Result<HashMap<RegionNumber, String>> {
+    let wal_options = wal_options_allocator
+        .alloc_batch(regions.len())
+        .into_iter()
+        .map(|wal_options| {
+            serde_json::to_string(&wal_options).context(EncodeWalOptionsToJsonSnafu { wal_options })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(regions.into_iter().zip(wal_options).collect())
+}
+
+/// Builds a wal options allocator.
+// TODO(niebayes): implement.
+pub async fn build_wal_options_allocator(
+    config: &WalConfig,
+    kv_backend: &KvBackendRef,
+) -> Result<WalOptionsAllocator> {
+    let _ = config;
+    let _ = kv_backend;
+    Ok(WalOptionsAllocator::default())
 }
