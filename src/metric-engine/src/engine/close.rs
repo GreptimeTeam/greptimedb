@@ -86,3 +86,5 @@ impl MetricEngineInner {
         Ok(0)
     }
 }
+
+// Unit tests in engine.rs

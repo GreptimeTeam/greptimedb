@@ -202,3 +202,69 @@ struct MetricEngineInner {
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
 }
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::region_request::{RegionCloseRequest, RegionOpenRequest};
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn close_open_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+
+        // close physical region
+        let physical_region_id = env.default_physical_region_id();
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // reopen physical region
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: physical_region_option,
+        };
+        engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // close nonexistent region
+        let nonexistent_region_id = RegionId::new(12313, 12);
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap_err();
+
+        // open nonexistent region
+        let invalid_open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: HashMap::new(),
+        };
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Open(invalid_open_request),
+            )
+            .await
+            .unwrap_err();
+    }
+}

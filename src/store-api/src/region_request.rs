@@ -185,11 +185,11 @@ pub struct RegionCreateRequest {
     pub region_dir: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct RegionDropRequest {}
 
 /// Open region request.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegionOpenRequest {
     /// Region engine name
     pub engine: String,

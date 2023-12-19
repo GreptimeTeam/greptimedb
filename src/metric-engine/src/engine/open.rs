@@ -129,17 +129,19 @@ impl MetricEngineInner {
             .await?;
 
         let mut state = self.state.write().await;
-        // recover logical regions
-        for logical_region_id in logical_regions {
-            state.add_logical_region(physical_region_id, logical_region_id);
-        }
         // recover physical column names
         let physical_column_names = physcial_columns
             .into_iter()
             .map(|col| col.column_schema.name)
             .collect();
         state.add_physical_region(physical_region_id, physical_column_names);
+        // recover logical regions
+        for logical_region_id in logical_regions {
+            state.add_logical_region(physical_region_id, logical_region_id);
+        }
 
         Ok(())
     }
 }
+
+// Unit tests in engine.rs
