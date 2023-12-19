@@ -67,8 +67,8 @@ impl TryFrom<&str> for SelectorType {
 
     fn try_from(value: &str) -> Result<Self> {
         match value {
-            "LoadBased" => Ok(SelectorType::LoadBased),
-            "LeaseBased" => Ok(SelectorType::LeaseBased),
+            "load_based" | "LoadBased" => Ok(SelectorType::LoadBased),
+            "lease_based" | "LeaseBased" => Ok(SelectorType::LeaseBased),
             other => error::UnsupportedSelectorTypeSnafu {
                 selector_type: other,
             }
@@ -89,12 +89,18 @@ mod tests {
 
     #[test]
     fn test_convert_str_to_selector_type() {
-        let leasebased = "LeaseBased";
-        let selector_type = leasebased.try_into().unwrap();
+        let lease_based = "lease_based";
+        let selector_type = lease_based.try_into().unwrap();
+        assert_eq!(SelectorType::LeaseBased, selector_type);
+        let lease_based = "LeaseBased";
+        let selector_type = lease_based.try_into().unwrap();
         assert_eq!(SelectorType::LeaseBased, selector_type);
 
-        let loadbased = "LoadBased";
-        let selector_type = loadbased.try_into().unwrap();
+        let load_based = "load_based";
+        let selector_type = load_based.try_into().unwrap();
+        assert_eq!(SelectorType::LoadBased, selector_type);
+        let load_based = "LoadBased";
+        let selector_type = load_based.try_into().unwrap();
         assert_eq!(SelectorType::LoadBased, selector_type);
 
         let unknown = "unknown";
