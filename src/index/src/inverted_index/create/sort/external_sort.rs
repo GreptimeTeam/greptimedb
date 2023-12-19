@@ -192,7 +192,7 @@ impl ExternalSorter {
     }
 
     /// Determines the segment index range for the row index range
-    /// [self.total_row_count, self.total_row_count + n - 1]
+    /// `[self.total_row_count, self.total_row_count + n - 1]`
     fn segment_index_range(&self, n: usize) -> RangeInclusive<usize> {
         let start = self.segment_index(self.total_row_count);
         let end = self.segment_index(self.total_row_count + n - 1);
