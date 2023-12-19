@@ -53,17 +53,17 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(OpenRegion {
                 region_ident,
                 region_storage_path,
-                options,
+                region_options,
                 region_wal_options,
             }) => Ok(Box::new(|region_server| {
                 Box::pin(async move {
                     let region_id = Self::region_ident_to_region_id(&region_ident);
-                    // TODO(niebayes): extends options with region_wal_options.
+                    // TODO(niebayes): extends region options with region_wal_options.
                     let _ = region_wal_options;
                     let request = RegionRequest::Open(RegionOpenRequest {
                         engine: region_ident.engine,
                         region_dir: region_dir(&region_storage_path, region_id),
-                        options,
+                        options: region_options,
                     });
                     let result = region_server.handle_request(region_id, request).await;
 

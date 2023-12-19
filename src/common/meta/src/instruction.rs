@@ -254,9 +254,9 @@ mod tests {
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct LegacyOpenRegion {
-        pub region_ident: RegionIdent,
-        pub region_storage_path: String,
-        pub region_options: HashMap<String, String>,
+        region_ident: RegionIdent,
+        region_storage_path: String,
+        region_options: HashMap<String, String>,
     }
 
     #[test]
@@ -285,9 +285,9 @@ mod tests {
         // Deserialize to OpenRegion.
         let deserialized = serde_json::from_str(&serialized).unwrap();
         let expected = OpenRegion {
-            region_ident: region_ident.clone(),
-            region_storage_path: region_storage_path.clone(),
-            region_options: region_options.clone(),
+            region_ident,
+            region_storage_path,
+            region_options,
             region_wal_options: HashMap::new(),
         };
         assert_eq!(expected, deserialized);

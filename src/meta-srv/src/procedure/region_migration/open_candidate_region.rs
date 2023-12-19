@@ -213,7 +213,7 @@ mod tests {
                 engine: MITO2_ENGINE.to_string(),
             },
             region_storage_path: "/bar/foo/region/".to_string(),
-            options: Default::default(),
+            region_options: Default::default(),
             region_wal_options: Default::default(),
         })
     }

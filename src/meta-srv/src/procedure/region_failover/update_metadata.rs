@@ -30,11 +30,12 @@ use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
+    #[serde(default)]
     region_wal_options: HashMap<String, String>,
 }
 
@@ -446,5 +447,41 @@ mod tests {
             assert_eq!(tables[0].table_id, 1);
             assert_eq!(tables[0].regions, vec![2, 4]);
         }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct LegacyUpdateRegionMetadata {
+        candidate: Peer,
+        region_storage_path: String,
+        region_options: HashMap<String, String>,
+    }
+
+    #[test]
+    fn test_compatible_serialize_update_region_metadata() {
+        let candidate = Peer::new(1, "test_addr");
+        let region_storage_path = "test_path".to_string();
+        let region_options = HashMap::from([
+            ("a".to_string(), "aa".to_string()),
+            ("b".to_string(), "bb".to_string()),
+        ]);
+
+        let legacy_update_region_metadata = LegacyUpdateRegionMetadata {
+            candidate: candidate.clone(),
+            region_storage_path: region_storage_path.clone(),
+            region_options: region_options.clone(),
+        };
+
+        // Serialize a LegacyUpdateRegionMetadata.
+        let serialized = serde_json::to_string(&legacy_update_region_metadata).unwrap();
+
+        // Deserialize to UpdateRegionMetadata.
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        let expected = UpdateRegionMetadata {
+            candidate,
+            region_storage_path,
+            region_options,
+            region_wal_options: HashMap::new(),
+        };
+        assert_eq!(expected, deserialized);
     }
 }
