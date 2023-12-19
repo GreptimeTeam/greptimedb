@@ -15,11 +15,13 @@
 use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_telemetry::warn;
+use common_meta::wal::options_allocator::build_region_wal_options;
+use common_meta::wal::WalOptionsAllocator;
+use common_telemetry::{debug, warn};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
 use table::metadata::RawTableInfo;
@@ -32,6 +34,7 @@ pub struct MetaSrvTableMetadataAllocator {
     ctx: SelectorContext,
     selector: SelectorRef,
     table_id_sequence: SequenceRef,
+    wal_options_allocator: WalOptionsAllocator,
 }
 
 impl MetaSrvTableMetadataAllocator {
@@ -39,11 +42,13 @@ impl MetaSrvTableMetadataAllocator {
         ctx: SelectorContext,
         selector: SelectorRef,
         table_id_sequence: SequenceRef,
+        wal_options_allocator: WalOptionsAllocator,
     ) -> Self {
         Self {
             ctx,
             selector,
             table_id_sequence,
+            wal_options_allocator,
         }
     }
 }
@@ -55,8 +60,8 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         ctx: &TableMetadataAllocatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
-        handle_create_region_routes(
+    ) -> MetaResult<TableMetadata> {
+        let (table_id, region_routes) = handle_create_region_routes(
             ctx.cluster_id,
             raw_table_info,
             partitions,
@@ -66,7 +71,25 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
         )
         .await
         .map_err(BoxedError::new)
-        .context(meta_error::ExternalSnafu)
+        .context(meta_error::ExternalSnafu)?;
+
+        let region_numbers = region_routes
+            .iter()
+            .map(|route| route.region.id.region_number())
+            .collect();
+        let region_wal_options =
+            build_region_wal_options(region_numbers, &self.wal_options_allocator)?;
+
+        debug!(
+            "Allocated region wal options {:?} for table {}",
+            region_wal_options, table_id
+        );
+
+        Ok(TableMetadata {
+            table_id,
+            region_routes,
+            region_wal_options,
+        })
     }
 }
 

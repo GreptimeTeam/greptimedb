@@ -37,6 +37,7 @@ use futures_util::StreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
+use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
@@ -452,10 +453,13 @@ impl DatanodeBuilder {
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let engine =
+                    let mito_engine =
                         Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
                             .await?;
-                    engines.push(Arc::new(engine) as _);
+
+                    let metric_engine = MetricEngine::new(mito_engine.clone());
+                    engines.push(Arc::new(mito_engine) as _);
+                    engines.push(Arc::new(metric_engine) as _);
                 }
                 RegionEngineConfig::File(config) => {
                     let engine = FileRegionEngine::new(
@@ -567,6 +571,7 @@ mod tests {
                 "mock",
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
+                HashMap::default(),
                 BTreeMap::from([(0, vec![0, 1, 2])]),
             )
             .unwrap();

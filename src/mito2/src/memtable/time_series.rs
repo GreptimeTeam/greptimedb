@@ -1041,7 +1041,7 @@ mod tests {
             v0.extend(
                 values
                     .fields
-                    .get(0)
+                    .first()
                     .unwrap()
                     .as_any()
                     .downcast_ref::<Int64Vector>()
@@ -1125,7 +1125,7 @@ mod tests {
             assert_eq!(1, batch.fields().len());
             let v0 = batch
                 .fields()
-                .get(0)
+                .first()
                 .unwrap()
                 .data
                 .as_any()

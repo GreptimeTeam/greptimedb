@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
-use common_meta::sequence::Sequence;
+use common_meta::sequence::{Sequence, SequenceBuilder};
 use common_meta::DatanodeId;
 use common_procedure::{Context as ProcedureContext, ProcedureId, Status};
 use common_procedure_test::MockContextProvider;
@@ -96,7 +97,8 @@ impl TestingEnv {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
-        let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 1, kv_backend.clone());
+        let mailbox_sequence =
+            SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
 
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
@@ -367,7 +369,7 @@ impl ProcedureMigrationTestSuite {
     ) {
         self.env
             .table_metadata_manager()
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
     }

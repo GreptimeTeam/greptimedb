@@ -9,7 +9,6 @@ testing = []
 
 [dependencies]
 api.workspace = true
-async-compat = "0.2"
 async-trait = "0.1"
 auth.workspace = true
 catalog.workspace = true

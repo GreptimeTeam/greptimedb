@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::DateTime;
@@ -20,7 +21,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_meta::sequence::Sequence;
+use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use datatypes::data_type::ConcreteDataType;
@@ -55,7 +56,8 @@ pub(crate) fn create_region_failover_manager() -> Arc<RegionFailoverManager> {
     let kv_backend = Arc::new(MemoryKvBackend::new());
 
     let pushers = Pushers::default();
-    let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
+    let mailbox_sequence =
+        SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
     let mailbox = HeartbeatMailbox::create(pushers, mailbox_sequence);
 
     let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
@@ -143,7 +145,7 @@ pub(crate) async fn prepare_table_region_and_info_value(
         region_route_factory(4, 3),
     ];
     table_metadata_manager
-        .create_table_metadata(table_info, region_routes)
+        .create_table_metadata(table_info, region_routes, HashMap::default())
         .await
         .unwrap();
 }

@@ -214,6 +214,13 @@ pub enum Error {
         error: snap::Error,
     },
 
+    #[snafu(display("Failed to compress prometheus remote request"))]
+    CompressPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: snap::Error,
+    },
+
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
     InvalidPromRemoteRequest { msg: String, location: Location },
 
@@ -401,6 +408,9 @@ pub enum Error {
         error: FromUtf8Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert Mysql value, error: {}", err_msg))]
+    MysqlValueConversion { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -444,6 +454,7 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
@@ -452,7 +463,8 @@ impl ErrorExt for Error {
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
             | UrlDecode { .. }
-            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
+            | IncompatibleSchema { .. }
+            | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }

@@ -147,7 +147,7 @@ mod tests {
 
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
 
     use super::*;
     use crate::cluster::MetaPeerClientBuilder;
@@ -162,7 +162,7 @@ mod tests {
         let leader_cached_kv_backend = Arc::new(LeaderCachedKvBackend::with_always_leader(
             kv_backend.clone(),
         ));
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend.clone());
+        let seq = SequenceBuilder::new("test_seq", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), seq);
         let meta_peer_client = MetaPeerClientBuilder::default()
             .election(None)
@@ -190,7 +190,7 @@ mod tests {
             cluster_id: 3,
             node_id: 101,
         };
-        let key: Vec<u8> = key.try_into().unwrap();
+        let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let key: StatKey = kv.key.clone().try_into().unwrap();
@@ -203,7 +203,7 @@ mod tests {
 
         handle_request_many_times(ctx.clone(), &handler, 10).await;
 
-        let key: Vec<u8> = key.try_into().unwrap();
+        let key: Vec<u8> = key.into();
         let res = ctx.in_memory.get(&key).await.unwrap();
         let kv = res.unwrap();
         let val: StatValue = kv.value.try_into().unwrap();

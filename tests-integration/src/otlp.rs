@@ -61,7 +61,7 @@ mod test {
             ctx.clone(),
         )
         .await
-        .get(0)
+        .first()
         .unwrap()
         .is_ok());
 

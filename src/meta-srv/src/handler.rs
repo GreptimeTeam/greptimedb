@@ -434,7 +434,7 @@ mod tests {
 
     use api::v1::meta::{MailboxMessage, RequestHeader, Role, PROTOCOL_VERSION};
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
     use crate::handler::check_leader_handler::CheckLeaderHandler;
@@ -487,7 +487,7 @@ mod tests {
             .await;
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let seq = Sequence::new("test_seq", 0, 10, kv_backend);
+        let seq = SequenceBuilder::new("test_seq", kv_backend).build();
         let mailbox = HeartbeatMailbox::create(handler_group.pushers(), seq);
 
         let msg = MailboxMessage {

@@ -38,7 +38,7 @@ use crate::error::{
     self as catalog_err, ListCatalogsSnafu, ListSchemasSnafu, Result as CatalogResult,
     TableMetadataManagerSnafu,
 };
-use crate::information_schema::{InformationSchemaProvider, COLUMNS, TABLES};
+use crate::information_schema::InformationSchemaProvider;
 use crate::CatalogManager;
 
 /// Access all existing catalog, schema and tables.
@@ -81,6 +81,11 @@ impl KvBackendCatalogManager {
             cache_invalidator,
             system_catalog: SystemCatalog {
                 catalog_manager: me.clone(),
+                information_schema_provider: Arc::new(InformationSchemaProvider::new(
+                    // The catalog name is not used in system_catalog, so let it empty
+                    "".to_string(),
+                    me.clone(),
+                )),
             },
         })
     }
@@ -231,11 +236,11 @@ impl CatalogManager for KvBackendCatalogManager {
 // a new catalog is created.
 /// Existing system tables:
 /// - public.numbers
-/// - information_schema.tables
-/// - information_schema.columns
+/// - information_schema.{tables}
 #[derive(Clone)]
 struct SystemCatalog {
     catalog_manager: Weak<KvBackendCatalogManager>,
+    information_schema_provider: Arc<InformationSchemaProvider>,
 }
 
 impl SystemCatalog {
@@ -245,7 +250,7 @@ impl SystemCatalog {
 
     fn table_names(&self, schema: &str) -> Vec<String> {
         if schema == INFORMATION_SCHEMA_NAME {
-            vec![TABLES.to_string(), COLUMNS.to_string()]
+            self.information_schema_provider.table_names()
         } else if schema == DEFAULT_SCHEMA_NAME {
             vec![NUMBERS_TABLE_NAME.to_string()]
         } else {
@@ -259,7 +264,7 @@ impl SystemCatalog {
 
     fn table_exist(&self, schema: &str, table: &str) -> bool {
         if schema == INFORMATION_SCHEMA_NAME {
-            table == TABLES || table == COLUMNS
+            self.information_schema_provider.table(table).is_some()
         } else if schema == DEFAULT_SCHEMA_NAME {
             table == NUMBERS_TABLE_NAME
         } else {

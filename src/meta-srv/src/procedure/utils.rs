@@ -117,7 +117,7 @@ pub mod test_data {
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::RegionRoute;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, RawSchema};
     use table::metadata::{RawTableInfo, RawTableMeta, TableIdent, TableType};
@@ -194,7 +194,8 @@ pub mod test_data {
     pub(crate) fn new_ddl_context(datanode_manager: DatanodeManagerRef) -> DdlContext {
         let kv_backend = Arc::new(MemoryKvBackend::new());
 
-        let mailbox_sequence = Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
+        let mailbox_sequence =
+            SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone()).build();
         let mailbox = HeartbeatMailbox::create(Pushers::default(), mailbox_sequence);
 
         DdlContext {

@@ -23,6 +23,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::peer::Peer;
+use crate::wal::WalOptions;
 use crate::DatanodeId;
 
 #[derive(Snafu)]
@@ -45,6 +46,12 @@ pub enum Error {
 
     #[snafu(display("Invalid result with a txn response: {}", err_msg))]
     InvalidTxnResult { err_msg: String, location: Location },
+
+    #[snafu(display("Invalid engine type: {}", engine_type))]
+    InvalidEngineType {
+        engine_type: String,
+        location: Location,
+    },
 
     #[snafu(display("Failed to connect to Etcd"))]
     ConnectEtcd {
@@ -278,6 +285,17 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display(
+        "Failed to encode a wal options to json string, wal_options: {:?}",
+        wal_options
+    ))]
+    EncodeWalOptionsToJson {
+        wal_options: WalOptions,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -312,7 +330,8 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. }
-            | RegionOperatingRace { .. } => StatusCode::Unexpected,
+            | RegionOperatingRace { .. }
+            | EncodeWalOptionsToJson { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -322,7 +341,9 @@ impl ErrorExt for Error {
             | RenameTable { .. }
             | Unsupported { .. } => StatusCode::Internal,
 
-            PrimaryKeyNotFound { .. } | &EmptyKey { .. } => StatusCode::InvalidArguments,
+            PrimaryKeyNotFound { .. } | EmptyKey { .. } | InvalidEngineType { .. } => {
+                StatusCode::InvalidArguments
+            }
 
             TableNotFound { .. } => StatusCode::TableNotFound,
             TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,

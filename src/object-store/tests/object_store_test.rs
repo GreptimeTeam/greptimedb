@@ -74,7 +74,7 @@ async fn test_object_list(store: &ObjectStore) -> Result<()> {
     // Only o2 is exists
     let entries = store.list("/").await?;
     assert_eq!(1, entries.len());
-    assert_eq!(p2, entries.get(0).unwrap().path());
+    assert_eq!(p2, entries.first().unwrap().path());
 
     let content = store.read(p2).await?;
     assert_eq!("Hello, object2!", String::from_utf8(content)?);

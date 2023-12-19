@@ -12,11 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
 use common_telemetry::tracing_context::W3cTrace;
-use store_api::storage::TableId;
+use store_api::storage::{RegionNumber, TableId};
 use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
@@ -54,6 +55,17 @@ pub struct TableMetadataAllocatorContext {
     pub cluster_id: u64,
 }
 
+/// Metadata allocated to a table.
+pub struct TableMetadata {
+    /// Table id.
+    pub table_id: TableId,
+    /// Route information for each region of the table.
+    pub region_routes: Vec<RegionRoute>,
+    /// The encoded wal options for regions of the table.
+    // If a region does not have an associated wal options, no key for the region would be found in the map.
+    pub region_wal_options: HashMap<RegionNumber, String>,
+}
+
 #[async_trait::async_trait]
 pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
@@ -61,7 +73,7 @@ pub trait TableMetadataAllocator: Send + Sync {
         ctx: &TableMetadataAllocatorContext,
         table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> Result<(TableId, Vec<RegionRoute>)>;
+    ) -> Result<TableMetadata>;
 }
 
 pub type TableMetadataAllocatorRef = Arc<dyn TableMetadataAllocator>;

@@ -76,6 +76,8 @@ impl OpenCandidateRegion {
 
         let engine = table_info.meta.engine.clone();
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options = HashMap::new();
 
         let open_instruction = Instruction::OpenRegion(OpenRegion::new(
             RegionIdent {
@@ -87,6 +89,7 @@ impl OpenCandidateRegion {
             },
             &region_storage_path,
             region_options,
+            region_wal_options,
         ));
 
         Ok(open_instruction)
@@ -210,7 +213,8 @@ mod tests {
                 engine: MITO2_ENGINE.to_string(),
             },
             region_storage_path: "/bar/foo/region/".to_string(),
-            options: Default::default(),
+            region_options: Default::default(),
+            region_wal_options: Default::default(),
         })
     }
 
@@ -403,7 +407,7 @@ mod tests {
         }];
 
         env.table_metadata_manager()
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 

@@ -16,18 +16,21 @@ use std::sync::Arc;
 
 use cmd::options::MixOptions;
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::sequence::SequenceBuilder;
+use common_meta::wal::build_wal_options_allocator;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataCreator;
+use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -109,13 +112,29 @@ impl GreptimeDbStandaloneBuilder {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
+        let table_id_sequence = Arc::new(
+            SequenceBuilder::new("table_id", kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
+        let wal_options_allocator =
+            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
+                .await
+                .unwrap();
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator,
+        ));
+
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(
                 procedure_manager.clone(),
                 datanode_manager.clone(),
                 Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
-                Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone())),
+                table_meta_allocator,
                 Arc::new(MemoryRegionKeeper::default()),
             )
             .unwrap(),

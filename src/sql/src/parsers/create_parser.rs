@@ -783,7 +783,7 @@ fn ensure_value_lists_strictly_increased<'a>(
 /// Ensure that value list's length matches the column list.
 fn ensure_value_list_len_matches_columns(
     partitions: &Partitions,
-    partition_columns: &Vec<&ColumnDef>,
+    partition_columns: &[&ColumnDef],
 ) -> Result<()> {
     for entry in partitions.entries.iter() {
         ensure!(

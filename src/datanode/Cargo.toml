@@ -12,7 +12,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 axum = "0.6"
 axum-macros = "0.3"
-bytes = "1.1"
+bytes.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
@@ -45,6 +45,7 @@ hyper = { version = "0.14", features = ["full"] }
 lazy_static.workspace = true
 log-store.workspace = true
 meta-client.workspace = true
+metric-engine.workspace = true
 mito2.workspace = true
 object-store.workspace = true
 pin-project = "1.0"

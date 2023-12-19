@@ -17,7 +17,9 @@ use std::{fs, path};
 
 use async_trait::async_trait;
 use clap::Parser;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
+use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -25,6 +27,8 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::sequence::SequenceBuilder;
+use common_meta::wal::build_wal_options_allocator;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -33,7 +37,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataCreator;
+use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
@@ -46,7 +50,7 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
     ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
@@ -364,8 +368,22 @@ impl StartCommand {
 
         let datanode_manager = Arc::new(StandaloneDatanodeManager(datanode.region_server()));
 
-        let table_meta_allocator =
-            Arc::new(StandaloneTableMetadataCreator::new(kv_backend.clone()));
+        let table_id_sequence = Arc::new(
+            SequenceBuilder::new("table_id", kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        );
+        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
+        let wal_options_allocator =
+            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
+                .await
+                .map_err(BoxedError::new)
+                .context(OtherSnafu)?;
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator,
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),

@@ -13,7 +13,7 @@ protobuf-build = { version = "0.15", default-features = false, features = [
 async-stream.workspace = true
 async-trait.workspace = true
 byteorder = "1.4"
-bytes = "1.1"
+bytes.workspace = true
 common-base.workspace = true
 common-config.workspace = true
 common-error.workspace = true

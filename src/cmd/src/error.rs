@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use config::ConfigError;
@@ -231,6 +231,12 @@ pub enum Error {
         #[snafu(source)]
         error: std::io::Error,
     },
+
+    #[snafu(display("Other error"))]
+    Other {
+        source: BoxedError,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -276,6 +282,8 @@ impl ErrorExt for Error {
             Error::StartCatalogManager { source, .. } => source.status_code(),
 
             Error::SerdeJson { .. } | Error::FileIo { .. } => StatusCode::Unexpected,
+
+            Error::Other { source, .. } => source.status_code(),
         }
     }
 

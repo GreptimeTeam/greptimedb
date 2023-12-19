@@ -634,6 +634,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a860072022177f903e59730004fb5dc13db9275b79bb2aef7ba8ce831956c233"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atoi"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1198,6 +1211,7 @@ dependencies = [
  "object-store",
  "parking_lot 0.12.1",
  "partition",
+ "paste",
  "prometheus",
  "regex",
  "serde",
@@ -1546,6 +1560,7 @@ dependencies = [
  "servers",
  "session",
  "snafu",
+ "store-api",
  "substrait 0.4.4",
  "table",
  "temp-env",
@@ -1823,11 +1838,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serde_with",
  "snafu",
  "store-api",
  "strum 0.25.0",
  "table",
  "tokio",
+ "toml 0.7.8",
  "tonic 0.10.2",
 ]
 
@@ -2648,6 +2665,7 @@ dependencies = [
  "lazy_static",
  "log-store",
  "meta-client",
+ "metric-engine",
  "mito2",
  "object-store",
  "pin-project",
@@ -3604,7 +3622,7 @@ checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b1d403088f02136bcebde53d604f491c260ca8e2#b1d403088f02136bcebde53d604f491c260ca8e2"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a31ea166fc015ea7ff111ac94e26c3a5d64364d2#a31ea166fc015ea7ff111ac94e26c3a5d64364d2"
 dependencies = [
  "prost 0.12.2",
  "serde",
@@ -3974,15 +3992,20 @@ name = "index"
 version = "0.4.4"
 dependencies = [
  "async-trait",
+ "asynchronous-codec",
  "bytemuck",
+ "bytes",
  "common-base",
  "common-error",
  "common-macro",
+ "common-telemetry",
  "fst",
  "futures",
  "greptime-proto",
  "mockall",
+ "pin-project",
  "prost 0.12.2",
+ "rand",
  "regex",
  "regex-automata 0.1.10",
  "snafu",
@@ -4892,7 +4915,6 @@ dependencies = [
  "aquamarine",
  "arc-swap",
  "async-channel",
- "async-compat",
  "async-stream",
  "async-trait",
  "bytes",
@@ -5480,8 +5502,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6b6a785aafb26a97c26078b9457e96cb238b386781583783a3a3d3de47fa841"
+source = "git+https://github.com/MichaelScofield/opensrv.git?rev=1676c1d#1676c1d166cf33e7745e1b5db54b3fe2b7defec9"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -5627,7 +5648,6 @@ name = "operator"
 version = "0.4.4"
 dependencies = [
  "api",
- "async-compat",
  "async-trait",
  "auth",
  "catalog",

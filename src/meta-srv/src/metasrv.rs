@@ -26,7 +26,7 @@ use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::region_keeper::MemoryRegionKeeperRef;
-use common_meta::sequence::SequenceRef;
+use common_meta::wal::WalConfig;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
@@ -71,6 +71,7 @@ pub struct MetaSrvOptions {
     pub datanode: DatanodeOptions,
     pub enable_telemetry: bool,
     pub data_home: String,
+    pub wal: WalConfig,
 }
 
 impl Default for MetaSrvOptions {
@@ -95,6 +96,7 @@ impl Default for MetaSrvOptions {
             datanode: DatanodeOptions::default(),
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
+            wal: WalConfig::default(),
         }
     }
 }
@@ -223,7 +225,6 @@ pub struct MetaSrv {
     in_memory: ResettableKvBackendRef,
     kv_backend: KvBackendRef,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
-    table_id_sequence: SequenceRef,
     meta_peer_client: MetaPeerClientRef,
     selector: SelectorRef,
     handler_group: HeartbeatHandlerGroup,
@@ -358,10 +359,6 @@ impl MetaSrv {
 
     pub fn meta_peer_client(&self) -> &MetaPeerClientRef {
         &self.meta_peer_client
-    }
-
-    pub fn table_id_sequence(&self) -> &SequenceRef {
-        &self.table_id_sequence
     }
 
     pub fn selector(&self) -> &SelectorRef {

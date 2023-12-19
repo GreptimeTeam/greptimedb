@@ -19,7 +19,7 @@ auth.workspace = true
 axum = { version = "0.6", features = ["headers"] }
 axum-macros = "0.3.8"
 base64.workspace = true
-bytes = "1.2"
+bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
@@ -54,7 +54,8 @@ lazy_static.workspace = true
 mime_guess = "2.0"
 once_cell.workspace = true
 openmetrics-parser = "0.4"
-opensrv-mysql = "0.6"
+# TODO(LFC): Wait for https://github.com/datafuselabs/opensrv/pull/60
+opensrv-mysql = { git = "https://github.com/MichaelScofield/opensrv.git", rev = "1676c1d" }
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
 pgwire = "0.17"

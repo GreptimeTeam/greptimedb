@@ -150,6 +150,16 @@ pub enum Error {
         error: fst::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to perform IO operation"))]
+    CommonIoError {
+        #[snafu(source)]
+        error: IoError,
+        location: Location,
+    },
+
+    #[snafu(display("Unknown intermediate codec magic: {magic:?}"))]
+    UnknownIntermediateCodecMagic { magic: [u8; 4], location: Location },
 }
 
 impl ErrorExt for Error {
@@ -168,6 +178,8 @@ impl ErrorExt for Error {
             | DecodeProto { .. }
             | DecodeFst { .. }
             | KeysApplierUnexpectedPredicates { .. }
+            | CommonIoError { .. }
+            | UnknownIntermediateCodecMagic { .. }
             | FstCompile { .. } => StatusCode::Unexpected,
 
             ParseRegex { .. }

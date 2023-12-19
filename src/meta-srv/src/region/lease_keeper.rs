@@ -291,7 +291,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, vec![region_route.clone()])
+            .create_table_metadata(table_info, vec![region_route.clone()], HashMap::default())
             .await
             .unwrap();
 
@@ -378,7 +378,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, vec![region_route.clone()])
+            .create_table_metadata(table_info, vec![region_route.clone()], HashMap::default())
             .await
             .unwrap();
 
