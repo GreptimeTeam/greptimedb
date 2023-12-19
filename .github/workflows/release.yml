@@ -82,7 +82,7 @@ on:
 # Use env variables to control all the release process.
 env:
   # The arguments of building greptime.
-  RUST_TOOLCHAIN: nightly-2023-12-13
+  RUST_TOOLCHAIN: nightly-2023-12-19
   CARGO_PROFILE: nightly
 
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
