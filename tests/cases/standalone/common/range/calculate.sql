@@ -24,9 +24,9 @@ SELECT ts, host, 2 * min(val) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
 SELECT ts, host, min(val * 2) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, min(CAST(val as Float64)) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+SELECT ts, host, min(val::DOUBLE) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, min(floor(CAST(val as Float64))) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
+SELECT ts, host, min(floor(val::DOUBLE)) RANGE '5s' FROM host ALIGN '5s' ORDER BY host, ts;
 
 SELECT ts, host, floor(min(val) RANGE '5s') FROM host ALIGN '5s' ORDER BY host, ts;
 
@@ -34,10 +34,10 @@ SELECT ts, host, floor(min(val) RANGE '5s') FROM host ALIGN '5s' ORDER BY host, 
 
 SELECT ts, host, (min(val) + max(val)) RANGE '20s' + 1.0 FROM host ALIGN '10s' ORDER BY host, ts;
 
-SELECT ts, host, covar(ceil(CAST(val as Float64)), floor(CAST(val as Float64))) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
+SELECT ts, host, covar(ceil(val::DOUBLE), floor(val::DOUBLE)) RANGE '20s' FROM host ALIGN '10s' ORDER BY host, ts;
 
 SELECT ts, host, floor(cos(ceil(sin(min(val) RANGE '5s')))) FROM host ALIGN '5s' ORDER BY host, ts;
 
-SELECT ts, host, gcd(CAST(max(floor(CAST(val as Float64))) RANGE '10s' FILL PREV as INT64) * 4, max(val * 4) RANGE '10s' FILL PREV) * length(host) + 1 FROM host ALIGN '5s' ORDER BY host, ts;
+SELECT ts, host, gcd(CAST(max(floor(val::DOUBLE)) RANGE '10s' FILL PREV as INT64) * 4, max(val * 4) RANGE '10s' FILL PREV) * length(host) + 1 FROM host ALIGN '5s' ORDER BY host, ts;
 
 DROP TABLE host;
