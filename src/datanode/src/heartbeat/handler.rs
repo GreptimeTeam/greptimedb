@@ -64,6 +64,7 @@ impl RegionHeartbeatResponseHandler {
                         engine: region_ident.engine,
                         region_dir: region_dir(&region_storage_path, region_id),
                         options: region_options,
+                        skip_replay_wal: false,
                     });
                     let result = region_server.handle_request(region_id, request).await;
 

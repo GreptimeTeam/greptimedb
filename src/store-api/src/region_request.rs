@@ -116,6 +116,7 @@ impl RegionRequest {
                         engine: open.engine,
                         region_dir,
                         options: open.options,
+                        skip_replay_wal: false,
                     }),
                 )])
             }
@@ -197,6 +198,8 @@ pub struct RegionOpenRequest {
     pub region_dir: String,
     /// Options of the opened region.
     pub options: HashMap<String, String>,
+    /// To skip replaying the WAL.
+    pub skip_replay_wal: bool,
 }
 
 /// Close region request.

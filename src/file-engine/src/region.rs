@@ -163,6 +163,7 @@ mod tests {
             engine: "file".to_string(),
             region_dir,
             options: HashMap::default(),
+            skip_replay_wal: false,
         };
 
         let region = FileRegion::open(region_id, request, &object_store)
@@ -211,6 +212,7 @@ mod tests {
             engine: "file".to_string(),
             region_dir,
             options: HashMap::default(),
+            skip_replay_wal: false,
         };
         let err = FileRegion::open(region_id, request, &object_store)
             .await

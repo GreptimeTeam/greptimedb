@@ -54,6 +54,7 @@ pub(crate) struct RegionOpener {
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
     cache_manager: Option<CacheManagerRef>,
+    skip_replay_wal: bool,
 }
 
 impl RegionOpener {
@@ -74,6 +75,7 @@ impl RegionOpener {
             scheduler,
             options: HashMap::new(),
             cache_manager: None,
+            skip_replay_wal: false,
         }
     }
 
@@ -92,6 +94,11 @@ impl RegionOpener {
     /// Sets the cache manager for the region.
     pub(crate) fn cache(mut self, cache_manager: Option<CacheManagerRef>) -> Self {
         self.cache_manager = cache_manager;
+        self
+    }
+
+    pub(crate) fn skip_replay_wal(mut self, skip: bool) -> Self {
+        self.skip_replay_wal = skip;
         self
     }
 
@@ -235,7 +242,11 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        if !self.skip_replay_wal {
+            replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        } else {
+            info!("Skip to replay the WAL for region: {}", region_id);
+        }
 
         let region = MitoRegion {
             region_id: self.region_id,
