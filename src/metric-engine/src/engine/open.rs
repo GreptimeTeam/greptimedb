@@ -123,14 +123,14 @@ impl MetricEngineInner {
             .metadata_region
             .logical_regions(physical_region_id)
             .await?;
-        let physcial_columns = self
+        let physical_columns = self
             .data_region
             .physical_columns(physical_region_id)
             .await?;
 
         let mut state = self.state.write().await;
         // recover physical column names
-        let physical_column_names = physcial_columns
+        let physical_column_names = physical_columns
             .into_iter()
             .map(|col| col.column_schema.name)
             .collect();
