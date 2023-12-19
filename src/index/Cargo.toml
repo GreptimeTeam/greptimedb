@@ -12,15 +12,18 @@ bytes.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+common-telemetry.workspace = true
 fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 mockall.workspace = true
+pin-project.workspace = true
 prost.workspace = true
 regex-automata.workspace = true
 regex.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
