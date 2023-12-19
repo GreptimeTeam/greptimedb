@@ -43,7 +43,7 @@ async fn test_engine_open_empty() {
                 engine: String::new(),
                 region_dir: "empty".to_string(),
                 options: HashMap::default(),
-                skip_replay_wal: false,
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -75,7 +75,7 @@ async fn test_engine_open_existing() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
-                skip_replay_wal: false,
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -164,7 +164,7 @@ async fn test_engine_region_open_with_options() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
-                skip_replay_wal: false,
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -209,7 +209,7 @@ async fn test_engine_region_open_with_custom_store() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
-                skip_replay_wal: false,
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -232,7 +232,7 @@ async fn test_engine_region_open_with_custom_store() {
 }
 
 #[tokio::test]
-async fn test_open_region_skip_replay_wal() {
+async fn test_open_region_skip_wal_replay() {
     let mut env = TestEnv::new();
     let engine = env.create_engine(MitoConfig::default()).await;
 
@@ -261,7 +261,7 @@ async fn test_open_region_skip_replay_wal() {
     put_rows(&engine, region_id, rows).await;
 
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
-    // Skip to replay the WAL.
+    // Skip the WAL replay .
     engine
         .handle_request(
             region_id,
@@ -269,7 +269,7 @@ async fn test_open_region_skip_replay_wal() {
                 engine: String::new(),
                 region_dir: region_dir.to_string(),
                 options: Default::default(),
-                skip_replay_wal: true,
+                skip_wal_replay: true,
             }),
         )
         .await
@@ -298,7 +298,7 @@ async fn test_open_region_skip_replay_wal() {
                 engine: String::new(),
                 region_dir,
                 options: Default::default(),
-                skip_replay_wal: false,
+                skip_wal_replay: false,
             }),
         )
         .await
