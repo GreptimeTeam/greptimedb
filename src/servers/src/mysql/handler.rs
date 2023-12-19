@@ -24,7 +24,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_telemetry::{error, logging, tracing, warn};
+use common_telemetry::{debug, error, logging, tracing, warn};
 use datatypes::prelude::ConcreteDataType;
 use itertools::Itertools;
 use opensrv_mysql::{
@@ -418,6 +418,15 @@ fn replace_params_with_values(
     params: &[ParamValue],
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
+
+    debug!(
+        "replace_params_with_values(param_types: {:#?}, params: {:#?})",
+        param_types,
+        params
+            .iter()
+            .map(|x| format!("({:?}, {:?})", x.value, x.coltype))
+            .join(", ")
+    );
 
     let mut values = Vec::with_capacity(params.len());
 
