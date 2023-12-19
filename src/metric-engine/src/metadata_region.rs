@@ -157,6 +157,24 @@ impl MetadataRegion {
 
         Ok(columns)
     }
+
+    pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        let region_prefix = "__region_".to_string();
+
+        let mut regions = vec![];
+        for (k, _) in self.get_all(metadata_region_id).await? {
+            if !k.starts_with(&region_prefix) {
+                continue;
+            }
+            // Safety: we have checked the prefix
+            let region_id = Self::parse_region_key(&k).unwrap();
+            let region_id = region_id.parse::<u64>().unwrap().into();
+            regions.push(region_id);
+        }
+
+        Ok(regions)
+    }
 }
 
 // utils to concat and parse key/value

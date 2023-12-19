@@ -13,7 +13,9 @@
 // limitations under the License.
 
 mod alter;
+mod close;
 mod create;
+mod open;
 mod put;
 mod read;
 mod region_metadata;
@@ -122,8 +124,8 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Delete(_) => todo!(),
             RegionRequest::Create(create) => self.inner.create_region(region_id, create).await,
             RegionRequest::Drop(_) => todo!(),
-            RegionRequest::Open(_) => todo!(),
-            RegionRequest::Close(_) => todo!(),
+            RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => self.inner.alter_region(region_id, alter).await,
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
@@ -157,11 +159,14 @@ impl RegionEngine for MetricEngine {
 
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError> {
-        todo!()
+        // don't need to stop the underlying mito engine
+        Ok(())
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
-        todo!()
+        // ignore the region not found error
+        let _ = self.inner.mito.set_writable(region_id, writable);
+        Ok(())
     }
 
     async fn set_readonly_gracefully(
