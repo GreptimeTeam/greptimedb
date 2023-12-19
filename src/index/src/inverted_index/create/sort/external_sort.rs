@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_base::BitVec;
+use common_telemetry::logging;
 use futures::stream;
 
 use crate::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
@@ -63,12 +64,6 @@ pub struct ExternalSorter {
 
 #[async_trait]
 impl Sorter for ExternalSorter {
-    /// Pushes a value into the sorter, adding it to the in-memory buffer and dumping the buffer to
-    /// an external file if necessary
-    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
-        self.push_n(value, 1).await
-    }
-
     /// Pushes n identical values into the sorter, adding them to the in-memory buffer and dumping
     /// the buffer to an external file if necessary
     async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
@@ -178,17 +173,20 @@ impl ExternalSorter {
             return Ok(());
         }
 
-        let values = mem::take(&mut self.values_buffer);
         let file_id = &format!("{:012}", self.total_row_count);
+        let index_name = &self.index_name;
+        let writer = self.temp_file_provider.create(index_name, file_id).await?;
 
-        let writer = self
-            .temp_file_provider
-            .create(&self.index_name, file_id)
-            .await?;
-        IntermediateWriter::new(writer).write_all(values).await?;
-
+        let memory_usage = self.current_memory_usage;
+        let values = mem::take(&mut self.values_buffer);
         self.current_memory_usage = 0;
-        Ok(())
+
+        let entries = values.len();
+        IntermediateWriter::new(writer).write_all(values).await.inspect(|_|
+            logging::debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
+        ).inspect_err(|e|
+            logging::error!("Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}. Error: {e}")
+        )
     }
 
     /// Determines the segment index range for the row index range

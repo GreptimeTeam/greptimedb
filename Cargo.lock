@@ -3980,6 +3980,7 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-telemetry",
  "fst",
  "futures",
  "greptime-proto",

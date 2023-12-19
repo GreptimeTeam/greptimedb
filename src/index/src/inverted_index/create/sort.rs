@@ -44,16 +44,13 @@ pub struct SortOutput {
 pub trait Sorter: Send {
     /// Inputs a non-null or null value into the sorter.
     /// Should be equivalent to calling `push_n` with n = 1
-    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()>;
+    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
+        self.push_n(value, 1).await
+    }
 
     /// Pushing n identical non-null or null values into the sorter.
     /// Should be equivalent to calling `push` n times
-    async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
-        for _ in 0..n {
-            self.push(value).await?;
-        }
-        Ok(())
-    }
+    async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()>;
 
     /// Completes the sorting process and returns the sorted data
     async fn output(&mut self) -> Result<SortOutput>;
