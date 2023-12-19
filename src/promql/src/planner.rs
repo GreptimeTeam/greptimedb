@@ -419,7 +419,7 @@ impl PromPlanner {
                         .time_index_column
                         .clone()
                         .expect("time index should be set in `setup_context`"),
-                    self.ctx.field_columns.get(0).cloned(),
+                    self.ctx.field_columns.first().cloned(),
                     normalize,
                 );
                 LogicalPlan::Extension(Extension {

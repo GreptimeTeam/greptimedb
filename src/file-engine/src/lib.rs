@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(result_option_inspect)]
 
 pub mod config;
 pub mod engine;

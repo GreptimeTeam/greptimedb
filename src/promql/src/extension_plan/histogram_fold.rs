@@ -624,7 +624,9 @@ impl HistogramFoldStream {
                 ))
             })?;
         for (i, v) in le_as_f64_array.iter().enumerate() {
-            if let Some(v) = v && v == f64::INFINITY {
+            if let Some(v) = v
+                && v == f64::INFINITY
+            {
                 return Ok(i);
             }
         }

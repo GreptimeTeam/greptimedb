@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(assert_matches)]
-#![feature(trait_upcasting)]
 
 pub mod alive_keeper;
 pub mod config;

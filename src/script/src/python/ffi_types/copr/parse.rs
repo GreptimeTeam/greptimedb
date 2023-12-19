@@ -272,7 +272,7 @@ fn parse_keywords(keywords: &Vec<ast::Keyword<()>>) -> Result<DecoratorArgs> {
                 "Expect between {len_min} and {len_max} keyword argument, found {}.",
                 keywords.len()
             ),
-            loc: keywords.get(0).map(|s| s.location)
+            loc: keywords.first().map(|s| s.location)
         }
     );
     let mut ret_args = DecoratorArgs::default();

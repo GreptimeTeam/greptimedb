@@ -29,7 +29,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RUST_TOOLCHAIN: nightly-2023-10-21
+  RUST_TOOLCHAIN: nightly-2023-12-19
 
 jobs:
   typos:
