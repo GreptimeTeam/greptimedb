@@ -29,9 +29,27 @@ pub trait InvertedIndexCreator {
     /// - `index_name`: Identifier for the index being built
     /// - `value`: The data to be indexed, or `None` for a null entry
     ///
-    /// Note: Caller should call this method for each row in the dataset
-    async fn push_with_name(&mut self, index_name: &str, value: Option<BytesRef<'_>>)
-        -> Result<()>;
+    /// It should be equivalent to calling `push_with_name_n` with `n = 1`
+    async fn push_with_name(
+        &mut self,
+        index_name: &str,
+        value: Option<BytesRef<'_>>,
+    ) -> Result<()> {
+        self.push_with_name_n(index_name, value, 1).await
+    }
+
+    /// Adds `n` identical values to the named index. `None` values represent absence of data (null)
+    ///
+    /// - `index_name`: Identifier for the index being built
+    /// - `value`: The data to be indexed, or `None` for a null entry
+    ///
+    /// It should be equivalent to calling `push_with_name` `n` times
+    async fn push_with_name_n(
+        &mut self,
+        index_name: &str,
+        value: Option<BytesRef<'_>>,
+        n: usize,
+    ) -> Result<()>;
 
     /// Finalizes the index creation process, ensuring all data is properly indexed and stored
     /// in the provided writer

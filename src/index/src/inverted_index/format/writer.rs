@@ -25,6 +25,8 @@ use crate::inverted_index::error::Result;
 pub use crate::inverted_index::format::writer::blob::InvertedIndexBlobWriter;
 use crate::inverted_index::Bytes;
 
+pub type ValueStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
+
 /// Trait for writing inverted index data to underlying storage.
 #[mockall::automock]
 #[async_trait]
@@ -39,7 +41,7 @@ pub trait InvertedIndexWriter: Send {
         &mut self,
         name: String,
         null_bitmap: BitVec,
-        values: Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>,
+        values: ValueStream,
     ) -> Result<()>;
 
     /// Finalizes the index writing process, ensuring all data is written.

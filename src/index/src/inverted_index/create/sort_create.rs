@@ -45,19 +45,23 @@ pub struct SortIndexCreator {
 
 #[async_trait]
 impl InvertedIndexCreator for SortIndexCreator {
-    /// Inserts a value or null into the sorter for the specified index
-    async fn push_with_name(
+    /// Inserts `n` values or nulls into the sorter for the specified index.
+    ///
+    /// If the index does not exist, a new index is created even if `n` is 0.
+    /// Caller may leverage this behavior to create indexes with no data.
+    async fn push_with_name_n(
         &mut self,
         index_name: &str,
         value: Option<BytesRef<'_>>,
+        n: usize,
     ) -> Result<()> {
         match self.sorters.get_mut(index_name) {
-            Some(sorter) => sorter.push(value).await,
+            Some(sorter) => sorter.push_n(value, n).await,
             None => {
-                let mut sorter =
-                    (self.sorter_factory)(index_name.to_owned(), self.segment_row_count);
-                sorter.push(value).await?;
-                self.sorters.insert(index_name.to_owned(), sorter);
+                let index_name = index_name.to_string();
+                let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
+                sorter.push_n(value, n).await?;
+                self.sorters.insert(index_name, sorter);
                 Ok(())
             }
         }
@@ -117,12 +121,6 @@ mod tests {
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::MockInvertedIndexWriter;
     use crate::inverted_index::Bytes;
-
-    fn stream_to_values(stream: SortedStream) -> Vec<Bytes> {
-        futures::executor::block_on(async {
-            stream.map(|r| r.unwrap().0).collect::<Vec<Bytes>>().await
-        })
-    }
 
     #[tokio::test]
     async fn test_sort_index_creator_basic() {
@@ -209,6 +207,36 @@ mod tests {
         assert!(matches!(res, Err(Error::InconsistentRowCount { .. })));
     }
 
+    #[tokio::test]
+    async fn test_sort_index_creator_create_indexes_without_data() {
+        let mut creator =
+            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
+
+        creator.push_with_name_n("a", None, 0).await.unwrap();
+        creator.push_with_name_n("b", None, 0).await.unwrap();
+        creator.push_with_name_n("c", None, 0).await.unwrap();
+
+        let mut mock_writer = MockInvertedIndexWriter::new();
+        mock_writer
+            .expect_add_index()
+            .returning(|name, null_bitmap, stream| {
+                assert!(null_bitmap.is_empty());
+                assert!(matches!(name.as_str(), "a" | "b" | "c"));
+                assert!(stream_to_values(stream).is_empty());
+                Ok(())
+            });
+        mock_writer
+            .expect_finish()
+            .times(1)
+            .returning(|total_row_count, segment_row_count| {
+                assert_eq!(total_row_count, 0);
+                assert_eq!(segment_row_count.get(), 1);
+                Ok(())
+            });
+
+        creator.finish(&mut mock_writer).await.unwrap();
+    }
+
     fn set_bit(bit_vec: &mut BitVec, index: usize) {
         if index >= bit_vec.len() {
             bit_vec.resize(index + 1, false);
@@ -266,5 +294,11 @@ mod tests {
                 total_row_count: self.total_row_count,
             })
         }
+    }
+
+    fn stream_to_values(stream: SortedStream) -> Vec<Bytes> {
+        futures::executor::block_on(async {
+            stream.map(|r| r.unwrap().0).collect::<Vec<Bytes>>().await
+        })
     }
 }

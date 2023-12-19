@@ -16,15 +16,14 @@ use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use common_base::BitVec;
-use futures::{AsyncWrite, AsyncWriteExt, Stream};
+use futures::{AsyncWrite, AsyncWriteExt};
 use greptime_proto::v1::index::InvertedIndexMetas;
 use prost::Message;
 use snafu::ResultExt;
 
-use super::single::SingleIndexWriter;
 use crate::inverted_index::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
-use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::format::writer::single::SingleIndexWriter;
+use crate::inverted_index::format::writer::{InvertedIndexWriter, ValueStream};
 
 /// `InvertedIndexBlobWriter`, implemented [`InvertedIndexWriter`], manages
 /// writing of an inverted index to a blob storage.
@@ -45,7 +44,7 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
         &mut self,
         name: String,
         null_bitmap: BitVec,
-        values: Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>,
+        values: ValueStream,
     ) -> Result<()> {
         let single_writer = SingleIndexWriter::new(
             name.clone(),
@@ -105,6 +104,7 @@ mod tests {
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+    use crate::inverted_index::Bytes;
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)
