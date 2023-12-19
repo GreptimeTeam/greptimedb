@@ -94,7 +94,7 @@ mod tests {
         let expected_kafka_config = KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 32,
-            selector_type: KafkaTopicSelectorType::RoundRobinBased,
+            selector_type: KafkaTopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_kafka_wal".to_string(),
             num_partitions: 1,
             replication_factor: 3,

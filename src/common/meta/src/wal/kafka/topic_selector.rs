@@ -23,7 +23,7 @@ use crate::wal::kafka::topic::Topic;
 pub enum SelectorType {
     #[default]
     #[serde(rename = "round_robin")]
-    RoundRobinBased,
+    RoundRobin,
 }
 
 /// Controls topic selection.

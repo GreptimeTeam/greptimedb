@@ -31,7 +31,7 @@ impl TopicManager {
     /// Creates a new topic manager.
     pub fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
         let selector = match config.selector_type {
-            SelectorType::RoundRobinBased => RoundRobinTopicSelector::new(),
+            SelectorType::RoundRobin => RoundRobinTopicSelector::new(),
         };
 
         Self {
