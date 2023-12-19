@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(iter_partition_in_place)]
-#![feature(result_option_inspect)]
 // TODO(zhongzc): remove once further code is added
 #![allow(dead_code)]
 
