@@ -308,7 +308,7 @@ mod tests {
         let _ = kv_map.get(&stat_key).unwrap();
 
         let stat_val = kv_map.get(&stat_key).unwrap();
-        let stat = stat_val.stats.get(0).unwrap();
+        let stat = stat_val.stats.first().unwrap();
 
         assert_eq!(0, stat.cluster_id);
         assert_eq!(100, stat.id);

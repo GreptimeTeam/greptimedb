@@ -214,6 +214,13 @@ pub enum Error {
         error: snap::Error,
     },
 
+    #[snafu(display("Failed to compress prometheus remote request"))]
+    CompressPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: snap::Error,
+    },
+
     #[snafu(display("Invalid prometheus remote request, msg: {}", msg))]
     InvalidPromRemoteRequest { msg: String, location: Location },
 
@@ -444,6 +451,7 @@ impl ErrorExt for Error {
             | InvalidOpentsdbJsonRequest { .. }
             | DecodePromRemoteRequest { .. }
             | DecodeOtlpRequest { .. }
+            | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }

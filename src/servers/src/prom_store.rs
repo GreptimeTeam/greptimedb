@@ -370,7 +370,7 @@ pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = Encoder::new();
     encoder
         .compress_vec(buf)
-        .context(error::DecompressPromRemoteRequestSnafu)
+        .context(error::CompressPromRemoteRequestSnafu)
 }
 
 /// Mock timeseries for test, it is both used in servers and frontend crate

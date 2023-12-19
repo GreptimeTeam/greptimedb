@@ -107,12 +107,9 @@ function deploy_greptimedb_cluster_with_s3_storage() {
     --set storage.s3.bucket="$AWS_CI_TEST_BUCKET" \
     --set storage.s3.region="$AWS_REGION" \
     --set storage.s3.root="$DATA_ROOT" \
-    --set storage.s3.secretName=s3-credentials \
     --set storage.credentials.secretName=s3-credentials \
-    --set storage.credentials.secretCreation.enabled=true \
-    --set storage.credentials.secretCreation.enableEncryption=false \
-    --set storage.credentials.secretCreation.data.access-key-id="$AWS_ACCESS_KEY_ID" \
-    --set storage.credentials.secretCreation.data.secret-access-key="$AWS_SECRET_ACCESS_KEY"
+    --set storage.credentials.accessKeyId="$AWS_ACCESS_KEY_ID" \
+    --set storage.credentials.secretAccessKey="$AWS_SECRET_ACCESS_KEY"
 
   # Wait for greptimedb cluster to be ready.
   while true; do

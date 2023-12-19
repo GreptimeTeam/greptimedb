@@ -360,7 +360,9 @@ impl InstantManipulateStream {
                 let curr = ts_column.value(cursor);
                 match curr.cmp(&expected_ts) {
                     Ordering::Equal => {
-                        if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+                        if let Some(field_column) = &field_column
+                            && field_column.value(cursor).is_nan()
+                        {
                             // ignore the NaN value
                         } else {
                             take_indices.push(cursor as u64);
@@ -393,7 +395,8 @@ impl InstantManipulateStream {
                     if prev_ts + self.lookback_delta >= expected_ts {
                         // only use the point in the time range
                         if let Some(field_column) = &field_column
-                            && field_column.value(prev_cursor).is_nan() {
+                            && field_column.value(prev_cursor).is_nan()
+                        {
                             // if the newest value is NaN, it means the value is stale, so we should not use it
                             continue;
                         }
@@ -402,7 +405,9 @@ impl InstantManipulateStream {
                         aligned_ts.push(expected_ts);
                     }
                 }
-            } else if let Some(field_column) = &field_column && field_column.value(cursor).is_nan() {
+            } else if let Some(field_column) = &field_column
+                && field_column.value(cursor).is_nan()
+            {
                 // if the newest value is NaN, it means the value is stale, so we should not use it
             } else {
                 // use this point

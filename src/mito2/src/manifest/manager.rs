@@ -269,8 +269,10 @@ impl RegionManifestManagerInner {
         };
 
         // apply actions from storage
-        let mut action_iter = store.scan(version, MAX_VERSION).await?;
-        while let Some((manifest_version, raw_action_list)) = action_iter.next_log().await? {
+        let manifests = store.scan(version, MAX_VERSION).await?;
+        let manifests = store.fetch_manifests(&manifests).await?;
+
+        for (manifest_version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
             // set manifest size after last checkpoint
             store.set_delta_file_size(manifest_version, raw_action_list.len() as u64);
@@ -402,10 +404,13 @@ impl RegionManifestManagerInner {
             return Ok(None);
         }
 
-        let mut iter = self.store.scan(start_version, end_version).await?;
+        let manifests = self.store.scan(start_version, end_version).await?;
         let mut last_version = start_version;
         let mut compacted_actions = 0;
-        while let Some((version, raw_action_list)) = iter.next_log().await? {
+
+        let manifests = self.store.fetch_manifests(&manifests).await?;
+
+        for (version, raw_action_list) in manifests {
             let action_list = RegionMetaActionList::decode(&raw_action_list)?;
             for action in action_list.actions {
                 match action {

@@ -158,17 +158,19 @@ impl PlanRewriter {
             }
             Commutativity::ConditionalCommutative(transformer) => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan) {
+                    && let Some(plan) = transformer(plan)
+                {
                     self.stage.push(plan)
                 }
-            },
+            }
             Commutativity::TransformedCommutative(transformer) => {
                 if let Some(transformer) = transformer
-                    && let Some(plan) = transformer(plan) {
+                    && let Some(plan) = transformer(plan)
+                {
                     self.stage.push(plan)
                 }
-            },
-            | Commutativity::NonCommutative
+            }
+            Commutativity::NonCommutative
             | Commutativity::Unimplemented
             | Commutativity::Unsupported => {
                 return true;
