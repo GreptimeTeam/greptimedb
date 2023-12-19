@@ -91,11 +91,12 @@ impl Display for OpenRegion {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
-    pub options: HashMap<String, String>,
+    pub region_options: HashMap<String, String>,
+    #[serde(default)]
     pub region_wal_options: HashMap<String, String>,
 }
 
@@ -103,13 +104,13 @@ impl OpenRegion {
     pub fn new(
         region_ident: RegionIdent,
         path: &str,
-        options: HashMap<String, String>,
+        region_options: HashMap<String, String>,
         region_wal_options: HashMap<String, String>,
     ) -> Self {
         Self {
             region_ident,
             region_storage_path: path.to_string(),
-            options,
+            region_options,
             region_wal_options,
         }
     }
@@ -231,7 +232,7 @@ mod tests {
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","options":{},"region_wal_options":{}}}"#,
+            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{}}}"#,
             serialized
         );
 
@@ -249,5 +250,46 @@ mod tests {
             r#"{"CloseRegion":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"}}"#,
             serialized
         );
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct LegacyOpenRegion {
+        pub region_ident: RegionIdent,
+        pub region_storage_path: String,
+        pub region_options: HashMap<String, String>,
+    }
+
+    #[test]
+    fn test_compatible_serialize_open_region() {
+        let region_ident = RegionIdent {
+            cluster_id: 1,
+            datanode_id: 2,
+            table_id: 1024,
+            region_number: 1,
+            engine: "mito2".to_string(),
+        };
+        let region_storage_path = "test/foo".to_string();
+        let region_options = HashMap::from([
+            ("a".to_string(), "aa".to_string()),
+            ("b".to_string(), "bb".to_string()),
+        ]);
+
+        // Serialize a legacy OpenRegion.
+        let legacy_open_region = LegacyOpenRegion {
+            region_ident: region_ident.clone(),
+            region_storage_path: region_storage_path.clone(),
+            region_options: region_options.clone(),
+        };
+        let serialized = serde_json::to_string(&legacy_open_region).unwrap();
+
+        // Deserialize to OpenRegion.
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        let expected = OpenRegion {
+            region_ident: region_ident.clone(),
+            region_storage_path: region_storage_path.clone(),
+            region_options: region_options.clone(),
+            region_wal_options: HashMap::new(),
+        };
+        assert_eq!(expected, deserialized);
     }
 }
