@@ -16,9 +16,9 @@ mod codec_v1;
 
 use std::collections::BTreeMap;
 
+use asynchronous_codec::{FramedRead, FramedWrite};
 use common_base::BitVec;
 use futures::{stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
-use futures_codec::{FramedRead, FramedWrite};
 use snafu::ResultExt;
 
 use crate::inverted_index::create::sort::SortedStream;

@@ -119,7 +119,7 @@ impl WriteRequest {
         let row_size = self
             .rows
             .rows
-            .get(0)
+            .first()
             .map(|row| row.encoded_len())
             .unwrap_or(0);
         row_size * self.rows.rows.len()

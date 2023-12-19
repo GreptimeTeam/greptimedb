@@ -38,3 +38,19 @@ order by table_schema, table_name;
 use public;
 
 drop schema my_db;
+
+use information_schema;
+
+-- test engines
+select * from engines;
+
+-- tables not implemented
+desc table COLUMN_PRIVILEGES;
+
+select * from COLUMN_PRIVILEGES;
+
+desc table COLUMN_STATISTICS;
+
+select * from COLUMN_STATISTICS;
+
+use public;

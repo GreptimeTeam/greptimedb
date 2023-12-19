@@ -14,9 +14,9 @@
 
 use std::io;
 
+use asynchronous_codec::{BytesMut, Decoder, Encoder};
 use bytes::{Buf, BufMut};
 use common_base::BitVec;
-use futures_codec::{BytesMut, Decoder, Encoder};
 use snafu::{location, Location};
 
 use crate::inverted_index::error::{Error, Result};
@@ -38,7 +38,7 @@ pub struct IntermediateCodecV1;
 
 /// [`FramedWrite`] requires the [`Encoder`] trait to be implemented.
 impl Encoder for IntermediateCodecV1 {
-    type Item = (Bytes, BitVec);
+    type Item<'a> = (Bytes, BitVec);
     type Error = Error;
 
     fn encode(&mut self, item: (Bytes, BitVec), dst: &mut BytesMut) -> Result<()> {

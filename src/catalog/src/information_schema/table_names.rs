@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use crate::data_type::{ConcreteDataType, DataType, DataTypeRef};
-pub use crate::scalars::{Scalar, ScalarRef, ScalarVector, ScalarVectorBuilder};
-pub use crate::type_id::LogicalTypeId;
-pub use crate::types::{LogicalPrimitiveType, WrapperType};
-pub use crate::value::{Value, ValueRef};
-pub use crate::vectors::{MutableVector, Validity, Vector, VectorRef};
+/// All table names in `information_schema`.
+
+pub const TABLES: &str = "tables";
+pub const COLUMNS: &str = "columns";
+pub const ENGINES: &str = "engines";
+pub const COLUMN_PRIVILEGES: &str = "column_privileges";
+pub const COLUMN_STATISTICS: &str = "column_statistics";

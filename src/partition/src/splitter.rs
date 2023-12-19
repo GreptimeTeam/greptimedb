@@ -202,7 +202,7 @@ mod tests {
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
-            let val = values.get(0).unwrap().clone();
+            let val = values.first().unwrap().clone();
             let val = match val {
                 Value::String(v) => v.as_utf8().to_string(),
                 _ => unreachable!(),
@@ -229,7 +229,7 @@ mod tests {
         }
 
         fn find_region(&self, values: &[Value]) -> Result<RegionNumber> {
-            let val = values.get(0).unwrap().clone();
+            let val = values.first().unwrap().clone();
             let val = match val {
                 Value::Null => 1,
                 _ => 0,

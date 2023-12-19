@@ -240,7 +240,7 @@ CREATE TABLE my_table (
     PARTITION r3 VALUES LESS THAN (MAXVALUE),
 )";
     let result = cluster.frontend.do_query(sql, QueryContext::arc()).await;
-    result.get(0).unwrap().as_ref().unwrap();
+    result.first().unwrap().as_ref().unwrap();
 
     let table = cluster
         .frontend

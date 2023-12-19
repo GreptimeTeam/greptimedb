@@ -19,7 +19,7 @@ auth.workspace = true
 axum = { version = "0.6", features = ["headers"] }
 axum-macros = "0.3.8"
 base64.workspace = true
-bytes = "1.2"
+bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true

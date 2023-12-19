@@ -16,8 +16,9 @@ use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
     CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
 };
-use api::v1::{ColumnDef, SemanticType};
+use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use async_trait::async_trait;
+use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -28,6 +29,7 @@ use common_telemetry::tracing_context::TracingContext;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
+use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
 use store_api::storage::RegionId;
 use strum::AsRefStr;
 use table::engine::TableReference;
@@ -35,7 +37,7 @@ use table::metadata::{RawTableInfo, TableId};
 
 use crate::ddl::utils::{handle_operate_region_error, handle_retry_error, region_storage_path};
 use crate::ddl::DdlContext;
-use crate::error::{self, Result};
+use crate::error::{self, Result, TableInfoNotFoundSnafu};
 use crate::key::table_name::TableNameKey;
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
@@ -122,7 +124,7 @@ impl CreateTableProcedure {
         Ok(Status::executing(true))
     }
 
-    pub fn create_region_request_template(&self) -> Result<PbCreateRegionRequest> {
+    pub fn new_region_request_builder(&self) -> Result<CreateRequestBuilder> {
         let create_table_expr = &self.creator.data.task.create_table;
 
         let column_defs = create_table_expr
@@ -172,14 +174,17 @@ impl CreateTableProcedure {
             })
             .collect::<Result<_>>()?;
 
-        Ok(PbCreateRegionRequest {
+        let template = PbCreateRegionRequest {
             region_id: 0,
             engine: create_table_expr.engine.to_string(),
             column_defs,
             primary_key,
             path: String::new(),
             options: create_table_expr.table_options.clone(),
-        })
+        };
+
+        let builder = CreateRequestBuilder::new_template(self.context.clone(), template);
+        Ok(builder)
     }
 
     pub async fn on_datanode_create_regions(&mut self) -> Result<Status> {
@@ -194,7 +199,7 @@ impl CreateTableProcedure {
         let schema = &create_table_expr.schema_name;
         let storage_path = region_storage_path(catalog, schema);
 
-        let request_template = self.create_region_request_template()?;
+        let mut request_builder = self.new_region_request_builder()?;
 
         let leaders = find_leaders(region_routes);
         let mut create_region_tasks = Vec::with_capacity(leaders.len());
@@ -203,17 +208,20 @@ impl CreateTableProcedure {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
 
             let regions = find_leader_regions(region_routes, &datanode);
-            let requests = regions
-                .iter()
-                .map(|region_number| {
-                    let region_id = RegionId::new(self.table_id(), *region_number);
+            let mut requests = Vec::with_capacity(regions.len());
+            for region_number in regions {
+                let region_id = RegionId::new(self.table_id(), region_number);
 
-                    let mut create_region_request = request_template.clone();
-                    create_region_request.region_id = region_id.as_u64();
-                    create_region_request.path = storage_path.clone();
-                    PbRegionRequest::Create(create_region_request)
-                })
-                .collect::<Vec<_>>();
+                let create_region_request = request_builder
+                    .build_one(
+                        &self.creator.data.task.create_table,
+                        region_id,
+                        storage_path.clone(),
+                    )
+                    .await?;
+
+                requests.push(PbRegionRequest::Create(create_region_request));
+            }
 
             for request in requests {
                 let request = RegionRequest {
@@ -369,5 +377,84 @@ pub struct CreateTableData {
 impl CreateTableData {
     fn table_ref(&self) -> TableReference<'_> {
         self.task.table_ref()
+    }
+}
+
+/// Builder for [PbCreateRegionRequest].
+pub struct CreateRequestBuilder {
+    context: DdlContext,
+    template: PbCreateRegionRequest,
+    /// Optional. Only for metric engine.
+    physical_table_id: Option<TableId>,
+}
+
+impl CreateRequestBuilder {
+    fn new_template(context: DdlContext, template: PbCreateRegionRequest) -> Self {
+        Self {
+            context,
+            template,
+            physical_table_id: None,
+        }
+    }
+
+    pub fn template(&self) -> &PbCreateRegionRequest {
+        &self.template
+    }
+
+    async fn build_one(
+        &mut self,
+        create_expr: &CreateTableExpr,
+        region_id: RegionId,
+        storage_path: String,
+    ) -> Result<PbCreateRegionRequest> {
+        let mut request = self.template.clone();
+
+        request.region_id = region_id.as_u64();
+        request.path = storage_path;
+
+        if self.template.engine == METRIC_ENGINE {
+            self.metric_engine_hook(create_expr, region_id, &mut request)
+                .await?;
+        }
+
+        Ok(request)
+    }
+
+    async fn metric_engine_hook(
+        &mut self,
+        create_expr: &CreateTableExpr,
+        region_id: RegionId,
+        request: &mut PbCreateRegionRequest,
+    ) -> Result<()> {
+        if let Some(physical_table_name) = request.options.get(LOGICAL_TABLE_METADATA_KEY) {
+            let table_id = if let Some(table_id) = self.physical_table_id {
+                table_id
+            } else {
+                let table_name_manager = self.context.table_metadata_manager.table_name_manager();
+                let table_name_key = TableNameKey::new(
+                    &create_expr.catalog_name,
+                    &create_expr.schema_name,
+                    physical_table_name,
+                );
+                let table_id = table_name_manager
+                    .get(table_name_key)
+                    .await?
+                    .context(TableInfoNotFoundSnafu {
+                        table_name: physical_table_name,
+                    })?
+                    .table_id();
+                self.physical_table_id = Some(table_id);
+                table_id
+            };
+            // Concat physical table's table id and corresponding region number to get
+            // the physical region id.
+            let physical_region_id = RegionId::new(table_id, region_id.region_number());
+            request.options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_region_id.as_u64().to_string(),
+            );
+        }
+
+        Ok(())
     }
 }

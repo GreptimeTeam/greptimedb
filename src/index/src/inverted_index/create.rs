@@ -19,7 +19,7 @@ use async_trait::async_trait;
 
 use crate::inverted_index::error::Result;
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::BytesRef;
 
 /// `InvertedIndexCreator` provides functionality to construct an inverted index
 #[async_trait]
@@ -30,7 +30,8 @@ pub trait InvertedIndexCreator {
     /// - `value`: The data to be indexed, or `None` for a null entry
     ///
     /// Note: Caller should call this method for each row in the dataset
-    async fn push_with_name(&mut self, index_name: &str, value: Option<Bytes>) -> Result<()>;
+    async fn push_with_name(&mut self, index_name: &str, value: Option<BytesRef<'_>>)
+        -> Result<()>;
 
     /// Finalizes the index creation process, ensuring all data is properly indexed and stored
     /// in the provided writer

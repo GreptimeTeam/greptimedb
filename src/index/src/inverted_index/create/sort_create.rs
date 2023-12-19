@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 
 use async_trait::async_trait;
 use snafu::ensure;
@@ -21,10 +22,10 @@ use crate::inverted_index::create::sort::{SortOutput, Sorter};
 use crate::inverted_index::create::InvertedIndexCreator;
 use crate::inverted_index::error::{InconsistentRowCountSnafu, Result};
 use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::BytesRef;
 
 type IndexName = String;
-type SegmentRowCount = usize;
+type SegmentRowCount = NonZeroUsize;
 
 /// Factory type to produce `Sorter` instances associated with an index name and segment row count
 pub type SorterFactory = Box<dyn Fn(IndexName, SegmentRowCount) -> Box<dyn Sorter> + Send>;
@@ -39,13 +40,17 @@ pub struct SortIndexCreator {
     sorters: HashMap<IndexName, Box<dyn Sorter>>,
 
     /// Number of rows in each segment, used to produce sorters
-    segment_row_count: usize,
+    segment_row_count: NonZeroUsize,
 }
 
 #[async_trait]
 impl InvertedIndexCreator for SortIndexCreator {
     /// Inserts a value or null into the sorter for the specified index
-    async fn push_with_name(&mut self, index_name: &str, value: Option<Bytes>) -> Result<()> {
+    async fn push_with_name(
+        &mut self,
+        index_name: &str,
+        value: Option<BytesRef<'_>>,
+    ) -> Result<()> {
         match self.sorters.get_mut(index_name) {
             Some(sorter) => sorter.push(value).await,
             None => {
@@ -60,16 +65,15 @@ impl InvertedIndexCreator for SortIndexCreator {
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
     async fn finish(&mut self, writer: &mut dyn InvertedIndexWriter) -> Result<()> {
-        let mut row_count = None;
-
+        let mut output_row_count = None;
         for (index_name, mut sorter) in self.sorters.drain() {
             let SortOutput {
-                null_bitmap,
+                segment_null_bitmap,
                 sorted_stream,
                 total_row_count,
             } = sorter.output().await?;
 
-            let expected_row_count = *row_count.get_or_insert(total_row_count);
+            let expected_row_count = *output_row_count.get_or_insert(total_row_count);
             ensure!(
                 expected_row_count == total_row_count,
                 InconsistentRowCountSnafu {
@@ -80,11 +84,11 @@ impl InvertedIndexCreator for SortIndexCreator {
             );
 
             writer
-                .add_index(index_name, null_bitmap, sorted_stream)
+                .add_index(index_name, segment_null_bitmap, sorted_stream)
                 .await?;
         }
 
-        let total_row_count = row_count.unwrap_or_default() as _;
+        let total_row_count = output_row_count.unwrap_or_default() as _;
         let segment_row_count = self.segment_row_count as _;
         writer.finish(total_row_count, segment_row_count).await
     }
@@ -92,7 +96,7 @@ impl InvertedIndexCreator for SortIndexCreator {
 
 impl SortIndexCreator {
     /// Creates a new `SortIndexCreator` with the given sorter factory and index writer
-    pub fn new(sorter_factory: SorterFactory, segment_row_count: usize) -> Self {
+    pub fn new(sorter_factory: SorterFactory, segment_row_count: NonZeroUsize) -> Self {
         Self {
             sorter_factory,
             sorters: HashMap::new(),
@@ -112,6 +116,7 @@ mod tests {
     use crate::inverted_index::create::sort::SortedStream;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::format::writer::MockInvertedIndexWriter;
+    use crate::inverted_index::Bytes;
 
     fn stream_to_values(stream: SortedStream) -> Vec<Bytes> {
         futures::executor::block_on(async {
@@ -121,7 +126,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_index_creator_basic() {
-        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), 1);
+        let mut creator =
+            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
 
         let index_values = vec![
             ("a", vec![b"3", b"2", b"1"]),
@@ -132,7 +138,7 @@ mod tests {
         for (index_name, values) in index_values {
             for value in values {
                 creator
-                    .push_with_name(index_name, Some(value.into()))
+                    .push_with_name(index_name, Some(value))
                     .await
                     .unwrap();
             }
@@ -157,7 +163,7 @@ mod tests {
             .times(1)
             .returning(|total_row_count, segment_row_count| {
                 assert_eq!(total_row_count, 3);
-                assert_eq!(segment_row_count, 1);
+                assert_eq!(segment_row_count.get(), 1);
                 Ok(())
             });
 
@@ -166,7 +172,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_index_creator_inconsistent_row_count() {
-        let mut creator = SortIndexCreator::new(NaiveSorter::factory(), 1);
+        let mut creator =
+            SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
 
         let index_values = vec![
             ("a", vec![b"3", b"2", b"1"]),
@@ -177,7 +184,7 @@ mod tests {
         for (index_name, values) in index_values {
             for value in values {
                 creator
-                    .push_with_name(index_name, Some(value.into()))
+                    .push_with_name(index_name, Some(value))
                     .await
                     .unwrap();
             }
@@ -211,7 +218,7 @@ mod tests {
 
     struct NaiveSorter {
         total_row_count: usize,
-        segment_row_count: usize,
+        segment_row_count: NonZeroUsize,
         values: BTreeMap<Option<Bytes>, BitVec>,
     }
 
@@ -229,21 +236,28 @@ mod tests {
 
     #[async_trait]
     impl Sorter for NaiveSorter {
-        async fn push(&mut self, value: Option<Bytes>) -> Result<()> {
+        async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
             let segment_index = self.total_row_count / self.segment_row_count;
             self.total_row_count += 1;
 
-            let bitmap = self.values.entry(value).or_default();
+            let bitmap = self.values.entry(value.map(Into::into)).or_default();
             set_bit(bitmap, segment_index);
 
             Ok(())
         }
 
+        async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
+            for _ in 0..n {
+                self.push(value).await?;
+            }
+            Ok(())
+        }
+
         async fn output(&mut self) -> Result<SortOutput> {
-            let null_bitmap = self.values.remove(&None).unwrap_or_default();
+            let segment_null_bitmap = self.values.remove(&None).unwrap_or_default();
 
             Ok(SortOutput {
-                null_bitmap,
+                segment_null_bitmap,
                 sorted_stream: Box::new(stream::iter(
                     std::mem::take(&mut self.values)
                         .into_iter()

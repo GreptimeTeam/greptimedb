@@ -15,6 +15,8 @@
 mod blob;
 mod single;
 
+use std::num::NonZeroUsize;
+
 use async_trait::async_trait;
 use common_base::BitVec;
 use futures::Stream;
@@ -42,5 +44,6 @@ pub trait InvertedIndexWriter: Send {
 
     /// Finalizes the index writing process, ensuring all data is written.
     /// `total_row_count` and `segment_row_count` is used to fill in the metadata.
-    async fn finish(&mut self, total_row_count: u64, segment_row_count: u64) -> Result<()>;
+    async fn finish(&mut self, total_row_count: u64, segment_row_count: NonZeroUsize)
+        -> Result<()>;
 }

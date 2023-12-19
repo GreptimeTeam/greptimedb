@@ -22,15 +22,15 @@ use common_base::BitVec;
 use futures::Stream;
 
 use crate::inverted_index::error::Result;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::{Bytes, BytesRef};
 
 /// A stream of sorted values along with their associated bitmap
 pub type SortedStream = Box<dyn Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin>;
 
 /// Output of a sorting operation, encapsulating a bitmap for null values and a stream of sorted items
 pub struct SortOutput {
-    /// Bitmap indicating positions of null values
-    pub null_bitmap: BitVec,
+    /// Bitmap indicating which segments have null values
+    pub segment_null_bitmap: BitVec,
 
     /// Stream of sorted items
     pub sorted_stream: SortedStream,
@@ -42,8 +42,15 @@ pub struct SortOutput {
 /// Handles data sorting, supporting incremental input and retrieval of sorted output
 #[async_trait]
 pub trait Sorter: Send {
-    /// Inputs a non-null or null value into the sorter
-    async fn push(&mut self, value: Option<Bytes>) -> Result<()>;
+    /// Inputs a non-null or null value into the sorter.
+    /// Should be equivalent to calling `push_n` with n = 1
+    async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
+        self.push_n(value, 1).await
+    }
+
+    /// Pushing n identical non-null or null values into the sorter.
+    /// Should be equivalent to calling `push` n times
+    async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()>;
 
     /// Completes the sorting process and returns the sorted data
     async fn output(&mut self) -> Result<SortOutput>;

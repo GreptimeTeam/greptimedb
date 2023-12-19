@@ -389,7 +389,7 @@ mod tests {
     use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_meta::sequence::Sequence;
+    use common_meta::sequence::SequenceBuilder;
     use common_meta::DatanodeId;
     use common_procedure::{BoxedProcedure, ProcedureId};
     use common_procedure_test::MockContextProvider;
@@ -512,7 +512,10 @@ mod tests {
             }
 
             let mailbox_sequence =
-                Sequence::new("test_heartbeat_mailbox", 0, 100, kv_backend.clone());
+                SequenceBuilder::new("test_heartbeat_mailbox", kv_backend.clone())
+                    .initial(0)
+                    .step(100)
+                    .build();
             let mailbox = HeartbeatMailbox::create(pushers.clone(), mailbox_sequence);
 
             let selector = self.selector.unwrap_or_else(|| {

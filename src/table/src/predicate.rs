@@ -433,7 +433,6 @@ mod tests {
 
     use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use datafusion::parquet::arrow::ArrowWriter;
-    pub use datafusion::parquet::schema::types::BasicTypeInfo;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::{col, lit, BinaryExpr, Literal, Operator};
     use datatypes::arrow::array::Int32Array;

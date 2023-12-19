@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::num::NonZeroUsize;
+
 use async_trait::async_trait;
 use common_base::BitVec;
 use futures::{AsyncWrite, AsyncWriteExt, Stream};
@@ -60,8 +62,12 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
         Ok(())
     }
 
-    async fn finish(&mut self, total_row_count: u64, segment_row_count: u64) -> Result<()> {
-        self.metas.segment_row_count = segment_row_count;
+    async fn finish(
+        &mut self,
+        total_row_count: u64,
+        segment_row_count: NonZeroUsize,
+    ) -> Result<()> {
+        self.metas.segment_row_count = segment_row_count.get() as _;
         self.metas.total_row_count = total_row_count;
 
         let metas_bytes = self.metas.encode_to_vec();
@@ -108,7 +114,10 @@ mod tests {
     async fn test_inverted_index_blob_writer_write_empty() {
         let mut blob = Vec::new();
         let mut writer = InvertedIndexBlobWriter::new(&mut blob);
-        writer.finish(8, 1).await.unwrap();
+        writer
+            .finish(8, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);
@@ -146,7 +155,10 @@ mod tests {
             )
             .await
             .unwrap();
-        writer.finish(8, 1).await.unwrap();
+        writer
+            .finish(8, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);
