@@ -17,7 +17,9 @@ use std::time::Instant;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::table_name::TableName;
 
-use crate::cli::bench::*;
+use crate::cli::bench::{
+    bench_self_recorded, create_region_routes, create_region_wal_options, create_table_info,
+};
 
 pub struct TableMetadataBencher {
     table_metadata_manager: TableMetadataManagerRef,
