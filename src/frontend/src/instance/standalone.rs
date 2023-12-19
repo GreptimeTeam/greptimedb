@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::meta::Partition;
@@ -20,18 +21,20 @@ use async_trait::async_trait;
 use client::region::check_response_header;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
-use common_meta::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
+use common_meta::wal::options_allocator::build_region_wal_options;
+use common_meta::wal::WalOptionsAllocator;
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::tracing;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
+use common_telemetry::{debug, tracing};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::RegionId;
 use table::metadata::RawTableInfo;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
@@ -104,24 +107,28 @@ impl Datanode for RegionInvoker {
     }
 }
 
-pub struct StandaloneTableMetadataCreator {
+pub struct StandaloneTableMetadataAllocator {
     table_id_sequence: SequenceRef,
+    wal_options_allocator: WalOptionsAllocator,
 }
 
-impl StandaloneTableMetadataCreator {
-    pub fn new(table_id_sequence: SequenceRef) -> Self {
-        Self { table_id_sequence }
+impl StandaloneTableMetadataAllocator {
+    pub fn new(table_id_sequence: SequenceRef, wal_options_allocator: WalOptionsAllocator) -> Self {
+        Self {
+            table_id_sequence,
+            wal_options_allocator,
+        }
     }
 }
 
 #[async_trait]
-impl TableMetadataAllocator for StandaloneTableMetadataCreator {
+impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
     async fn create(
         &self,
         _ctx: &TableMetadataAllocatorContext,
         raw_table_info: &mut RawTableInfo,
         partitions: &[Partition],
-    ) -> MetaResult<(TableId, Vec<RegionRoute>)> {
+    ) -> MetaResult<TableMetadata> {
         let table_id = self.table_id_sequence.next().await? as u32;
         raw_table_info.ident.table_id = table_id;
         let region_routes = partitions
@@ -144,6 +151,22 @@ impl TableMetadataAllocator for StandaloneTableMetadataCreator {
             })
             .collect::<Vec<_>>();
 
-        Ok((table_id, region_routes))
+        let region_numbers = region_routes
+            .iter()
+            .map(|route| route.region.id.region_number())
+            .collect();
+        let region_wal_options =
+            build_region_wal_options(region_numbers, &self.wal_options_allocator)?;
+
+        debug!(
+            "Allocated region wal options {:?} for table {}",
+            region_wal_options, table_id
+        );
+
+        Ok(TableMetadata {
+            table_id,
+            region_routes,
+            region_wal_options: HashMap::default(),
+        })
     }
 }

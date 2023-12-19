@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use api::v1::region::region_request::Body as PbRegionRequest;
 use api::v1::region::{
     CreateRequest as PbCreateRegionRequest, RegionColumnDef, RegionRequest, RegionRequestHeader,
@@ -30,7 +32,7 @@ use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
@@ -45,6 +47,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
+use crate::wal::WAL_OPTIONS_KEY;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -58,11 +61,12 @@ impl CreateTableProcedure {
         cluster_id: u64,
         task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_wal_options: HashMap<RegionNumber, String>,
         context: DdlContext,
     ) -> Self {
         Self {
             context,
-            creator: TableCreator::new(cluster_id, task, region_routes),
+            creator: TableCreator::new(cluster_id, task, region_routes, region_wal_options),
         }
     }
 
@@ -92,6 +96,10 @@ impl CreateTableProcedure {
 
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
         &self.creator.data.region_routes
+    }
+
+    pub fn region_wal_options(&self) -> &HashMap<RegionNumber, String> {
+        &self.creator.data.region_wal_options
     }
 
     /// Checks whether the table exists.
@@ -193,6 +201,7 @@ impl CreateTableProcedure {
 
         let create_table_data = &self.creator.data;
         let region_routes = &create_table_data.region_routes;
+        let region_wal_options = &create_table_data.region_wal_options;
 
         let create_table_expr = &create_table_data.task.create_table;
         let catalog = &create_table_expr.catalog_name;
@@ -211,12 +220,12 @@ impl CreateTableProcedure {
             let mut requests = Vec::with_capacity(regions.len());
             for region_number in regions {
                 let region_id = RegionId::new(self.table_id(), region_number);
-
                 let create_region_request = request_builder
                     .build_one(
                         &self.creator.data.task.create_table,
                         region_id,
                         storage_path.clone(),
+                        region_wal_options,
                     )
                     .await?;
 
@@ -262,8 +271,9 @@ impl CreateTableProcedure {
 
         let raw_table_info = self.table_info().clone();
         let region_routes = self.region_routes().clone();
+        let region_wal_options = self.region_wal_options().clone();
         manager
-            .create_table_metadata(raw_table_info, region_routes)
+            .create_table_metadata(raw_table_info, region_routes, region_wal_options)
             .await?;
         info!("Created table metadata for table {table_id}");
 
@@ -316,13 +326,19 @@ pub struct TableCreator {
 }
 
 impl TableCreator {
-    pub fn new(cluster_id: u64, task: CreateTableTask, region_routes: Vec<RegionRoute>) -> Self {
+    pub fn new(
+        cluster_id: u64,
+        task: CreateTableTask,
+        region_routes: Vec<RegionRoute>,
+        region_wal_options: HashMap<RegionNumber, String>,
+    ) -> Self {
         Self {
             data: CreateTableData {
                 state: CreateTableState::Prepare,
                 cluster_id,
                 task,
                 region_routes,
+                region_wal_options,
             },
             opening_regions: vec![],
         }
@@ -371,6 +387,7 @@ pub struct CreateTableData {
     pub state: CreateTableState,
     pub task: CreateTableTask,
     pub region_routes: Vec<RegionRoute>,
+    pub region_wal_options: HashMap<RegionNumber, String>,
     pub cluster_id: u64,
 }
 
@@ -406,11 +423,20 @@ impl CreateRequestBuilder {
         create_expr: &CreateTableExpr,
         region_id: RegionId,
         storage_path: String,
+        region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<PbCreateRegionRequest> {
         let mut request = self.template.clone();
 
         request.region_id = region_id.as_u64();
         request.path = storage_path;
+        // Stores the encoded wal options into the request options.
+        region_wal_options
+            .get(&region_id.region_number())
+            .and_then(|wal_options| {
+                request
+                    .options
+                    .insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+            });
 
         if self.template.engine == METRIC_ENGINE {
             self.metric_engine_hook(create_expr, region_id, &mut request)

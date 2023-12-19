@@ -534,6 +534,7 @@ mod tests {
                 "mock",
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
+                HashMap::default(),
                 BTreeMap::from([(0, vec![0, 1, 2])]),
             )
             .unwrap();

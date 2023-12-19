@@ -30,11 +30,13 @@ use crate::error::{self, Result, RetryLaterSnafu, TableRouteNotFoundSnafu};
 use crate::lock::keys::table_metadata_lock_key;
 use crate::lock::Opts;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub(super) struct UpdateRegionMetadata {
     candidate: Peer,
     region_storage_path: String,
     region_options: HashMap<String, String>,
+    #[serde(default)]
+    region_wal_options: HashMap<String, String>,
 }
 
 impl UpdateRegionMetadata {
@@ -42,11 +44,13 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
+        region_wal_options: HashMap<String, String>,
     ) -> Self {
         Self {
             candidate,
             region_storage_path,
             region_options,
+            region_wal_options,
         }
     }
 
@@ -104,10 +108,12 @@ impl UpdateRegionMetadata {
                     engine: engine.to_string(),
                     region_storage_path: self.region_storage_path.to_string(),
                     region_options: self.region_options.clone(),
+                    region_wal_options: self.region_wal_options.clone(),
                 },
                 &table_route_value,
                 new_region_routes,
                 &self.region_options,
+                &self.region_wal_options,
             )
             .await
             .context(error::UpdateTableRouteSnafu)?;
@@ -188,8 +194,12 @@ mod tests {
         let env = TestingEnvBuilder::new().build().await;
         let failed_region = env.failed_region(1).await;
 
-        let mut state =
-            UpdateRegionMetadata::new(Peer::new(2, ""), env.path.clone(), HashMap::new());
+        let mut state = UpdateRegionMetadata::new(
+            Peer::new(2, ""),
+            env.path.clone(),
+            HashMap::new(),
+            HashMap::new(),
+        );
 
         let next_state = state.next(&env.context, &failed_region).await.unwrap();
         assert_eq!(format!("{next_state:?}"), "InvalidateCache");
@@ -205,6 +215,7 @@ mod tests {
             let state = UpdateRegionMetadata::new(
                 Peer::new(candidate, ""),
                 env.path.clone(),
+                HashMap::new(),
                 HashMap::new(),
             );
             state
@@ -348,7 +359,12 @@ mod tests {
             let path = env.path.clone();
             let _ = futures::future::join_all(vec![
                 tokio::spawn(async move {
-                    let state = UpdateRegionMetadata::new(Peer::new(2, ""), path, HashMap::new());
+                    let state = UpdateRegionMetadata::new(
+                        Peer::new(2, ""),
+                        path,
+                        HashMap::new(),
+                        HashMap::new(),
+                    );
                     state
                         .update_metadata(&ctx_1, &failed_region_1)
                         .await
@@ -358,6 +374,7 @@ mod tests {
                     let state = UpdateRegionMetadata::new(
                         Peer::new(3, ""),
                         env.path.clone(),
+                        HashMap::new(),
                         HashMap::new(),
                     );
                     state
@@ -430,5 +447,41 @@ mod tests {
             assert_eq!(tables[0].table_id, 1);
             assert_eq!(tables[0].regions, vec![2, 4]);
         }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct LegacyUpdateRegionMetadata {
+        candidate: Peer,
+        region_storage_path: String,
+        region_options: HashMap<String, String>,
+    }
+
+    #[test]
+    fn test_compatible_serialize_update_region_metadata() {
+        let candidate = Peer::new(1, "test_addr");
+        let region_storage_path = "test_path".to_string();
+        let region_options = HashMap::from([
+            ("a".to_string(), "aa".to_string()),
+            ("b".to_string(), "bb".to_string()),
+        ]);
+
+        let legacy_update_region_metadata = LegacyUpdateRegionMetadata {
+            candidate: candidate.clone(),
+            region_storage_path: region_storage_path.clone(),
+            region_options: region_options.clone(),
+        };
+
+        // Serialize a LegacyUpdateRegionMetadata.
+        let serialized = serde_json::to_string(&legacy_update_region_metadata).unwrap();
+
+        // Deserialize to UpdateRegionMetadata.
+        let deserialized = serde_json::from_str(&serialized).unwrap();
+        let expected = UpdateRegionMetadata {
+            candidate,
+            region_storage_path,
+            region_options,
+            region_wal_options: HashMap::new(),
+        };
+        assert_eq!(expected, deserialized);
     }
 }

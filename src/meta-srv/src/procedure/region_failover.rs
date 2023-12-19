@@ -621,6 +621,7 @@ mod tests {
                             opening_region,
                             &path,
                             HashMap::new(),
+                            HashMap::new(),
                         )))
                         .unwrap(),
                     ))

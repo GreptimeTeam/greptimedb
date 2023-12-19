@@ -1560,6 +1560,7 @@ dependencies = [
  "servers",
  "session",
  "snafu",
+ "store-api",
  "substrait 0.4.4",
  "table",
  "temp-env",
@@ -1831,11 +1832,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serde_with",
  "snafu",
  "store-api",
  "strum 0.25.0",
  "table",
  "tokio",
+ "toml 0.7.8",
  "tonic 0.10.2",
 ]
 
