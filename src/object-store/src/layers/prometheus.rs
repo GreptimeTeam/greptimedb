@@ -319,7 +319,7 @@ impl<A: Accessor> LayeredAccessor for PrometheusAccessor<A> {
             .inc();
 
         let timer = REQUESTS_DURATION_SECONDS
-            .with_label_values(&[&self.scheme])
+            .with_label_values(&[&self.scheme, Operation::BlockingRead.into_static()])
             .start_timer();
         let result = self.inner.blocking_read(path, args).map(|(rp, r)| {
             (
