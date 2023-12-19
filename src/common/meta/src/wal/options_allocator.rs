@@ -19,6 +19,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::{KafkaOptions, TopicManager as KafkaTopicManager};
 use crate::wal::{WalConfig, WalOptions};
 
+/// Allocates wal options in region granularity.
 #[derive(Default)]
 pub enum WalOptionsAllocator {
     #[default]

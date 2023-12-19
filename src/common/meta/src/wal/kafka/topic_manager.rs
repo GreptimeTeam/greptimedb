@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::topic::Topic;
-use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
+use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, SelectorType, TopicSelectorRef};
 use crate::wal::kafka::KafkaConfig;
 
 /// Manages topic initialization and selection.
@@ -30,9 +30,13 @@ pub struct TopicManager {
 impl TopicManager {
     /// Creates a new topic manager.
     pub fn new(config: &KafkaConfig, kv_backend: KvBackendRef) -> Self {
+        let selector = match config.selector_type {
+            SelectorType::RoundRobinBased => RoundRobinTopicSelector::new(),
+        };
+
         Self {
             topic_pool: Vec::new(),
-            topic_selector: Arc::new(RoundRobinTopicSelector::new()),
+            topic_selector: Arc::new(selector),
             kv_backend,
         }
     }

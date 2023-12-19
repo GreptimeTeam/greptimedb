@@ -112,6 +112,7 @@ impl UpdateRegionMetadata {
                 &table_route_value,
                 new_region_routes,
                 &self.region_options,
+                &self.region_wal_options,
             )
             .await
             .context(error::UpdateTableRouteSnafu)?;

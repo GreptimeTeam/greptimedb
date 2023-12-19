@@ -29,7 +29,7 @@ pub use crate::wal::options_allocator::WalOptionsAllocator;
 /// and inserted into the options of a `RegionCreateRequest`.
 pub const WAL_OPTIONS_KEY: &str = "wal_options";
 
-/// Wal configurations for bootstrapping meta srv.
+/// Wal configurations for bootstrapping metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
@@ -41,7 +41,7 @@ pub enum WalConfig {
 }
 
 /// Wal options allocated to a region.
-/// A wal options is encoded by meta srv into a `String` with `serde_json::to_string`.
+/// A wal options is encoded by metasrv into a `String` with `serde_json::to_string`.
 /// It's then decoded by datanode to a `HashMap<String, String>` with `serde_json::from_str`.
 /// Such a encoding/decoding scheme is inspired by the encoding/decoding of `RegionOptions`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -94,7 +94,7 @@ mod tests {
         let expected_kafka_config = KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 32,
-            selector_type: KafkaTopicSelectorType::RoundRobin,
+            selector_type: KafkaTopicSelectorType::RoundRobinBased,
             topic_name_prefix: "greptimedb_kafka_wal".to_string(),
             num_partitions: 1,
             replication_factor: 3,

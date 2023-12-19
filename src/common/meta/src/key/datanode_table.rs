@@ -213,6 +213,7 @@ impl DatanodeTableManager {
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         new_region_options: &HashMap<String, String>,
+        new_region_wal_options: &HashMap<String, String>,
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
@@ -224,13 +225,15 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
-        // TODO(niebayes): maybe also check any update on region_wal_options.
+
         let need_update_options = region_info.region_options != *new_region_options;
+        let need_update_wal_options = region_info.region_wal_options != *new_region_wal_options;
+
         for (datanode, regions) in new_region_distribution.into_iter() {
             let need_update =
                 if let Some(current_region) = current_region_distribution.get(&datanode) {
                     // Updates if need.
-                    *current_region != regions || need_update_options
+                    *current_region != regions || need_update_options || need_update_wal_options
                 } else {
                     true
                 };

@@ -149,11 +149,12 @@ impl UpdateMetadata {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: region_options.clone(),
-                    region_wal_options,
+                    region_wal_options: region_wal_options.clone(),
                 },
                 table_route_value,
                 region_routes,
                 &region_options,
+                &region_wal_options,
             )
             .await
             .context(error::TableMetadataManagerSnafu)

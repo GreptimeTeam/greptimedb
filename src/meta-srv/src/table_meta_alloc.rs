@@ -20,7 +20,7 @@ use common_meta::error::{self as meta_error, EncodeWalOptionsToJsonSnafu, Result
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
 use common_meta::wal::WalOptionsAllocator;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
 use table::metadata::RawTableInfo;
@@ -83,11 +83,17 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
                     .context(EncodeWalOptionsToJsonSnafu { wal_options })
             })
             .collect::<MetaResult<Vec<_>>>()?;
+
         let region_wal_options = region_routes
             .iter()
             .map(|route| route.region.id.region_number())
             .zip(wal_options)
             .collect();
+
+        debug!(
+            "Allocated region wal options {:?} for table {}",
+            region_wal_options, table_id
+        );
 
         Ok(TableMetadata {
             table_id,

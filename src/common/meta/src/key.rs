@@ -589,6 +589,7 @@ impl TableMetadataManager {
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
+        new_region_wal_options: &HashMap<String, String>,
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
@@ -601,6 +602,7 @@ impl TableMetadataManager {
             current_region_distribution,
             new_region_distribution,
             new_region_options,
+            new_region_wal_options,
         )?;
 
         // Updates the table_route.
@@ -1211,6 +1213,7 @@ mod tests {
                 &current_table_route_value,
                 new_region_routes.clone(),
                 &HashMap::new(),
+                &HashMap::new(),
             )
             .await
             .unwrap();
@@ -1228,6 +1231,7 @@ mod tests {
                 },
                 &current_table_route_value,
                 new_region_routes.clone(),
+                &HashMap::new(),
                 &HashMap::new(),
             )
             .await
@@ -1251,6 +1255,7 @@ mod tests {
                 },
                 &current_table_route_value,
                 new_region_routes.clone(),
+                &HashMap::new(),
                 &HashMap::new(),
             )
             .await
@@ -1277,6 +1282,7 @@ mod tests {
                 },
                 &wrong_table_route_value,
                 new_region_routes,
+                &HashMap::new(),
                 &HashMap::new(),
             )
             .await
