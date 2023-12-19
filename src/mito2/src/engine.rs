@@ -19,6 +19,8 @@ mod alter_test;
 #[cfg(test)]
 mod basic_test;
 #[cfg(test)]
+mod catchup_test;
+#[cfg(test)]
 mod close_test;
 #[cfg(test)]
 mod compaction_test;

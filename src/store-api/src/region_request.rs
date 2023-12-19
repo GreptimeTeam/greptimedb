@@ -21,6 +21,7 @@ use api::v1::{self, Rows, SemanticType};
 use snafu::{ensure, OptionExt};
 use strum::IntoStaticStr;
 
+use crate::logstore::entry;
 use crate::metadata::{
     ColumnMetadata, InvalidRawRegionRequestSnafu, InvalidRegionRequestSnafu, MetadataError,
     RegionMetadata, Result,
@@ -42,6 +43,7 @@ pub enum RegionRequest {
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
+    Catchup(RegionCatchupRequest),
 }
 
 impl RegionRequest {
@@ -59,6 +61,7 @@ impl RegionRequest {
             RegionRequest::Flush(_) => "flush",
             RegionRequest::Compact(_) => "compact",
             RegionRequest::Truncate(_) => "truncate",
+            RegionRequest::Catchup(_) => "catchup",
         }
     }
 
@@ -453,6 +456,19 @@ pub struct RegionCompactRequest {}
 #[derive(Debug)]
 pub struct RegionTruncateRequest {}
 
+/// Catchup region request.
+///
+/// Makes a readonly region to catch up to leader region changes.
+/// There is no effect if it operating on a leader region.
+#[derive(Debug)]
+pub struct RegionCatchupRequest {
+    /// Sets it to writable if it's available after it has caught up with all changes.
+    pub set_writable: bool,
+    /// The `entry_id` that was expected to reply to.
+    /// `None` stands replaying to latest.
+    pub entry_id: Option<entry::Id>,
+}
+
 impl fmt::Display for RegionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -466,6 +482,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Flush(_) => write!(f, "Flush"),
             RegionRequest::Compact(_) => write!(f, "Compact"),
             RegionRequest::Truncate(_) => write!(f, "Truncate"),
+            RegionRequest::Catchup(_) => write!(f, "Catchup"),
         }
     }
 }

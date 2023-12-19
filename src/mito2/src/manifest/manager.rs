@@ -26,7 +26,7 @@ use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
 };
-use crate::manifest::storage::ManifestObjectStore;
+use crate::manifest::storage::{file_version, is_delta_file, ManifestObjectStore};
 
 /// Options for [RegionManifestManager].
 #[derive(Debug, Clone)]
@@ -160,6 +160,12 @@ impl RegionManifestManager {
         let inner = self.inner.read().await;
         inner.total_manifest_size()
     }
+
+    /// Returns true if a newer version manifest file is found.
+    pub async fn check_update(&self) -> Result<bool> {
+        let inner = self.inner.read().await;
+        inner.check_update().await
+    }
 }
 
 #[cfg(test)]
@@ -233,7 +239,7 @@ impl RegionManifestManagerInner {
         })
     }
 
-    /// Open an existing manifest.
+    /// Opens an existing manifest.
     ///
     /// Returns `Ok(None)` if no such manifest.
     async fn open(options: RegionManifestOptions) -> Result<Option<Self>> {
@@ -323,7 +329,7 @@ impl RegionManifestManagerInner {
         Ok(())
     }
 
-    /// Update the manifest. Return the current manifest version number.
+    /// Updates the manifest. Return the current manifest version number.
     async fn update(&mut self, action_list: RegionMetaActionList) -> Result<ManifestVersion> {
         let version = self.increase_version();
         self.store.save(version, &action_list.encode()?).await?;
@@ -385,7 +391,7 @@ impl RegionManifestManagerInner {
         Ok(())
     }
 
-    /// Make a new checkpoint. Return the fresh one if there are some actions to compact.
+    /// Makes a new checkpoint. Return the fresh one if there are some actions to compact.
     async fn do_checkpoint(&mut self) -> Result<Option<RegionCheckpoint>> {
         let last_checkpoint = Self::last_checkpoint(&mut self.store).await?;
         let current_version = self.last_version;
@@ -459,7 +465,7 @@ impl RegionManifestManagerInner {
         Ok(Some(checkpoint))
     }
 
-    /// Fetch the last [RegionCheckpoint] from storage.
+    /// Fetches the last [RegionCheckpoint] from storage.
     pub(crate) async fn last_checkpoint(
         store: &mut ManifestObjectStore,
     ) -> Result<Option<RegionCheckpoint>> {
@@ -471,6 +477,28 @@ impl RegionManifestManagerInner {
         } else {
             Ok(None)
         }
+    }
+
+    /// Returns true if a newer version manifest file is found.
+    ///
+    /// It is typically used in read-only regions to catch up with manifest.
+    pub(crate) async fn check_update(&self) -> Result<bool> {
+        let last_version = self.last_version;
+        let newer_manifests = self
+            .store
+            .get_paths(|entry| {
+                let file_name = entry.name();
+                if is_delta_file(file_name) {
+                    let version = file_version(file_name);
+                    if version > last_version {
+                        return Some((version, entry));
+                    }
+                }
+                None
+            })
+            .await?;
+
+        Ok(!newer_manifests.is_empty())
     }
 }
 

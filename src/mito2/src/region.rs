@@ -126,6 +126,11 @@ impl MitoRegion {
         self.writable.load(Ordering::Relaxed)
     }
 
+    /// Returns the region dir.
+    pub(crate) fn region_dir(&self) -> &str {
+        self.access_layer.region_dir()
+    }
+
     /// Sets the writable flag.
     pub(crate) fn set_writable(&self, writable: bool) {
         self.writable.store(writable, Ordering::Relaxed);

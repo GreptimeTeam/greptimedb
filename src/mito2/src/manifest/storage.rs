@@ -171,7 +171,12 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
-    /// Scan the manifest files in the range of [start, end) and return all manifest entries.
+    /// Sorts the manifest files.
+    fn sort_manifests(entries: &mut [(ManifestVersion, Entry)]) {
+        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+    }
+
+    /// Scans the manifest files in the range of [start, end) and return all manifest entries.
     pub async fn scan(
         &self,
         start: ManifestVersion,
@@ -192,7 +197,7 @@ impl ManifestObjectStore {
             })
             .await?;
 
-        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+        Self::sort_manifests(&mut entries);
 
         Ok(entries)
     }
