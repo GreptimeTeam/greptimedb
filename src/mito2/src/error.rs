@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_config::wal::WalOptions;
 use common_datasource::compression::CompressionType;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -218,17 +217,6 @@ pub enum Error {
     DeleteWal {
         region_id: RegionId,
         location: Location,
-        source: BoxedError,
-    },
-
-    #[snafu(display(
-        "Failed to build a wal namespace, region_id: {}, wal_options: {:?}",
-        region_id,
-        wal_options
-    ))]
-    BuildWalNamespace {
-        region_id: RegionId,
-        wal_options: WalOptions,
         source: BoxedError,
     },
 
@@ -439,8 +427,7 @@ impl ErrorExt for Error {
             | ReadParquet { .. }
             | WriteWal { .. }
             | ReadWal { .. }
-            | DeleteWal { .. }
-            | BuildWalNamespace { .. } => StatusCode::StorageUnavailable,
+            | DeleteWal { .. } => StatusCode::StorageUnavailable,
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }

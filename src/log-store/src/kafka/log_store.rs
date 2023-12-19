@@ -73,7 +73,7 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Create a namespace of the associate Namespace type
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
         todo!()
     }
 

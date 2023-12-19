@@ -20,8 +20,6 @@ use crate::logstore::namespace::Namespace;
 pub type Id = u64;
 /// An entry's physical offset in the underlying log store.
 pub type Offset = usize;
-// TODO(niebayes): consider removing `Epoch`.
-pub type Epoch = u64;
 
 /// Entry is the minimal data storage unit in `LogStore`.
 pub trait Entry: Send + Sync {

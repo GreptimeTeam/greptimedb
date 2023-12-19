@@ -31,8 +31,7 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    BuildWalNamespaceSnafu, DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result,
-    WriteWalSnafu,
+    DecodeWalSnafu, DeleteWalSnafu, EncodeWalSnafu, ReadWalSnafu, Result, WriteWalSnafu,
 };
 
 /// WAL entry id.
@@ -75,7 +74,7 @@ impl<S: LogStore> Wal<S> {
         wal_options: &'a WalOptions,
     ) -> Result<WalEntryStream> {
         let stream = try_stream!({
-            let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
+            let namespace = self.store.namespace(region_id.into(), wal_options);
             let mut stream = self
                 .store
                 .read(&namespace, start_id)
@@ -104,7 +103,7 @@ impl<S: LogStore> Wal<S> {
         last_id: EntryId,
         wal_options: &WalOptions,
     ) -> Result<()> {
-        let namespace = try_build_wal_namespace(&self.store, region_id, wal_options)?;
+        let namespace = self.store.namespace(region_id.into(), wal_options);
         self.store
             .obsolete(namespace, last_id)
             .await
@@ -148,11 +147,7 @@ impl<S: LogStore> WalWriter<S> {
         let namespace = self
             .namespaces
             .entry(region_id)
-            .or_insert(try_build_wal_namespace(
-                &self.store,
-                region_id,
-                wal_options,
-            )?)
+            .or_insert_with(|| self.store.namespace(region_id.into(), wal_options))
             .clone();
 
         // Encode wal entry to log store entry.
@@ -182,20 +177,6 @@ impl<S: LogStore> WalWriter<S> {
             .context(WriteWalSnafu)
             .map(|_| ())
     }
-}
-
-fn try_build_wal_namespace<S: LogStore>(
-    store: &Arc<S>,
-    region_id: RegionId,
-    wal_options: &WalOptions,
-) -> Result<S::Namespace> {
-    store
-        .namespace(region_id.into(), wal_options)
-        .map_err(BoxedError::new)
-        .with_context(|_| BuildWalNamespaceSnafu {
-            region_id,
-            wal_options: wal_options.clone(),
-        })
 }
 
 #[cfg(test)]

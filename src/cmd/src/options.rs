@@ -195,7 +195,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            provider = "raft-engine"
+            provider = "raft_engine"
             dir = "/tmp/greptimedb/wal"
             file_size = "1GB"
             purge_threshold = "50GB"

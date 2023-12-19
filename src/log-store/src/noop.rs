@@ -112,10 +112,10 @@ impl LogStore for NoopLogStore {
         EntryImpl
     }
 
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
         let _ = ns_id;
         let _ = wal_options;
-        Ok(NamespaceImpl)
+        NamespaceImpl
     }
 
     async fn obsolete(
@@ -149,10 +149,7 @@ mod tests {
         store.create_namespace(&NamespaceImpl).await.unwrap();
         assert_eq!(0, store.list_namespaces().await.unwrap().len());
         store.delete_namespace(&NamespaceImpl).await.unwrap();
-        assert_eq!(
-            NamespaceImpl,
-            store.namespace(0, &WalOptions::default()).unwrap()
-        );
+        assert_eq!(NamespaceImpl, store.namespace(0, &WalOptions::default()));
         store.obsolete(NamespaceImpl, 1).await.unwrap();
     }
 }

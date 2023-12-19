@@ -71,11 +71,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Create a namespace of the associate Namespace type
     // TODO(sunng87): confusion with `create_namespace`
-    fn namespace(
-        &self,
-        ns_id: NamespaceId,
-        wal_options: &WalOptions,
-    ) -> Result<Self::Namespace, Self::Error>;
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
 
     /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
     /// the log files if all entries inside are obsolete. This method may not delete log

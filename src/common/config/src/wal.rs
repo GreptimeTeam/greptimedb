@@ -26,7 +26,7 @@ pub use crate::wal::raft_engine::RaftEngineConfig;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
-    #[serde(rename = "raft-engine")]
+    #[serde(rename = "raft_engine")]
     RaftEngine(RaftEngineConfig),
     #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
@@ -43,7 +43,7 @@ impl Default for WalConfig {
 #[serde(tag = "wal.provider")]
 pub enum WalOptions {
     #[default]
-    #[serde(rename = "raft-engine")]
+    #[serde(rename = "raft_engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
     #[serde(with = "prefix_wal_kafka")]
@@ -102,7 +102,7 @@ mod tests {
     fn test_serde_raft_engine_wal_options() {
         let wal_options = WalOptions::RaftEngine;
         let encoded = serde_json::to_string(&wal_options).unwrap();
-        let expected_encoded = make_json_string(&[("wal.provider", "raft-engine")]);
+        let expected_encoded = make_json_string(&[("wal.provider", "raft_engine")]);
         assert_eq!(encoded, expected_encoded);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();

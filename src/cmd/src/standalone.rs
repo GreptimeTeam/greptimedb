@@ -482,7 +482,7 @@ mod tests {
             enable_memory_catalog = true
 
             [wal]
-            provider = "raft-engine"
+            provider = "raft_engine"
             dir = "/tmp/greptimedb/test/wal"
             file_size = "1GB"
             purge_threshold = "50GB"

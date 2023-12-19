@@ -341,12 +341,12 @@ impl LogStore for RaftEngineLogStore {
         }
     }
 
-    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Result<Self::Namespace> {
+    fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
         let _ = wal_options;
-        Ok(Namespace {
+        Namespace {
             id: ns_id,
             ..Default::default()
-        })
+        }
     }
 
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<()> {

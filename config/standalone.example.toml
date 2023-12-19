@@ -85,7 +85,7 @@ enable = true
 # Available wal providers:
 # - "RaftEngine" (default)
 # - "Kafka"
-provider = "raft-engine"
+provider = "raft_engine"
 
 # There's no kafka wal config for standalone mode.
 

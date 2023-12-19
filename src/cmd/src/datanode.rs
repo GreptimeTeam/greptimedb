@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use catalog::kvbackend::MetaKvBackend;
 use clap::Parser;
 use common_config::WalConfig;
-use common_telemetry::logging;
+use common_telemetry::{info, logging};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use meta_client::MetaClientOptions;
@@ -171,6 +171,13 @@ impl StartCommand {
             // `wal_dir` only affects raft-engine config.
             match &mut opts.wal {
                 WalConfig::RaftEngine(raft_engine_config) => {
+                    if raft_engine_config
+                        .dir
+                        .as_ref()
+                        .is_some_and(|original_dir| original_dir != wal_dir)
+                    {
+                        info!("The wal dir of raft-engine is altered to {wal_dir}");
+                    }
                     raft_engine_config.dir.replace(wal_dir.clone());
                 }
                 WalConfig::Kafka(_) => {}
@@ -263,7 +270,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            provider = "raft-engine"
+            provider = "raft_engine"
             dir = "/other/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -426,7 +433,7 @@ mod tests {
             tcp_nodelay = true
 
             [wal]
-            provider = "raft-engine"
+            provider = "raft_engine"
             file_size = "1GB"
             purge_threshold = "50GB"
             purge_interval = "5m"

@@ -30,10 +30,12 @@ connect_timeout = "1s"
 tcp_nodelay = true
 
 # WAL options.
-# Uncomments all other wal options except the one you chose.
+# Currently, users are expected to choose the wal through the provider field. 
+# When a wal provider is chose, the user should comment out all other wal config 
+# except those corresponding to the chosen one.
 [wal]
 # WAL data directory
-provider = "raft-engine"
+provider = "raft_engine"
 
 # Raft-engine wal options, see `standalone.example.toml`
 # dir = "/tmp/greptimedb/wal"
@@ -45,19 +47,19 @@ sync_write = false
 
 # Kafka wal options.
 # The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
-broker_endpoints = ["127.0.0.1:9090"]
+# broker_endpoints = ["127.0.0.1:9090"]
 # Number of topics shall be created beforehand.
-num_topics = 64
+# num_topics = 64
 # Topic name prefix.
-topic_name_prefix = "greptimedb_wal_kafka_topic"
+# topic_name_prefix = "greptimedb_wal_kafka_topic"
 # Number of partitions per topic.
-num_partitions = 1
+# num_partitions = 1
 # The maximum log size an rskafka batch producer could buffer.
-max_batch_size = "4MB"
+# max_batch_size = "4MB"
 # The linger duration of an rskafka batch producer.
-linger = "200ms"
+# linger = "200ms"
 # The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
-max_wait_time = "100ms"
+# max_wait_time = "100ms"
 
 # Storage options, see `standalone.example.toml`.
 [storage]
