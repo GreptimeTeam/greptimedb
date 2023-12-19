@@ -30,6 +30,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
+use servers::remote_writer::RemoteWriteOptions;
 use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
@@ -241,6 +242,7 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
+    pub remote_write: RemoteWriteOptions,
 }
 
 impl Default for DatanodeOptions {
@@ -265,6 +267,7 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
+            remote_write: RemoteWriteOptions::default(),
         }
     }
 }

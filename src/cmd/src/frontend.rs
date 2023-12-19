@@ -250,6 +250,10 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         instance
+            .build_remote_write_metric_task(&opts.remote_write)
+            .context(StartFrontendSnafu)?;
+
+        instance
             .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;

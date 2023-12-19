@@ -21,6 +21,7 @@ use frontend::error::{Result as FeResult, TomlFormatSnafu};
 use frontend::frontend::{FrontendOptions, TomlSerializable};
 use meta_srv::metasrv::MetaSrvOptions;
 use serde::{Deserialize, Serialize};
+use servers::remote_writer::RemoteWriteOptions;
 use snafu::ResultExt;
 
 use crate::error::{LoadLayeredConfigSnafu, Result, SerdeJsonSnafu};
@@ -37,6 +38,7 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
+    pub remote_write: RemoteWriteOptions,
 }
 
 impl From<MixOptions> for FrontendOptions {

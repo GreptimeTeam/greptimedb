@@ -17,6 +17,7 @@ use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
+use servers::remote_writer::RemoteWriteOptions;
 use servers::Mode;
 use snafu::prelude::*;
 
@@ -44,6 +45,7 @@ pub struct FrontendOptions {
     pub logging: LoggingOptions,
     pub datanode: DatanodeOptions,
     pub user_provider: Option<String>,
+    pub remote_write: RemoteWriteOptions,
 }
 
 impl Default for FrontendOptions {
@@ -64,6 +66,7 @@ impl Default for FrontendOptions {
             logging: LoggingOptions::default(),
             datanode: DatanodeOptions::default(),
             user_provider: None,
+            remote_write: RemoteWriteOptions::default(),
         }
     }
 }

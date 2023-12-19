@@ -144,6 +144,7 @@ impl FrontendBuilder {
             heartbeat_task: self.heartbeat_task,
             inserter,
             deleter,
+            remote_write_metric_task: None,
         })
     }
 }

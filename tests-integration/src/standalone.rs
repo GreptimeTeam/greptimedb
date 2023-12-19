@@ -32,6 +32,7 @@ use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use servers::remote_writer::RemoteWriteOptions;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
@@ -162,6 +163,7 @@ impl GreptimeDbStandaloneBuilder {
                 frontend: FrontendOptions::default(),
                 datanode: opts,
                 logging: LoggingOptions::default(),
+                remote_write: RemoteWriteOptions::default(),
             },
             guard,
         }

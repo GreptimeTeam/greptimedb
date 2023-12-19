@@ -45,14 +45,15 @@ use frontend::service_config::{
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
+use servers::remote_writer::{RemoteWriteMetricTask, RemoteWriteOptions};
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu,
+    InitRemoteWriteMetricTaskSnafu, Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu,
+    StartDatanodeSnafu, StartFrontendSnafu, StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
 use crate::App;
@@ -112,6 +113,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub remote_write: RemoteWriteOptions,
 }
 
 impl Default for StandaloneOptions {
@@ -131,6 +133,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            remote_write: RemoteWriteOptions::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -175,6 +178,7 @@ pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
+    remote_write_metric_task: Option<RemoteWriteMetricTask>,
 }
 
 #[async_trait]
@@ -190,6 +194,10 @@ impl App for Instance {
             .start()
             .await
             .context(StartProcedureManagerSnafu)?;
+
+        if let Some(t) = self.remote_write_metric_task.as_ref() {
+            t.start()
+        }
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
@@ -320,6 +328,7 @@ impl StartCommand {
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
+        let remote_write = opts.remote_write.clone();
         let datanode = opts.datanode_options();
 
         Ok(Options::Standalone(Box::new(MixOptions {
@@ -329,6 +338,7 @@ impl StartCommand {
             frontend,
             datanode,
             logging,
+            remote_write,
         })))
     }
 
@@ -393,6 +403,10 @@ impl StartCommand {
         )
         .await?;
 
+        let remote_write_metric_task =
+            RemoteWriteMetricTask::try_new(&opts.remote_write, Some(&fe_plugins))
+                .context(InitRemoteWriteMetricTaskSnafu)?;
+
         let mut frontend = FrontendBuilder::new(kv_backend, datanode_manager, ddl_task_executor)
             .with_plugin(fe_plugins)
             .try_build()
@@ -408,6 +422,7 @@ impl StartCommand {
             datanode,
             frontend,
             procedure_manager,
+            remote_write_metric_task,
         })
     }
 

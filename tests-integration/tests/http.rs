@@ -753,6 +753,10 @@ timeout = "10s"
 connect_timeout = "1s"
 tcp_nodelay = true
 
+[frontend.remote_write]
+enable = false
+write_interval = "30s"
+
 [datanode]
 mode = "standalone"
 node_id = 0
@@ -807,8 +811,16 @@ parallel_scan_channel_size = 32
 [datanode.logging]
 enable_otlp_tracing = false
 
+[datanode.remote_write]
+enable = false
+write_interval = "30s"
+
 [logging]
-enable_otlp_tracing = false"#,
+enable_otlp_tracing = false
+
+[remote_write]
+enable = false
+write_interval = "30s""#,
         store_type,
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);

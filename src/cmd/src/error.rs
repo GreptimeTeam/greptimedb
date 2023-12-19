@@ -140,6 +140,12 @@ pub enum Error {
         source: common_recordbatch::error::Error,
     },
 
+    #[snafu(display("Failed to init remote write metric task"))]
+    InitRemoteWriteMetricTask {
+        location: Location,
+        source: servers::error::Error,
+    },
+
     #[snafu(display("Failed to pretty print Recordbatches"))]
     PrettyPrintRecordBatches {
         location: Location,
@@ -266,6 +272,7 @@ impl ErrorExt for Error {
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
             | Error::EmptyResult { .. }
+            | Error::InitRemoteWriteMetricTask { .. }
             | Error::InvalidDatabaseName { .. } => StatusCode::InvalidArguments,
 
             Error::StartProcedureManager { source, .. }

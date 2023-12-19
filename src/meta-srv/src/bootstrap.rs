@@ -28,6 +28,7 @@ use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
+use servers::remote_writer::RemoteWriteMetricTask;
 use servers::server::Server;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
@@ -36,6 +37,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
+use crate::error::InitRemoteWriteMetricTaskSnafu;
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetaSrvBuilder;
@@ -57,6 +59,8 @@ pub struct MetaSrvInstance {
     signal_sender: Option<Sender<()>>,
 
     plugins: Plugins,
+
+    remote_write_metric_task: Option<RemoteWriteMetricTask>,
 }
 
 impl MetaSrvInstance {
@@ -73,17 +77,25 @@ impl MetaSrvInstance {
         );
         // put meta_srv into plugins for later use
         plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
+        let remote_write_metric_task =
+            RemoteWriteMetricTask::try_new(&opts.remote_write, Some(&plugins))
+                .context(InitRemoteWriteMetricTaskSnafu)?;
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
             opts,
             signal_sender: None,
             plugins,
+            remote_write_metric_task,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.meta_srv.try_start().await?;
+
+        if let Some(t) = self.remote_write_metric_task.as_ref() {
+            t.start()
+        }
 
         let (tx, rx) = mpsc::channel::<()>(1);
 

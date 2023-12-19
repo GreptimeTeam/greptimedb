@@ -72,6 +72,7 @@ prost.workspace = true
 query.workspace = true
 rand.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = "0.22"
 rustls-pemfile = "2.0"

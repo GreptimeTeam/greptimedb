@@ -65,6 +65,7 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
+use servers::remote_writer::{RemoteWriteMetricTask, RemoteWriteOptions};
 use servers::server::{start_server, ServerHandlers};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
@@ -77,7 +78,8 @@ pub use standalone::StandaloneDatanodeManager;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, TableOperationSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
+    TableOperationSnafu,
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
@@ -116,6 +118,7 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
+    remote_write_metric_task: Option<RemoteWriteMetricTask>,
 }
 
 impl Instance {
@@ -193,6 +196,12 @@ impl Instance {
         Ok(())
     }
 
+    pub fn build_remote_write_metric_task(&mut self, opts: &RemoteWriteOptions) -> Result<()> {
+        self.remote_write_metric_task =
+            RemoteWriteMetricTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
+        Ok(())
+    }
+
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
@@ -221,6 +230,10 @@ impl FrontendInstance for Instance {
         }
 
         self.script_executor.start(self)?;
+
+        if let Some(t) = self.remote_write_metric_task.as_ref() {
+            t.start()
+        }
 
         futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
             info!("Starting service: {name}");
