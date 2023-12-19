@@ -303,7 +303,7 @@ mod tests {
     }
 
     // This test intends to ensure both the `serde_json::to_string` + `serde_json::from_str`
-    // and `serde_json::to_vec` + `serde_json::from_slice` works for `DatanodeTableValue`.
+    // and `serde_json::to_vec` + `serde_json::from_slice` work for `DatanodeTableValue`.
     // Warning: if the key of `region_wal_options` is of type non-String, this test would fail.
     #[test]
     fn test_serde_with_region_info() {

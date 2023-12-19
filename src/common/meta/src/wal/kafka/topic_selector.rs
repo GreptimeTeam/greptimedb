@@ -20,9 +20,9 @@ use crate::wal::kafka::topic::Topic;
 
 /// The type of the topic selector, i.e. with which strategy to select a topic.
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum SelectorType {
     #[default]
-    #[serde(rename = "round_robin")]
     RoundRobin,
 }
 

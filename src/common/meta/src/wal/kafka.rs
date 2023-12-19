@@ -54,17 +54,7 @@ impl Default for KafkaConfig {
 
 /// Kafka wal options allocated to a region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
 pub struct KafkaOptions {
     /// Kafka wal topic.
     pub topic: Topic,
-}
-
-impl Default for KafkaOptions {
-    fn default() -> Self {
-        Self {
-            // To indicates a default deserialized topic is invalid.
-            topic: "invalid_topic".to_string(),
-        }
-    }
 }
