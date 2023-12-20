@@ -454,7 +454,6 @@ mod tests {
     use std::sync::Arc;
 
     use common_procedure::local::LocalManager;
-    use table::metadata::{RawTableInfo, TableId};
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -470,7 +469,6 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::rpc::ddl::CreateTableTask;
-    use crate::rpc::router::RegionRoute;
     use crate::state_store::KvStateStore;
 
     /// A dummy implemented [DatanodeManager].

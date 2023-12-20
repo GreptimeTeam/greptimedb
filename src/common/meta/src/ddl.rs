@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
-use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;

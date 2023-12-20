@@ -35,7 +35,6 @@ use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, TableId};
-use table::metadata::RawTableInfo;
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
@@ -161,8 +160,8 @@ impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
         let table_id = self.allocate_table_id(task).await?;
         task.table_info.ident.table_id = table_id;
 
-        let region_routes = task.
-            partitions
+        let region_routes = task
+            .partitions
             .iter()
             .enumerate()
             .map(|(i, partition)| {
