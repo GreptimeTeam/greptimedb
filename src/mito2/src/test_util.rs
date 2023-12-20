@@ -696,6 +696,7 @@ pub async fn reopen_region(
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await

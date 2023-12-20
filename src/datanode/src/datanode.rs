@@ -380,6 +380,7 @@ impl DatanodeBuilder {
                             engine: engine.clone(),
                             region_dir,
                             options,
+                            skip_wal_replay: false,
                         }),
                     )
                     .await?;

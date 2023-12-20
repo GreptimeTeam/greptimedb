@@ -18,15 +18,16 @@ use std::time::Duration;
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_recordbatch::RecordBatches;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::test_util::{
-    build_rows, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
+    build_rows, flush_region, put_rows, reopen_region, rows_schema, CreateRequestBuilder, TestEnv,
 };
 
 #[tokio::test]
@@ -42,6 +43,7 @@ async fn test_engine_open_empty() {
                 engine: String::new(),
                 region_dir: "empty".to_string(),
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -73,6 +75,7 @@ async fn test_engine_open_existing() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -161,6 +164,7 @@ async fn test_engine_region_open_with_options() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("ttl".to_string(), "4d".to_string())]),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -205,6 +209,7 @@ async fn test_engine_region_open_with_custom_store() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::from([("storage".to_string(), "Gcs".to_string())]),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -224,4 +229,93 @@ async fn test_engine_region_open_with_custom_store() {
         .is_exist(region.access_layer.region_dir())
         .await
         .unwrap());
+}
+
+#[tokio::test]
+async fn test_open_region_skip_wal_replay() {
+    let mut env = TestEnv::new();
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let region_dir = request.region_dir.clone();
+
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    flush_region(&engine, region_id, None).await;
+
+    let rows = Rows {
+        schema: column_schemas.clone(),
+        rows: build_rows(3, 5),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    // Skip the WAL replay .
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir: region_dir.to_string(),
+                options: Default::default(),
+                skip_wal_replay: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    // Replay the WAL.
+    let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+    // Open the region again with options.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                region_dir,
+                options: Default::default(),
+                skip_wal_replay: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let request = ScanRequest::default();
+    let stream = engine.handle_query(region_id, request).await.unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
+| 4     | 4.0     | 1970-01-01T00:00:04 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
 }

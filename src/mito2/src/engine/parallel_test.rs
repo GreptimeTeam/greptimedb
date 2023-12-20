@@ -50,6 +50,7 @@ async fn scan_in_parallel(
                 engine: String::new(),
                 region_dir: region_dir.to_string(),
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
