@@ -15,6 +15,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::wal::kafka::topic::Topic;
@@ -42,6 +43,18 @@ pub(super) struct RoundRobinTopicSelector {
     cursor: AtomicUsize,
 }
 
+impl RoundRobinTopicSelector {
+    // The cursor in the round-robin selector is not persisted which may break the round-robin strategy cross crashes.
+    // Introducing a shuffling strategy may help mitigate this issue.
+    pub fn with_shuffle() -> Self {
+        let mut this = Self::default();
+        let offset = rand::thread_rng().gen::<usize>() % usize::MAX;
+        // It's ok when an overflow happens since `fetch_add` automatically wraps around.
+        this.cursor.fetch_add(offset, Ordering::Relaxed);
+        this
+    }
+}
+
 impl TopicSelector for RoundRobinTopicSelector {
     fn select<'a>(&'a self, topic_pool: &'a [Topic]) -> &Topic {
         // Safety: the caller ensures the topic pool is not empty and hence the modulo operation is safe.
@@ -64,5 +77,10 @@ mod tests {
         assert_eq!(selector.select(&topic_pool), "1");
         assert_eq!(selector.select(&topic_pool), "2");
         assert_eq!(selector.select(&topic_pool), "0");
+
+        // Creates a round-robin selector with shuffle.
+        let selector = RoundRobinTopicSelector::with_shuffle();
+        let topic = selector.select(&topic_pool);
+        assert!(topic_pool.contains(&topic));
     }
 }

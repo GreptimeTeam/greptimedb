@@ -33,6 +33,7 @@ lazy_static.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 regex.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with = "3"
