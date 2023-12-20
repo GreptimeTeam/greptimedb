@@ -230,11 +230,14 @@ impl<'a> InMemoryRowGroup<'a> {
                 .collect::<Result<Vec<_>>>()
         };
 
-        maybe_spawn_blocking(f).await
+        common_runtime::spawn_blocking_read(f)
+            .await
+            .map_err(|e| ParquetError::External(Box::new(e)))?
     }
 
     /// Fetches data from object store concurrently.
     async fn get_ranges_concurrent(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
+        // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
         let mut handles = Vec::with_capacity(ranges.len());
         for range in ranges {
             let future_read = self.object_store.read_with(self.file_path);
@@ -325,22 +328,6 @@ impl<'a> RowGroups for InMemoryRowGroup<'a> {
         Ok(Box::new(ColumnChunkIterator {
             reader: Some(Ok(page_reader)),
         }))
-    }
-}
-
-//  Port from https://github.com/apache/arrow-rs/blob/802ed428f87051fdca31180430ddb0ecb2f60e8b/object_store/src/util.rs#L74-L83
-/// Takes a function and spawns it to a tokio blocking pool if available
-pub async fn maybe_spawn_blocking<F, T>(f: F) -> Result<T>
-where
-    F: FnOnce() -> Result<T> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(runtime) => runtime
-            .spawn_blocking(f)
-            .await
-            .map_err(|e| ParquetError::External(Box::new(e)))?,
-        Err(_) => f(),
     }
 }
 
