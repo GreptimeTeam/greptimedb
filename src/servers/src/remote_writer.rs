@@ -82,6 +82,8 @@ impl RemoteWriteMetricTask {
                 "Start remote write metric task to endpoint: {}, interval: {}s",
                 endpoint, sec
             );
+            // Pass the first tick. Because the first tick completes immediately.
+            interval.tick().await;
             loop {
                 interval.tick().await;
                 match report_metric(&endpoint, filter.as_ref()).await {

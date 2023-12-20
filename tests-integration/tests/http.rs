@@ -816,11 +816,7 @@ enable = false
 write_interval = "30s"
 
 [logging]
-enable_otlp_tracing = false
-
-[remote_write]
-enable = false
-write_interval = "30s""#,
+enable_otlp_tracing = false"#,
         store_type,
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);
