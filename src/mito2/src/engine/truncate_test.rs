@@ -250,6 +250,7 @@ async fn test_engine_truncate_reopen() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
@@ -353,6 +354,7 @@ async fn test_engine_truncate_during_flush() {
                 engine: String::new(),
                 region_dir,
                 options: HashMap::default(),
+                skip_wal_replay: false,
             }),
         )
         .await
