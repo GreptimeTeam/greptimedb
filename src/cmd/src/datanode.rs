@@ -167,21 +167,18 @@ impl StartCommand {
             opts.storage.data_home = data_home.clone();
         }
 
-        if let Some(wal_dir) = &self.wal_dir {
-            // `wal_dir` only affects raft-engine config.
-            match &mut opts.wal {
-                WalConfig::RaftEngine(raft_engine_config) => {
-                    if raft_engine_config
-                        .dir
-                        .as_ref()
-                        .is_some_and(|original_dir| original_dir != wal_dir)
-                    {
-                        info!("The wal dir of raft-engine is altered to {wal_dir}");
-                    }
-                    raft_engine_config.dir.replace(wal_dir.clone());
-                }
-                WalConfig::Kafka(_) => {}
+        // `wal_dir` only affects raft-engine config.
+        if let Some(wal_dir) = &self.wal_dir
+            && let WalConfig::RaftEngine(raft_engine_config) = &mut opts.wal
+        {
+            if raft_engine_config
+                .dir
+                .as_ref()
+                .is_some_and(|original_dir| original_dir != wal_dir)
+            {
+                info!("The wal dir of raft-engine is altered to {wal_dir}");
             }
+            raft_engine_config.dir.replace(wal_dir.clone());
         }
 
         if let Some(http_addr) = &self.http_addr {

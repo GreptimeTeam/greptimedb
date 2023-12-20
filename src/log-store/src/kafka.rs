@@ -14,13 +14,13 @@
 
 pub mod log_store;
 
+use common_meta::wal::KafkaWalTopic as Topic;
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::Namespace;
 
 use crate::error::Error;
 
-type Topic = String;
-
+/// Kafka Namespace implementation.
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct NamespaceImpl {
     region_id: u64,
@@ -47,6 +47,7 @@ impl Namespace for NamespaceImpl {
     }
 }
 
+/// Kafka Entry implementation.
 pub struct EntryImpl {
     /// Entry payload.
     data: Vec<u8>,

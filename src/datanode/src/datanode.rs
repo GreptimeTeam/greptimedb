@@ -479,8 +479,6 @@ impl DatanodeBuilder {
         object_store_manager: ObjectStoreManagerRef,
         config: MitoConfig,
     ) -> Result<MitoEngine> {
-        // TODO(niebayes): validate wal config, for e.g. providing a remote wal for standalone mode is not allowed.
-
         let mito_engine = match &opts.wal {
             WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
                 config,
