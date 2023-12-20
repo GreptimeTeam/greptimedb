@@ -78,8 +78,18 @@ impl WalOptionsAllocator {
     }
 }
 
+/// Creates and initializes a wal options allocator.
+pub async fn build_wal_options_allocator(
+    config: &WalConfig,
+    kv_backend: &KvBackendRef,
+) -> Result<WalOptionsAllocator> {
+    let mut allocator = WalOptionsAllocator::new(config.clone(), kv_backend.clone());
+    allocator.try_init().await?;
+    Ok(allocator)
+}
+
 /// Allocates a wal options for each region. The allocated wal options is encoded immediately.
-pub fn build_region_wal_options(
+pub fn allocate_region_wal_options(
     regions: Vec<RegionNumber>,
     wal_options_allocator: &WalOptionsAllocator,
 ) -> Result<HashMap<RegionNumber, String>> {
@@ -94,14 +104,30 @@ pub fn build_region_wal_options(
     Ok(regions.into_iter().zip(wal_options).collect())
 }
 
-/// Builds a wal options allocator.
-pub async fn build_wal_options_allocator(
-    config: &WalConfig,
-    kv_backend: &KvBackendRef,
-) -> Result<WalOptionsAllocator> {
-    let mut allocator = WalOptionsAllocator::new(config.clone(), kv_backend.clone());
-    allocator.try_init().await?;
-    Ok(allocator)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv_backend::memory::MemoryKvBackend;
 
-// TODO(niebayes): add tests for the above utility functions.
+    // Tests the wal options allocator could successfully allocate raft-engine wal options.
+    // Note: tests for allocator with kafka are integration tests.
+    #[tokio::test]
+    async fn test_allocator_with_raft_engine() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let wal_config = WalConfig::RaftEngine;
+        let allocator = build_wal_options_allocator(&wal_config, &kv_backend)
+            .await
+            .unwrap();
+
+        let num_regions = 32;
+        let regions = (0..num_regions).collect::<Vec<_>>();
+        let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+
+        let encoded_wal_options = serde_json::to_string(&WalOptions::RaftEngine).unwrap();
+        let expected = regions
+            .into_iter()
+            .zip(vec![encoded_wal_options; num_regions as usize])
+            .collect();
+        assert_eq!(got, expected);
+    }
+}
