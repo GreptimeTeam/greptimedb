@@ -39,29 +39,24 @@ impl TableRouteKey {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum TableRouteValue {
-    Mito(MitoTableRouteValue),
-    File(FileTableRouteValue),
-    Metrics(MetricsTableRouteValue),
+    Physical(PhysicalTableRouteValue),
+    Logical(LogicalTableRouteValue),
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct MitoTableRouteValue {
+pub struct PhysicalTableRouteValue {
     pub region_routes: Vec<RegionRoute>,
     version: u64,
 }
 
-// TODO(LFC): Make file engine table use its own table route.
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct FileTableRouteValue;
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct MetricsTableRouteValue {
+pub struct LogicalTableRouteValue {
     // TODO(LFC): Add table route for MetricsEngine table.
 }
 
 impl TableRouteValue {
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
-        Self::Mito(MitoTableRouteValue {
+        Self::Physical(PhysicalTableRouteValue {
             region_routes,
             version: 0,
         })
@@ -69,8 +64,8 @@ impl TableRouteValue {
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
-        let version = self.mito_table_route().version;
-        Self::Mito(MitoTableRouteValue {
+        let version = self.physical_table_route().version;
+        Self::Physical(PhysicalTableRouteValue {
             region_routes,
             version: version + 1,
         })
@@ -81,12 +76,12 @@ impl TableRouteValue {
     /// For test purpose.
     #[cfg(any(test, feature = "testing"))]
     pub fn version(&self) -> u64 {
-        self.mito_table_route().version
+        self.physical_table_route().version
     }
 
     /// Returns the corresponding [RegionRoute].
     pub fn region_route(&self, region_id: RegionId) -> Option<RegionRoute> {
-        self.mito_table_route()
+        self.physical_table_route()
             .region_routes
             .iter()
             .find(|route| route.region.id == region_id)
@@ -98,13 +93,13 @@ impl TableRouteValue {
     /// # Panics
     /// The engine type of this table is not "`Mito`".
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
-        &self.mito_table_route().region_routes
+        &self.physical_table_route().region_routes
     }
 
-    fn mito_table_route(&self) -> &MitoTableRouteValue {
+    fn physical_table_route(&self) -> &PhysicalTableRouteValue {
         match self {
-            TableRouteValue::Mito(x) => x,
-            _ => unreachable!("Mistakenly been treated as a Mito TableRoute: {:?}", self),
+            TableRouteValue::Physical(x) => x,
+            _ => unreachable!("Mistakenly been treated as a Physical TableRoute: {self:?}"),
         }
     }
 }
