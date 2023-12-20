@@ -216,6 +216,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} is busy", region_id))]
+    RegionBusy {
+        region_id: RegionId,
+        location: Location,
+    },
+
     #[snafu(display("Region engine {} is not registered", name))]
     RegionEngineNotFound { name: String, location: Location },
 
@@ -302,6 +308,7 @@ impl ErrorExt for Error {
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
+            RegionBusy { .. } => StatusCode::RegionBusy,
 
             StartServer { source, .. } | ShutdownServer { source, .. } => source.status_code(),
 

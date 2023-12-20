@@ -274,10 +274,6 @@ impl RegionEngineWithStatus {
     pub fn is_registering(&self) -> bool {
         matches!(self, Self::Registering(_))
     }
-
-    pub fn is_deregistering(&self) -> bool {
-        matches!(self, Self::Deregistering(_))
-    }
 }
 
 impl Deref for RegionEngineWithStatus {
@@ -356,13 +352,15 @@ impl RegionServerInner {
 
         let engine = match region_change {
             RegionChange::Register(ref engine_type) => match current_region_status {
-                Some(status) => {
-                    if status.is_registering() {
-                        return Ok(CurrentEngine::EarlyReturn(0));
-                    } else {
-                        status.clone().into_engine()
+                Some(status) => match status.clone() {
+                    RegionEngineWithStatus::Registering(_) => {
+                        return Ok(CurrentEngine::EarlyReturn(0))
                     }
-                }
+                    RegionEngineWithStatus::Deregistering(_) => {
+                        return error::RegionBusySnafu { region_id }.fail()
+                    }
+                    RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
+                },
                 _ => self
                     .engines
                     .read()
@@ -372,13 +370,15 @@ impl RegionServerInner {
                     .clone(),
             },
             RegionChange::Deregisters => match current_region_status {
-                Some(status) => {
-                    if status.is_deregistering() {
-                        return Ok(CurrentEngine::EarlyReturn(0));
-                    } else {
-                        status.clone().into_engine()
+                Some(status) => match status.clone() {
+                    RegionEngineWithStatus::Registering(_) => {
+                        return error::RegionBusySnafu { region_id }.fail()
                     }
-                }
+                    RegionEngineWithStatus::Deregistering(_) => {
+                        return Ok(CurrentEngine::EarlyReturn(0))
+                    }
+                    RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
+                },
                 None => return Ok(CurrentEngine::EarlyReturn(0)),
             },
             RegionChange::None => match current_region_status {
@@ -1052,8 +1052,8 @@ mod tests {
                 current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
                 region_change: RegionChange::Register(engine.name().to_string()),
                 assert: Box::new(|result| {
-                    let current_engine = result.unwrap();
-                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionBusy);
                 }),
             },
             CurrentEngineTest {
@@ -1080,8 +1080,8 @@ mod tests {
                 current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
                 region_change: RegionChange::Deregisters,
                 assert: Box::new(|result| {
-                    let current_engine = result.unwrap();
-                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionBusy);
                 }),
             },
             CurrentEngineTest {
