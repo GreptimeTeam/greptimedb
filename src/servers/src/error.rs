@@ -539,7 +539,9 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound => Code::NotFound,
         StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
-        StatusCode::RuntimeResourcesExhausted | StatusCode::RateLimited => Code::ResourceExhausted,
+        StatusCode::RuntimeResourcesExhausted
+        | StatusCode::RateLimited
+        | StatusCode::RegionBusy => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound
