@@ -12,6 +12,10 @@ rpc_runtime_size = 8
 # It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
 require_lease_before_startup = false
 
+# Initialize all regions in the background during the startup.
+# By default, it provides services after all regions have been initialized.
+initialize_region_in_background = false
+
 [heartbeat]
 # Interval for sending heartbeat messages to the Metasrv, 3 seconds by default.
 interval = "3s"
