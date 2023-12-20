@@ -35,30 +35,45 @@ pub enum WalOptionsAllocator {
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
     pub fn new(config: &WalConfig, kv_backend: KvBackendRef) -> Self {
-        todo!()
+        match config {
+            WalConfig::RaftEngine => Self::RaftEngine,
+            WalConfig::Kafka(kafka_config) => {
+                Self::Kafka(KafkaTopicManager::new(kafka_config, kv_backend))
+            }
+        }
     }
 
     /// Tries to initialize the allocator.
-    pub fn try_init(&self) -> Result<()> {
-        todo!()
+    pub async fn try_init(&mut self) -> Result<()> {
+        match self {
+            Self::RaftEngine => Ok(()),
+            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.try_init().await,
+        }
     }
 
     /// Allocates a wal options for a region.
     pub fn alloc(&self) -> WalOptions {
-        todo!()
+        match self {
+            Self::RaftEngine => WalOptions::RaftEngine,
+            Self::Kafka(kafka_topic_manager) => WalOptions::Kafka(KafkaWalOptions {
+                topic: kafka_topic_manager.select().clone(),
+            }),
+        }
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
     pub fn alloc_batch(&self, num_regions: usize) -> Vec<WalOptions> {
         match self {
             WalOptionsAllocator::RaftEngine => vec![WalOptions::RaftEngine; num_regions],
-            WalOptionsAllocator::Kafka(topic_manager) => {
-                let topics = topic_manager.select_batch(num_regions);
-                topics
-                    .into_iter()
-                    .map(|topic| WalOptions::Kafka(KafkaWalOptions { topic }))
-                    .collect()
-            }
+            WalOptionsAllocator::Kafka(topic_manager) => topic_manager
+                .select_batch(num_regions)
+                .into_iter()
+                .map(|topic| {
+                    WalOptions::Kafka(KafkaWalOptions {
+                        topic: topic.clone(),
+                    })
+                })
+                .collect(),
         }
     }
 }
@@ -80,12 +95,11 @@ pub fn build_region_wal_options(
 }
 
 /// Builds a wal options allocator.
-// TODO(niebayes): implement.
 pub async fn build_wal_options_allocator(
     config: &WalConfig,
     kv_backend: &KvBackendRef,
 ) -> Result<WalOptionsAllocator> {
-    let _ = config;
-    let _ = kv_backend;
-    Ok(WalOptionsAllocator::default())
+    let mut allocator = WalOptionsAllocator::new(config, kv_backend.clone());
+    allocator.try_init().await?;
+    Ok(allocator)
 }
