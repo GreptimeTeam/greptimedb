@@ -22,6 +22,7 @@ mod stats;
 pub mod writer;
 
 use common_base::readable_size::ReadableSize;
+use parquet::file::metadata::ParquetMetaData;
 
 use crate::sst::file::FileTimeRange;
 
@@ -59,6 +60,8 @@ pub struct SstInfo {
     pub file_size: u64,
     /// Number of rows.
     pub num_rows: usize,
+    /// File Meta Data
+    pub file_metadata: Option<ParquetMetaData>,
 }
 
 #[cfg(test)]
