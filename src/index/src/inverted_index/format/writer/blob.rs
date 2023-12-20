@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::num::NonZeroUsize;
+
 use async_trait::async_trait;
 use common_base::BitVec;
-use futures::{AsyncWrite, AsyncWriteExt, Stream};
+use futures::{AsyncWrite, AsyncWriteExt};
 use greptime_proto::v1::index::InvertedIndexMetas;
 use prost::Message;
 use snafu::ResultExt;
 
-use super::single::SingleIndexWriter;
 use crate::inverted_index::error::{CloseSnafu, FlushSnafu, Result, WriteSnafu};
-use crate::inverted_index::format::writer::InvertedIndexWriter;
-use crate::inverted_index::Bytes;
+use crate::inverted_index::format::writer::single::SingleIndexWriter;
+use crate::inverted_index::format::writer::{InvertedIndexWriter, ValueStream};
 
 /// `InvertedIndexBlobWriter`, implemented [`InvertedIndexWriter`], manages
 /// writing of an inverted index to a blob storage.
@@ -39,10 +40,12 @@ pub struct InvertedIndexBlobWriter<W> {
 
 #[async_trait]
 impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWriter<W> {
-    async fn add_index<S>(&mut self, name: String, null_bitmap: BitVec, values: S) -> Result<()>
-    where
-        S: Stream<Item = Result<(Bytes, BitVec)>> + Send + Unpin,
-    {
+    async fn add_index(
+        &mut self,
+        name: String,
+        null_bitmap: BitVec,
+        values: ValueStream,
+    ) -> Result<()> {
         let single_writer = SingleIndexWriter::new(
             name.clone(),
             self.written_size,
@@ -58,7 +61,14 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<()> {
+    async fn finish(
+        &mut self,
+        total_row_count: u64,
+        segment_row_count: NonZeroUsize,
+    ) -> Result<()> {
+        self.metas.segment_row_count = segment_row_count.get() as _;
+        self.metas.total_row_count = total_row_count;
+
         let metas_bytes = self.metas.encode_to_vec();
         self.blob_writer
             .write_all(&metas_bytes)
@@ -78,19 +88,11 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
 }
 
 impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
-    pub fn new(
-        blob_writer: W,
-        total_row_count: u64,
-        segment_row_count: u64,
-    ) -> InvertedIndexBlobWriter<W> {
+    pub fn new(blob_writer: W) -> InvertedIndexBlobWriter<W> {
         InvertedIndexBlobWriter {
             blob_writer,
             written_size: 0,
-            metas: InvertedIndexMetas {
-                total_row_count,
-                segment_row_count,
-                ..Default::default()
-            },
+            metas: InvertedIndexMetas::default(),
         }
     }
 }
@@ -98,9 +100,11 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
 #[cfg(test)]
 mod tests {
     use futures::io::Cursor;
+    use futures::stream;
 
     use super::*;
     use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+    use crate::inverted_index::Bytes;
 
     fn unpack(fst_value: u64) -> [u32; 2] {
         bytemuck::cast::<u64, [u32; 2]>(fst_value)
@@ -109,8 +113,11 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_writer_write_empty() {
         let mut blob = Vec::new();
-        let mut writer = InvertedIndexBlobWriter::new(&mut blob, 8, 1);
-        writer.finish().await.unwrap();
+        let mut writer = InvertedIndexBlobWriter::new(&mut blob);
+        writer
+            .finish(8, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);
@@ -123,16 +130,16 @@ mod tests {
     #[tokio::test]
     async fn test_inverted_index_blob_writer_write_basic() {
         let mut blob = Vec::new();
-        let mut writer = InvertedIndexBlobWriter::new(&mut blob, 8, 1);
+        let mut writer = InvertedIndexBlobWriter::new(&mut blob);
         writer
             .add_index(
                 "tag0".to_string(),
                 BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
-                futures::stream::iter(vec![
+                Box::new(stream::iter(vec![
                     Ok((Bytes::from("a"), BitVec::from_slice(&[0b0000_0001]))),
                     Ok((Bytes::from("b"), BitVec::from_slice(&[0b0010_0000]))),
                     Ok((Bytes::from("c"), BitVec::from_slice(&[0b0000_0001]))),
-                ]),
+                ])),
             )
             .await
             .unwrap();
@@ -140,15 +147,18 @@ mod tests {
             .add_index(
                 "tag1".to_string(),
                 BitVec::from_slice(&[0b0000_0001, 0b0000_0000]),
-                futures::stream::iter(vec![
+                Box::new(stream::iter(vec![
                     Ok((Bytes::from("x"), BitVec::from_slice(&[0b0000_0001]))),
                     Ok((Bytes::from("y"), BitVec::from_slice(&[0b0010_0000]))),
                     Ok((Bytes::from("z"), BitVec::from_slice(&[0b0000_0001]))),
-                ]),
+                ])),
             )
             .await
             .unwrap();
-        writer.finish().await.unwrap();
+        writer
+            .finish(8, NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
 
         let cursor = Cursor::new(blob);
         let mut reader = InvertedIndexBlobReader::new(cursor);

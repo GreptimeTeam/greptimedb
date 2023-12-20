@@ -160,6 +160,13 @@ pub enum Error {
 
     #[snafu(display("Unknown intermediate codec magic: {magic:?}"))]
     UnknownIntermediateCodecMagic { magic: [u8; 4], location: Location },
+
+    #[snafu(display("Inconsistent row count, index_name: {index_name}, total_row_count: {total_row_count}, expected: {expected_row_count}"))]
+    InconsistentRowCount {
+        index_name: String,
+        total_row_count: usize,
+        expected_row_count: usize,
+    },
 }
 
 impl ErrorExt for Error {
@@ -188,6 +195,7 @@ impl ErrorExt for Error {
             | IntersectionApplierWithInList { .. }
             | EmptyPredicates { .. }
             | FstInsert { .. }
+            | InconsistentRowCount { .. }
             | IndexNotFound { .. } => StatusCode::InvalidArguments,
         }
     }
