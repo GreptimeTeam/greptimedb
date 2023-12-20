@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -29,23 +30,39 @@ pub enum SelectorType {
 /// Controls topic selection.
 pub(super) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.
-    fn select(&self, topic_pool: &[Topic]) -> &Topic;
+    fn select<'a>(&'a self, topic_pool: &'a [Topic]) -> &Topic;
 }
 
+/// Arc wrapper of TopicSelector.
 pub(super) type TopicSelectorRef = Arc<dyn TopicSelector>;
 
 /// A topic selector with the round-robin strategy, i.e. selects topics in a round-robin manner.
-pub(super) struct RoundRobinTopicSelector;
-
-impl RoundRobinTopicSelector {
-    /// Creates a new round-robin topic selector.
-    pub(super) fn new() -> Self {
-        todo!()
-    }
+#[derive(Default)]
+pub(super) struct RoundRobinTopicSelector {
+    cursor: AtomicUsize,
 }
 
 impl TopicSelector for RoundRobinTopicSelector {
-    fn select(&self, topic_pool: &[Topic]) -> &Topic {
-        todo!()
+    fn select<'a>(&'a self, topic_pool: &'a [Topic]) -> &Topic {
+        // Safety: the caller ensures the topic pool is not empty and hence the modulo operation is safe.
+        let which = self.cursor.fetch_add(1, Ordering::Relaxed) % topic_pool.len();
+        // Safety: the modulo operation ensures the index operation is safe.
+        topic_pool.get(which).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_round_robin_topic_selector() {
+        let topic_pool: Vec<_> = [0, 1, 2].into_iter().map(|v| v.to_string()).collect();
+        let selector = RoundRobinTopicSelector::default();
+
+        assert_eq!(selector.select(&topic_pool), "0");
+        assert_eq!(selector.select(&topic_pool), "1");
+        assert_eq!(selector.select(&topic_pool), "2");
+        assert_eq!(selector.select(&topic_pool), "0");
     }
 }
