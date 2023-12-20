@@ -34,7 +34,7 @@ pub enum WalOptionsAllocator {
 
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
-    pub fn new(config: &WalConfig, kv_backend: KvBackendRef) -> Self {
+    pub fn new(config: WalConfig, kv_backend: KvBackendRef) -> Self {
         match config {
             WalConfig::RaftEngine => Self::RaftEngine,
             WalConfig::Kafka(kafka_config) => {
@@ -99,7 +99,9 @@ pub async fn build_wal_options_allocator(
     config: &WalConfig,
     kv_backend: &KvBackendRef,
 ) -> Result<WalOptionsAllocator> {
-    let mut allocator = WalOptionsAllocator::new(config, kv_backend.clone());
+    let mut allocator = WalOptionsAllocator::new(config.clone(), kv_backend.clone());
     allocator.try_init().await?;
     Ok(allocator)
 }
+
+// TODO(niebayes): add tests for the above utility functions.

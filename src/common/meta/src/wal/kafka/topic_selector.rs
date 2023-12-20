@@ -81,6 +81,6 @@ mod tests {
         // Creates a round-robin selector with shuffle.
         let selector = RoundRobinTopicSelector::with_shuffle();
         let topic = selector.select(&topic_pool);
-        assert!(topic_pool.contains(&topic));
+        assert!(topic_pool.contains(topic));
     }
 }

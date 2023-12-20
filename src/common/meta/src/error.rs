@@ -296,6 +296,37 @@ pub enum Error {
         error: serde_json::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid number of topics {}", num_topics))]
+    InvalidNumTopics {
+        num_topics: usize,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build an rskafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to build an rskafka controller client"))]
+    BuildCtrlClient {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to create a kafka wal topic through rskafka client"))]
+    CreateKafkaWalTopic {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -331,7 +362,10 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
-            | EncodeWalOptionsToJson { .. } => StatusCode::Unexpected,
+            | EncodeWalOptionsToJson { .. }
+            | BuildClient { .. }
+            | BuildCtrlClient { .. }
+            | CreateKafkaWalTopic { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -356,6 +390,8 @@ impl ErrorExt for Error {
             RetryLater { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+
+            InvalidNumTopics { .. } => StatusCode::InvalidArguments,
         }
     }
 
