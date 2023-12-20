@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
-use common_config::wal::{EncodedWalOptions, KafkaConfig, RaftEngineConfig};
-use common_config::WalConfig;
+use common_config::wal::{KafkaConfig, RaftEngineConfig};
+use common_config::{WalConfig, WAL_OPTIONS_KEY};
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::DatanodeTableManager;
@@ -52,7 +52,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use tokio::fs;
 use tokio::sync::Notify;
 
@@ -346,16 +346,15 @@ impl DatanodeBuilder {
         while let Some(table_value) = table_values.next().await {
             let table_value = table_value.context(GetMetadataSnafu)?;
             for region_number in table_value.regions {
-                // Augments region options with wal options.
-                // TODO(niebayes): fetch wal options map from region info.
-                // let wal_options_map = &table_value.region_info.wal_options_map;
-                let wal_options_map: HashMap<RegionNumber, EncodedWalOptions> = HashMap::default();
-                let wal_options = wal_options_map
-                    .get(&region_number)
-                    .cloned()
-                    .unwrap_or_default();
+                // Augments region options with wal options if a wal options is provided.
                 let mut region_options = table_value.region_info.region_options.clone();
-                region_options.extend(wal_options);
+                table_value
+                    .region_info
+                    .region_wal_options
+                    .get(&region_number.to_string())
+                    .and_then(|wal_options| {
+                        region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+                    });
 
                 regions.push((
                     RegionId::new(table_value.table_id, region_number),

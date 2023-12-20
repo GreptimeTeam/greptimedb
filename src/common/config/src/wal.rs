@@ -15,14 +15,17 @@
 pub mod kafka;
 pub mod raft_engine;
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
 pub use crate::wal::kafka::{KafkaConfig, KafkaOptions as KafkaWalOptions, Topic as KafkaWalTopic};
 pub use crate::wal::raft_engine::RaftEngineConfig;
 
+/// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
+/// and inserted into the options of a `RegionCreateRequest`.
+pub const WAL_OPTIONS_KEY: &str = "wal_options";
+
+/// Wal config for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
@@ -39,6 +42,8 @@ impl Default for WalConfig {
 }
 
 /// Wal options allocated to a region.
+/// A wal options is encoded by metasrv with `serde_json::to_string`, and then decoded
+/// by datanode with `serde_json::from_str`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "wal.provider")]
 pub enum WalOptions {
@@ -52,15 +57,11 @@ pub enum WalOptions {
 
 with_prefix!(prefix_wal_kafka "wal.kafka.");
 
-/// The encoded wal options.
-pub type EncodedWalOptions = HashMap<String, String>;
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use common_base::readable_size::ReadableSize;
-    use itertools::Itertools;
     use rskafka::client::partition::Compression as RsKafkaCompression;
 
     use crate::wal::{KafkaConfig, KafkaWalOptions, WalOptions};
@@ -90,34 +91,24 @@ mod tests {
         assert_eq!(decoded, expected);
     }
 
-    fn make_json_string(items: &[(&str, &str)]) -> String {
-        let body = items
-            .iter()
-            .map(|(k, v)| format!("\"{k}\":\"{v}\""))
-            .join(",");
-        "{".to_string() + &body + "}"
-    }
-
     #[test]
-    fn test_serde_raft_engine_wal_options() {
+    fn test_serde_wal_options() {
+        // Test serde raft-engine wal options.
         let wal_options = WalOptions::RaftEngine;
         let encoded = serde_json::to_string(&wal_options).unwrap();
-        let expected_encoded = make_json_string(&[("wal.provider", "raft_engine")]);
-        assert_eq!(encoded, expected_encoded);
+        let expected = r#"{"wal.provider":"raft_engine"}"#;
+        assert_eq!(&encoded, expected);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, wal_options);
-    }
 
-    #[test]
-    fn test_serde_kafka_wal_options() {
+        // Test serde kafka wal options.
         let wal_options = WalOptions::Kafka(KafkaWalOptions {
             topic: "test_topic".to_string(),
         });
         let encoded = serde_json::to_string(&wal_options).unwrap();
-        let expected_encoded =
-            make_json_string(&[("wal.provider", "kafka"), ("wal.kafka.topic", "test_topic")]);
-        assert_eq!(encoded, expected_encoded);
+        let expected = r#"{"wal.provider":"kafka","wal.kafka.topic":"test_topic"}"#;
+        assert_eq!(&encoded, expected);
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, wal_options);

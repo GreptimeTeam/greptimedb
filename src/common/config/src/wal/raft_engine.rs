@@ -17,6 +17,7 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
+/// Configurations for raft-engine wal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RaftEngineConfig {
@@ -39,8 +40,8 @@ impl Default for RaftEngineConfig {
     fn default() -> Self {
         Self {
             dir: None,
-            file_size: ReadableSize::mb(256), // log file size 256MB
-            purge_threshold: ReadableSize::gb(4), // purge threshold 4GB
+            file_size: ReadableSize::mb(256),
+            purge_threshold: ReadableSize::gb(4),
             purge_interval: Duration::from_secs(600),
             read_batch_size: 128,
             sync_write: false,

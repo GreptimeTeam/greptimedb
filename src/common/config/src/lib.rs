@@ -17,7 +17,7 @@ pub mod wal;
 use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
-pub use crate::wal::WalConfig;
+pub use crate::wal::{KafkaWalOptions, WalConfig, WalOptions, WAL_OPTIONS_KEY};
 
 pub fn metadata_store_dir(store_dir: &str) -> String {
     format!("{store_dir}/metadata")

@@ -57,9 +57,9 @@ impl Default for KafkaConfig {
             topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
             num_partitions: 1,
             compression: RsKafkaCompression::NoCompression,
-            max_batch_size: ReadableSize::mb(4),       // 4MB.
-            linger: Duration::from_millis(200),        // 200ms.
-            max_wait_time: Duration::from_millis(100), // 100ms.
+            max_batch_size: ReadableSize::mb(4),
+            linger: Duration::from_millis(200),
+            max_wait_time: Duration::from_millis(100),
         }
     }
 }
