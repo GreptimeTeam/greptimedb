@@ -88,10 +88,10 @@ impl TableRouteValue {
             .cloned()
     }
 
-    /// Gets the [RegionRoute]s of this table route.
+    /// Gets the [RegionRoute]s of this [TableRouteValue::Physical].
     ///
     /// # Panics
-    /// The engine type of this table is not "`Mito`".
+    /// The route type is not the [TableRouteValue::Physical].
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
         &self.physical_table_route().region_routes
     }
