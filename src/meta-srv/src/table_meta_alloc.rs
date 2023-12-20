@@ -57,7 +57,7 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
     async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
-        task: &mut CreateTableTask,
+        task: &CreateTableTask,
     ) -> MetaResult<TableMetadata> {
         let (table_id, region_routes) = handle_create_region_routes(
             ctx.cluster_id,
@@ -93,12 +93,12 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
 /// pre-allocates create table's table id and region routes.
 async fn handle_create_region_routes(
     cluster_id: u64,
-    task: &mut CreateTableTask,
+    task: &CreateTableTask,
     ctx: &SelectorContext,
     selector: &SelectorRef,
     table_id_sequence: &SequenceRef,
 ) -> Result<(TableId, Vec<RegionRoute>)> {
-    let table_info = &mut task.table_info;
+    let table_info = &task.table_info;
     let partitions = &task.partitions;
 
     let mut peers = selector
@@ -138,7 +138,6 @@ async fn handle_create_region_routes(
         .next()
         .await
         .context(error::NextSequenceSnafu)? as u32;
-    table_info.ident.table_id = table_id;
 
     ensure!(
         partitions.len() <= MAX_REGION_SEQ as usize,

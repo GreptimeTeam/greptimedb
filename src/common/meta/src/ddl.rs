@@ -69,7 +69,7 @@ pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
-        task: &mut CreateTableTask,
+        task: &CreateTableTask,
     ) -> Result<TableMetadata>;
 }
 

@@ -386,7 +386,7 @@ async fn handle_create_table_task(
         .table_metadata_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
-            &mut create_table_task,
+            &create_table_task,
         )
         .await?;
 
@@ -395,6 +395,8 @@ async fn handle_create_table_task(
         region_routes,
         region_wal_options,
     } = table_meta;
+
+    create_table_task.table_info.ident.table_id = table_id;
 
     let id = ddl_manager
         .submit_create_table_task(
@@ -489,7 +491,7 @@ mod tests {
         async fn create(
             &self,
             _ctx: &TableMetadataAllocatorContext,
-            _task: &mut CreateTableTask,
+            _task: &CreateTableTask,
         ) -> Result<TableMetadata> {
             unimplemented!()
         }

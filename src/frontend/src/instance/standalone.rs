@@ -155,10 +155,9 @@ impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
     async fn create(
         &self,
         _ctx: &TableMetadataAllocatorContext,
-        task: &mut CreateTableTask,
+        task: &CreateTableTask,
     ) -> MetaResult<TableMetadata> {
         let table_id = self.allocate_table_id(task).await?;
-        task.table_info.ident.table_id = table_id;
 
         let region_routes = task
             .partitions
