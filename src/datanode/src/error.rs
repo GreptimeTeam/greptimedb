@@ -210,7 +210,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("RegionId {} not ready", region_id))]
+    #[snafu(display("Region {} not ready", region_id))]
     RegionNotReady {
         region_id: RegionId,
         location: Location,

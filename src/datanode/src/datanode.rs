@@ -25,7 +25,7 @@ use common_config::wal::{KafkaConfig, RaftEngineConfig};
 use common_config::{WalConfig, WAL_OPTIONS_KEY};
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
@@ -33,7 +33,7 @@ use common_telemetry::{error, info, warn};
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
@@ -234,18 +234,21 @@ impl DatanodeBuilder {
 
         let region_server = self.new_region_server(region_event_listener).await?;
 
-        let open_all_regions = open_all_regions(
-            region_server.clone(),
-            kv_backend,
-            !controlled_by_metasrv,
-            node_id,
-        );
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
+
+        let open_all_regions =
+            open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
 
         if self.opts.initialize_region_in_background {
             // Opens regions in background.
             common_runtime::spawn_bg(async move {
                 if let Err(err) = open_all_regions.await {
-                    error!(err; "Failed to opening regions during the startup.");
+                    error!(err; "Failed to open regions during the startup.");
                 }
             });
         } else {
@@ -356,13 +359,15 @@ impl DatanodeBuilder {
         open_with_writable: bool,
     ) -> Result<()> {
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        open_all_regions(
-            region_server.clone(),
-            kv_backend,
-            open_with_writable,
-            node_id,
-        )
-        .await
+
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
+
+        open_all_regions(region_server.clone(), table_values, open_with_writable).await
     }
 
     async fn new_region_server(
@@ -511,17 +516,11 @@ impl DatanodeBuilder {
 /// Open all regions belong to this datanode.
 async fn open_all_regions(
     region_server: RegionServer,
-    kv_backend: KvBackendRef,
+    table_values: Vec<DatanodeTableValue>,
     open_with_writable: bool,
-    node_id: u64,
 ) -> Result<()> {
-    let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
     let mut regions = vec![];
-    let mut table_values = datanode_table_manager.tables(node_id);
-
-    while let Some(table_value) = table_values.next().await {
-        let table_value = table_value.context(GetMetadataSnafu)?;
-
+    for table_value in table_values {
         for region_number in table_value.regions {
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();

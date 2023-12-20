@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -252,7 +253,7 @@ impl FlightCraft for RegionServer {
 
 #[derive(Clone)]
 enum RegionEngineWithStatus {
-    // A opening, or creating region.
+    // An opening, or creating region.
     Registering(RegionEngineRef),
     // A closing, or dropping region.
     Deregistering(RegionEngineRef),
@@ -300,6 +301,26 @@ struct RegionServerInner {
     table_provider_factory: TableProviderFactoryRef,
 }
 
+enum CurrentEngine {
+    Engine(RegionEngineRef),
+    EarlyReturn(AffectedRows),
+}
+
+impl Debug for CurrentEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CurrentEngine::Engine(engine) => f
+                .debug_struct("CurrentEngine")
+                .field("engine", &engine.name())
+                .finish(),
+            CurrentEngine::EarlyReturn(rows) => f
+                .debug_struct("CurrentEngine")
+                .field("return", rows)
+                .finish(),
+        }
+    }
+}
+
 impl RegionServerInner {
     pub fn new(
         query_engine: QueryEngineRef,
@@ -326,6 +347,57 @@ impl RegionServerInner {
             .insert(engine_name.to_string(), engine);
     }
 
+    fn get_engine(
+        &self,
+        region_id: RegionId,
+        region_change: &RegionChange,
+    ) -> Result<CurrentEngine> {
+        let current_region_status = self.region_map.get(&region_id);
+
+        let engine = match region_change {
+            RegionChange::Register(ref engine_type) => match current_region_status {
+                Some(status) => {
+                    if status.is_registering() {
+                        return Ok(CurrentEngine::EarlyReturn(0));
+                    } else {
+                        status.clone().into_engine()
+                    }
+                }
+                _ => self
+                    .engines
+                    .read()
+                    .unwrap()
+                    .get(engine_type)
+                    .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?
+                    .clone(),
+            },
+            RegionChange::Deregisters => match current_region_status {
+                Some(status) => {
+                    if status.is_deregistering() {
+                        return Ok(CurrentEngine::EarlyReturn(0));
+                    } else {
+                        status.clone().into_engine()
+                    }
+                }
+                None => return Ok(CurrentEngine::EarlyReturn(0)),
+            },
+            RegionChange::None => match current_region_status {
+                Some(status) => match status.clone() {
+                    RegionEngineWithStatus::Registering(_) => {
+                        return error::RegionNotReadySnafu { region_id }.fail()
+                    }
+                    RegionEngineWithStatus::Deregistering(_) => {
+                        return error::RegionNotFoundSnafu { region_id }.fail()
+                    }
+                    RegionEngineWithStatus::Ready(engine) => engine,
+                },
+                None => return error::RegionNotFoundSnafu { region_id }.fail(),
+            },
+        };
+
+        Ok(CurrentEngine::Engine(engine))
+    }
+
     pub async fn handle_request(
         &self,
         region_id: RegionId,
@@ -348,52 +420,44 @@ impl RegionServerInner {
             | RegionRequest::Truncate(_) => RegionChange::None,
         };
 
-        let region_status = self.region_map.get(&region_id);
-
-        let engine = match region_change {
-            RegionChange::Register(ref engine_type) => match region_status {
-                Some(status) => {
-                    if status.is_registering() {
-                        return Ok(0);
-                    } else {
-                        status.clone().into_engine()
-                    }
-                }
-                _ => self
-                    .engines
-                    .read()
-                    .unwrap()
-                    .get(engine_type)
-                    .with_context(|| RegionEngineNotFoundSnafu { name: engine_type })?
-                    .clone(),
-            },
-            RegionChange::Deregisters => match region_status {
-                Some(status) => {
-                    if status.is_deregistering() {
-                        return Ok(0);
-                    } else {
-                        status.clone().into_engine()
-                    }
-                }
-                None => return Ok(0),
-            },
-            RegionChange::None => match region_status {
-                Some(status) => match status.clone() {
-                    RegionEngineWithStatus::Registering(_) => {
-                        return error::RegionNotReadySnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Deregistering(_) => {
-                        return error::RegionNotFoundSnafu { region_id }.fail()
-                    }
-                    RegionEngineWithStatus::Ready(engine) => engine,
-                },
-                None => return error::RegionNotFoundSnafu { region_id }.fail(),
-            },
+        let engine = match self.get_engine(region_id, &region_change)? {
+            CurrentEngine::Engine(engine) => engine,
+            CurrentEngine::EarlyReturn(rows) => return Ok(rows),
         };
 
         let engine_type = engine.name();
 
-        // Sets the RegionStatus before the operation.
+        // Sets corresponding region status to registering/deregistering before the operation.
+        self.set_region_status_not_ready(region_id, &engine, &region_change);
+
+        match engine
+            .handle_request(region_id, request)
+            .trace(info_span!(
+                "RegionEngine::handle_region_request",
+                engine_type
+            ))
+            .await
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+        {
+            Ok(result) => {
+                // Sets corresponding region status to ready.
+                self.set_region_status_ready(region_id, engine, region_change);
+                Ok(result)
+            }
+            Err(err) => {
+                // Removes the region status if the operation fails.
+                self.unset_region_status(region_id, region_change);
+                Err(err)
+            }
+        }
+    }
+
+    fn set_region_status_not_ready(
+        &self,
+        region_id: RegionId,
+        engine: &RegionEngineRef,
+        region_change: &RegionChange,
+    ) {
         match region_change {
             RegionChange::Register(_) => {
                 self.region_map.insert(
@@ -409,46 +473,40 @@ impl RegionServerInner {
             }
             _ => {}
         }
+    }
 
-        match engine
-            .handle_request(region_id, request)
-            .trace(info_span!(
-                "RegionEngine::handle_region_request",
-                engine_type
-            ))
-            .await
-            .with_context(|_| HandleRegionRequestSnafu { region_id })
-        {
-            Ok(result) => {
-                match region_change {
-                    RegionChange::None => {}
-                    RegionChange::Register(_) => {
-                        info!("Region {region_id} is registered to engine {engine_type}");
-                        self.region_map
-                            .insert(region_id, RegionEngineWithStatus::Ready(engine));
-                        self.event_listener.on_region_registered(region_id);
-                    }
-                    RegionChange::Deregisters => {
-                        info!("Region {region_id} is deregistered from engine {engine_type}");
-                        self.region_map
-                            .remove(&region_id)
-                            .map(|(id, engine)| engine.set_writable(id, false));
-                        self.event_listener.on_region_deregistered(region_id);
-                    }
-                }
-                Ok(result)
+    fn unset_region_status(&self, region_id: RegionId, region_change: RegionChange) {
+        match region_change {
+            RegionChange::None => {}
+            RegionChange::Register(_) | RegionChange::Deregisters => {
+                self.region_map
+                    .remove(&region_id)
+                    .map(|(id, engine)| engine.set_writable(id, false));
             }
-            Err(err) => {
-                // Removes the RegionStatus if the operation fails.
-                match region_change {
-                    RegionChange::None => {}
-                    RegionChange::Register(_) | RegionChange::Deregisters => {
-                        self.region_map
-                            .remove(&region_id)
-                            .map(|(id, engine)| engine.set_writable(id, false));
-                    }
-                }
-                Err(err)
+        }
+    }
+
+    fn set_region_status_ready(
+        &self,
+        region_id: RegionId,
+        engine: RegionEngineRef,
+        region_change: RegionChange,
+    ) {
+        let engine_type = engine.name();
+        match region_change {
+            RegionChange::None => {}
+            RegionChange::Register(_) => {
+                info!("Region {region_id} is registered to engine {engine_type}");
+                self.region_map
+                    .insert(region_id, RegionEngineWithStatus::Ready(engine));
+                self.event_listener.on_region_registered(region_id);
+            }
+            RegionChange::Deregisters => {
+                info!("Region {region_id} is deregistered from engine {engine_type}");
+                self.region_map
+                    .remove(&region_id)
+                    .map(|(id, engine)| engine.set_writable(id, false));
+                self.event_listener.on_region_deregistered(region_id);
             }
         }
     }
@@ -730,6 +788,8 @@ pub type TableProviderFactoryRef = Arc<dyn TableProviderFactory>;
 #[cfg(test)]
 mod tests {
 
+    use std::assert_matches::assert_matches;
+
     use common_error::ext::ErrorExt;
     use mito2::test_util::CreateRequestBuilder;
     use store_api::region_engine::RegionEngine;
@@ -737,6 +797,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::error::Result;
     use crate::tests::{mock_region_server, MockRegionEngine};
 
     #[tokio::test]
@@ -781,6 +842,7 @@ mod tests {
                     engine: engine_name.to_string(),
                     region_dir: String::new(),
                     options: Default::default(),
+                    skip_wal_replay: false,
                 }),
             )
             .await
@@ -910,5 +972,161 @@ mod tests {
 
         let status = mock_region_server.inner.region_map.get(&region_id);
         assert!(status.is_none());
+    }
+
+    struct CurrentEngineTest {
+        region_id: RegionId,
+        current_region_status: Option<RegionEngineWithStatus>,
+        region_change: RegionChange,
+        assert: Box<dyn FnOnce(Result<CurrentEngine>)>,
+    }
+
+    #[tokio::test]
+    async fn test_current_engine() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let (engine, _) = MockRegionEngine::new();
+        mock_region_server.register_engine(engine.clone());
+
+        let region_id = RegionId::new(1024, 1);
+        let tests = vec![
+            // RegionChange::None
+            CurrentEngineTest {
+                region_id,
+                current_region_status: None,
+                region_change: RegionChange::None,
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
+                region_change: RegionChange::None,
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
+                region_change: RegionChange::None,
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionNotReady);
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
+                region_change: RegionChange::None,
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+                }),
+            },
+            // RegionChange::Register
+            CurrentEngineTest {
+                region_id,
+                current_region_status: None,
+                region_change: RegionChange::Register(engine.name().to_string()),
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
+                region_change: RegionChange::Register(engine.name().to_string()),
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
+                region_change: RegionChange::Register(engine.name().to_string()),
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
+                region_change: RegionChange::Register(engine.name().to_string()),
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            // RegionChange::Deregister
+            CurrentEngineTest {
+                region_id,
+                current_region_status: None,
+                region_change: RegionChange::Deregisters,
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
+                region_change: RegionChange::Deregisters,
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
+                region_change: RegionChange::Deregisters,
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
+                region_change: RegionChange::Deregisters,
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+        ];
+
+        for test in tests {
+            let CurrentEngineTest {
+                region_id,
+                current_region_status,
+                region_change,
+                assert,
+            } = test;
+
+            // Sets up
+            if let Some(status) = current_region_status {
+                mock_region_server
+                    .inner
+                    .region_map
+                    .insert(region_id, status);
+            } else {
+                mock_region_server.inner.region_map.remove(&region_id);
+            }
+
+            let result = mock_region_server
+                .inner
+                .get_engine(region_id, &region_change);
+
+            assert(result);
+        }
     }
 }
