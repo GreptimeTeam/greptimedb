@@ -59,7 +59,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         // Make all data obsolete.
-        self.wal.obsolete(region_id, truncated_entry_id).await?;
+        self.wal
+            .obsolete(region_id, truncated_entry_id, &region.wal_options)
+            .await?;
         info!(
             "Complete truncating region: {}, entry id: {} and sequence: {}.",
             region_id, truncated_entry_id, truncated_sequence

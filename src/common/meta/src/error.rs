@@ -14,6 +14,7 @@
 
 use std::str::Utf8Error;
 
+use common_config::wal::WalOptions;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -23,7 +24,6 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::peer::Peer;
-use crate::wal::WalOptions;
 use crate::DatanodeId;
 
 #[derive(Snafu)]

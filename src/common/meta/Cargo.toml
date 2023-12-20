@@ -15,6 +15,7 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 common-catalog.workspace = true
+common-config.workspace = true
 common-error.workspace = true
 common-grpc-expr.workspace = true
 common-macro.workspace = true

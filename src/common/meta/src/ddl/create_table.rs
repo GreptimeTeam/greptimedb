@@ -21,6 +21,7 @@ use api::v1::region::{
 use api::v1::{ColumnDef, CreateTableExpr, SemanticType};
 use async_trait::async_trait;
 use common_catalog::consts::METRIC_ENGINE;
+use common_config::WAL_OPTIONS_KEY;
 use common_error::ext::BoxedError;
 use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -47,7 +48,6 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
-use crate::wal::WAL_OPTIONS_KEY;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,

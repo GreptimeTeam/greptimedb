@@ -201,7 +201,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Region {} flush finished, tries to bump wal to {}",
             region_id, request.flushed_entry_id
         );
-        if let Err(e) = self.wal.obsolete(region_id, request.flushed_entry_id).await {
+        if let Err(e) = self
+            .wal
+            .obsolete(region_id, request.flushed_entry_id, &region.wal_options)
+            .await
+        {
             error!(e; "Failed to write wal, region: {}", region_id);
             request.on_failure(e);
             return;

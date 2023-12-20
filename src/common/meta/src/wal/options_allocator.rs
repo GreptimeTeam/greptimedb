@@ -15,13 +15,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_config::{KafkaWalOptions, WalOptions};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 
 use crate::error::{EncodeWalOptionsToJsonSnafu, Result};
 use crate::kv_backend::KvBackendRef;
-use crate::wal::kafka::{KafkaOptions, TopicManager as KafkaTopicManager};
-use crate::wal::{WalConfig, WalOptions};
+use crate::wal::kafka::TopicManager as KafkaTopicManager;
+use crate::wal::WalConfig;
 
 /// Allocates wal options in region granularity.
 #[derive(Default)]
@@ -55,7 +56,7 @@ impl WalOptionsAllocator {
                 let topics = topic_manager.select_batch(num_regions);
                 topics
                     .into_iter()
-                    .map(|topic| WalOptions::Kafka(KafkaOptions { topic }))
+                    .map(|topic| WalOptions::Kafka(KafkaWalOptions { topic }))
                     .collect()
             }
         }

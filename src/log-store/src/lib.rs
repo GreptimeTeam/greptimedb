@@ -15,6 +15,8 @@
 #![feature(let_chains)]
 
 pub mod error;
+#[allow(unused)]
+pub mod kafka;
 mod noop;
 pub mod raft_engine;
 pub mod test_util;

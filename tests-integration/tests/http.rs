@@ -773,6 +773,7 @@ timeout = "30s"
 body_limit = "64MiB"
 
 [datanode.wal]
+provider = "raft_engine"
 file_size = "256MiB"
 purge_threshold = "4GiB"
 purge_interval = "10m"
