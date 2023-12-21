@@ -126,7 +126,13 @@ impl<'a> InMemoryRowGroup<'a> {
                     ranges
                 })
                 .collect();
-            let mut chunk_data = self.get_byte_ranges(&fetch_ranges).await?.into_iter();
+            let mut chunk_data = fetch_byte_ranges(
+                self.file_path.to_string(),
+                self.object_store.clone(),
+                fetch_ranges,
+            )
+            .await?
+            .into_iter();
 
             let mut page_start_offsets = page_start_offsets.into_iter();
 
@@ -172,7 +178,13 @@ impl<'a> InMemoryRowGroup<'a> {
                 return Ok(());
             }
 
-            let mut chunk_data = self.get_byte_ranges(&fetch_ranges).await?.into_iter();
+            let mut chunk_data = fetch_byte_ranges(
+                self.file_path.to_string(),
+                self.object_store.clone(),
+                fetch_ranges,
+            )
+            .await?
+            .into_iter();
 
             for (idx, (chunk, cached_pages)) in self
                 .column_chunks
@@ -194,63 +206,6 @@ impl<'a> InMemoryRowGroup<'a> {
         }
 
         Ok(())
-    }
-
-    /// Fetches data from object store.
-    /// If the object store supports blocking, use sequence blocking read.
-    /// Otherwise, use concurrent read.
-    async fn get_byte_ranges(&self, ranges: &[Range<usize>]) -> Result<Vec<Bytes>> {
-        let ranges: Vec<_> = ranges
-            .iter()
-            .map(|range| range.start as u64..range.end as u64)
-            .collect();
-        if self.object_store.info().full_capability().blocking {
-            self.get_ranges_seq(ranges).await
-        } else {
-            self.get_ranges_concurrent(ranges).await
-        }
-    }
-
-    /// Fetches data from object store sequentially
-    async fn get_ranges_seq(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
-        let block_object_store = self.object_store.blocking();
-        let file_path = self.file_path.to_string();
-
-        let f = move || -> Result<Vec<Bytes>> {
-            ranges
-                .into_iter()
-                .map(|range| {
-                    let data = block_object_store
-                        .read_with(&file_path)
-                        .range(range)
-                        .call()
-                        .map_err(|e| ParquetError::External(Box::new(e)))?;
-                    Ok::<_, ParquetError>(Bytes::from(data))
-                })
-                .collect::<Result<Vec<_>>>()
-        };
-
-        common_runtime::spawn_blocking_read(f)
-            .await
-            .map_err(|e| ParquetError::External(Box::new(e)))?
-    }
-
-    /// Fetches data from object store concurrently.
-    async fn get_ranges_concurrent(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
-        // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
-        let mut handles = Vec::with_capacity(ranges.len());
-        for range in ranges {
-            let future_read = self.object_store.read_with(self.file_path);
-            handles.push(async move {
-                let data = future_read
-                    .range(range.start..range.end)
-                    .await
-                    .map_err(|e| ParquetError::External(Box::new(e)))?;
-                Ok::<_, ParquetError>(Bytes::from(data))
-            });
-        }
-        let results = futures::future::try_join_all(handles).await?;
-        Ok(results)
     }
 
     /// Fetches pages for columns if cache is enabled.
@@ -400,3 +355,85 @@ impl Iterator for ColumnChunkIterator {
 }
 
 impl PageIterator for ColumnChunkIterator {}
+
+/// Fetches data from object store.
+/// If the object store supports blocking, use sequence blocking read.
+/// Otherwise, use concurrent read.
+async fn fetch_byte_ranges(
+    file_path: String,
+    object_store: ObjectStore,
+    ranges: Vec<Range<usize>>,
+) -> Result<Vec<Bytes>> {
+    let ranges: Vec<_> = ranges
+        .iter()
+        .map(|range| range.start as u64..range.end as u64)
+        .collect();
+    if object_store.info().full_capability().blocking {
+        fetch_ranges_seq(file_path, object_store, ranges).await
+    } else {
+        fetch_ranges_concurrent(file_path, object_store, ranges).await
+    }
+}
+
+/// Fetches data from object store sequentially
+async fn fetch_ranges_seq(
+    file_path: String,
+    object_store: ObjectStore,
+    ranges: Vec<Range<u64>>,
+) -> Result<Vec<Bytes>> {
+    let block_object_store = object_store.blocking();
+
+    let f = move || -> Result<Vec<Bytes>> {
+        ranges
+            .into_iter()
+            .map(|range| {
+                let data = block_object_store
+                    .read_with(&file_path)
+                    .range(range)
+                    .call()
+                    .map_err(|e| ParquetError::External(Box::new(e)))?;
+                Ok::<_, ParquetError>(Bytes::from(data))
+            })
+            .collect::<Result<Vec<_>>>()
+    };
+
+    maybe_spawn_blocking(f).await
+}
+
+/// Fetches data from object store concurrently.
+async fn fetch_ranges_concurrent(
+    file_path: String,
+    object_store: ObjectStore,
+    ranges: Vec<Range<u64>>,
+) -> Result<Vec<Bytes>> {
+    // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
+    let mut handles = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        let future_read = object_store.read_with(&file_path);
+        handles.push(async move {
+            let data = future_read
+                .range(range.start..range.end)
+                .await
+                .map_err(|e| ParquetError::External(Box::new(e)))?;
+            Ok::<_, ParquetError>(Bytes::from(data))
+        });
+    }
+    let results = futures::future::try_join_all(handles).await?;
+    Ok(results)
+}
+
+//  Port from https://github.com/apache/arrow-rs/blob/802ed428f87051fdca31180430ddb0ecb2f60e8b/object_store/src/util.rs#L74-L83
+/// Takes a function and spawns it to a tokio blocking pool if available
+pub async fn maybe_spawn_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime
+            .spawn_blocking(f)
+            .await
+            .map_err(|e| ParquetError::External(Box::new(e)))?,
+        Err(_) => f(),
+    }
+}
