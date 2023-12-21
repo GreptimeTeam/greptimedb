@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod client_manager;
 pub mod log_store;
 
 use common_meta::wal::KafkaWalTopic as Topic;
