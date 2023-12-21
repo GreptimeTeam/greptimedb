@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::{KafkaConfig, KafkaWalOptions, KafkaWalTopic as Topic, WalOptions};
+use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic, WalOptions};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::record::{Record, RecordAndOffset};
@@ -27,7 +27,7 @@ use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
 use crate::error::{
     CastOffsetSnafu, ConsumeRecordSnafu, EmptyOffsetsSnafu, Error, GetClientSnafu,
-    MissingOffsetSnafu, ProduceEntriesSnafu, Result,
+    ProduceEntriesSnafu, Result,
 };
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::{EntryImpl, NamespaceImpl};
@@ -61,11 +61,6 @@ impl KafkaLogStore {
     ) -> Result<(Topic, EntryOffset)> {
         // Safety: the caller ensures the input entries is not empty.
         assert!(!entries.is_empty());
-
-        let region_ids = entries
-            .iter()
-            .map(|entry| entry.ns.region_id)
-            .collect::<Vec<_>>();
 
         // Gets the client associated with the topic.
         let client = self
@@ -123,7 +118,6 @@ impl LogStore for KafkaLogStore {
     /// Appends an entry to the log store and returns a response containing the entry id and an optional entry offset.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
         let entry_id = entry.id;
-        let region_id = entry.ns.region_id;
         let topic = entry.ns.topic.clone();
 
         let offset = self.append_batch_to_topic(vec![entry], topic).await?.1;
@@ -258,6 +252,7 @@ impl LogStore for KafkaLogStore {
 // Each time the mapping is updated, the map is serialized into a vector of bytes and stored into the kv backend at the given key.
 // On initializing the log store, the map is deserialized from the kv backend.
 fn try_get_offset(entry_id: EntryId) -> Result<i64> {
+    let _ = entry_id;
     todo!()
 }
 

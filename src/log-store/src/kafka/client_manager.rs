@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_config::wal::{KafkaConfig, KafkaWalOptions, KafkaWalTopic as Topic};
+use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
 use dashmap::mapref::entry::Entry as DashMapEntry;
 use dashmap::DashMap;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};

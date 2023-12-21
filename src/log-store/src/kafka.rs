@@ -33,14 +33,6 @@ impl NamespaceImpl {
     fn new(region_id: u64, topic: Topic) -> Self {
         Self { region_id, topic }
     }
-
-    fn region_id(&self) -> u64 {
-        self.region_id
-    }
-
-    fn topic(&self) -> &Topic {
-        &self.topic
-    }
 }
 
 impl Namespace for NamespaceImpl {

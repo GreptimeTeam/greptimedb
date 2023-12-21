@@ -19,7 +19,6 @@ use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use snafu::{Location, Snafu};
-use store_api::logstore::entry::Id as EntryId;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -142,19 +141,6 @@ pub enum Error {
 
     #[snafu(display("Missing required value in a record"))]
     MissingValue { location: Location },
-
-    #[snafu(display(
-        "Missing required entry offset, entry_id: {}, region_id: {}, topic: {}",
-        entry_id,
-        region_id,
-        topic
-    ))]
-    MissingOffset {
-        entry_id: EntryId,
-        region_id: u64,
-        topic: KafkaWalTopic,
-        location: Location,
-    },
 
     #[snafu(display("Failed to produce entries to Kafka, topic: {}", topic))]
     ProduceEntries {
