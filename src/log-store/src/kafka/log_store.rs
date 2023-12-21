@@ -253,7 +253,7 @@ impl LogStore for KafkaLogStore {
 // On initializing the log store, the map is deserialized from the kv backend.
 //
 // The third solution is to store the offset for each region separately. More specifically, when flushed, the
-// latest entry offset is stored in the RegionManifest and then persisted into the manifest file. On openning
+// latest entry offset is stored in the RegionManifest and then persisted into the manifest file. On opening
 // a region, the offset is restored and maintained at somewhere in memory.
 fn try_get_offset(entry_id: EntryId) -> Result<i64> {
     let _ = entry_id;
