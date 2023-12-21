@@ -17,7 +17,7 @@
 mod cache_size;
 #[cfg(test)]
 pub(crate) mod test_util;
-mod upload_cache;
+pub(crate) mod upload_cache;
 
 use std::mem;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use parquet::file::metadata::ParquetMetaData;
 use store_api::storage::RegionId;
 
 use crate::cache::cache_size::parquet_meta_size;
+use crate::cache::upload_cache::UploadCacheRef;
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 use crate::sst::file::FileId;
 
@@ -40,6 +41,8 @@ const VECTOR_TYPE: &str = "vector";
 // Metrics type key for pages.
 const PAGE_TYPE: &str = "page";
 
+// TODO(yingwen): Builder for cache manager.
+
 /// Manages cached data for the engine.
 pub struct CacheManager {
     /// Cache for SST metadata.
@@ -48,6 +51,8 @@ pub struct CacheManager {
     vector_cache: Option<VectorCache>,
     /// Cache for SST pages.
     page_cache: Option<PageCache>,
+    /// Upload cache.
+    upload_cache: Option<UploadCacheRef>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
@@ -107,6 +112,7 @@ impl CacheManager {
             sst_meta_cache,
             vector_cache,
             page_cache,
+            upload_cache: None,
         }
     }
 
@@ -179,6 +185,11 @@ impl CacheManager {
                 .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
         }
+    }
+
+    /// Returns the upload cache.
+    pub(crate) fn upload_cache(&self) -> &Option<UploadCacheRef> {
+        &self.upload_cache
     }
 }
 

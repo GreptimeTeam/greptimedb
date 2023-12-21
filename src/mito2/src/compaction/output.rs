@@ -17,6 +17,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::error;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
@@ -40,6 +41,7 @@ impl CompactionOutput {
         schema: RegionMetadataRef,
         sst_layer: AccessLayerRef,
         sst_write_buffer_size: ReadableSize,
+        cache_manager: Option<CacheManagerRef>,
     ) -> error::Result<Option<FileMeta>> {
         let reader = build_sst_reader(schema.clone(), sst_layer.clone(), &self.inputs).await?;
 
@@ -50,7 +52,12 @@ impl CompactionOutput {
 
         // TODO(hl): measure merge elapsed time.
 
-        let mut writer = sst_layer.write_sst(self.output_file_id, schema, Source::Reader(reader));
+        let mut writer = sst_layer.write_sst(
+            self.output_file_id,
+            schema,
+            Source::Reader(reader),
+            &cache_manager,
+        );
         let meta = writer.write_all(&opts).await?.map(
             |SstInfo {
                  time_range,

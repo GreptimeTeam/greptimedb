@@ -28,6 +28,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::compaction::output::CompactionOutput;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
@@ -126,6 +127,7 @@ impl Picker for TwcsPicker {
             file_purger,
             start_time,
             sst_write_buffer_size,
+            cache_manager,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -179,6 +181,7 @@ impl Picker for TwcsPicker {
             waiters,
             file_purger,
             start_time,
+            cache_manager,
         };
         Some(Box::new(task))
     }
@@ -241,6 +244,8 @@ pub(crate) struct TwcsCompactionTask {
     pub waiters: Vec<OutputTx>,
     /// Start time of compaction task
     pub start_time: Instant,
+    /// Cache.
+    pub cache_manager: Option<CacheManagerRef>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -294,9 +299,16 @@ impl TwcsCompactionTask {
             );
 
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
+            let cache_manager = self.cache_manager.clone();
             futs.push(async move {
                 output
-                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .build(
+                        region_id,
+                        schema,
+                        sst_layer,
+                        sst_write_buffer_size,
+                        cache_manager,
+                    )
                     .await
             });
         }

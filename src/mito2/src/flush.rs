@@ -25,6 +25,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
     Error, FlushRegionSnafu, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
@@ -200,6 +201,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
+    pub(crate) cache_manager: Option<CacheManagerRef>,
 }
 
 impl RegionFlushTask {
@@ -310,9 +312,12 @@ impl RegionFlushTask {
             let file_id = FileId::random();
             let iter = mem.iter(None, None);
             let source = Source::Iter(iter);
-            let mut writer = self
-                .access_layer
-                .write_sst(file_id, version.metadata.clone(), source);
+            let mut writer = self.access_layer.write_sst(
+                file_id,
+                version.metadata.clone(),
+                source,
+                &self.cache_manager,
+            );
             let Some(sst_info) = writer.write_all(&write_opts).await? else {
                 // No data written.
                 continue;
@@ -728,6 +733,7 @@ mod tests {
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
+            cache_manager: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

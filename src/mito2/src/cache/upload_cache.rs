@@ -14,13 +14,14 @@
 
 //! Cache files sent to remote object stores.
 
+use std::sync::Arc;
+
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::mpsc::Sender;
 
-use crate::access_layer::AccessLayerRef;
 use crate::error::Result;
 use crate::read::Source;
 use crate::request::WorkerRequest;
@@ -28,6 +29,7 @@ use crate::sst::file::{FileId, FileMeta};
 use crate::sst::parquet::WriteOptions;
 use crate::wal::EntryId;
 
+// TODO(yingwen): Works with CacheManager.
 /// A cache for uploading files to remote object stores.
 ///
 /// It keeps files in local disk and sends files to object store in background.
@@ -38,7 +40,23 @@ pub struct UploadCache {
     object_store_manager: ObjectStoreManagerRef,
 }
 
+pub type UploadCacheRef = Arc<UploadCache>;
+
 impl UploadCache {
+    // TODO(yingwen): Maybe pass cache path instead of local store.
+    /// Create the upload cache with a `local_store` to cache files and a
+    /// `object_store_manager` for all object stores.
+    pub fn new(
+        local_store: ObjectStore,
+        object_store_manager: ObjectStoreManagerRef,
+    ) -> UploadCache {
+        // TODO(yingwen): Cache capacity.
+        UploadCache {
+            local_store,
+            object_store_manager,
+        }
+    }
+
     fn upload(&self, upload: Upload) -> Result<()> {
         // Add the upload metadata to the manifest.
         unimplemented!()

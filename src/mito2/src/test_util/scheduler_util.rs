@@ -65,7 +65,7 @@ impl SchedulerEnv {
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
-        CompactionScheduler::new(scheduler, request_sender)
+        CompactionScheduler::new(scheduler, request_sender, None)
     }
 
     /// Creates a new flush scheduler.

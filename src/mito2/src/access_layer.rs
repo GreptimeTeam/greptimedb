@@ -18,6 +18,7 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
@@ -29,6 +30,7 @@ pub type AccessLayerRef = Arc<AccessLayer>;
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     region_dir: String,
+    /// Target object store.
     object_store: ObjectStore,
 }
 
@@ -80,6 +82,7 @@ impl AccessLayer {
         file_id: FileId,
         metadata: RegionMetadataRef,
         source: Source,
+        cache_manager: &Option<CacheManagerRef>,
     ) -> ParquetWriter {
         let path = self.sst_file_path(&file_id.as_parquet());
         ParquetWriter::new(path, metadata, source, self.object_store.clone())
