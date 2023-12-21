@@ -88,7 +88,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a rskafka client, broker endpoints: {:?}",
+        "Failed to build an rskafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
     BuildClient {
@@ -99,7 +99,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a rskafka partition client, topic: {}, partition: {}",
+        "Failed to build an rskafka partition client, topic: {}, partition: {}",
         topic,
         partition
     ))]
