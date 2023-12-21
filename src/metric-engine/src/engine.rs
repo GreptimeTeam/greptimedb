@@ -237,6 +237,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             region_dir: env.default_region_dir(),
             options: physical_region_option,
+            skip_wal_replay: false,
         };
         engine
             .handle_request(physical_region_id, RegionRequest::Open(open_request))
@@ -258,6 +259,7 @@ mod test {
             engine: METRIC_ENGINE_NAME.to_string(),
             region_dir: env.default_region_dir(),
             options: HashMap::new(),
+            skip_wal_replay: false,
         };
         engine
             .handle_request(

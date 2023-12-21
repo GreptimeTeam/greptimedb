@@ -81,11 +81,13 @@ impl MetricEngineInner {
             region_dir: metadata_region_dir,
             options: request.options.clone(),
             engine: MITO_ENGINE_NAME.to_string(),
+            skip_wal_replay: request.skip_wal_replay,
         };
         let open_data_region_request = RegionOpenRequest {
             region_dir: data_region_dir,
             options: request.options.clone(),
             engine: MITO_ENGINE_NAME.to_string(),
+            skip_wal_replay: request.skip_wal_replay,
         };
 
         let metadata_region_id = utils::to_metadata_region_id(region_id);
