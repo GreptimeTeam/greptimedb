@@ -109,7 +109,7 @@ impl TestEnv {
             options: [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
                 .into_iter()
                 .collect(),
-            region_dir: "test_metric_region".to_string(),
+            region_dir: self.default_region_dir(),
         };
 
         // create physical region
@@ -147,6 +147,11 @@ impl TestEnv {
     /// Default logical region id `RegionId::new(3, 2)`
     pub fn default_logical_region_id(&self) -> RegionId {
         RegionId::new(3, 2)
+    }
+
+    /// Default region dir `test_metric_region`
+    pub fn default_region_dir(&self) -> String {
+        "test_metric_region".to_string()
     }
 }
 
