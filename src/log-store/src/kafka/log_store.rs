@@ -248,7 +248,15 @@ impl LogStore for KafkaLogStore {
     }
 }
 
-// Tries to get the physical offset of the entry with the given entry id.
+/// Tries to get the physical offset of the entry with the given entry id.
+// TODO(niebayes): a mapping between entry id and entry offset needs to maintained at somewhere.
+// One solution is to store the mapping at a specific Kafka topic. Each time the mapping is updated,
+// a new record is constructed and appended to the topic. On initializing the log store, the latest
+// record is pulled from Kafka cluster.
+//
+// Another solution is to store the mapping at the kv backend. We design a dedicated key, e.g. ID_TO_OFFSET_MAP_KEY.
+// Each time the mapping is updated, the map is serialized into a vector of bytes and stored into the kv backend at the given key.
+// On initializing the log store, the map is deserialized from the kv backend.
 fn try_get_offset(entry_id: EntryId) -> Result<i64> {
     todo!()
 }
