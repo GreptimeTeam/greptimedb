@@ -38,6 +38,9 @@ use crate::error::{
 };
 use crate::utils;
 
+const REGION_PREFIX: &str = "__region_";
+const COLUMN_PREFIX: &str = "__column_";
+
 /// The other two fields key and value will be used as a k-v storage.
 /// It contains two group of key:
 /// - `__region_<LOGICAL_REGION_ID>` is used for marking table existence. It doesn't have value.
@@ -160,11 +163,10 @@ impl MetadataRegion {
 
     pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
-        let region_prefix = "__region_".to_string();
 
         let mut regions = vec![];
         for (k, _) in self.get_all(metadata_region_id).await? {
-            if !k.starts_with(&region_prefix) {
+            if !k.starts_with(REGION_PREFIX) {
                 continue;
             }
             // Safety: we have checked the prefix
@@ -180,29 +182,33 @@ impl MetadataRegion {
 // utils to concat and parse key/value
 impl MetadataRegion {
     pub fn concat_region_key(region_id: RegionId) -> String {
-        format!("__region_{}", region_id.as_u64())
+        format!("{REGION_PREFIX}{}", region_id.as_u64())
     }
 
     /// Column name will be encoded by base64([STANDARD_NO_PAD])
     pub fn concat_column_key(region_id: RegionId, column_name: &str) -> String {
         let encoded_column_name = STANDARD_NO_PAD.encode(column_name);
-        format!("__column_{}_{}", region_id.as_u64(), encoded_column_name)
+        format!(
+            "{COLUMN_PREFIX}{}_{}",
+            region_id.as_u64(),
+            encoded_column_name
+        )
     }
 
     /// Concat a column key prefix without column name
     pub fn concat_column_key_prefix(region_id: RegionId) -> String {
-        format!("__column_{}_", region_id.as_u64())
+        format!("{COLUMN_PREFIX}{}_", region_id.as_u64())
     }
 
     #[allow(dead_code)]
     pub fn parse_region_key(key: &str) -> Option<&str> {
-        key.strip_prefix("__region_")
+        key.strip_prefix(REGION_PREFIX)
     }
 
     /// Parse column key to (logical_region_id, column_name)
     #[allow(dead_code)]
     pub fn parse_column_key(key: &str) -> Result<Option<(RegionId, String)>> {
-        if let Some(stripped) = key.strip_prefix("__column_") {
+        if let Some(stripped) = key.strip_prefix(COLUMN_PREFIX) {
             let mut iter = stripped.split('_');
 
             let region_id_raw = iter.next().unwrap();
