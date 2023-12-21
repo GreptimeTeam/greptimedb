@@ -24,7 +24,8 @@ mod state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
@@ -165,8 +166,12 @@ impl RegionEngine for MetricEngine {
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         // ignore the region not found error
-        let _ = self.inner.mito.set_writable(region_id, writable);
-        Ok(())
+        let result = self.inner.mito.set_writable(region_id, writable);
+
+        match result {
+            Err(e) if e.status_code() == StatusCode::RegionNotFound => Ok(()),
+            _ => result,
+        }
     }
 
     async fn set_readonly_gracefully(
