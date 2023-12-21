@@ -4480,6 +4480,7 @@ dependencies = [
  "raft-engine",
  "rand",
  "rskafka",
+ "serde",
  "serde_json",
  "snafu",
  "store-api",

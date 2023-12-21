@@ -13,11 +13,17 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::num::TryFromIntError;
 
+use common_config::wal::KafkaWalTopic;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use snafu::{Location, Snafu};
+use store_api::logstore::entry::Id as EntryId;
+use store_api::logstore::namespace::Id as NamespaceId;
+
+use crate::kafka::record_utils::RecordKey;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -108,6 +114,38 @@ pub enum Error {
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
+
+    #[snafu(display(
+        "Failed to get a Kafka topic client, topic: {}, source: {}",
+        topic,
+        error
+    ))]
+    GetClient {
+        topic: KafkaWalTopic,
+        location: Location,
+        error: String,
+    },
+
+    #[snafu(display("Failed to encode a record key, key: {:?}", key))]
+    EncodeKey {
+        key: RecordKey,
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
+
+    #[snafu(display("Failed to decode a record key"))]
+    DecodeKey {
+        location: Location,
+        #[snafu(source)]
+        error: serde_json::Error,
+    },
+
+    #[snafu(display("Missing required key in a record"))]
+    MissingKey { location: Location },
+
+    #[snafu(display("Missing required value in a record"))]
+    MissingValue { location: Location },
 }
 
 impl ErrorExt for Error {

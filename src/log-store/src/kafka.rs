@@ -14,6 +14,7 @@
 
 mod client_manager;
 pub mod log_store;
+pub(crate) mod record_utils;
 
 use common_meta::wal::KafkaWalTopic as Topic;
 use store_api::logstore::entry::{Entry, Id as EntryId};
