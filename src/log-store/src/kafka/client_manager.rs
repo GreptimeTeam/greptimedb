@@ -32,23 +32,23 @@ use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 const DEFAULT_PARTITION: i32 = 0;
 
 /// Arc wrapper of Client.
-pub(super) type ClientRef = Arc<Client>;
+pub(crate) type ClientRef = Arc<Client>;
 /// Arc wrapper of ClientManager.
-pub(super) type ClientManagerRef = Arc<ClientManager>;
+pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
 /// A client through which to contact Kafka cluster. Each client associates with one partition of a topic.
 /// Since a topic only has one partition in our design, the mapping between clients and topics are one-one.
 #[derive(Debug)]
-pub(super) struct Client {
+pub(crate) struct Client {
     /// A raw client used to construct a batch producer and/or a stream consumer for a specific topic.
-    pub(super) raw_client: Arc<PartitionClient>,
+    pub(crate) raw_client: Arc<PartitionClient>,
     /// A producer used to buffer log entries for a specific topic before sending them in a batching manner.
-    pub(super) producer: Arc<BatchProducer<RecordAggregator>>,
+    pub(crate) producer: Arc<BatchProducer<RecordAggregator>>,
 }
 
 impl Client {
     /// Creates a Client from the raw client.
-    pub(super) fn new(raw_client: Arc<PartitionClient>, config: &KafkaConfig) -> Self {
+    pub(crate) fn new(raw_client: Arc<PartitionClient>, config: &KafkaConfig) -> Self {
         let record_aggregator = RecordAggregator::new(config.max_batch_size.as_bytes() as usize);
         let batch_producer = BatchProducerBuilder::new(raw_client.clone())
             .with_compression(config.compression)
@@ -64,7 +64,7 @@ impl Client {
 
 /// Manages client construction and accesses.
 #[derive(Debug)]
-pub(super) struct ClientManager {
+pub(crate) struct ClientManager {
     config: KafkaConfig,
     /// Top-level client in rskafka. All clients are constructed by this client.
     client_factory: RsKafkaClient,
@@ -75,7 +75,7 @@ pub(super) struct ClientManager {
 
 impl ClientManager {
     /// Tries to create a ClientManager.
-    pub(super) async fn try_new(config: &KafkaConfig) -> Result<Self> {
+    pub(crate) async fn try_new(config: &KafkaConfig) -> Result<Self> {
         // Sets backoff config for the top-level rskafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: Duration::from_millis(500),
@@ -101,7 +101,7 @@ impl ClientManager {
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
-    pub(super) async fn get_or_insert(&self, topic: &Topic) -> Result<ClientRef> {
+    pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<ClientRef> {
         match self.client_pool.entry(topic.to_string()) {
             DashMapEntry::Occupied(entry) => Ok(entry.get().clone()),
             DashMapEntry::Vacant(entry) => {

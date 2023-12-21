@@ -119,8 +119,7 @@ impl LogStore for KafkaLogStore {
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
         let entry_id = entry.id;
         let topic = entry.ns.topic.clone();
-
-        let offset = self.append_batch_to_topic(vec![entry], topic).await?.1;
+        let (_, offset) = self.append_batch_to_topic(vec![entry], topic).await?;
         Ok(AppendResponse {
             entry_id,
             offset: Some(offset),
@@ -153,10 +152,10 @@ impl LogStore for KafkaLogStore {
             .into_iter()
             .map(|(topic, entries)| self.append_batch_to_topic(entries, topic))
             .collect::<Vec<_>>();
-        let topic_offset: HashMap<_, _> = futures::future::try_join_all(tasks)
+        let topic_offset = futures::future::try_join_all(tasks)
             .await?
             .into_iter()
-            .collect();
+            .collect::<HashMap<_, _>>();
 
         let mut region_offset = HashMap::new();
         for (topic, regions) in topic_regions {
