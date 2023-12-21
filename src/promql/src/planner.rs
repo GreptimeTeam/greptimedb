@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -24,8 +25,8 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::logical_expr::expr::{AggregateFunction, Alias, ScalarFunction, ScalarUDF};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast, Extension,
-    LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
+    col, AggregateFunction as AggregateFunctionEnum, BinaryExpr, BuiltinScalarFunction, Cast,
+    Extension, LogicalPlan, LogicalPlanBuilder, Operator, ScalarUDF as ScalarUdfDef,
 };
 use datafusion::optimizer::utils;
 use datafusion::prelude as df_prelude;
@@ -1489,6 +1490,7 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)
     }
 
+    /// Build a set operator (AND/OR/UNLESS)
     fn set_op_on_non_field_columns(
         &self,
         left: LogicalPlan,
@@ -1500,6 +1502,10 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let mut left_tag_col_set = left_tag_cols.into_iter().collect::<HashSet<_>>();
         let mut right_tag_col_set = right_tag_cols.into_iter().collect::<HashSet<_>>();
+
+        if matches!(op.id(), token::T_LOR) {
+            return self.or_operator(left, right, left_tag_col_set, right_tag_col_set, modifier);
+        }
 
         // apply modifier
         if let Some(modifier) = modifier {
@@ -1545,7 +1551,8 @@ impl PromPlanner {
             )
         };
         let join_keys = left_tag_col_set
-            .into_iter()
+            .iter()
+            .cloned()
             .chain([self.ctx.time_index_column.clone().unwrap()])
             .collect::<Vec<_>>();
 
@@ -1579,15 +1586,137 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu),
             token::T_LOR => {
-                // `OR` can not be expressed by `UNION` precisely.
-                // it will generate unexpceted result when schemas don't match
-                UnsupportedExprSnafu {
-                    name: "set operation `OR`",
-                }
-                .fail()
+                self.or_operator(left, right, left_tag_col_set, right_tag_col_set, modifier)
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }
+    }
+
+    // TODO(ruihang): change function name
+    fn or_operator(
+        &self,
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_tag_cols_set: HashSet<String>,
+        right_tag_cols_set: HashSet<String>,
+        modifier: &Option<BinModifier>,
+    ) -> Result<LogicalPlan> {
+        // prepare hash sets
+        let all_tags = left_tag_cols_set
+            .union(&right_tag_cols_set)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let tags_not_in_left = all_tags
+            .difference(&left_tag_cols_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let tags_not_in_right = all_tags
+            .difference(&right_tag_cols_set)
+            .cloned()
+            .collect::<Vec<_>>();
+        let left_qualifier = left.schema().field(0).qualifier().cloned();
+        let right_qualifier = right.schema().field(0).qualifier().cloned();
+        let left_qualifier_string = left_qualifier
+            .as_ref()
+            .map(|l| l.to_string())
+            .unwrap_or_default();
+        let right_qualifier_string = right_qualifier
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_default();
+
+        common_telemetry::info!("[DEBUG] tags not in left {tags_not_in_left:?}");
+        common_telemetry::info!("[DEBUG] all tags {all_tags:?}");
+
+        // step 1: align schema using project, fill non-exist columns with null
+        let left_proj_exprs =
+            left.schema()
+                .field_names()
+                .into_iter()
+                .map(col)
+                .chain(tags_not_in_left.iter().map(|tag_name| {
+                    DfExpr::Literal(ScalarValue::Utf8(None))
+                        // .alias(format!("{left_qualifier_string}.{tag_name}"))
+                        .alias(format!("{tag_name}"))
+                }));
+        let left_projected = LogicalPlanBuilder::from(left)
+            .project(left_proj_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .alias(left_qualifier_string.clone())
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        let right_proj_exprs =
+            right
+                .schema()
+                .field_names()
+                .into_iter()
+                .map(col)
+                .chain(tags_not_in_right.iter().map(|tag_name| {
+                    DfExpr::Literal(ScalarValue::Utf8(None))
+                        // .alias(format!("{right_qualifier_string}.{tag_name}"))
+                        .alias(format!("{tag_name}"))
+                }));
+        let right_projected = LogicalPlanBuilder::from(right)
+            .project(right_proj_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .alias(right_qualifier_string.clone())
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        // step 2: compute match columns
+        let mut match_columns = if let Some(modifier) = modifier
+            && let Some(matching) = &modifier.matching
+        {
+            match matching {
+                // keeps columns mentioned in `on`
+                LabelModifier::Include(on) => on.labels.clone(),
+                // removes columns memtioned in `ignoring`
+                LabelModifier::Exclude(ignoring) => {
+                    let ignoring = ignoring.labels.iter().cloned().collect::<HashSet<_>>();
+                    all_tags.difference(&ignoring).cloned().collect()
+                }
+            }
+        } else {
+            all_tags.iter().cloned().collect()
+        };
+        // sort to ensure the generated plan is not volatile
+        match_columns.sort_unstable();
+        match_columns.push(self.ctx.time_index_column.clone().unwrap());
+
+        // step 3: right anti join
+        let filter = match_columns
+            .iter()
+            .cloned()
+            .map(|col| {
+                let left_col = DfExpr::Column(Column::new(left_qualifier.clone(), col));
+                left_col.is_not_null()
+            })
+            .reduce(|left, right| left.and(right))
+            .unwrap(); // Safety: match columns contains at least the time index col
+        let right_anti_join = LogicalPlanBuilder::from(left_projected.clone())
+            .join_detailed(
+                right_projected,
+                JoinType::RightAnti,
+                (match_columns.clone(), match_columns),
+                Some(filter),
+                true,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        common_telemetry::info!("[DEBUG] left projected {left_projected:?}");
+        common_telemetry::info!("[DEBUG] right anti join {right_anti_join:?}");
+
+        // step 4: union left and right
+        let result = LogicalPlanBuilder::from(left_projected)
+            .union(right_anti_join)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        Ok(result)
     }
 
     /// Build a projection that project and perform operation expr for every value columns.
