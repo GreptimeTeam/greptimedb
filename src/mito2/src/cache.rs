@@ -17,6 +17,7 @@
 mod cache_size;
 #[cfg(test)]
 pub(crate) mod test_util;
+mod upload_cache;
 
 use std::mem;
 use std::sync::Arc;
