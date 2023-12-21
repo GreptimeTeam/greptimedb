@@ -112,7 +112,7 @@ impl MetricEngineInner {
                 region_type: "data",
             })?;
 
-        info!("Opened physical metric region {region_id:?}");
+        info!("Opened physical metric region {region_id}");
         PHYSICAL_REGION_COUNT.inc();
 
         Ok(0)
