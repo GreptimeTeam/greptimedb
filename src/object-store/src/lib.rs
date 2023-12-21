@@ -15,7 +15,7 @@
 pub use opendal::raw::oio::Pager;
 pub use opendal::raw::{normalize_path as raw_normalize_path, HttpClient};
 pub use opendal::{
-    services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Metakey,
+    services, Builder as ObjectStoreBuilder, Entry, EntryMode, Error, ErrorKind, Lister, Metakey,
     Operator as ObjectStore, Reader, Result, Writer,
 };
 

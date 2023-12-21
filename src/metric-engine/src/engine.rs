@@ -131,6 +131,8 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),
+            /// It always Ok(0), all data is latest.
+            RegionRequest::Catchup(_) => Ok(0),
         };
 
         result.map_err(BoxedError::new)

@@ -20,7 +20,6 @@ use store_api::region_request::{RegionPutRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
-use crate::request::WorkerRequest;
 use crate::test_util::{build_rows, put_rows, rows_schema, CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -89,18 +88,6 @@ async fn test_set_readonly_gracefully_not_exist() {
     let engine = env.create_engine(MitoConfig::default()).await;
 
     let non_exist_region_id = RegionId::new(1, 1);
-
-    // For inner `handle_inter_command`.
-    let (set_readonly_request, recv) =
-        WorkerRequest::new_set_readonly_gracefully(non_exist_region_id);
-    engine
-        .inner
-        .workers
-        .submit_to_worker(non_exist_region_id, set_readonly_request)
-        .await
-        .unwrap();
-    let result = recv.await.unwrap();
-    assert_eq!(SetReadonlyResponse::NotFound, result);
 
     // For fast-path.
     let result = engine

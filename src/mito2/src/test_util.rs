@@ -139,6 +139,14 @@ impl TestEnv {
         MitoEngine::new(config, logstore, object_store_manager)
     }
 
+    /// Creates a new engine with specific config and existing logstore and object store manager.
+    pub async fn create_follower_engine(&mut self, config: MitoConfig) -> MitoEngine {
+        let logstore = self.logstore.as_ref().unwrap().clone();
+        let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
+
+        MitoEngine::new(config, logstore, object_store_manager)
+    }
+
     /// Creates a new engine with specific config and manager/listener under this env.
     pub async fn create_engine_with(
         &mut self,
@@ -221,6 +229,7 @@ impl TestEnv {
         )
     }
 
+    /// Returns the log store and object store manager.
     async fn create_log_and_object_store_manager(
         &self,
     ) -> (RaftEngineLogStore, ObjectStoreManager) {
