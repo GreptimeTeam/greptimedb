@@ -34,8 +34,6 @@ use crate::kafka::{EntryImpl, NamespaceImpl};
 
 type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client::error::Error>;
 
-// TODO(niebayes): implement building log store upon start.
-
 /// A log store backed by Kafka.
 #[derive(Debug)]
 pub struct KafkaLogStore {

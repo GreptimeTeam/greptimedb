@@ -94,5 +94,6 @@ pub struct AppendResponse {
 pub struct AppendBatchResponse {
     /// Key: region id (as u64). Value: the known minimum start offset of the appended log entries belonging to the region.
     /// Depends on the `LogStore` implementation, the entry offsets may be missing.
+    // TODO(niebayes): the offset seems shouldn't be exposed to users of wal. But for now, let's keep it.
     pub offsets: HashMap<u64, EntryOffset>,
 }

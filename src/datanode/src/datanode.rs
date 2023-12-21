@@ -493,8 +493,11 @@ impl DatanodeBuilder {
 
     /// Builds [KafkaLogStore].
     async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
-        let _ = config;
-        todo!()
+        KafkaLogStore::try_new(config)
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)
+            .map(Arc::new)
     }
 
     /// Builds [ObjectStoreManager]
