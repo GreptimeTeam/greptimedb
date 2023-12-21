@@ -249,12 +249,20 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+        let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             None,
         )?;
 
+        self.convert_options(cli_options, opts)
+    }
+
+    pub fn convert_options(
+        &self,
+        cli_options: &CliOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &cli_options.log_dir {

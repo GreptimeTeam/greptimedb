@@ -17,11 +17,11 @@ use api::v1::promql_request::Promql;
 use api::v1::{
     column, AddColumn, AddColumns, AlterExpr, Basic, Column, ColumnDataType, ColumnDef,
     CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, SemanticType, TableId,
+    PromqlRequest, RequestHeader, SemanticType,
 };
 use auth::user_provider_from_option;
 use client::{Client, Database, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_catalog::consts::{MIN_USER_TABLE_ID, MITO_ENGINE};
+use common_catalog::consts::MITO_ENGINE;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use servers::grpc::GrpcServerConfig;
@@ -447,9 +447,7 @@ fn testing_create_expr() -> CreateTableExpr {
         primary_keys: vec!["host".to_string()],
         create_if_not_exists: true,
         table_options: Default::default(),
-        table_id: Some(TableId {
-            id: MIN_USER_TABLE_ID,
-        }),
+        table_id: None,
         engine: MITO_ENGINE.to_string(),
     }
 }
