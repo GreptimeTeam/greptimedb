@@ -27,10 +27,16 @@ use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
 /// is the entry data. Either of the key or the headers can be chosen to store the entry metadata
 /// including topic, region id, and entry id. Currently, the entry metadata is stored in the key.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct RecordKey {
+struct RecordKey {
     topic: Topic,
     region_id: u64,
     entry_id: EntryId,
+}
+
+impl ToString for RecordKey {
+    fn to_string(&self) -> String {
+        format!("{}/{}/{}", self.topic, self.region_id, self.entry_id)
+    }
 }
 
 // When writing to a region, a wal entry is constructed from all mutations on the region.
@@ -45,7 +51,9 @@ impl TryInto<Record> for EntryImpl {
             region_id: self.ns.region_id,
             entry_id: self.id,
         };
-        let raw_key = serde_json::to_vec(&key).context(EncodeKeySnafu { key })?;
+        let raw_key = serde_json::to_vec(&key).context(EncodeKeySnafu {
+            key: key.to_string(),
+        })?;
 
         Ok(Record {
             key: Some(raw_key),

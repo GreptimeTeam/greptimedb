@@ -82,9 +82,9 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 /// The response of an `append` operation.
 #[derive(Debug)]
 pub struct AppendResponse {
-    /// The entry id of the appended log entry.
+    /// The logical id of the appended log entry.
     pub entry_id: EntryId,
-    /// The start entry offset of the appended log entry.
+    /// The physical start offset of the appended log entry.
     /// Depends on the `LogStore` implementation, the entry offset may be missing.
     pub offset: Option<EntryOffset>,
 }

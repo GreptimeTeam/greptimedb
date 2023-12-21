@@ -13,22 +13,96 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use common_config::wal::{KafkaConfig, WalOptions};
-use store_api::logstore::entry::Id as EntryId;
+use common_config::wal::{KafkaConfig, KafkaWalOptions, KafkaWalTopic as Topic, WalOptions};
+use futures_util::StreamExt;
+use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
+use rskafka::record::{Record, RecordAndOffset};
+use snafu::{OptionExt, ResultExt};
+use store_api::logstore::entry::{Id as EntryId, Offset as EntryOffset};
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use crate::error::{Error, Result};
+use crate::error::{
+    CastOffsetSnafu, ConsumeRecordSnafu, EmptyOffsetsSnafu, Error, GetClientSnafu,
+    MissingOffsetSnafu, ProduceEntriesSnafu, Result,
+};
+use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
+type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client::error::Error>;
+
+// TODO(niebayes): implement building log store upon start.
+
+/// A log store backed by Kafka.
 #[derive(Debug)]
-pub struct KafkaLogStore;
+pub struct KafkaLogStore {
+    config: KafkaConfig,
+    /// Manages rskafka clients through which the log store contact the Kafka cluster.
+    client_manager: ClientManagerRef,
+}
 
 impl KafkaLogStore {
-    pub async fn try_new(config: KafkaConfig) -> Result<Self> {
-        todo!()
+    /// Tries to create a Kafka log store.
+    pub async fn try_new(config: &KafkaConfig) -> Result<Self> {
+        Ok(Self {
+            client_manager: Arc::new(ClientManager::try_new(config).await?),
+            config: config.clone(),
+        })
+    }
+
+    /// Appends a batch of entries to a topic. The entries may come from multiple regions.
+    /// Returns a tuple where the first element is the topic while the second is the minimum
+    /// start offset of the entries appended to the topic.
+    async fn append_batch_to_topic(
+        &self,
+        entries: Vec<EntryImpl>,
+        topic: Topic,
+    ) -> Result<(Topic, EntryOffset)> {
+        // Safety: the caller ensures the input entries is not empty.
+        assert!(!entries.is_empty());
+
+        let region_ids = entries
+            .iter()
+            .map(|entry| entry.ns.region_id)
+            .collect::<Vec<_>>();
+
+        // Gets the client associated with the topic.
+        let client = self
+            .client_manager
+            .get_or_insert(&topic)
+            .await
+            .map_err(|e| {
+                GetClientSnafu {
+                    topic: &topic,
+                    error: e.to_string(),
+                }
+                .build()
+            })?;
+
+        // Convert entries to records and produce them to Kafka.
+        let mut tasks = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let record: Record = entry.try_into()?;
+            let task = client.producer.produce(record);
+            tasks.push(task);
+        }
+        // Each produce task will return an offset to represent the minimum start offset of the entries produced by the task.
+        let offsets = futures::future::try_join_all(tasks)
+            .await
+            .context(ProduceEntriesSnafu { topic: &topic })?;
+
+        // Since the task completion order is not deterministic, a `min` operation is required to find the minimum offset.
+        let min_offset = offsets
+            .into_iter()
+            .min()
+            .context(EmptyOffsetsSnafu { topic: &topic })?;
+        let min_offset: EntryOffset = min_offset
+            .try_into()
+            .map_err(|_| CastOffsetSnafu { offset: min_offset }.build())?;
+        Ok((topic, min_offset))
     }
 }
 
@@ -38,7 +112,7 @@ impl LogStore for KafkaLogStore {
     type Entry = EntryImpl;
     type Namespace = NamespaceImpl;
 
-    /// Create an entry of the associate Entry type.
+    /// Creates an entry of the associated Entry type.
     fn entry<D: AsRef<[u8]>>(
         &self,
         data: D,
@@ -48,33 +122,103 @@ impl LogStore for KafkaLogStore {
         EntryImpl::new(data.as_ref().to_vec(), entry_id, ns)
     }
 
-    /// Append an `Entry` to WAL with given namespace and return append response containing
-    /// the entry id.
+    /// Appends an entry to the log store and returns a response containing the entry id and an optional entry offset.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        todo!()
+        let entry_id = entry.id;
+        let region_id = entry.ns.region_id;
+        let topic = entry.ns.topic.clone();
+
+        let offset = self.append_batch_to_topic(vec![entry], topic).await?.1;
+        Ok(AppendResponse {
+            entry_id,
+            offset: Some(offset),
+        })
     }
 
-    /// For a batch of log entries belonging to multiple regions, each assigned to a specific topic,
-    /// we need to determine the minimum log offset returned for each region in this batch.
-    /// During replay, we use this offset to fetch log entries for a region from its assigned topic.
-    /// After fetching, we filter the entries to obtain log entries relevant to that specific region.
+    /// For a batch of entries belonging to multiple regions, each assigned to a specific topic,
+    /// we need to determine the minimum start offset returned for each region in this batch.
+    /// During replay a region, we use this offset to fetch entries for the region from its assigned topic.
+    /// After fetching, we filter the entries to obtain entries relevant to the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        todo!()
+        if entries.is_empty() {
+            return Ok(AppendBatchResponse::default());
+        }
+
+        // The entries are grouped by topic since the number of regions might be very large
+        // while the number of topics are well controlled,
+        let mut topic_entries: HashMap<_, Vec<_>> = HashMap::new();
+        // A utility map used to construct the result response.
+        let mut topic_regions: HashMap<_, Vec<_>> = HashMap::new();
+        for entry in entries {
+            let topic = entry.ns.topic.clone();
+            let region_id = entry.ns.region_id;
+            topic_entries.entry(topic.clone()).or_default().push(entry);
+            topic_regions.entry(topic).or_default().push(region_id);
+        }
+
+        // Appends each group of entries to the corresponding topic.
+        let tasks = topic_entries
+            .into_iter()
+            .map(|(topic, entries)| self.append_batch_to_topic(entries, topic))
+            .collect::<Vec<_>>();
+        let topic_offset: HashMap<_, _> = futures::future::try_join_all(tasks)
+            .await?
+            .into_iter()
+            .collect();
+
+        let mut region_offset = HashMap::new();
+        for (topic, regions) in topic_regions {
+            let offset = topic_offset[&topic];
+            regions.into_iter().for_each(|region| {
+                region_offset.insert(region, offset);
+            });
+        }
+        Ok(AppendBatchResponse {
+            offsets: region_offset,
+        })
     }
 
-    /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
-    /// starting from `id`. The generated entries will be filtered by the namespace.
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
+    /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
-        todo!()
+        let topic = ns.topic.clone();
+        let region_id = ns.region_id;
+        let offset = try_get_offset(entry_id)?;
+
+        let raw_client = self
+            .client_manager
+            .get_or_insert(&topic)
+            .await?
+            .raw_client
+            .clone();
+        // Reads the entries starting from exactly the specified offset.
+        let mut stream_consumer = StreamConsumerBuilder::new(raw_client, StartOffset::At(offset))
+            .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
+            .with_max_wait_ms(self.config.max_wait_time.as_millis() as i32)
+            .build();
+        let stream = async_stream::stream!({
+            while let Some(consume_result) = stream_consumer.next().await {
+                yield handle_consume_result(consume_result, &topic, region_id, offset);
+            }
+        });
+        Ok(Box::pin(stream))
     }
 
     /// Create a namespace of the associate Namespace type
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        todo!()
+        // TODO(niebayes): we need to add necessary validations on wal options and wal config to ensure they're consistent.
+        // With the validations added, we can safely use unreachable here.
+        let WalOptions::Kafka(kafka_options) = wal_options else {
+            unreachable!()
+        };
+        NamespaceImpl {
+            region_id: ns_id,
+            topic: kafka_options.topic.clone(),
+        }
     }
 
     /// Create a new `Namespace`.
@@ -102,5 +246,34 @@ impl LogStore for KafkaLogStore {
     /// Stop components of logstore.
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+// Tries to get the physical offset of the entry with the given entry id.
+fn try_get_offset(entry_id: EntryId) -> Result<i64> {
+    todo!()
+}
+
+fn handle_consume_result(
+    result: ConsumeResult,
+    topic: &Topic,
+    region_id: u64,
+    offset: i64,
+) -> Result<Vec<EntryImpl>> {
+    match result {
+        Ok((record_and_offset, _)) => {
+            let entry = EntryImpl::try_from(record_and_offset.record)?;
+            // Only produces entries belonging to the region with the given region id.
+            if entry.ns.region_id == region_id {
+                Ok(vec![entry])
+            } else {
+                Ok(vec![])
+            }
+        }
+        Err(e) => Err(e).context(ConsumeRecordSnafu {
+            offset,
+            topic,
+            region_id,
+        }),
     }
 }

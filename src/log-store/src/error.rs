@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::any::Any;
-use std::num::TryFromIntError;
 
 use common_config::wal::KafkaWalTopic;
 use common_error::ext::ErrorExt;
@@ -21,9 +20,6 @@ use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use snafu::{Location, Snafu};
 use store_api::logstore::entry::Id as EntryId;
-use store_api::logstore::namespace::Id as NamespaceId;
-
-use crate::kafka::record_utils::RecordKey;
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -126,9 +122,9 @@ pub enum Error {
         error: String,
     },
 
-    #[snafu(display("Failed to encode a record key, key: {:?}", key))]
+    #[snafu(display("Failed to encode a record key, key: {}", key))]
     EncodeKey {
-        key: RecordKey,
+        key: String,
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
@@ -146,6 +142,54 @@ pub enum Error {
 
     #[snafu(display("Missing required value in a record"))]
     MissingValue { location: Location },
+
+    #[snafu(display(
+        "Missing required entry offset, entry_id: {}, region_id: {}, topic: {}",
+        entry_id,
+        region_id,
+        topic
+    ))]
+    MissingOffset {
+        entry_id: EntryId,
+        region_id: u64,
+        topic: KafkaWalTopic,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to produce entries to Kafka, topic: {}", topic))]
+    ProduceEntries {
+        topic: KafkaWalTopic,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::producer::Error,
+    },
+
+    #[snafu(display("The produce tasks return an empty offset vector, topic: {}", topic))]
+    EmptyOffsets {
+        topic: KafkaWalTopic,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to cast an rskafka offset to entry offset, rskafka_offset: {}",
+        offset
+    ))]
+    CastOffset { offset: i64, location: Location },
+
+    #[snafu(display(
+        "Failed to read a record from Kafka, offset {}, topic: {}, region id: {}",
+        offset,
+        topic,
+        region_id,
+    ))]
+    ConsumeRecord {
+        offset: i64,
+        topic: String,
+        region_id: u64,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
