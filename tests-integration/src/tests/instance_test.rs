@@ -443,11 +443,12 @@ async fn test_execute_show_databases_tables(instance: Arc<dyn MockInstance>) {
         Output::RecordBatches(databases) => {
             let databases = databases.take();
             assert_eq!(1, databases[0].num_columns());
-            assert_eq!(databases[0].column(0).len(), 2);
+            assert_eq!(databases[0].column(0).len(), 3);
 
             assert_eq!(
                 *databases[0].column(0),
                 Arc::new(StringVector::from(vec![
+                    Some("greptime_private"),
                     Some("information_schema"),
                     Some("public")
                 ])) as VectorRef

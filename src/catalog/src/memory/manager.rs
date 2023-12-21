@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Weak};
 
 use common_catalog::build_db_string;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
+};
 use snafu::OptionExt;
 use table::TableRef;
 
@@ -133,6 +135,12 @@ impl MemoryCatalogManager {
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
                 schema: DEFAULT_SCHEMA_NAME.to_string(),
+            })
+            .unwrap();
+        manager
+            .register_schema_sync(RegisterSchemaRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
             })
             .unwrap();
 

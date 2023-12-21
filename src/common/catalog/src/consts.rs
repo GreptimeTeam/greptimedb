@@ -17,6 +17,7 @@ pub const INFORMATION_SCHEMA_NAME: &str = "information_schema";
 pub const SYSTEM_CATALOG_TABLE_NAME: &str = "system_catalog";
 pub const DEFAULT_CATALOG_NAME: &str = "greptime";
 pub const DEFAULT_SCHEMA_NAME: &str = "public";
+pub const DEFAULT_PRIVATE_SCHEMA_NAME: &str = "greptime_private";
 
 /// Reserves [0,MIN_USER_TABLE_ID) for internal usage.
 /// User defined table id starts from this value.

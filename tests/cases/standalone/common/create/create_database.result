@@ -11,6 +11,7 @@ show databases;
 +--------------------+
 | Schemas            |
 +--------------------+
+| greptime_private   |
 | illegal-database   |
 | information_schema |
 | public             |
