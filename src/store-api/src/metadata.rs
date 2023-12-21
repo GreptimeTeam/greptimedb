@@ -261,6 +261,75 @@ impl RegionMetadata {
         self.primary_key.iter().position(|id| *id == column_id)
     }
 
+    /// Project the metadata to a new one using specified column ids.
+    ///
+    /// [RegionId] and schema version are preserved.
+    pub fn project(&self, projection: &[ColumnId]) -> Result<RegionMetadata> {
+        // check time index
+        ensure!(
+            projection.iter().any(|id| *id == self.time_index),
+            TimeIndexNotFoundSnafu
+        );
+
+        // prepare new indices
+        let mut indices_to_preserve = projection
+            .iter()
+            .map(|id| {
+                self.column_index_by_id(*id)
+                    .with_context(|| InvalidRegionRequestSnafu {
+                        region_id: self.region_id,
+                        err: format!("column id {} not found", id),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        indices_to_preserve.sort_unstable();
+        indices_to_preserve.reverse();
+
+        // project schema
+        let projected_schema =
+            self.schema
+                .try_project(&indices_to_preserve)
+                .with_context(|_| SchemaProjectSnafu {
+                    origin_schema: self.schema.clone(),
+                    projection: projection.to_vec(),
+                })?;
+
+        // project columns
+        let mut projected_column_metadatas = self.column_metadatas.clone();
+        for index in indices_to_preserve {
+            projected_column_metadatas.remove(index);
+        }
+
+        // generate projected primary key
+        let projected_primary_key = projected_column_metadatas
+            .iter()
+            .filter_map(|col| {
+                if col.semantic_type == SemanticType::Tag {
+                    Some(col.column_id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // generate new id_to_index
+        let projected_id_to_index = projected_column_metadatas
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| (col.column_id, idx))
+            .collect();
+
+        Ok(RegionMetadata {
+            schema: Arc::new(projected_schema),
+            time_index: self.time_index,
+            id_to_index: projected_id_to_index,
+            column_metadatas: projected_column_metadatas,
+            primary_key: projected_primary_key,
+            region_id: self.region_id,
+            schema_version: self.schema_version,
+        })
+    }
+
     /// Checks whether the metadata is valid.
     fn validate(&self) -> Result<()> {
         // Id to name.
@@ -621,6 +690,17 @@ pub enum MetadataError {
         err: String,
         location: Location,
     },
+
+    #[snafu(display("Unexpected schema error during project"))]
+    SchemaProject {
+        origin_schema: SchemaRef,
+        projection: Vec<ColumnId>,
+        location: Location,
+        source: datatypes::Error,
+    },
+
+    #[snafu(display("Time index column not found"))]
+    TimeIndexNotFound { location: Location },
 }
 
 impl ErrorExt for MetadataError {

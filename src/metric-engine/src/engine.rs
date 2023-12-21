@@ -152,7 +152,10 @@ impl RegionEngine for MetricEngine {
 
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
-        todo!()
+        self.inner
+            .load_region_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's disk usage.
