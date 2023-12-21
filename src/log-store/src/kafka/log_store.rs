@@ -202,8 +202,8 @@ impl LogStore for KafkaLogStore {
 
     /// Create a namespace of the associate Namespace type
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        // Warning: we assume the database manager, not the database itself, is responsible for ensuring that
-        // the wal config for metasrv and that for datanode are consistent, i.e. the wal provider should be identical.
+        // Safety: we assume the database administrator, not the database itself, is responsible for ensuring that
+        // the wal config for metasrv and that for datanode are consistent, i.e. their wal providers should be identical.
         // With such an assumption, the unreachable is safe here.
         let WalOptions::Kafka(kafka_options) = wal_options else {
             unreachable!()
@@ -248,9 +248,13 @@ impl LogStore for KafkaLogStore {
 // a new record is constructed and appended to the topic. On initializing the log store, the latest
 // record is pulled from Kafka cluster.
 //
-// Another solution is to store the mapping at the kv backend. We design a dedicated key, e.g. ID_TO_OFFSET_MAP_KEY.
+// The second solution is to store the mapping at the kv backend. We design a dedicated key, e.g. ID_TO_OFFSET_MAP_KEY.
 // Each time the mapping is updated, the map is serialized into a vector of bytes and stored into the kv backend at the given key.
 // On initializing the log store, the map is deserialized from the kv backend.
+//
+// The third solution is to store the offset for each region separately. More specifically, when flushed, the
+// latest entry offset is stored in the RegionManifest and then persisted into the manifest file. On openning
+// a region, the offset is restored and maintained at somewhere in memory.
 fn try_get_offset(entry_id: EntryId) -> Result<i64> {
     let _ = entry_id;
     todo!()
