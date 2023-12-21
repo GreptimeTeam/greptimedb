@@ -84,6 +84,30 @@ pub enum Error {
         attempt_index: u64,
         location: Location,
     },
+
+    #[snafu(display(
+        "Failed to build a rskafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display(
+        "Failed to build a rskafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildPartitionClient {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
