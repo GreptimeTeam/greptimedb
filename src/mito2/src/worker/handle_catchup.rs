@@ -67,7 +67,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let flushed_entry_id = region.version_control.current().last_entry_id;
-
         let last_entry_id = replay_memtable(
             &self.wal,
             &region.wal_options,
@@ -76,10 +75,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             &region.version_control,
         )
         .await?;
-
-        let expected_last_entry_id = request.entry_id;
-
-        if let Some(expected_last_entry_id) = expected_last_entry_id {
+        if let Some(expected_last_entry_id) = request.entry_id {
             ensure!(
                 expected_last_entry_id == last_entry_id,
                 error::UnexpectedReplaySnafu {

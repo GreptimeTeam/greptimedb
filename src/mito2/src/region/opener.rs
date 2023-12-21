@@ -114,8 +114,8 @@ impl RegionOpener {
     /// Opens the region if it already exists.
     ///
     /// # Panics
-    /// Panics if metadata is not set.
-    /// Panics if options is not set.
+    /// - Panics if metadata is not set.
+    /// - Panics if options is not set.
     pub(crate) async fn create_or_open<S: LogStore>(
         mut self,
         config: &MitoConfig,
