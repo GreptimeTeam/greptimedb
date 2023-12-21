@@ -13,6 +13,7 @@ arc-swap = "1.0"
 arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"
+build-data = "0.1"
 common-catalog.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true

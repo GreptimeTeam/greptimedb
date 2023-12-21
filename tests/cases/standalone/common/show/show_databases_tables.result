@@ -19,6 +19,7 @@ show tables;
 +-------------------+
 | Tables            |
 +-------------------+
+| build_info        |
 | column_privileges |
 | column_statistics |
 | columns           |

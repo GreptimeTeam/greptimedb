@@ -44,6 +44,10 @@ use information_schema;
 -- test engines
 select * from engines;
 
+desc table build_info;
+
+select count(*) from build_info;
+
 -- tables not implemented
 desc table COLUMN_PRIVILEGES;
 

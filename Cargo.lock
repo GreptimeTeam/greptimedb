@@ -1186,6 +1186,7 @@ dependencies = [
  "arrow-schema",
  "async-stream",
  "async-trait",
+ "build-data",
  "catalog",
  "chrono",
  "common-catalog",

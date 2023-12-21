@@ -41,6 +41,8 @@ pub const INFORMATION_SCHEMA_ENGINES_TABLE_ID: u32 = 5;
 pub const INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID: u32 = 6;
 /// id for information_schema.column_statistics
 pub const INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID: u32 = 7;
+/// id for information_schema.build_info
+pub const INFORMATION_SCHEMA_BUILD_INFO_TABLE_ID: u32 = 8;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

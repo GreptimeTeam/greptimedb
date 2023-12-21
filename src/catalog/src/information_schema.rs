@@ -49,7 +49,8 @@ lazy_static! {
     static ref MEMORY_TABLES: &'static [&'static str] = &[
         ENGINES,
         COLUMN_PRIVILEGES,
-        COLUMN_STATISTICS
+        COLUMN_STATISTICS,
+        BUILD_INFO,
     ];
 }
 
@@ -154,6 +155,7 @@ impl InformationSchemaProvider {
             ENGINES => setup_memory_table!(ENGINES),
             COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
             COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
+            BUILD_INFO => setup_memory_table!(BUILD_INFO),
             _ => None,
         }
     }

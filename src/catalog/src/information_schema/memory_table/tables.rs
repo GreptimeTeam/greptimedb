@@ -21,6 +21,8 @@ use datatypes::vectors::StringVector;
 
 use crate::information_schema::table_names::*;
 
+const UNKNOWN: &str = "unknown";
+
 /// Find the schema and columns by the table_name, only valid for memory tables.
 /// Safety: the user MUST ensure the table schema exists, panic otherwise.
 pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
@@ -67,6 +69,31 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
                 Arc::new(StringVector::from(vec!["NO"])),
                 Arc::new(StringVector::from(vec!["NO"])),
                 Arc::new(StringVector::from(vec!["NO"])),
+            ],
+        ),
+
+        BUILD_INFO => (
+            string_columns(&[
+                "GIT_BRANCH",
+                "GIT_COMMIT",
+                "GIT_COMMIT_SHORT",
+                "GIT_DIRTY",
+                "PKG_VERSION",
+            ]),
+            vec![
+                Arc::new(StringVector::from(vec![
+                    build_data::get_git_branch().unwrap_or_else(|_| UNKNOWN.to_string())
+                ])),
+                Arc::new(StringVector::from(vec![
+                    build_data::get_git_commit().unwrap_or_else(|_| UNKNOWN.to_string())
+                ])),
+                Arc::new(StringVector::from(vec![
+                    build_data::get_git_commit_short().unwrap_or_else(|_| UNKNOWN.to_string())
+                ])),
+                Arc::new(StringVector::from(vec![
+                    build_data::get_git_dirty().map_or(UNKNOWN.to_string(), |v| v.to_string())
+                ])),
+                Arc::new(StringVector::from(vec![option_env!("CARGO_PKG_VERSION")])),
             ],
         ),
 
