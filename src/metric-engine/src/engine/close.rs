@@ -31,6 +31,7 @@ use crate::error::{
     CloseMitoRegionSnafu, Error, LogicalRegionNotFoundSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
 };
+use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::{metadata_region, utils};
 
 impl MetricEngineInner {
@@ -82,6 +83,8 @@ impl MetricEngineInner {
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
+
+        PHYSICAL_REGION_COUNT.dec();
 
         Ok(0)
     }

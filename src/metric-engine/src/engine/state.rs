@@ -20,6 +20,7 @@ use snafu::OptionExt;
 use store_api::storage::RegionId;
 
 use crate::error::{PhysicalRegionNotFoundSnafu, Result};
+use crate::metrics::LOGICAL_REGION_COUNT;
 use crate::utils::to_data_region_id;
 
 /// Internal states of metric engine
@@ -99,13 +100,15 @@ impl MetricEngineState {
     pub fn remove_physical_region(&mut self, physical_region_id: RegionId) -> Result<()> {
         let physical_region_id = to_data_region_id(physical_region_id);
 
-        for logical_region in
-            self.physical_regions
-                .get(&physical_region_id)
-                .context(PhysicalRegionNotFoundSnafu {
-                    region_id: physical_region_id,
-                })?
-        {
+        let logical_regions = self.physical_regions.get(&physical_region_id).context(
+            PhysicalRegionNotFoundSnafu {
+                region_id: physical_region_id,
+            },
+        )?;
+
+        LOGICAL_REGION_COUNT.sub(logical_regions.len() as i64);
+
+        for logical_region in logical_regions {
             self.logical_regions.remove(logical_region);
         }
         self.physical_regions.remove(&physical_region_id);

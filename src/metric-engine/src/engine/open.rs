@@ -14,6 +14,7 @@
 
 //! Open a metric region.
 
+use common_telemetry::info;
 use mito2::engine::MITO_ENGINE_NAME;
 use object_store::util::join_dir;
 use snafu::ResultExt;
@@ -26,6 +27,7 @@ use store_api::storage::RegionId;
 
 use super::MetricEngineInner;
 use crate::error::{Error, LogicalRegionNotFoundSnafu, OpenMitoRegionSnafu, Result};
+use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
 use crate::utils;
 
 impl MetricEngineInner {
@@ -108,6 +110,9 @@ impl MetricEngineInner {
                 region_type: "data",
             })?;
 
+        info!("Opened physical metric region {region_id:?}");
+        PHYSICAL_REGION_COUNT.inc();
+
         Ok(0)
     }
 
@@ -127,6 +132,7 @@ impl MetricEngineInner {
             .data_region
             .physical_columns(physical_region_id)
             .await?;
+        let logical_region_num = logical_regions.len();
 
         let mut state = self.state.write().await;
         // recover physical column names
@@ -139,6 +145,7 @@ impl MetricEngineInner {
         for logical_region_id in logical_regions {
             state.add_logical_region(physical_region_id, logical_region_id);
         }
+        LOGICAL_REGION_COUNT.add(logical_region_num as i64);
 
         Ok(())
     }
