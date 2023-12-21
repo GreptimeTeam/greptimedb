@@ -42,8 +42,8 @@ use query::QueryEngineFactory;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
-use servers::remote_writer::RemoteWriteMetricTask;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
+use servers::system_metric::SystemMetricTask;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
@@ -82,7 +82,7 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
-    remote_write_metric_task: Option<RemoteWriteMetricTask>,
+    system_metric_task: Option<SystemMetricTask>,
 }
 
 impl Datanode {
@@ -94,7 +94,7 @@ impl Datanode {
 
         self.start_telemetry();
 
-        if let Some(t) = self.remote_write_metric_task.as_ref() {
+        if let Some(t) = self.system_metric_task.as_ref() {
             t.start()
         }
 
@@ -265,8 +265,8 @@ impl DatanodeBuilder {
                 None
             };
 
-        let remote_write_metric_task =
-            RemoteWriteMetricTask::try_new(&self.opts.remote_write, Some(&self.plugins))
+        let system_metric_task =
+            SystemMetricTask::try_new(&self.opts.system_metric, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         Ok(Datanode {
@@ -277,7 +277,7 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
-            remote_write_metric_task,
+            system_metric_task,
         })
     }
 

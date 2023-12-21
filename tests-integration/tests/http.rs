@@ -753,8 +753,9 @@ timeout = "10s"
 connect_timeout = "1s"
 tcp_nodelay = true
 
-[frontend.remote_write]
+[frontend.system_metric]
 enable = false
+db = ""
 write_interval = "30s"
 
 [datanode]
@@ -811,8 +812,9 @@ parallel_scan_channel_size = 32
 [datanode.logging]
 enable_otlp_tracing = false
 
-[datanode.remote_write]
+[datanode.system_metric]
 enable = false
+db = ""
 write_interval = "30s"
 
 [logging]

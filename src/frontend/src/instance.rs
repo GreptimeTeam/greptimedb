@@ -65,8 +65,8 @@ use servers::query_handler::{
     InfluxdbLineProtocolHandler, OpenTelemetryProtocolHandler, OpentsdbProtocolHandler,
     PromStoreProtocolHandler, ScriptHandler,
 };
-use servers::remote_writer::{RemoteWriteMetricTask, RemoteWriteOptions};
 use servers::server::{start_server, ServerHandlers};
+use servers::system_metric::{SystemMetricOption, SystemMetricTask};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -118,7 +118,7 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
-    remote_write_metric_task: Option<RemoteWriteMetricTask>,
+    system_metric_task: Option<SystemMetricTask>,
 }
 
 impl Instance {
@@ -196,9 +196,9 @@ impl Instance {
         Ok(())
     }
 
-    pub fn build_remote_write_metric_task(&mut self, opts: &RemoteWriteOptions) -> Result<()> {
-        self.remote_write_metric_task =
-            RemoteWriteMetricTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
+    pub fn build_system_metric_task(&mut self, opts: &SystemMetricOption) -> Result<()> {
+        self.system_metric_task =
+            SystemMetricTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
         Ok(())
     }
 
@@ -231,7 +231,7 @@ impl FrontendInstance for Instance {
 
         self.script_executor.start(self)?;
 
-        if let Some(t) = self.remote_write_metric_task.as_ref() {
+        if let Some(t) = self.system_metric_task.as_ref() {
             t.start()
         }
 

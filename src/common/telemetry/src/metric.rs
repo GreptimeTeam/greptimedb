@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-// metric stuffs, inspired by databend
 use greptime_proto::prometheus::remote::{Sample, TimeSeries};
 use greptime_proto::prometheus::*;
 use prometheus::proto::{LabelPair, MetricFamily, MetricType};

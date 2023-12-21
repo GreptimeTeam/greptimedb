@@ -37,10 +37,10 @@ pub mod postgres;
 pub mod prom_store;
 pub mod prometheus_handler;
 pub mod query_handler;
-pub mod remote_writer;
 mod row_writer;
 pub mod server;
 mod shutdown;
+pub mod system_metric;
 pub mod tls;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

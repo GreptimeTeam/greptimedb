@@ -45,7 +45,7 @@ use frontend::service_config::{
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
 use servers::http::HttpOptions;
-use servers::remote_writer::RemoteWriteOptions;
+use servers::system_metric::SystemMetricOption;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
@@ -113,7 +113,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
-    pub remote_write: RemoteWriteOptions,
+    pub system_metric: SystemMetricOption,
 }
 
 impl Default for StandaloneOptions {
@@ -133,7 +133,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
-            remote_write: RemoteWriteOptions::default(),
+            system_metric: SystemMetricOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -157,8 +157,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
-            // Handle the remote write metric task run by standalone to frontend for execution
-            remote_write: self.remote_write,
+            // Handle the system metric task run by standalone to frontend for execution
+            system_metric: self.system_metric,
             ..Default::default()
         }
     }
@@ -405,7 +405,7 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         frontend
-            .build_remote_write_metric_task(&opts.frontend.remote_write)
+            .build_system_metric_task(&opts.frontend.system_metric)
             .context(StartFrontendSnafu)?;
 
         frontend

@@ -29,31 +29,33 @@ use crate::prom_store::snappy_compress;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
-pub struct RemoteWriteOptions {
+pub struct SystemMetricOption {
     pub enable: bool,
     pub endpoint: String,
+    pub db: String,
     #[serde(with = "humantime_serde")]
     pub write_interval: Duration,
 }
 
-impl Default for RemoteWriteOptions {
+impl Default for SystemMetricOption {
     fn default() -> Self {
         Self {
             enable: false,
-            endpoint: String::new(),
+            endpoint: "127.0.0.1:4000".to_string(),
+            db: String::new(),
             write_interval: Duration::from_secs(30),
         }
     }
 }
 
 #[derive(Default, Clone)]
-pub struct RemoteWriteMetricTask {
-    config: RemoteWriteOptions,
+pub struct SystemMetricTask {
+    config: SystemMetricOption,
     filter: Option<MetricFilter>,
 }
 
-impl RemoteWriteMetricTask {
-    pub fn try_new(config: &RemoteWriteOptions, plugins: Option<&Plugins>) -> Result<Option<Self>> {
+impl SystemMetricTask {
+    pub fn try_new(config: &SystemMetricOption, plugins: Option<&Plugins>) -> Result<Option<Self>> {
         if !config.enable {
             return Ok(None);
         }
@@ -61,7 +63,13 @@ impl RemoteWriteMetricTask {
         ensure!(
             config.write_interval.as_secs() != 0,
             InvalidRemoteWriteConfigSnafu {
-                msg: "Expected Remote write write_interval greater than zero"
+                msg: "Expected System metric write_interval greater than zero"
+            }
+        );
+        ensure!(
+            !config.db.is_empty(),
+            InvalidRemoteWriteConfigSnafu {
+                msg: "Expected System metric db not empty"
             }
         );
         Ok(Some(Self {
@@ -75,24 +83,27 @@ impl RemoteWriteMetricTask {
         }
         let mut interval = time::interval(self.config.write_interval);
         let sec = self.config.write_interval.as_secs();
-        let endpoint = self.config.endpoint.clone();
+        let endpoint = format!(
+            "http://{}/v1/prometheus/write?db={}",
+            self.config.endpoint, self.config.db
+        );
         let filter = self.filter.clone();
         let _handle = common_runtime::spawn_bg(async move {
             info!(
-                "Start remote write metric task to endpoint: {}, interval: {}s",
+                "Start system metric task to endpoint: {}, interval: {}s",
                 endpoint, sec
             );
             // Pass the first tick. Because the first tick completes immediately.
             interval.tick().await;
             loop {
                 interval.tick().await;
-                match report_metric(&endpoint, filter.as_ref()).await {
+                match write_system_metric(&endpoint, filter.as_ref()).await {
                     Ok(resp) => {
                         if !resp.status().is_success() {
-                            error!("report metric in remote write error, msg: {:#?}", resp);
+                            error!("report system metric error, msg: {:#?}", resp);
                         }
                     }
-                    Err(e) => error!("report metric in remote write failed, error {}", e),
+                    Err(e) => error!("report system metric failed, error {}", e),
                 };
             }
         });
@@ -102,7 +113,7 @@ impl RemoteWriteMetricTask {
 /// Export the collected metrics, encode metrics into [RemoteWrite format](https://prometheus.io/docs/concepts/remote_write_spec/),
 /// and send metrics to Prometheus remote-write compatible receiver (e.g. `greptimedb`) specified by `url`.
 /// User could use `MetricFilter` to filter metric they don't want collect
-pub async fn report_metric(url: &str, filter: Option<&MetricFilter>) -> Result<Response> {
+pub async fn write_system_metric(url: &str, filter: Option<&MetricFilter>) -> Result<Response> {
     let metric_families = prometheus::gather();
     let request = convert_metric_to_write_request(
         metric_families,
