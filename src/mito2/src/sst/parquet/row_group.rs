@@ -126,13 +126,10 @@ impl<'a> InMemoryRowGroup<'a> {
                     ranges
                 })
                 .collect();
-            let mut chunk_data = fetch_byte_ranges(
-                self.file_path.to_string(),
-                self.object_store.clone(),
-                fetch_ranges,
-            )
-            .await?
-            .into_iter();
+            let mut chunk_data =
+                fetch_byte_ranges(self.file_path, self.object_store.clone(), fetch_ranges)
+                    .await?
+                    .into_iter();
 
             let mut page_start_offsets = page_start_offsets.into_iter();
 
@@ -178,13 +175,10 @@ impl<'a> InMemoryRowGroup<'a> {
                 return Ok(());
             }
 
-            let mut chunk_data = fetch_byte_ranges(
-                self.file_path.to_string(),
-                self.object_store.clone(),
-                fetch_ranges,
-            )
-            .await?
-            .into_iter();
+            let mut chunk_data =
+                fetch_byte_ranges(self.file_path, self.object_store.clone(), fetch_ranges)
+                    .await?
+                    .into_iter();
 
             for (idx, (chunk, cached_pages)) in self
                 .column_chunks
@@ -360,7 +354,7 @@ impl PageIterator for ColumnChunkIterator {}
 /// If the object store supports blocking, use sequence blocking read.
 /// Otherwise, use concurrent read.
 async fn fetch_byte_ranges(
-    file_path: String,
+    file_path: &str,
     object_store: ObjectStore,
     ranges: Vec<Range<usize>>,
 ) -> Result<Vec<Bytes>> {
@@ -377,11 +371,12 @@ async fn fetch_byte_ranges(
 
 /// Fetches data from object store sequentially
 async fn fetch_ranges_seq(
-    file_path: String,
+    file_path: &str,
     object_store: ObjectStore,
     ranges: Vec<Range<u64>>,
 ) -> Result<Vec<Bytes>> {
     let block_object_store = object_store.blocking();
+    let file_path = file_path.to_string();
 
     let f = move || -> Result<Vec<Bytes>> {
         ranges
@@ -402,14 +397,14 @@ async fn fetch_ranges_seq(
 
 /// Fetches data from object store concurrently.
 async fn fetch_ranges_concurrent(
-    file_path: String,
+    file_path: &str,
     object_store: ObjectStore,
     ranges: Vec<Range<u64>>,
 ) -> Result<Vec<Bytes>> {
     // TODO(QuenKar): may merge small ranges to a bigger range to optimize.
     let mut handles = Vec::with_capacity(ranges.len());
     for range in ranges {
-        let future_read = object_store.read_with(&file_path);
+        let future_read = object_store.read_with(file_path);
         handles.push(async move {
             let data = future_read
                 .range(range.start..range.end)
