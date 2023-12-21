@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches::assert_matches;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -368,7 +369,7 @@ impl ProcedureMigrationTestSuite {
     ) {
         self.env
             .table_metadata_manager()
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
     }
@@ -376,7 +377,7 @@ impl ProcedureMigrationTestSuite {
     /// Verifies table metadata after region migration.
     pub(crate) async fn verify_table_metadata(&self) {
         let region_id = self.context.persistent_ctx.region_id;
-        let region_routes = self
+        let table_route = self
             .env
             .table_metadata_manager
             .table_route_manager()
@@ -384,22 +385,25 @@ impl ProcedureMigrationTestSuite {
             .await
             .unwrap()
             .unwrap()
-            .into_inner()
-            .region_routes;
+            .into_inner();
+        let region_routes = table_route.region_routes();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;
         let removed_follower_id = self.context.persistent_ctx.from_peer.id;
 
         let region_route = region_routes
-            .into_iter()
+            .iter()
             .find(|route| route.region.id == region_id)
             .unwrap();
 
         assert!(!region_route.is_leader_downgraded());
-        assert_eq!(region_route.leader_peer.unwrap().id, expected_leader_id);
+        assert_eq!(
+            region_route.leader_peer.as_ref().unwrap().id,
+            expected_leader_id
+        );
         assert!(!region_route
             .follower_peers
-            .into_iter()
+            .iter()
             .any(|route| route.id == removed_follower_id))
     }
 }

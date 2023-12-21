@@ -21,9 +21,11 @@ use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
+use common_config::wal::{KafkaConfig, RaftEngineConfig};
+use common_config::{WalConfig, WAL_OPTIONS_KEY};
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
@@ -31,10 +33,12 @@ use common_telemetry::{error, info, warn};
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
+use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
 use metric_engine::engine::MetricEngine;
+use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
@@ -45,7 +49,6 @@ use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
-use store_api::logstore::LogStore;
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -210,6 +213,7 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let mode = &self.opts.mode;
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         let meta_client = self.meta_client.take();
 
@@ -221,8 +225,6 @@ impl DatanodeBuilder {
         let kv_backend = self.kv_backend.take().context(MissingKvBackendSnafu)?;
 
         // build and initialize region server
-        let log_store = Self::build_log_store(&self.opts).await?;
-
         let (region_event_listener, region_event_receiver) = if controlled_by_metasrv {
             let (tx, rx) = new_region_server_event_channel();
             (Box::new(tx) as _, Some(rx))
@@ -230,12 +232,28 @@ impl DatanodeBuilder {
             (Box::new(NoopRegionServerEventListener) as _, None)
         };
 
-        let region_server = self
-            .new_region_server(log_store, region_event_listener)
-            .await?;
+        let region_server = self.new_region_server(region_event_listener).await?;
 
-        self.initialize_region_server(&region_server, kv_backend, !controlled_by_metasrv)
-            .await?;
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
+
+        let open_all_regions =
+            open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
+
+        if self.opts.initialize_region_in_background {
+            // Opens regions in background.
+            common_runtime::spawn_bg(async move {
+                if let Err(err) = open_all_regions.await {
+                    error!(err; "Failed to open regions during the startup.");
+                }
+            });
+        } else {
+            open_all_regions.await?;
+        }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
@@ -332,6 +350,7 @@ impl DatanodeBuilder {
         Ok((server, addr))
     }
 
+    #[cfg(test)]
     /// Open all regions belong to this datanode.
     async fn initialize_region_server(
         &self,
@@ -339,61 +358,20 @@ impl DatanodeBuilder {
         kv_backend: KvBackendRef,
         open_with_writable: bool,
     ) -> Result<()> {
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        let mut regions = vec![];
-        let mut table_values = datanode_table_manager.tables(node_id);
 
-        while let Some(table_value) = table_values.next().await {
-            let table_value = table_value.context(GetMetadataSnafu)?;
-            for region_number in table_value.regions {
-                regions.push((
-                    RegionId::new(table_value.table_id, region_number),
-                    table_value.region_info.engine.clone(),
-                    table_value.region_info.region_storage_path.clone(),
-                    table_value.region_info.region_options.clone(),
-                ));
-            }
-        }
-        info!("going to open {} regions", regions.len());
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
-        let mut tasks = vec![];
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
 
-        for (region_id, engine, store_path, options) in regions {
-            let region_dir = region_dir(&store_path, region_id);
-            let semaphore_moved = semaphore.clone();
-            tasks.push(async move {
-                let _permit = semaphore_moved.acquire().await;
-                region_server
-                    .handle_request(
-                        region_id,
-                        RegionRequest::Open(RegionOpenRequest {
-                            engine: engine.clone(),
-                            region_dir,
-                            options,
-                        }),
-                    )
-                    .await?;
-                if open_with_writable {
-                    if let Err(e) = region_server.set_writable(region_id, true) {
-                        error!(
-                            e; "failed to set writable for region {region_id}"
-                        );
-                    }
-                }
-                Ok(())
-            });
-        }
-        let _ = try_join_all(tasks).await?;
-
-        info!("region server is initialized");
-
-        Ok(())
+        open_all_regions(region_server.clone(), table_values, open_with_writable).await
     }
 
     async fn new_region_server(
         &self,
-        log_store: Arc<RaftEngineLogStore>,
         event_listener: RegionServerEventListenerRef,
     ) -> Result<RegionServer> {
         let opts = &self.opts;
@@ -425,7 +403,7 @@ impl DatanodeBuilder {
         );
 
         let object_store_manager = Self::build_object_store_manager(opts).await?;
-        let engines = Self::build_store_engines(opts, log_store, object_store_manager).await?;
+        let engines = Self::build_store_engines(opts, object_store_manager).await?;
         for engine in engines {
             region_server.register_engine(engine);
         }
@@ -435,48 +413,19 @@ impl DatanodeBuilder {
 
     // internal utils
 
-    /// Build [RaftEngineLogStore]
-    async fn build_log_store(opts: &DatanodeOptions) -> Result<Arc<RaftEngineLogStore>> {
-        let data_home = normalize_dir(&opts.storage.data_home);
-        let wal_dir = match &opts.wal.dir {
-            Some(dir) => dir.clone(),
-            None => format!("{}{WAL_DIR}", data_home),
-        };
-        let wal_config = opts.wal.clone();
-
-        // create WAL directory
-        fs::create_dir_all(Path::new(&wal_dir))
-            .await
-            .context(CreateDirSnafu { dir: &wal_dir })?;
-        info!(
-            "Creating logstore with config: {:?} and storage path: {}",
-            wal_config, &wal_dir
-        );
-        let logstore = RaftEngineLogStore::try_new(wal_dir, wal_config)
-            .await
-            .map_err(Box::new)
-            .context(OpenLogStoreSnafu)?;
-        Ok(Arc::new(logstore))
-    }
-
-    /// Build [RegionEngineRef] from `store_engine` section in `opts`
-    async fn build_store_engines<S>(
+    /// Builds [RegionEngineRef] from `store_engine` section in `opts`
+    async fn build_store_engines(
         opts: &DatanodeOptions,
-        log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> Result<Vec<RegionEngineRef>>
-    where
-        S: LogStore,
-    {
+    ) -> Result<Vec<RegionEngineRef>> {
         let mut engines = vec![];
         for engine in &opts.region_engine {
             match engine {
                 RegionEngineConfig::Mito(config) => {
-                    let mito_engine: MitoEngine = MitoEngine::new(
-                        config.clone(),
-                        log_store.clone(),
-                        object_store_manager.clone(),
-                    );
+                    let mito_engine =
+                        Self::build_mito_engine(opts, object_store_manager.clone(), config.clone())
+                            .await?;
+
                     let metric_engine = MetricEngine::new(mito_engine.clone());
                     engines.push(Arc::new(mito_engine) as _);
                     engines.push(Arc::new(metric_engine) as _);
@@ -493,6 +442,61 @@ impl DatanodeBuilder {
         Ok(engines)
     }
 
+    /// Builds [MitoEngine] according to options.
+    async fn build_mito_engine(
+        opts: &DatanodeOptions,
+        object_store_manager: ObjectStoreManagerRef,
+        config: MitoConfig,
+    ) -> Result<MitoEngine> {
+        let mito_engine = match &opts.wal {
+            WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
+                config,
+                Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
+                    .await?,
+                object_store_manager,
+            ),
+            WalConfig::Kafka(kafka_config) => MitoEngine::new(
+                config,
+                Self::build_kafka_log_store(kafka_config).await?,
+                object_store_manager,
+            ),
+        };
+        Ok(mito_engine)
+    }
+
+    /// Builds [RaftEngineLogStore].
+    async fn build_raft_engine_log_store(
+        data_home: &str,
+        config: &RaftEngineConfig,
+    ) -> Result<Arc<RaftEngineLogStore>> {
+        let data_home = normalize_dir(data_home);
+        let wal_dir = match &config.dir {
+            Some(dir) => dir.clone(),
+            None => format!("{}{WAL_DIR}", data_home),
+        };
+
+        // create WAL directory
+        fs::create_dir_all(Path::new(&wal_dir))
+            .await
+            .context(CreateDirSnafu { dir: &wal_dir })?;
+        info!(
+            "Creating raft-engine logstore with config: {:?} and storage path: {}",
+            config, &wal_dir
+        );
+        let logstore = RaftEngineLogStore::try_new(wal_dir, config.clone())
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)?;
+
+        Ok(Arc::new(logstore))
+    }
+
+    /// Builds [KafkaLogStore].
+    async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        let _ = config;
+        todo!()
+    }
+
     /// Builds [ObjectStoreManager]
     async fn build_object_store_manager(opts: &DatanodeOptions) -> Result<ObjectStoreManagerRef> {
         let object_store =
@@ -507,6 +511,72 @@ impl DatanodeBuilder {
         }
         Ok(Arc::new(object_store_manager))
     }
+}
+
+/// Open all regions belong to this datanode.
+async fn open_all_regions(
+    region_server: RegionServer,
+    table_values: Vec<DatanodeTableValue>,
+    open_with_writable: bool,
+) -> Result<()> {
+    let mut regions = vec![];
+    for table_value in table_values {
+        for region_number in table_value.regions {
+            // Augments region options with wal options if a wal options is provided.
+            let mut region_options = table_value.region_info.region_options.clone();
+            table_value
+                .region_info
+                .region_wal_options
+                .get(&region_number.to_string())
+                .and_then(|wal_options| {
+                    region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+                });
+
+            regions.push((
+                RegionId::new(table_value.table_id, region_number),
+                table_value.region_info.engine.clone(),
+                table_value.region_info.region_storage_path.clone(),
+                region_options,
+            ));
+        }
+    }
+    info!("going to open {} regions", regions.len());
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
+    let mut tasks = vec![];
+
+    let region_server_ref = &region_server;
+    for (region_id, engine, store_path, options) in regions {
+        let region_dir = region_dir(&store_path, region_id);
+        let semaphore_moved = semaphore.clone();
+
+        tasks.push(async move {
+            let _permit = semaphore_moved.acquire().await;
+            region_server_ref
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: engine.clone(),
+                        region_dir,
+                        options,
+                        skip_wal_replay: false,
+                    }),
+                )
+                .await?;
+            if open_with_writable {
+                if let Err(e) = region_server_ref.set_writable(region_id, true) {
+                    error!(
+                        e; "failed to set writable for region {region_id}"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+    let _ = try_join_all(tasks).await?;
+
+    info!("all regions are opened");
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -534,6 +604,7 @@ mod tests {
                 "mock",
                 "foo/bar/weny",
                 HashMap::from([("foo".to_string(), "bar".to_string())]),
+                HashMap::default(),
                 BTreeMap::from([(0, vec![0, 1, 2])]),
             )
             .unwrap();

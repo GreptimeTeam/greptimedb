@@ -207,7 +207,7 @@ mod tests {
             .unwrap();
 
         let should_downgraded = table_route_value
-            .region_routes
+            .region_routes()
             .iter()
             .find(|route| route.region.id.region_number() == failed_region.region_number)
             .unwrap();
@@ -277,7 +277,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None, region_wal_options: None }"#
         );
     }
 
@@ -319,7 +319,7 @@ mod tests {
         // Timeout or not, proceed to `ActivateRegion`.
         assert_eq!(
             format!("{next_state:?}"),
-            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None }"#
+            r#"ActivateRegion { candidate: Peer { id: 2, addr: "" }, remark_inactive_region: false, region_storage_path: None, region_options: None, region_wal_options: None }"#
         );
     }
 }

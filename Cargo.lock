@@ -1560,6 +1560,7 @@ dependencies = [
  "servers",
  "session",
  "snafu",
+ "store-api",
  "substrait 0.4.4",
  "table",
  "temp-env",
@@ -1623,7 +1624,11 @@ version = "0.4.4"
 dependencies = [
  "common-base",
  "humantime-serde",
+ "rskafka",
  "serde",
+ "serde_json",
+ "serde_with",
+ "toml 0.7.8",
 ]
 
 [[package]]
@@ -1811,6 +1816,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-catalog",
+ "common-config",
  "common-error",
  "common-grpc-expr",
  "common-macro",
@@ -1831,11 +1837,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "serde_with",
  "snafu",
  "store-api",
  "strum 0.25.0",
  "table",
  "tokio",
+ "toml 0.7.8",
  "tonic 0.10.2",
 ]
 
@@ -2148,6 +2156,15 @@ name = "crc-catalog"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
+
+[[package]]
+name = "crc32c"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8f48d60e5b4d2c53d5c2b1d8a58c849a70ae5e5509b08a48d047e3b65714a74"
+dependencies = [
+ "rustc_version",
+]
 
 [[package]]
 name = "crc32fast"
@@ -3980,11 +3997,14 @@ dependencies = [
  "common-base",
  "common-error",
  "common-macro",
+ "common-telemetry",
  "fst",
  "futures",
  "greptime-proto",
  "mockall",
+ "pin-project",
  "prost 0.12.2",
+ "rand",
  "regex",
  "regex-automata 0.1.10",
  "snafu",
@@ -4076,6 +4096,12 @@ name = "integer-encoding"
 version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
+
+[[package]]
+name = "integer-encoding"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "924df4f0e24e2e7f9cdd90babb0b96f93b20f3ecfa949ea9e6613756b8c8e1bf"
 
 [[package]]
 name = "inventory"
@@ -4894,6 +4920,7 @@ dependencies = [
  "chrono",
  "common-base",
  "common-catalog",
+ "common-config",
  "common-datasource",
  "common-decimal",
  "common-error",
@@ -5474,8 +5501,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6b6a785aafb26a97c26078b9457e96cb238b386781583783a3a3d3de47fa841"
+source = "git+https://github.com/MichaelScofield/opensrv.git?rev=1676c1d#1676c1d166cf33e7745e1b5db54b3fe2b7defec9"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7378,6 +7404,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rskafka"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "132ecfa3cd9c3825208524a80881f115337762904ad3f0174e87975b2d79162c"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "crc32c",
+ "flate2",
+ "futures",
+ "integer-encoding 4.0.0",
+ "lz4",
+ "parking_lot 0.12.1",
+ "pin-project-lite",
+ "rand",
+ "snap",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "zstd 0.12.4",
+]
+
+[[package]]
 name = "rstest"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8971,6 +9021,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "common-base",
+ "common-config",
  "common-error",
  "common-macro",
  "common-query",
@@ -9497,7 +9548,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
 dependencies = [
  "byteorder",
- "integer-encoding",
+ "integer-encoding 3.0.4",
  "ordered-float 2.10.1",
 ]
 

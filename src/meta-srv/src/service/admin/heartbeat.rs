@@ -128,13 +128,13 @@ mod tests {
         let mut stat_vals = vec![stat_value1, stat_value2];
         stat_vals = filter_by_addr(stat_vals, "127.0.0.1:3002");
         assert_eq!(stat_vals.len(), 1);
-        assert_eq!(stat_vals.get(0).unwrap().stats.len(), 3);
+        assert_eq!(stat_vals.first().unwrap().stats.len(), 3);
         assert_eq!(
             stat_vals
-                .get(0)
+                .first()
                 .unwrap()
                 .stats
-                .get(0)
+                .first()
                 .unwrap()
                 .timestamp_millis,
             3

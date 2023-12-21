@@ -35,6 +35,8 @@ pub mod sequence;
 pub mod state_store;
 pub mod table_name;
 pub mod util;
+#[allow(unused)]
+pub mod wal;
 
 pub type ClusterId = u64;
 pub type DatanodeId = u64;

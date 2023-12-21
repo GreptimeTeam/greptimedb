@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #![feature(let_chains)]
-#![feature(trait_upcasting)]
 
 mod df_substrait;
 pub mod error;

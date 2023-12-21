@@ -33,7 +33,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let mut region_routes = table_route_value.region_routes.clone();
+        let mut region_routes = table_route_value.region_routes().clone();
         let region_route = region_routes
             .iter_mut()
             .find(|route| route.region.id == region_id)
@@ -81,7 +81,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let region_routes = table_route_value.region_routes.clone();
+        let region_routes = table_route_value.region_routes().clone();
         let region_route = region_routes
             .into_iter()
             .find(|route| route.region.id == region_id)
@@ -136,6 +136,9 @@ impl UpdateMetadata {
         let engine = table_info.meta.engine.clone();
         let region_options: HashMap<String, String> = (&table_info.meta.options).into();
 
+        // TODO(niebayes): properly fetch or construct region wal options.
+        let region_wal_options = HashMap::new();
+
         // No remote fetch.
         let table_route_value = ctx.get_table_route_value().await?;
 
@@ -146,10 +149,12 @@ impl UpdateMetadata {
                     engine: engine.to_string(),
                     region_storage_path: region_storage_path.to_string(),
                     region_options: region_options.clone(),
+                    region_wal_options: region_wal_options.clone(),
                 },
                 table_route_value,
                 region_routes,
                 &region_options,
+                &region_wal_options,
             )
             .await
             .context(error::TableMetadataManagerSnafu)
@@ -171,6 +176,7 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -221,7 +227,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -250,7 +256,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -281,7 +287,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -322,7 +328,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -381,7 +387,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -407,7 +413,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -433,7 +439,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -466,7 +472,7 @@ mod tests {
 
         let table_metadata_manager = env.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes)
+            .create_table_metadata(table_info, region_routes, HashMap::default())
             .await
             .unwrap();
 
@@ -474,14 +480,14 @@ mod tests {
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
 
-        let region_routes = table_metadata_manager
+        let table_route = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner()
-            .region_routes;
+            .into_inner();
+        let region_routes = table_route.region_routes();
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());

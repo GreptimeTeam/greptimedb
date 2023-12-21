@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(assert_matches)]
+#![feature(assert_matches, let_chains)]
 
 use async_trait::async_trait;
 use clap::arg;

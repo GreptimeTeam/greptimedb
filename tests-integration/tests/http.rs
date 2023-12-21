@@ -757,6 +757,7 @@ tcp_nodelay = true
 mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
+initialize_region_in_background = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 rpc_max_recv_message_size = "512MiB"
@@ -773,6 +774,7 @@ timeout = "30s"
 body_limit = "64MiB"
 
 [datanode.wal]
+provider = "raft_engine"
 file_size = "256MiB"
 purge_threshold = "4GiB"
 purge_interval = "10m"

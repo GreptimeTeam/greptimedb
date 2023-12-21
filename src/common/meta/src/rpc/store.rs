@@ -916,7 +916,7 @@ mod tests {
         let into_req: PbBatchGetRequest = req.into();
 
         assert!(into_req.header.is_none());
-        assert_eq!(b"test_key1".as_slice(), into_req.keys.get(0).unwrap());
+        assert_eq!(b"test_key1".as_slice(), into_req.keys.first().unwrap());
         assert_eq!(b"test_key2".as_slice(), into_req.keys.get(1).unwrap());
         assert_eq!(b"test_key3".as_slice(), into_req.keys.get(2).unwrap());
     }
@@ -946,10 +946,10 @@ mod tests {
 
         let into_req: PbBatchPutRequest = req.into();
         assert!(into_req.header.is_none());
-        assert_eq!(b"test_key1".to_vec(), into_req.kvs.get(0).unwrap().key);
+        assert_eq!(b"test_key1".to_vec(), into_req.kvs.first().unwrap().key);
         assert_eq!(b"test_key2".to_vec(), into_req.kvs.get(1).unwrap().key);
         assert_eq!(b"test_key3".to_vec(), into_req.kvs.get(2).unwrap().key);
-        assert_eq!(b"test_value1".to_vec(), into_req.kvs.get(0).unwrap().value);
+        assert_eq!(b"test_value1".to_vec(), into_req.kvs.first().unwrap().value);
         assert_eq!(b"test_value2".to_vec(), into_req.kvs.get(1).unwrap().value);
         assert_eq!(b"test_value3".to_vec(), into_req.kvs.get(2).unwrap().value);
         assert!(into_req.prev_kv);
@@ -981,7 +981,7 @@ mod tests {
 
         let into_req: PbBatchDeleteRequest = req.into();
         assert!(into_req.header.is_none());
-        assert_eq!(&b"test_key1".to_vec(), into_req.keys.get(0).unwrap());
+        assert_eq!(&b"test_key1".to_vec(), into_req.keys.first().unwrap());
         assert_eq!(&b"test_key2".to_vec(), into_req.keys.get(1).unwrap());
         assert_eq!(&b"test_key3".to_vec(), into_req.keys.get(2).unwrap());
         assert!(into_req.prev_kv);

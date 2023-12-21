@@ -17,7 +17,9 @@ use std::time::Instant;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::table_name::TableName;
 
-use super::{bench_self_recorded, create_region_routes, create_table_info};
+use crate::cli::bench::{
+    bench_self_recorded, create_region_routes, create_region_wal_options, create_table_info,
+};
 
 pub struct TableMetadataBencher {
     table_metadata_manager: TableMetadataManagerRef,
@@ -43,12 +45,15 @@ impl TableMetadataBencher {
                 let table_name = format!("bench_table_name_{}", i);
                 let table_name = TableName::new("bench_catalog", "bench_schema", table_name);
                 let table_info = create_table_info(i, table_name);
-                let region_routes = create_region_routes();
+
+                let regions: Vec<_> = (0..64).collect();
+                let region_routes = create_region_routes(regions.clone());
+                let region_wal_options = create_region_wal_options(regions);
 
                 let start = Instant::now();
 
                 self.table_metadata_manager
-                    .create_table_metadata(table_info, region_routes)
+                    .create_table_metadata(table_info, region_routes, region_wal_options)
                     .await
                     .unwrap();
 

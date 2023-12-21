@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
+use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -27,6 +28,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
+use common_meta::wal::build_wal_options_allocator;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -35,7 +37,7 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataCreator;
+use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
@@ -48,7 +50,7 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
     ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StopProcedureManagerSnafu,
 };
@@ -247,12 +249,20 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+        let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             None,
         )?;
 
+        self.convert_options(cli_options, opts)
+    }
+
+    pub fn convert_options(
+        &self,
+        cli_options: &CliOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &cli_options.log_dir {
@@ -372,7 +382,16 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let table_meta_allocator = Arc::new(StandaloneTableMetadataCreator::new(table_id_sequence));
+        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
+        let wal_options_allocator =
+            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
+                .await
+                .map_err(BoxedError::new)
+                .context(OtherSnafu)?;
+        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator,
+        ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
@@ -489,6 +508,7 @@ mod tests {
             enable_memory_catalog = true
 
             [wal]
+            provider = "raft_engine"
             dir = "/tmp/greptimedb/test/wal"
             file_size = "1GB"
             purge_threshold = "50GB"
@@ -551,7 +571,10 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        assert_eq!("/tmp/greptimedb/test/wal", dn_opts.wal.dir.unwrap());
+        let WalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+            unreachable!()
+        };
+        assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());
 
         assert!(matches!(
             &dn_opts.storage.store,

@@ -408,6 +408,9 @@ pub enum Error {
         error: FromUtf8Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert Mysql value, error: {}", err_msg))]
+    MysqlValueConversion { err_msg: String, location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -460,7 +463,8 @@ impl ErrorExt for Error {
             | PreparedStmtTypeMismatch { .. }
             | TimePrecision { .. }
             | UrlDecode { .. }
-            | IncompatibleSchema { .. } => StatusCode::InvalidArguments,
+            | IncompatibleSchema { .. }
+            | MysqlValueConversion { .. } => StatusCode::InvalidArguments,
 
             InfluxdbLinesWrite { source, .. }
             | PromSeriesWrite { source, .. }
@@ -534,8 +538,10 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable => Code::Unavailable,
-        StatusCode::RuntimeResourcesExhausted | StatusCode::RateLimited => Code::ResourceExhausted,
+        StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted
+        | StatusCode::RateLimited
+        | StatusCode::RegionBusy => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound

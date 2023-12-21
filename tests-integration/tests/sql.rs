@@ -60,6 +60,7 @@ macro_rules! sql_tests {
                 test_postgres_auth,
                 test_postgres_crud,
                 test_postgres_parameter_inference,
+                test_mysql_prepare_stmt_insert_timestamp,
             );
         )*
     };
@@ -577,5 +578,80 @@ pub async fn test_mysql_async_timestamp(store_type: StorageType) {
     assert_eq!(loaded_metrics.len(), 6);
 
     let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
+    let (addr, mut guard, server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_stmt_insert_timestamp").await;
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query("create table demo(i bigint, ts timestamp time index)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Valid timestamp binary encoding: https://mariadb.com/kb/en/resultset-row/#timestamp-binary-encoding
+
+    // Timestamp data length = 4, year-month-day(ymd) only:
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(0)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                // Though hour, minute and second are provided, `sqlx` will not encode them if they are all zeroes,
+                // which is just what we desire here.
+                // See https://github.com/launchbadge/sqlx/blob/bb064e3789d68ad4e9affe7cba34944abb000f72/sqlx-core/src/mysql/types/chrono.rs#L186C22-L186C22
+                .and_then(|x| x.and_hms_opt(0, 0, 0))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Timestamp data length = 7, ymd and hour-minute-second(hms):
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(1)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                .and_then(|x| x.and_hms_opt(13, 19, 1))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Timestamp data length = 11, ymd, hms and microseconds:
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(2)
+        .bind(
+            NaiveDate::from_ymd_opt(2023, 12, 19)
+                .and_then(|x| x.and_hms_micro_opt(13, 20, 1, 123456))
+                .unwrap(),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let rows = sqlx::query("select i, ts from demo order by i")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+
+    let x: DateTime<Utc> = rows[0].get(1);
+    assert_eq!(x.to_string(), "2023-12-19 00:00:00 UTC");
+
+    let x: DateTime<Utc> = rows[1].get(1);
+    assert_eq!(x.to_string(), "2023-12-19 13:19:01 UTC");
+
+    let x: DateTime<Utc> = rows[2].get(1);
+    assert_eq!(x.to_string(), "2023-12-19 13:20:01.123 UTC");
+
+    let _ = server.shutdown().await;
     guard.remove_all().await;
 }

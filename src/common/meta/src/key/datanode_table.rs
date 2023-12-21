@@ -38,14 +38,18 @@ use crate::DatanodeId;
 /// For compatible reason, DON'T modify the field name.
 pub struct RegionInfo {
     #[serde(default)]
-    // The table engine, it SHOULD be immutable after created.
+    /// The table engine, it SHOULD be immutable after created.
     pub engine: String,
-    // The region storage path, it SHOULD be immutable after created.
+    /// The region storage path, it SHOULD be immutable after created.
     #[serde(default)]
     pub region_storage_path: String,
-    // The region options.
+    /// The region options.
     #[serde(default)]
     pub region_options: HashMap<String, String>,
+    /// The per-region wal options.
+    /// Key: region number (in string representation). Value: the encoded wal options of the region.
+    #[serde(default)]
+    pub region_wal_options: HashMap<String, String>,
 }
 
 pub struct DatanodeTableKey {
@@ -165,11 +169,21 @@ impl DatanodeTableManager {
         engine: &str,
         region_storage_path: &str,
         region_options: HashMap<String, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
         distribution: RegionDistribution,
     ) -> Result<Txn> {
         let txns = distribution
             .into_iter()
             .map(|(datanode_id, regions)| {
+                let filtered_region_wal_options = regions
+                    .iter()
+                    .filter_map(|region_number| {
+                        region_wal_options
+                            .get(region_number)
+                            .map(|wal_options| (region_number.to_string(), wal_options.clone()))
+                    })
+                    .collect();
+
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
                     table_id,
@@ -178,6 +192,7 @@ impl DatanodeTableManager {
                         engine: engine.to_string(),
                         region_storage_path: region_storage_path.to_string(),
                         region_options: region_options.clone(),
+                        region_wal_options: filtered_region_wal_options,
                     },
                 );
 
@@ -198,6 +213,7 @@ impl DatanodeTableManager {
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         new_region_options: &HashMap<String, String>,
+        new_region_wal_options: &HashMap<String, String>,
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
@@ -209,12 +225,15 @@ impl DatanodeTableManager {
                 opts.push(TxnOp::Delete(raw_key))
             }
         }
+
         let need_update_options = region_info.region_options != *new_region_options;
+        let need_update_wal_options = region_info.region_wal_options != *new_region_wal_options;
+
         for (datanode, regions) in new_region_distribution.into_iter() {
             let need_update =
                 if let Some(current_region) = current_region_distribution.get(&datanode) {
                     // Updates if need.
-                    *current_region != regions || need_update_options
+                    *current_region != regions || need_update_options || need_update_wal_options
                 } else {
                     true
                 };
@@ -272,7 +291,7 @@ mod tests {
             region_info: RegionInfo::default(),
             version: 1,
         };
-        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"version":1}"#;
+        let literal = br#"{"table_id":42,"regions":[1,2,3],"engine":"","region_storage_path":"","region_options":{},"region_wal_options":{},"version":1}"#;
 
         let raw_value = value.try_as_raw_value().unwrap();
         assert_eq!(raw_value, literal);
@@ -284,6 +303,41 @@ mod tests {
         let raw_str = br#"{"table_id":42,"regions":[1,2,3],"version":1}"#;
         let parsed = DatanodeTableValue::try_from_raw_value(raw_str);
         assert!(parsed.is_ok());
+    }
+
+    // This test intends to ensure both the `serde_json::to_string` + `serde_json::from_str`
+    // and `serde_json::to_vec` + `serde_json::from_slice` work for `DatanodeTableValue`.
+    // Warning: if the key of `region_wal_options` is of type non-String, this test would fail.
+    #[test]
+    fn test_serde_with_region_info() {
+        let region_info = RegionInfo {
+            engine: "test_engine".to_string(),
+            region_storage_path: "test_storage_path".to_string(),
+            region_options: HashMap::from([
+                ("a".to_string(), "aa".to_string()),
+                ("b".to_string(), "bb".to_string()),
+                ("c".to_string(), "cc".to_string()),
+            ]),
+            region_wal_options: HashMap::from([
+                ("1".to_string(), "aaa".to_string()),
+                ("2".to_string(), "bbb".to_string()),
+                ("3".to_string(), "ccc".to_string()),
+            ]),
+        };
+        let table_value = DatanodeTableValue {
+            table_id: 1,
+            regions: vec![],
+            region_info,
+            version: 1,
+        };
+
+        let encoded = serde_json::to_string(&table_value).unwrap();
+        let decoded = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(table_value, decoded);
+
+        let encoded = serde_json::to_vec(&table_value).unwrap();
+        let decoded = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(table_value, decoded);
     }
 
     #[test]

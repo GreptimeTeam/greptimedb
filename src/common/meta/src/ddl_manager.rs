@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{info, tracing};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
@@ -26,7 +28,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
-    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadataAllocatorContext,
+    DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
     TableMetadataAllocatorRef,
 };
 use crate::error::{
@@ -52,7 +54,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_meta_allocator: TableMetadataAllocatorRef,
+    table_metadata_allocator: TableMetadataAllocatorRef,
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
@@ -63,7 +65,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
+        table_metadata_allocator: TableMetadataAllocatorRef,
         memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Result<Self> {
         let manager = Self {
@@ -71,7 +73,7 @@ impl DdlManager {
             datanode_manager: datanode_clients,
             cache_invalidator,
             table_metadata_manager,
-            table_meta_allocator,
+            table_metadata_allocator,
             memory_region_keeper,
         };
         manager.register_loaders()?;
@@ -176,11 +178,17 @@ impl DdlManager {
         cluster_id: u64,
         create_table_task: CreateTableTask,
         region_routes: Vec<RegionRoute>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure =
-            CreateTableProcedure::new(cluster_id, create_table_task, region_routes, context);
+        let procedure = CreateTableProcedure::new(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options,
+            context,
+        );
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -271,7 +279,7 @@ async fn handle_truncate_table_task(
         table_name: table_ref.to_string(),
     })?;
 
-    let table_route = table_route_value.into_inner().region_routes;
+    let table_route = table_route_value.into_inner().region_routes().clone();
 
     let id = ddl_manager
         .submit_truncate_table_task(
@@ -374,17 +382,29 @@ async fn handle_create_table_task(
     cluster_id: u64,
     mut create_table_task: CreateTableTask,
 ) -> Result<SubmitDdlTaskResponse> {
-    let (table_id, region_routes) = ddl_manager
-        .table_meta_allocator
+    let table_meta = ddl_manager
+        .table_metadata_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
-            &mut create_table_task.table_info,
-            &create_table_task.partitions,
+            &create_table_task,
         )
         .await?;
 
+    let TableMetadata {
+        table_id,
+        region_routes,
+        region_wal_options,
+    } = table_meta;
+
+    create_table_task.table_info.ident.table_id = table_id;
+
     let id = ddl_manager
-        .submit_create_table_task(cluster_id, create_table_task, region_routes)
+        .submit_create_table_task(
+            cluster_id,
+            create_table_task,
+            region_routes,
+            region_wal_options,
+        )
         .await?;
 
     info!("Table: {table_id:?} is created via procedure_id {id:?}");
@@ -435,9 +455,7 @@ impl DdlTaskExecutor for DdlManager {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::Partition;
     use common_procedure::local::LocalManager;
-    use table::metadata::{RawTableInfo, TableId};
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -446,13 +464,13 @@ mod tests {
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::truncate_table::TruncateTableProcedure;
-    use crate::ddl::{TableMetadataAllocator, TableMetadataAllocatorContext};
+    use crate::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
     use crate::error::Result;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
-    use crate::rpc::router::RegionRoute;
+    use crate::rpc::ddl::CreateTableTask;
     use crate::state_store::KvStateStore;
 
     /// A dummy implemented [DatanodeManager].
@@ -473,9 +491,8 @@ mod tests {
         async fn create(
             &self,
             _ctx: &TableMetadataAllocatorContext,
-            _table_info: &mut RawTableInfo,
-            _partitions: &[Partition],
-        ) -> Result<(TableId, Vec<RegionRoute>)> {
+            _task: &CreateTableTask,
+        ) -> Result<TableMetadata> {
             unimplemented!()
         }
     }

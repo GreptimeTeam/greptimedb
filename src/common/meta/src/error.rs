@@ -14,6 +14,7 @@
 
 use std::str::Utf8Error;
 
+use common_config::wal::WalOptions;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -284,6 +285,17 @@ pub enum Error {
 
     #[snafu(display("Retry later"))]
     RetryLater { source: BoxedError },
+
+    #[snafu(display(
+        "Failed to encode a wal options to json string, wal_options: {:?}",
+        wal_options
+    ))]
+    EncodeWalOptionsToJson {
+        wal_options: WalOptions,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -318,7 +330,8 @@ impl ErrorExt for Error {
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. }
-            | RegionOperatingRace { .. } => StatusCode::Unexpected,
+            | RegionOperatingRace { .. }
+            | EncodeWalOptionsToJson { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }

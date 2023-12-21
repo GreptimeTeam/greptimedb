@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::Arc;
 
+use common_config::wal::WalOptions;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::StreamExt;
@@ -54,6 +55,7 @@ pub(crate) struct RegionOpener {
     scheduler: SchedulerRef,
     options: HashMap<String, String>,
     cache_manager: Option<CacheManagerRef>,
+    skip_wal_replay: bool,
 }
 
 impl RegionOpener {
@@ -74,6 +76,7 @@ impl RegionOpener {
             scheduler,
             options: HashMap::new(),
             cache_manager: None,
+            skip_wal_replay: false,
         }
     }
 
@@ -92,6 +95,12 @@ impl RegionOpener {
     /// Sets the cache manager for the region.
     pub(crate) fn cache(mut self, cache_manager: Option<CacheManagerRef>) -> Self {
         self.cache_manager = cache_manager;
+        self
+    }
+
+    /// Sets the `skip_wal_replay`.
+    pub(crate) fn skip_wal_replay(mut self, skip: bool) -> Self {
+        self.skip_wal_replay = skip;
         self
     }
 
@@ -137,6 +146,8 @@ impl RegionOpener {
             }
         }
         let options = RegionOptions::try_from(&self.options)?;
+        let wal_options = options.wal_options.clone();
+
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -163,6 +174,7 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
             )),
+            wal_options,
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is writable after it is created.
             writable: AtomicBool::new(true),
@@ -207,6 +219,8 @@ impl RegionOpener {
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
         let region_options = RegionOptions::try_from(&self.options)?;
+        let wal_options = region_options.wal_options.clone();
+
         let region_manifest_options = self.manifest_options(config, &region_options)?;
         let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
         else {
@@ -235,7 +249,18 @@ impl RegionOpener {
             .build();
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
-        replay_memtable(wal, region_id, flushed_entry_id, &version_control).await?;
+        if !self.skip_wal_replay {
+            replay_memtable(
+                wal,
+                &wal_options,
+                region_id,
+                flushed_entry_id,
+                &version_control,
+            )
+            .await?;
+        } else {
+            info!("Skip the WAL replay for region: {}", region_id);
+        }
 
         let region = MitoRegion {
             region_id: self.region_id,
@@ -243,6 +268,7 @@ impl RegionOpener {
             access_layer,
             manifest_manager,
             file_purger,
+            wal_options,
             last_flush_millis: AtomicI64::new(current_time_millis()),
             // Region is always opened in read only mode.
             writable: AtomicBool::new(false),
@@ -334,6 +360,7 @@ pub(crate) fn check_recovered_region(
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
 async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
+    wal_options: &WalOptions,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
@@ -342,8 +369,8 @@ async fn replay_memtable<S: LogStore>(
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
-    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control);
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id)?;
+    let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control, wal_options.clone());
+    let mut wal_stream = wal.scan(region_id, flushed_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);

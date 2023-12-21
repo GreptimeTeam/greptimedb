@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use common_config::wal::WalOptions;
+use common_config::WAL_OPTIONS_KEY;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_with::{serde_as, with_prefix, DisplayFromStr};
@@ -37,6 +39,8 @@ pub struct RegionOptions {
     pub compaction: CompactionOptions,
     /// Custom storage.
     pub storage: Option<String>,
+    /// Wal options.
+    pub wal_options: WalOptions,
 }
 
 impl TryFrom<&HashMap<String, String>> for RegionOptions {
@@ -53,10 +57,19 @@ impl TryFrom<&HashMap<String, String>> for RegionOptions {
             serde_json::from_str(&json).context(JsonOptionsSnafu)?;
         let compaction: CompactionOptions = serde_json::from_str(&json).unwrap_or_default();
 
+        // Tries to decode the wal options from the map or sets to the default if there's none wal options in the map.
+        let wal_options = options_map.get(WAL_OPTIONS_KEY).map_or_else(
+            || Ok(WalOptions::default()),
+            |encoded_wal_options| {
+                serde_json::from_str(encoded_wal_options).context(JsonOptionsSnafu)
+            },
+        )?;
+
         Ok(RegionOptions {
             ttl: options.ttl,
             compaction,
             storage: options.storage,
+            wal_options,
         })
     }
 }
@@ -161,6 +174,9 @@ fn options_map_to_value(options: &HashMap<String, String>) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use common_config::wal::KafkaWalOptions;
+    use common_config::WAL_OPTIONS_KEY;
+
     use super::*;
 
     fn make_map(options: &[(&str, &str)]) -> HashMap<String, String> {
@@ -232,8 +248,34 @@ mod tests {
         assert_eq!(expect, options);
     }
 
+    fn test_with_wal_options(wal_options: &WalOptions) -> bool {
+        let encoded_wal_options = serde_json::to_string(&wal_options).unwrap();
+        let map = make_map(&[(WAL_OPTIONS_KEY, &encoded_wal_options)]);
+        let got = RegionOptions::try_from(&map).unwrap();
+        let expect = RegionOptions {
+            wal_options: wal_options.clone(),
+            ..Default::default()
+        };
+        expect == got
+    }
+
+    // No need to add compatible tests for RegionOptions since the above tests already check for compatibility.
+    #[test]
+    fn test_with_any_wal_options() {
+        let all_wal_options = vec![
+            WalOptions::RaftEngine,
+            WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+            }),
+        ];
+        all_wal_options.iter().all(test_with_wal_options);
+    }
+
     #[test]
     fn test_with_all() {
+        let wal_options = WalOptions::Kafka(KafkaWalOptions {
+            topic: "test_topic".to_string(),
+        });
         let map = make_map(&[
             ("ttl", "7d"),
             ("compaction.twcs.max_active_window_files", "8"),
@@ -241,6 +283,10 @@ mod tests {
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
             ("storage", "S3"),
+            (
+                WAL_OPTIONS_KEY,
+                &serde_json::to_string(&wal_options).unwrap(),
+            ),
         ]);
         let options = RegionOptions::try_from(&map).unwrap();
         let expect = RegionOptions {
@@ -251,6 +297,7 @@ mod tests {
                 time_window: Some(Duration::from_secs(3600 * 2)),
             }),
             storage: Some("s3".to_string()),
+            wal_options,
         };
         assert_eq!(expect, options);
     }

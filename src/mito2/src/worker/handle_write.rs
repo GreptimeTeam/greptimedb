@@ -133,7 +133,11 @@ impl<S> RegionWorkerLoop<S> {
                     continue;
                 };
 
-                let region_ctx = RegionWriteCtx::new(region.region_id, &region.version_control);
+                let region_ctx = RegionWriteCtx::new(
+                    region.region_id,
+                    &region.version_control,
+                    region.wal_options.clone(),
+                );
 
                 e.insert(region_ctx);
             }

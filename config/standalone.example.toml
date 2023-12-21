@@ -82,6 +82,13 @@ enable = true
 
 # WAL options.
 [wal]
+# Available wal providers:
+# - "RaftEngine" (default)
+# - "Kafka"
+provider = "raft_engine"
+
+# There's no kafka wal config for standalone mode.
+
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"
 # WAL file size in bytes.
