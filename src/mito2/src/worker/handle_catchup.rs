@@ -42,7 +42,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // It's expensive to execute catch-up requests without `set_writable=true` multiple times.
         let is_mutable_empty = region.version().memtables.mutable.is_empty();
 
-        let region = if !is_mutable_empty || region.manifest_manager.check_update().await? {
+        // Utilizes the short circuit evaluation.
+        let region = if !is_mutable_empty || region.manifest_manager.has_update().await? {
             let reopened_region = Arc::new(
                 RegionOpener::new(
                     region_id,
@@ -53,6 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 )
                 .cache(Some(self.cache_manager.clone()))
                 .options(region.version().options.clone())
+                .skip_wal_replay(true)
                 .open(&self.config, &self.wal)
                 .await?,
             );

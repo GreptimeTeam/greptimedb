@@ -28,6 +28,15 @@ use crate::error::{self, Error};
 use crate::test_util::{
     build_rows, flush_region, put_rows, rows_schema, CreateRequestBuilder, TestEnv,
 };
+use crate::wal::EntryId;
+
+fn get_last_entry_id(resp: SetReadonlyResponse) -> Option<EntryId> {
+    if let SetReadonlyResponse::Success { last_entry_id } = resp {
+        last_entry_id
+    } else {
+        unreachable!();
+    }
+}
 
 #[tokio::test]
 async fn test_catchup_with_last_entry_id() {
@@ -75,11 +84,7 @@ async fn test_catchup_with_last_entry_id() {
         .await
         .unwrap();
 
-    let last_entry_id = if let SetReadonlyResponse::Success { last_entry_id } = resp {
-        last_entry_id
-    } else {
-        unreachable!();
-    };
+    let last_entry_id = get_last_entry_id(resp);
     assert!(last_entry_id.is_some());
 
     // Replays the memtable.
@@ -174,11 +179,7 @@ async fn test_catchup_with_incorrect_last_entry_id() {
         .await
         .unwrap();
 
-    let last_entry_id = if let SetReadonlyResponse::Success { last_entry_id } = resp {
-        last_entry_id
-    } else {
-        unreachable!();
-    };
+    let last_entry_id = get_last_entry_id(resp);
     assert!(last_entry_id.is_some());
 
     let incorrect_last_entry_id = last_entry_id.map(|e| e + 1);

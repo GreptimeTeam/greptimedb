@@ -35,7 +35,10 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}", region_id,expected_last_entry_id,replayed_last_entry_id))]
+    #[snafu(display(
+        "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+        region_id, expected_last_entry_id, replayed_last_entry_id
+    ))]
     UnexpectedReplay {
         location: Location,
         region_id: RegionId,
@@ -400,6 +403,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Empty manifest directory, manifest_dir: {}", manifest_dir,))]
+    EmptyManifestDir {
+        manifest_dir: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
     ArrowReader {
         path: String,
@@ -485,7 +494,7 @@ impl ErrorExt for Error {
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionReadonly { .. } => StatusCode::RegionReadonly,
             JsonOptions { .. } => StatusCode::InvalidArguments,
-            EmptyRegionDir { .. } => StatusCode::RegionNotFound,
+            EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
         }
     }

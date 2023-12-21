@@ -16,12 +16,14 @@ use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
 use common_telemetry::{debug, info};
+use futures::TryStreamExt;
 use object_store::ObjectStore;
+use snafu::{OptionExt, ResultExt};
 use store_api::manifest::{ManifestVersion, MAX_VERSION, MIN_VERSION};
 use store_api::metadata::RegionMetadataRef;
 use tokio::sync::RwLock;
 
-use crate::error::Result;
+use crate::error::{self, Result};
 use crate::manifest::action::{
     RegionChange, RegionCheckpoint, RegionManifest, RegionManifestBuilder, RegionMetaAction,
     RegionMetaActionList,
@@ -162,9 +164,9 @@ impl RegionManifestManager {
     }
 
     /// Returns true if a newer version manifest file is found.
-    pub async fn check_update(&self) -> Result<bool> {
+    pub async fn has_update(&self) -> Result<bool> {
         let inner = self.inner.read().await;
-        inner.check_update().await
+        inner.has_update().await
     }
 }
 
@@ -482,23 +484,32 @@ impl RegionManifestManagerInner {
     /// Returns true if a newer version manifest file is found.
     ///
     /// It is typically used in read-only regions to catch up with manifest.
-    pub(crate) async fn check_update(&self) -> Result<bool> {
+    pub(crate) async fn has_update(&self) -> Result<bool> {
         let last_version = self.last_version;
-        let newer_manifests = self
-            .store
-            .get_paths(|entry| {
+
+        let streamer =
+            self.store
+                .manifest_lister()
+                .await?
+                .context(error::EmptyManifestDirSnafu {
+                    manifest_dir: self.store.manifest_dir(),
+                })?;
+
+        let need_update = streamer
+            .try_any(|entry| async move {
                 let file_name = entry.name();
                 if is_delta_file(file_name) {
                     let version = file_version(file_name);
                     if version > last_version {
-                        return Some((version, entry));
+                        return true;
                     }
                 }
-                None
+                false
             })
-            .await?;
+            .await
+            .context(error::OpenDalSnafu)?;
 
-        Ok(!newer_manifests.is_empty())
+        Ok(need_update)
     }
 }
 

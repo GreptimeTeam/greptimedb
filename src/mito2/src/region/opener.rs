@@ -115,6 +115,7 @@ impl RegionOpener {
     ///
     /// # Panics
     /// Panics if metadata is not set.
+    /// Panics if options is not set.
     pub(crate) async fn create_or_open<S: LogStore>(
         mut self,
         config: &MitoConfig,
@@ -126,7 +127,6 @@ impl RegionOpener {
         match self.maybe_open(config, wal).await {
             Ok(Some(region)) => {
                 let recovered = region.metadata();
-                // Safety: must exist.
                 // Checks the schema of the region.
                 let expect = self.metadata.as_ref().unwrap();
                 check_recovered_region(
@@ -152,14 +152,12 @@ impl RegionOpener {
                 );
             }
         }
-        // Safety: must exist.
         let options = self.options.take().unwrap();
         let wal_options = options.wal_options.clone();
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
         let region_manifest_options = self.manifest_options(config, &options)?;
-        // Safety: must exist.
         let metadata = Arc::new(self.metadata.unwrap());
         let manifest_manager =
             RegionManifestManager::new(metadata.clone(), region_manifest_options).await?;
@@ -226,7 +224,6 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        // Safety: must exist.
         let region_options = self.options.as_ref().unwrap().clone();
         let wal_options = region_options.wal_options.clone();
 
@@ -248,7 +245,6 @@ impl RegionOpener {
             self.cache_manager.clone(),
         ));
         let mutable = self.memtable_builder.build(&metadata);
-        debug_assert!(mutable.is_empty());
         let version = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger.clone(), manifest.files.values().cloned())
             .flushed_entry_id(manifest.flushed_entry_id)
