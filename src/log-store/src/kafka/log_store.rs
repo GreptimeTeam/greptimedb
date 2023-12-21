@@ -208,8 +208,9 @@ impl LogStore for KafkaLogStore {
 
     /// Create a namespace of the associate Namespace type
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        // TODO(niebayes): we need to add necessary validations on wal options and wal config to ensure they're consistent.
-        // With the validations added, we can safely use unreachable here.
+        // Warning: we assume the database manager, not the database itself, is responsible for ensuring that
+        // the wal config for metasrv and that for datanode are consistent, i.e. the wal provider should be identical.
+        // With such an assumption, the unreachable is safe here.
         let WalOptions::Kafka(kafka_options) = wal_options else {
             unreachable!()
         };
