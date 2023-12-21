@@ -44,8 +44,8 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
-use servers::system_metric::SystemMetricOption;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
@@ -113,7 +113,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
-    pub system_metric: SystemMetricOption,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for StandaloneOptions {
@@ -133,7 +133,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
-            system_metric: SystemMetricOption::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -157,8 +157,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
-            // Handle the system metric task run by standalone to frontend for execution
-            system_metric: self.system_metric,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -405,7 +405,7 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         frontend
-            .build_system_metric_task(&opts.frontend.system_metric)
+            .build_export_metrics_task(&opts.frontend.export_metrics)
             .context(StartFrontendSnafu)?;
 
         frontend

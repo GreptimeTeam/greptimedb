@@ -221,8 +221,8 @@ pub enum Error {
         error: reqwest::Error,
     },
 
-    #[snafu(display("Invalid prometheus remote write config, msg: {}", msg))]
-    InvalidRemoteWriteConfig { msg: String, location: Location },
+    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
+    InvalidExportMetricsConfig { msg: String, location: Location },
 
     #[snafu(display("Failed to compress prometheus remote request"))]
     CompressPromRemoteRequest {
@@ -468,7 +468,7 @@ impl ErrorExt for Error {
             | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
-            | InvalidRemoteWriteConfig { .. }
+            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }

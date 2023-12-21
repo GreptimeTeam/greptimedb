@@ -39,11 +39,11 @@ use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
+use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
-use servers::system_metric::SystemMetricTask;
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
@@ -82,7 +82,7 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
-    system_metric_task: Option<SystemMetricTask>,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -94,7 +94,7 @@ impl Datanode {
 
         self.start_telemetry();
 
-        if let Some(t) = self.system_metric_task.as_ref() {
+        if let Some(t) = self.export_metrics_task.as_ref() {
             t.start()
         }
 
@@ -265,8 +265,8 @@ impl DatanodeBuilder {
                 None
             };
 
-        let system_metric_task =
-            SystemMetricTask::try_new(&self.opts.system_metric, Some(&self.plugins))
+        let export_metrics_task =
+            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         Ok(Datanode {
@@ -277,7 +277,7 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
-            system_metric_task,
+            export_metrics_task,
         })
     }
 

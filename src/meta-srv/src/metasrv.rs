@@ -32,8 +32,8 @@ use common_procedure::ProcedureManagerRef;
 use common_telemetry::logging::LoggingOptions;
 use common_telemetry::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
-use servers::system_metric::SystemMetricOption;
 use snafu::ResultExt;
 use table::metadata::TableId;
 use tokio::sync::broadcast::error::RecvError;
@@ -73,7 +73,7 @@ pub struct MetaSrvOptions {
     pub enable_telemetry: bool,
     pub data_home: String,
     pub wal: WalConfig,
-    pub system_metric: SystemMetricOption,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for MetaSrvOptions {
@@ -99,7 +99,7 @@ impl Default for MetaSrvOptions {
             enable_telemetry: true,
             data_home: METASRV_HOME.to_string(),
             wal: WalConfig::default(),
-            system_metric: SystemMetricOption::default(),
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }

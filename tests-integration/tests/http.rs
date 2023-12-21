@@ -753,10 +753,12 @@ timeout = "10s"
 connect_timeout = "1s"
 tcp_nodelay = true
 
-[frontend.system_metric]
+[frontend.export_metrics]
 enable = false
 db = ""
 write_interval = "30s"
+
+[frontend.export_metrics.headers]
 
 [datanode]
 mode = "standalone"
@@ -812,10 +814,12 @@ parallel_scan_channel_size = 32
 [datanode.logging]
 enable_otlp_tracing = false
 
-[datanode.system_metric]
+[datanode.export_metrics]
 enable = false
 db = ""
 write_interval = "30s"
+
+[datanode.export_metrics.headers]
 
 [logging]
 enable_otlp_tracing = false"#,

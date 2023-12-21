@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod configurator;
 pub mod error;
+pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
 pub mod http;
@@ -40,7 +41,6 @@ pub mod query_handler;
 mod row_writer;
 pub mod server;
 mod shutdown;
-pub mod system_metric;
 pub mod tls;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

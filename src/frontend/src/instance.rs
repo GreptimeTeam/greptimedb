@@ -55,6 +55,7 @@ use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -66,7 +67,6 @@ use servers::query_handler::{
     PromStoreProtocolHandler, ScriptHandler,
 };
 use servers::server::{start_server, ServerHandlers};
-use servers::system_metric::{SystemMetricOption, SystemMetricTask};
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use sql::dialect::Dialect;
@@ -118,7 +118,7 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
-    system_metric_task: Option<SystemMetricTask>,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Instance {
@@ -196,9 +196,9 @@ impl Instance {
         Ok(())
     }
 
-    pub fn build_system_metric_task(&mut self, opts: &SystemMetricOption) -> Result<()> {
-        self.system_metric_task =
-            SystemMetricTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
+    pub fn build_export_metrics_task(&mut self, opts: &ExportMetricsOption) -> Result<()> {
+        self.export_metrics_task =
+            ExportMetricsTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
         Ok(())
     }
 
@@ -231,7 +231,7 @@ impl FrontendInstance for Instance {
 
         self.script_executor.start(self)?;
 
-        if let Some(t) = self.system_metric_task.as_ref() {
+        if let Some(t) = self.export_metrics_task.as_ref() {
             t.start()
         }
 

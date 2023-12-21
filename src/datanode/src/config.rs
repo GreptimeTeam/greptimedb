@@ -28,9 +28,9 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
-use servers::system_metric::SystemMetricOption;
 use servers::Mode;
 
 pub const DEFAULT_OBJECT_STORE_CACHE_SIZE: ReadableSize = ReadableSize::mb(256);
@@ -242,7 +242,7 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
-    pub system_metric: SystemMetricOption,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for DatanodeOptions {
@@ -267,7 +267,7 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
-            system_metric: SystemMetricOption::default(),
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }

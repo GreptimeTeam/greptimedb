@@ -250,7 +250,7 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         instance
-            .build_system_metric_task(&opts.system_metric)
+            .build_export_metrics_task(&opts.export_metrics)
             .context(StartFrontendSnafu)?;
 
         instance

@@ -26,10 +26,10 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_telemetry::info;
 use etcd_client::Client;
 use servers::configurator::ConfiguratorRef;
+use servers::export_metrics::ExportMetricsTask;
 use servers::http::{HttpServer, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::server::Server;
-use servers::system_metric::SystemMetricTask;
 use snafu::ResultExt;
 use tokio::net::TcpListener;
 use tokio::select;
@@ -37,7 +37,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::transport::server::{Router, TcpIncoming};
 
 use crate::election::etcd::EtcdElection;
-use crate::error::InitRemoteWriteMetricTaskSnafu;
+use crate::error::InitExportMetricsTaskSnafu;
 use crate::lock::etcd::EtcdLock;
 use crate::lock::memory::MemLock;
 use crate::metasrv::builder::MetaSrvBuilder;
@@ -60,7 +60,7 @@ pub struct MetaSrvInstance {
 
     plugins: Plugins,
 
-    system_metric_task: Option<SystemMetricTask>,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl MetaSrvInstance {
@@ -77,22 +77,22 @@ impl MetaSrvInstance {
         );
         // put meta_srv into plugins for later use
         plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
-        let system_metric_task = SystemMetricTask::try_new(&opts.system_metric, Some(&plugins))
-            .context(InitRemoteWriteMetricTaskSnafu)?;
+        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
+            .context(InitExportMetricsTaskSnafu)?;
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
             opts,
             signal_sender: None,
             plugins,
-            system_metric_task,
+            export_metrics_task,
         })
     }
 
     pub async fn start(&mut self) -> Result<()> {
         self.meta_srv.try_start().await?;
 
-        if let Some(t) = self.system_metric_task.as_ref() {
+        if let Some(t) = self.export_metrics_task.as_ref() {
             t.start()
         }
 
