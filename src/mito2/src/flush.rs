@@ -334,8 +334,8 @@ impl RegionFlushTask {
             let source = Source::Iter(iter);
 
             // Flush to level 0.
-            let mut sst_writer = part_writer.new_sst_writer(file_id, source);
-            let Some(sst_info) = sst_writer.write_all(&write_opts).await? else {
+            let mut sst_writer = part_writer.new_sst_writer(file_id);
+            let Some(sst_info) = sst_writer.write_all(source, &write_opts).await? else {
                 // No data written.
                 continue;
             };

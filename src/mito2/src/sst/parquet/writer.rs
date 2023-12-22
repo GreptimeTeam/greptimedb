@@ -35,8 +35,6 @@ use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 pub struct ParquetWriter {
     /// SST output file path.
     file_path: String,
-    /// Input data source.
-    source: Source,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     object_store: ObjectStore,
@@ -47,12 +45,10 @@ impl ParquetWriter {
     pub fn new(
         file_path: String,
         metadata: RegionMetadataRef,
-        source: Source,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
             file_path,
-            source,
             metadata,
             object_store,
         }
@@ -61,7 +57,11 @@ impl ParquetWriter {
     /// Iterates source and writes all rows to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
-    pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
+    pub async fn write_all(
+        &mut self,
+        mut source: Source,
+        opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
         let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
@@ -87,7 +87,7 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        while let Some(batch) = self.source.next_batch().await? {
+        while let Some(batch) = source.next_batch().await? {
             stats.update(&batch);
             let arrow_batch = write_format.convert_batch(&batch)?;
 

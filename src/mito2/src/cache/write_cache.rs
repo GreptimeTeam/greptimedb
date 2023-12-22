@@ -165,14 +165,9 @@ impl UploadPartWriter {
     }
 
     /// Builds a new parquet writer to write to this part.
-    pub(crate) fn new_sst_writer(&self, file_id: FileId, source: Source) -> ParquetWriter {
+    pub(crate) fn new_sst_writer(&self, file_id: FileId) -> ParquetWriter {
         let path = sst_file_path(&self.region_dir, file_id);
-        ParquetWriter::new(
-            path,
-            self.metadata.clone(),
-            source,
-            self.local_store.clone(),
-        )
+        ParquetWriter::new(path, self.metadata.clone(), self.local_store.clone())
     }
 
     /// Adds a SST to this part.
