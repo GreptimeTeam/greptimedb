@@ -146,7 +146,6 @@ impl MemoryCatalogManager {
         manager
             .register_schema_sync(RegisterSchemaRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
-
                 schema: INFORMATION_SCHEMA_NAME.to_string(),
             })
             .unwrap();
