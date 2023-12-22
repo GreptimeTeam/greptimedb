@@ -51,7 +51,6 @@ impl CompactionOutput {
         };
 
         // TODO(hl): measure merge elapsed time.
-
         let mut writer = sst_layer.write_sst(
             self.output_file_id,
             schema,

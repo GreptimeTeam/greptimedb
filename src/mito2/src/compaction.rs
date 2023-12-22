@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod output;
+// TODO(yingwen): Remove output mod.
 mod picker;
 #[cfg(test)]
 mod test_util;
