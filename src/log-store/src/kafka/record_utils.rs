@@ -23,7 +23,7 @@ use crate::error::{DecodeKeySnafu, EncodeKeySnafu, MissingKeySnafu, MissingValue
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
 
 /// The key of a record.
-/// An rskafka record consists of key, value, headers, and datetime. The value of a record
+/// A kafka record consists of key, value, headers, and datetime. The value of a record
 /// is the entry data. Either of the key or the headers can be chosen to store the entry metadata
 /// including topic, region id, and entry id. Currently, the entry metadata is stored in the key.
 #[derive(Debug, Serialize, Deserialize)]

@@ -87,7 +87,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build an rskafka client, broker endpoints: {:?}",
+        "Failed to build a kafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
     BuildClient {
@@ -98,7 +98,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build an rskafka partition client, topic: {}, partition: {}",
+        "Failed to build a kafka partition client, topic: {}, partition: {}",
         topic,
         partition
     ))]
@@ -157,7 +157,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to cast an rskafka offset to entry offset, rskafka_offset: {}",
+        "Failed to cast a kafka offset to entry offset, kafka_offset: {}",
         offset
     ))]
     CastOffset { offset: i64, location: Location },

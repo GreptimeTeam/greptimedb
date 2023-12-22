@@ -38,7 +38,7 @@ type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client
 #[derive(Debug)]
 pub struct KafkaLogStore {
     config: KafkaConfig,
-    /// Manages rskafka clients through which the log store contact the Kafka cluster.
+    /// Manages kafka clients through which the log store contact the Kafka cluster.
     client_manager: ClientManagerRef,
 }
 

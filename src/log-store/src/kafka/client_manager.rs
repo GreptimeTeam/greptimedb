@@ -66,7 +66,7 @@ impl Client {
 #[derive(Debug)]
 pub(crate) struct ClientManager {
     config: KafkaConfig,
-    /// Top-level client in rskafka. All clients are constructed by this client.
+    /// Top-level client in kafka. All clients are constructed by this client.
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
@@ -76,7 +76,7 @@ pub(crate) struct ClientManager {
 impl ClientManager {
     /// Tries to create a ClientManager.
     pub(crate) async fn try_new(config: &KafkaConfig) -> Result<Self> {
-        // Sets backoff config for the top-level rskafka client and all clients constructed by it.
+        // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
             init_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(10),
