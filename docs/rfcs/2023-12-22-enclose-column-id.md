@@ -15,7 +15,7 @@ At present, Both Frontend, datanode and Metasrv are aware of `ColumnId` but it's
 
 # Details
 
-`RegionId` is used widely on both read and write pathes. Removing it from Frontend and Metasrv implies several things:
+`RegionId` is used widely on both read and write paths. Removing it from Frontend and Metasrv implies several things:
 
 - A column may have different column id in different regions.
 - A column is identified by its name in all components.
