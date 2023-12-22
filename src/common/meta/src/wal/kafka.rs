@@ -39,7 +39,7 @@ pub struct KafkaConfig {
     pub num_partitions: i32,
     /// The replication factor of each topic.
     pub replication_factor: i16,
-    /// Aboves which a topic creation operation will be cancelled.
+    /// Above which a topic creation operation will be cancelled.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
     /// The initial backoff for kafka clients.

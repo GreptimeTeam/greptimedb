@@ -66,7 +66,7 @@ provider = "raft_engine"
 # num_partitions = 1
 # Expected number of replicas of each partition.
 # replication_factor = 3
-# Aboves which a topic creation operation will be cancelled.
+# Above which a topic creation operation will be cancelled.
 # create_topic_timeout = "30s"
 # The initial backoff for kafka clients.
 # backoff_init = "500ms"
