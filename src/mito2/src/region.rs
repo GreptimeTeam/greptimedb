@@ -163,6 +163,12 @@ impl MitoRegion {
     fn estimated_wal_usage(&self, memtable_usage: u64) -> u64 {
         ((memtable_usage as f32) * ESTIMATED_WAL_FACTOR) as u64
     }
+
+    /// Returns the custom storage name in the options.
+    pub(crate) fn storage_name(&self) -> Option<String> {
+        let version = self.version();
+        version.options.storage.clone()
+    }
 }
 
 /// Regions indexed by ids.

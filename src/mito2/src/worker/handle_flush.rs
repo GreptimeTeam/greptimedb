@@ -149,6 +149,7 @@ impl<S> RegionWorkerLoop<S> {
             engine_config,
             row_group_size,
             cache_manager: Some(self.cache_manager.clone()),
+            storage: region.storage_name(),
         }
     }
 }

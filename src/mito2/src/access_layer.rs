@@ -75,6 +75,7 @@ impl AccessLayer {
         ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
+    // TODO(yingwen): returns a upload part builder.
     /// Returns a new parquet writer to write the SST for specific `file_id`.
     // TODO(hl): maybe rename to [sst_writer].
     pub(crate) fn write_sst(

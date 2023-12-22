@@ -73,6 +73,7 @@ struct Upload {
 struct UploadPart {
     /// Region id.
     region_id: RegionId,
+    // TODO(yingwen): region dir?
     /// Meta of files created.
     file_metas: Vec<FileMeta>,
     /// Target storage of SSTs.
