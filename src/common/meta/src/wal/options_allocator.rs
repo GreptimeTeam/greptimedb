@@ -19,7 +19,7 @@ use common_config::{KafkaWalOptions, WalOptions};
 use snafu::ResultExt;
 use store_api::storage::RegionNumber;
 
-use crate::error::{EncodeWalOptionsToJsonSnafu, Result};
+use crate::error::{EncodeWalOptionsSnafu, Result};
 use crate::kv_backend::KvBackendRef;
 use crate::wal::kafka::TopicManager as KafkaTopicManager;
 use crate::wal::WalConfig;
@@ -32,6 +32,9 @@ pub enum WalOptionsAllocator {
     Kafka(KafkaTopicManager),
 }
 
+/// Arc wrapper of WalOptionsAllocator.
+pub type WalOptionsAllocatorRef = Arc<WalOptionsAllocator>;
+
 impl WalOptionsAllocator {
     /// Creates a WalOptionsAllocator.
     pub fn new(config: WalConfig, kv_backend: KvBackendRef) -> Self {
@@ -43,49 +46,45 @@ impl WalOptionsAllocator {
         }
     }
 
-    /// Tries to initialize the allocator.
-    pub async fn try_init(&mut self) -> Result<()> {
+    /// Tries to start the allocator.
+    pub async fn start(&self) -> Result<()> {
         match self {
             Self::RaftEngine => Ok(()),
-            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.try_init().await,
+            Self::Kafka(kafka_topic_manager) => kafka_topic_manager.start().await,
         }
     }
 
     /// Allocates a wal options for a region.
-    pub fn alloc(&self) -> WalOptions {
+    pub fn alloc(&self) -> Result<WalOptions> {
         match self {
-            Self::RaftEngine => WalOptions::RaftEngine,
-            Self::Kafka(kafka_topic_manager) => WalOptions::Kafka(KafkaWalOptions {
-                topic: kafka_topic_manager.select().clone(),
-            }),
+            Self::RaftEngine => Ok(WalOptions::RaftEngine),
+            Self::Kafka(topic_manager) => {
+                let topic = topic_manager.select()?;
+                Ok(WalOptions::Kafka(KafkaWalOptions {
+                    topic: topic.clone(),
+                }))
+            }
         }
     }
 
     /// Allocates a batch of wal options where each wal options goes to a region.
-    pub fn alloc_batch(&self, num_regions: usize) -> Vec<WalOptions> {
+    pub fn alloc_batch(&self, num_regions: usize) -> Result<Vec<WalOptions>> {
         match self {
-            WalOptionsAllocator::RaftEngine => vec![WalOptions::RaftEngine; num_regions],
-            WalOptionsAllocator::Kafka(topic_manager) => topic_manager
-                .select_batch(num_regions)
-                .into_iter()
-                .map(|topic| {
-                    WalOptions::Kafka(KafkaWalOptions {
-                        topic: topic.clone(),
+            WalOptionsAllocator::RaftEngine => Ok(vec![WalOptions::RaftEngine; num_regions]),
+            WalOptionsAllocator::Kafka(topic_manager) => {
+                let options_batch = topic_manager
+                    .select_batch(num_regions)?
+                    .into_iter()
+                    .map(|topic| {
+                        WalOptions::Kafka(KafkaWalOptions {
+                            topic: topic.clone(),
+                        })
                     })
-                })
-                .collect(),
+                    .collect();
+                Ok(options_batch)
+            }
         }
     }
-}
-
-/// Creates and initializes a wal options allocator.
-pub async fn build_wal_options_allocator(
-    config: &WalConfig,
-    kv_backend: &KvBackendRef,
-) -> Result<WalOptionsAllocator> {
-    let mut allocator = WalOptionsAllocator::new(config.clone(), kv_backend.clone());
-    allocator.try_init().await?;
-    Ok(allocator)
 }
 
 /// Allocates a wal options for each region. The allocated wal options is encoded immediately.
@@ -94,10 +93,10 @@ pub fn allocate_region_wal_options(
     wal_options_allocator: &WalOptionsAllocator,
 ) -> Result<HashMap<RegionNumber, String>> {
     let wal_options = wal_options_allocator
-        .alloc_batch(regions.len())
+        .alloc_batch(regions.len())?
         .into_iter()
         .map(|wal_options| {
-            serde_json::to_string(&wal_options).context(EncodeWalOptionsToJsonSnafu { wal_options })
+            serde_json::to_string(&wal_options).context(EncodeWalOptionsSnafu { wal_options })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -115,9 +114,8 @@ mod tests {
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = WalConfig::RaftEngine;
-        let allocator = build_wal_options_allocator(&wal_config, &kv_backend)
-            .await
-            .unwrap();
+        let mut allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        allocator.start().await.unwrap();
 
         let num_regions = 32;
         let regions = (0..num_regions).collect::<Vec<_>>();

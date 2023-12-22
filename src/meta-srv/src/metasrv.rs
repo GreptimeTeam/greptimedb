@@ -26,6 +26,7 @@ use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
 use common_meta::region_keeper::MemoryRegionKeeperRef;
+use common_meta::wal::options_allocator::WalOptionsAllocatorRef;
 use common_meta::wal::WalConfig;
 use common_procedure::options::ProcedureConfig;
 use common_procedure::ProcedureManagerRef;
@@ -174,6 +175,7 @@ pub type ElectionRef = Arc<dyn Election<Leader = LeaderValue>>;
 
 pub struct MetaStateHandler {
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
     subscribe_manager: Option<SubscribeManagerRef>,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leader_cached_kv_backend: Arc<LeaderCachedKvBackend>,
@@ -193,6 +195,11 @@ impl MetaStateHandler {
         if let Err(e) = self.procedure_manager.start().await {
             error!(e; "Failed to start procedure manager");
         }
+
+        if let Err(e) = self.wal_options_allocator.start().await {
+            error!(e; "Failed to start wal options allocator");
+        }
+
         self.greptimedb_telemetry_task.should_report(true);
     }
 
@@ -233,6 +240,7 @@ pub struct MetaSrv {
     procedure_manager: ProcedureManagerRef,
     mailbox: MailboxRef,
     ddl_executor: DdlTaskExecutorRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
     table_metadata_manager: TableMetadataManagerRef,
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
@@ -267,6 +275,7 @@ impl MetaSrv {
                 greptimedb_telemetry_task,
                 subscribe_manager,
                 procedure_manager,
+                wal_options_allocator: self.wal_options_allocator.clone(),
                 state: self.state.clone(),
                 leader_cached_kv_backend: leader_cached_kv_backend.clone(),
             };

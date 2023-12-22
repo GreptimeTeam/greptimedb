@@ -290,7 +290,7 @@ pub enum Error {
         "Failed to encode a wal options to json string, wal_options: {:?}",
         wal_options
     ))]
-    EncodeWalOptionsToJson {
+    EncodeWalOptions {
         wal_options: WalOptions,
         #[snafu(source)]
         error: serde_json::Error,
@@ -304,29 +304,32 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build an rskafka client, broker endpoints: {:?}",
+        "Failed to build a kafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
-    BuildClient {
+    BuildKafkaClient {
         broker_endpoints: Vec<String>,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to build an rskafka controller client"))]
-    BuildCtrlClient {
+    #[snafu(display("Failed to build a kafka controller client"))]
+    BuildKafkaCtrlClient {
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to create a kafka wal topic through rskafka client"))]
+    #[snafu(display("Failed to create a kafka wal topic"))]
     CreateKafkaWalTopic {
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
+
+    #[snafu(display("The topic pool is empty"))]
+    EmptyTopicPool { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -362,10 +365,11 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
-            | EncodeWalOptionsToJson { .. }
-            | BuildClient { .. }
-            | BuildCtrlClient { .. }
-            | CreateKafkaWalTopic { .. } => StatusCode::Unexpected,
+            | EncodeWalOptions { .. }
+            | BuildKafkaClient { .. }
+            | BuildKafkaCtrlClient { .. }
+            | CreateKafkaWalTopic { .. }
+            | EmptyTopicPool { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }

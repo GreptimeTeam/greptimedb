@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use snafu::ensure;
 
+use crate::error::{EmptyTopicPoolSnafu, Result};
 use crate::wal::kafka::topic::Topic;
 
 /// The type of the topic selector, i.e. with which strategy to select a topic.
@@ -29,17 +31,17 @@ pub enum SelectorType {
 }
 
 /// Controls topic selection.
-pub(super) trait TopicSelector: Send + Sync {
+pub(crate) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.
-    fn select<'a>(&'a self, topic_pool: &'a [Topic]) -> &Topic;
+    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic>;
 }
 
 /// Arc wrapper of TopicSelector.
-pub(super) type TopicSelectorRef = Arc<dyn TopicSelector>;
+pub(crate) type TopicSelectorRef = Arc<dyn TopicSelector>;
 
 /// A topic selector with the round-robin strategy, i.e. selects topics in a round-robin manner.
 #[derive(Default)]
-pub(super) struct RoundRobinTopicSelector {
+pub(crate) struct RoundRobinTopicSelector {
     cursor: AtomicUsize,
 }
 
@@ -47,20 +49,18 @@ impl RoundRobinTopicSelector {
     // The cursor in the round-robin selector is not persisted which may break the round-robin strategy cross crashes.
     // Introducing a shuffling strategy may help mitigate this issue.
     pub fn with_shuffle() -> Self {
-        let mut this = Self::default();
-        let offset = rand::thread_rng().gen::<usize>() % usize::MAX;
-        // It's ok when an overflow happens since `fetch_add` automatically wraps around.
-        this.cursor.fetch_add(offset, Ordering::Relaxed);
-        this
+        let offset = rand::thread_rng().gen_range(0..64);
+        Self {
+            cursor: AtomicUsize::new(offset),
+        }
     }
 }
 
 impl TopicSelector for RoundRobinTopicSelector {
-    fn select<'a>(&'a self, topic_pool: &'a [Topic]) -> &Topic {
-        // Safety: the caller ensures the topic pool is not empty and hence the modulo operation is safe.
+    fn select<'a>(&self, topic_pool: &'a [Topic]) -> Result<&'a Topic> {
+        ensure!(!topic_pool.is_empty(), EmptyTopicPoolSnafu);
         let which = self.cursor.fetch_add(1, Ordering::Relaxed) % topic_pool.len();
-        // Safety: the modulo operation ensures the index operation is safe.
-        topic_pool.get(which).unwrap()
+        Ok(&topic_pool[which])
     }
 }
 
@@ -73,14 +73,14 @@ mod tests {
         let topic_pool: Vec<_> = [0, 1, 2].into_iter().map(|v| v.to_string()).collect();
         let selector = RoundRobinTopicSelector::default();
 
-        assert_eq!(selector.select(&topic_pool), "0");
-        assert_eq!(selector.select(&topic_pool), "1");
-        assert_eq!(selector.select(&topic_pool), "2");
-        assert_eq!(selector.select(&topic_pool), "0");
+        assert_eq!(selector.select(&topic_pool).unwrap(), "0");
+        assert_eq!(selector.select(&topic_pool).unwrap(), "1");
+        assert_eq!(selector.select(&topic_pool).unwrap(), "2");
+        assert_eq!(selector.select(&topic_pool).unwrap(), "0");
 
         // Creates a round-robin selector with shuffle.
         let selector = RoundRobinTopicSelector::with_shuffle();
-        let topic = selector.select(&topic_pool);
+        let topic = selector.select(&topic_pool).unwrap();
         assert!(topic_pool.contains(topic));
     }
 }

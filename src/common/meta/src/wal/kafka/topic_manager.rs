@@ -22,7 +22,7 @@ use rskafka::BackoffConfig;
 use snafu::{ensure, ResultExt};
 
 use crate::error::{
-    BuildClientSnafu, BuildCtrlClientSnafu, CreateKafkaWalTopicSnafu, DecodeJsonSnafu,
+    BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaWalTopicSnafu, DecodeJsonSnafu,
     EncodeJsonSnafu, InvalidNumTopicsSnafu, Result,
 };
 use crate::kv_backend::KvBackendRef;
@@ -31,12 +31,12 @@ use crate::wal::kafka::topic::Topic;
 use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, SelectorType, TopicSelectorRef};
 use crate::wal::kafka::KafkaConfig;
 
-const CREATE_TOPIC_TIMEOUT: i32 = 5_000; // 5,000 ms.
-const CREATED_TOPICS_KEY: &str = "__created_kafka_wal_topics";
+const CREATED_TOPICS_KEY: &str = "__created_wal_topics/kafka/";
 
 /// Manages topic initialization and selection.
 pub struct TopicManager {
     config: KafkaConfig,
+    // TODO(niebayes): maybe add a guard to ensure all topics in the topic pool are created.
     topic_pool: Vec<Topic>,
     topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
@@ -45,13 +45,18 @@ pub struct TopicManager {
 impl TopicManager {
     /// Creates a new topic manager.
     pub fn new(config: KafkaConfig, kv_backend: KvBackendRef) -> Self {
+        // Topics should be created.
+        let topics = (0..config.num_topics)
+            .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
+            .collect::<Vec<_>>();
+
         let selector = match config.selector_type {
             SelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
 
         Self {
             config,
-            topic_pool: Vec::new(),
+            topic_pool: topics,
             topic_selector: Arc::new(selector),
             kv_backend,
         }
@@ -60,74 +65,85 @@ impl TopicManager {
     /// Tries to initialize the topic manager.
     /// The initializer first tries to restore persisted topics from the kv backend.
     /// If not enough topics retrieved, the initializer will try to contact the Kafka cluster and request creating more topics.
-    pub async fn try_init(&mut self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         let num_topics = self.config.num_topics;
         ensure!(num_topics > 0, InvalidNumTopicsSnafu { num_topics });
 
-        // Builds an rskafka controller client for creating topics if necessary.
-        let broker_endpoints = self.config.broker_endpoints.clone();
-        let backoff_config = BackoffConfig {
-            init_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(10),
-            base: 2.0,
-            // Stop reconnecting if the total wait time reaches the deadline.
-            deadline: Some(Duration::from_secs(60 * 5)), // 5 mins.
-        };
-        let client = ClientBuilder::new(broker_endpoints.clone())
-            .backoff_config(backoff_config)
-            .build()
-            .await
-            .context(BuildClientSnafu { broker_endpoints })?
-            .controller_client()
-            .context(BuildCtrlClientSnafu)?;
-
         // Topics should be created.
-        let topics = (0..num_topics)
-            .map(|topic_id| format!("{}_{topic_id}", self.config.topic_name_prefix))
-            .collect::<Vec<_>>();
+        let topics = &self.topic_pool;
+
         // Topics already created.
         // There may have extra topics created but it's okay since those topics won't break topic allocation.
         let created_topics = Self::restore_created_topics(&self.kv_backend)
             .await?
             .into_iter()
             .collect::<HashSet<Topic>>();
+        debug!("Restored {} topics", created_topics.len());
 
-        // Spawns tokio tasks for creating missing topics.
-        let tasks = topics
+        // Creates missing topics.
+        let to_be_created = topics
             .iter()
-            .filter_map(|topic| {
+            .enumerate()
+            .filter_map(|(i, topic)| {
                 if created_topics.contains(topic) {
-                    debug!("Topic {} was created", topic);
                     return None;
                 }
+                Some(i)
+            })
+            .collect::<Vec<_>>();
+        if !to_be_created.is_empty() {
+            self.try_create_topics(topics, &to_be_created).await?;
+            Self::persist_created_topics(topics, &self.kv_backend).await?;
+            debug!("Persisted {} topics", topics.len());
+        }
+        Ok(())
+    }
 
-                debug!("Tries to create topic {}", topic);
-                Some(client.create_topic(
-                    topic,
+    /// Tries to create topics specified by indexes in `to_be_created`.
+    async fn try_create_topics(&self, topics: &[Topic], to_be_created: &[usize]) -> Result<()> {
+        // Builds an kafka controller client for creating topics.
+        let backoff_config = BackoffConfig {
+            init_backoff: self.config.backoff_init,
+            max_backoff: self.config.backoff_max,
+            base: self.config.backoff_base,
+            deadline: self.config.backoff_deadline,
+        };
+        let client = ClientBuilder::new(self.config.broker_endpoints.clone())
+            .backoff_config(backoff_config)
+            .build()
+            .await
+            .with_context(|_| BuildKafkaClientSnafu {
+                broker_endpoints: self.config.broker_endpoints.clone(),
+            })?
+            .controller_client()
+            .context(BuildKafkaCtrlClientSnafu)?;
+
+        // Spawns tokio tasks for creating missing topics.
+        let tasks = to_be_created
+            .iter()
+            .map(|i| {
+                client.create_topic(
+                    topics[*i].clone(),
                     self.config.num_partitions,
                     self.config.replication_factor,
-                    CREATE_TOPIC_TIMEOUT,
-                ))
+                    self.config.create_topic_timeout.as_millis() as i32,
+                )
             })
             .collect::<Vec<_>>();
         // TODO(niebayes): Determine how rskafka handles an already-exist topic. Check if an error would be raised.
         futures::future::try_join_all(tasks)
             .await
-            .context(CreateKafkaWalTopicSnafu)?;
-
-        // Persists created topics.
-        Self::persist_created_topics(&topics, &self.kv_backend).await?;
-
-        Ok(())
+            .context(CreateKafkaWalTopicSnafu)
+            .map(|_| ())
     }
 
     /// Selects one topic from the topic pool through the topic selector.
-    pub fn select(&self) -> &Topic {
+    pub fn select(&self) -> Result<&Topic> {
         self.topic_selector.select(&self.topic_pool)
     }
 
     /// Selects a batch of topics from the topic pool through the topic selector.
-    pub fn select_batch(&self, num_topics: usize) -> Vec<&Topic> {
+    pub fn select_batch(&self, num_topics: usize) -> Result<Vec<&Topic>> {
         (0..num_topics)
             .map(|_| self.topic_selector.select(&self.topic_pool))
             .collect()
@@ -137,8 +153,10 @@ impl TopicManager {
         kv_backend
             .get(CREATED_TOPICS_KEY.as_bytes())
             .await?
-            .map(|key_value| serde_json::from_slice(&key_value.value).context(DecodeJsonSnafu))
-            .unwrap_or_else(|| Ok(vec![]))
+            .map_or_else(
+                || Ok(vec![]),
+                |key_value| serde_json::from_slice(&key_value.value).context(DecodeJsonSnafu),
+            )
     }
 
     async fn persist_created_topics(topics: &[Topic], kv_backend: &KvBackendRef) -> Result<()> {
@@ -163,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_persisted_topics() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let topic_name_prefix = "__test_";
+        let topic_name_prefix = "greptimedb_wal_kafka";
         let num_topics = 16;
 
         // Constructs mock topics.
