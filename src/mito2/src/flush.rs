@@ -184,7 +184,6 @@ impl FlushReason {
     }
 }
 
-// TODO(yingwen): Need storage name.
 /// Task to flush a region.
 pub(crate) struct RegionFlushTask {
     /// Region to flush.
@@ -203,8 +202,6 @@ pub(crate) struct RegionFlushTask {
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
     pub(crate) cache_manager: Option<CacheManagerRef>,
-    /// Custom target storage for files.
-    pub(crate) storage: Option<String>,
 }
 
 impl RegionFlushTask {
@@ -737,7 +734,6 @@ mod tests {
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
             cache_manager: None,
-            storage: None,
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
