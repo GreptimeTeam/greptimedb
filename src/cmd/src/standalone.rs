@@ -44,6 +44,7 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -112,6 +113,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for StandaloneOptions {
@@ -131,6 +133,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -154,6 +157,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -405,6 +410,10 @@ impl StartCommand {
             .with_plugin(fe_plugins)
             .try_build()
             .await
+            .context(StartFrontendSnafu)?;
+
+        frontend
+            .build_export_metrics_task(&opts.frontend.export_metrics)
             .context(StartFrontendSnafu)?;
 
         frontend

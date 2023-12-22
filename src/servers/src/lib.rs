@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod configurator;
 pub mod error;
+pub mod export_metrics;
 pub mod grpc;
 pub mod heartbeat_options;
 pub mod http;

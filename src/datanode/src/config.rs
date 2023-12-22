@@ -28,6 +28,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -242,6 +243,7 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for DatanodeOptions {
@@ -267,6 +269,7 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }
