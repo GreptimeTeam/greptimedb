@@ -18,6 +18,7 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::cache::upload_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::read::Source;
@@ -63,7 +64,7 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let path = sst_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&path)
             .await
@@ -75,7 +76,17 @@ impl AccessLayer {
         ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
-    // TODO(yingwen): returns a upload part builder.
+    // Returns a [UploadPartWriter] to upload.
+    pub(crate) fn upload_part_writer(
+        &self,
+        metadata: RegionMetadataRef,
+        _cache_manager: &Option<CacheManagerRef>,
+    ) -> UploadPartWriter {
+        // TODO(yingwen): Use local store in the cache manager once the upload cache is ready.
+        UploadPartWriter::new(self.object_store.clone(), metadata)
+            .with_region_dir(self.region_dir.clone())
+    }
+
     /// Returns a new parquet writer to write the SST for specific `file_id`.
     // TODO(hl): maybe rename to [sst_writer].
     pub(crate) fn write_sst(
@@ -85,12 +96,12 @@ impl AccessLayer {
         source: Source,
         cache_manager: &Option<CacheManagerRef>,
     ) -> ParquetWriter {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let path = sst_file_path(&self.region_dir, file_id);
         ParquetWriter::new(path, metadata, source, self.object_store.clone())
     }
+}
 
-    /// Returns the `file_path` for the `file_name` in the object store.
-    fn sst_file_path(&self, file_name: &str) -> String {
-        util::join_path(&self.region_dir, file_name)
-    }
+/// Returns the `file_path` for the `file_id` in the object store.
+pub(crate) fn sst_file_path(region_dir: &str, file_id: FileId) -> String {
+    util::join_path(region_dir, &file_id.as_parquet())
 }

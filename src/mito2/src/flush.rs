@@ -25,6 +25,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::upload_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -39,7 +40,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileId, FileMeta};
+use crate::sst::file::FileId;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
@@ -245,8 +246,22 @@ impl RegionFlushTask {
     async fn do_flush(&mut self, version_data: VersionControlData) {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
-        let worker_request = match self.flush_memtables(&version_data.version).await {
-            Ok(file_metas) => {
+
+        let version = &version_data.version;
+        // Prepare a upload part.
+        let mut writer = self
+            .access_layer
+            .upload_part_writer(version.metadata.clone(), &self.cache_manager)
+            .with_storage(version.options.storage.clone())
+            .with_request_sender(Some(self.request_sender.clone()))
+            .with_flushed_entry_id(Some(version_data.last_entry_id))
+            .with_flushed_sequence(Some(version_data.committed_sequence));
+
+        let worker_request = match self
+            .flush_memtables(&version_data.version, &mut writer)
+            .await
+        {
+            Ok(()) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -254,9 +269,11 @@ impl RegionFlushTask {
                     .iter()
                     .map(|m| m.id())
                     .collect();
+                let upload_part = writer.finish();
+
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
-                    file_metas,
+                    file_metas: upload_part.file_metas,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     flushed_sequence: version_data.committed_sequence,
@@ -287,7 +304,11 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs.
-    async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
+    async fn flush_memtables(
+        &self,
+        version: &VersionRef,
+        writer: &mut UploadPartWriter,
+    ) -> Result<()> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
             .start_timer();
@@ -299,10 +320,9 @@ impl RegionFlushTask {
         if let Some(row_group_size) = self.row_group_size {
             write_opts.row_group_size = row_group_size;
         }
-        let memtables = version.memtables.immutables();
-        let mut file_metas = Vec::with_capacity(memtables.len());
-        let mut flushed_bytes = 0;
 
+        let memtables = version.memtables.immutables();
+        writer.reserve_capacity(memtables.len());
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -312,41 +332,34 @@ impl RegionFlushTask {
             let file_id = FileId::random();
             let iter = mem.iter(None, None);
             let source = Source::Iter(iter);
-            let mut writer = self.access_layer.write_sst(
-                file_id,
-                version.metadata.clone(),
-                source,
-                &self.cache_manager,
-            );
-            let Some(sst_info) = writer.write_all(&write_opts).await? else {
-                // No data written.
-                continue;
-            };
 
-            flushed_bytes += sst_info.file_size;
-            file_metas.push(FileMeta {
-                region_id: version.metadata.region_id,
-                file_id,
-                time_range: sst_info.time_range,
-                level: 0,
-                file_size: sst_info.file_size,
-            });
+            // Flush to level 0.
+            writer.write_sst(file_id, 0, source, &write_opts).await?;
         }
 
-        if !file_metas.is_empty() {
+        if !writer.written_file_metas().is_empty() {
+            let flushed_bytes = writer
+                .written_file_metas()
+                .iter()
+                .map(|meta| meta.file_size)
+                .sum();
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
+        let file_ids: Vec<_> = writer
+            .written_file_metas()
+            .iter()
+            .map(|f| f.file_id)
+            .collect();
         info!(
-            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}",
-            version.metadata.region_id,
+            "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}s",
+            self.region_id,
             self.reason.as_str(),
             file_ids,
             timer.stop_and_record(),
         );
 
-        Ok(file_metas)
+        Ok(())
     }
 
     /// Notify flush job status.
