@@ -91,6 +91,7 @@ impl ActivateRegion {
             &region_storage_path,
             region_options.clone(),
             region_wal_options.clone(),
+            false,
         ));
 
         self.region_storage_path = Some(region_storage_path);
@@ -236,6 +237,7 @@ mod tests {
                     &env.path,
                     HashMap::new(),
                     HashMap::new(),
+                    false
                 )))
                 .unwrap(),
             ))
@@ -307,6 +309,7 @@ mod tests {
                     &env.path,
                     HashMap::new(),
                     HashMap::new(),
+                    false
                 )))
                 .unwrap(),
             ))

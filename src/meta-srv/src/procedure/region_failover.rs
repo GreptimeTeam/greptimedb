@@ -622,6 +622,7 @@ mod tests {
                             &path,
                             HashMap::new(),
                             HashMap::new(),
+                            false
                         )))
                         .unwrap(),
                     ))
