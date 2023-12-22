@@ -64,7 +64,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME,
 };
 use common_telemetry::warn;
 use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue};
@@ -297,17 +297,20 @@ impl TableMetadataManager {
 
     pub async fn init(&self) -> Result<()> {
         let catalog_name = CatalogNameKey::new(DEFAULT_CATALOG_NAME);
-        let public_schema_name = SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        let private_schema_name =
-            SchemaNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME);
 
         self.catalog_manager().create(catalog_name, true).await?;
-        self.schema_manager()
-            .create(public_schema_name, None, true)
-            .await?;
-        self.schema_manager()
-            .create(private_schema_name, None, true)
-            .await?;
+
+        let internal_schemas = [
+            DEFAULT_SCHEMA_NAME,
+            INFORMATION_SCHEMA_NAME,
+            DEFAULT_PRIVATE_SCHEMA_NAME,
+        ];
+
+        for schema_name in internal_schemas {
+            let schema_key = SchemaNameKey::new(DEFAULT_CATALOG_NAME, schema_name);
+
+            self.schema_manager().create(schema_key, None, true).await?;
+        }
 
         Ok(())
     }

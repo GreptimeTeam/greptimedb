@@ -1,4 +1,6 @@
 -- scripts table has different table ids in different modes
+create database information_schema;
+
 select *
 from information_schema.tables
 where table_name != 'scripts'
@@ -33,7 +35,7 @@ from information_schema.columns
 where table_catalog = 'greptime'
   and table_schema != 'public'
   and table_schema != 'information_schema'
-order by table_schema, table_name;
+order by table_schema, table_name, column_name;
 
 use public;
 
