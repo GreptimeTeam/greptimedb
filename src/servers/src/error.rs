@@ -214,6 +214,16 @@ pub enum Error {
         error: snap::Error,
     },
 
+    #[snafu(display("Failed to send prometheus remote request"))]
+    SendPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
+    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
+    InvalidExportMetricsConfig { msg: String, location: Location },
+
     #[snafu(display("Failed to compress prometheus remote request"))]
     CompressPromRemoteRequest {
         location: Location,
@@ -427,6 +437,7 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
+            | SendPromRemoteRequest { .. }
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
@@ -457,6 +468,7 @@ impl ErrorExt for Error {
             | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
+            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
@@ -538,8 +550,10 @@ pub fn status_to_tonic_code(status_code: StatusCode) -> Code {
         | StatusCode::TableColumnNotFound
         | StatusCode::DatabaseNotFound
         | StatusCode::UserNotFound => Code::NotFound,
-        StatusCode::StorageUnavailable => Code::Unavailable,
-        StatusCode::RuntimeResourcesExhausted | StatusCode::RateLimited => Code::ResourceExhausted,
+        StatusCode::StorageUnavailable | StatusCode::RegionNotReady => Code::Unavailable,
+        StatusCode::RuntimeResourcesExhausted
+        | StatusCode::RateLimited
+        | StatusCode::RegionBusy => Code::ResourceExhausted,
         StatusCode::UnsupportedPasswordType
         | StatusCode::UserPasswordMismatch
         | StatusCode::AuthHeaderNotFound

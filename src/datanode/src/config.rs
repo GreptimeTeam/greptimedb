@@ -28,6 +28,7 @@ use meta_client::MetaClientOptions;
 use mito2::config::MitoConfig;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -225,6 +226,7 @@ pub struct DatanodeOptions {
     pub mode: Mode,
     pub node_id: Option<u64>,
     pub require_lease_before_startup: bool,
+    pub initialize_region_in_background: bool,
     pub rpc_addr: String,
     pub rpc_hostname: Option<String>,
     pub rpc_runtime_size: usize,
@@ -241,6 +243,7 @@ pub struct DatanodeOptions {
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for DatanodeOptions {
@@ -249,6 +252,7 @@ impl Default for DatanodeOptions {
             mode: Mode::Standalone,
             node_id: None,
             require_lease_before_startup: false,
+            initialize_region_in_background: false,
             rpc_addr: "127.0.0.1:3001".to_string(),
             rpc_hostname: None,
             rpc_runtime_size: 8,
@@ -265,6 +269,7 @@ impl Default for DatanodeOptions {
             logging: LoggingOptions::default(),
             heartbeat: HeartbeatOptions::datanode_default(),
             enable_telemetry: true,
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }

@@ -3,6 +3,7 @@ show databases;
 +-----------------------+
 | Schemas               |
 +-----------------------+
+| greptime_private      |
 | illegal-database      |
 | information_schema    |
 | public                |
@@ -19,6 +20,7 @@ show tables;
 +-------------------+
 | Tables            |
 +-------------------+
+| build_info        |
 | column_privileges |
 | column_statistics |
 | columns           |

@@ -15,17 +15,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::v1::meta::Partition;
 use common_telemetry::tracing_context::W3cTrace;
 use store_api::storage::{RegionNumber, TableId};
-use table::metadata::RawTableInfo;
 
 use crate::cache_invalidator::CacheInvalidatorRef;
 use crate::datanode_manager::DatanodeManagerRef;
 use crate::error::Result;
 use crate::key::TableMetadataManagerRef;
 use crate::region_keeper::MemoryRegionKeeperRef;
-use crate::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use crate::rpc::ddl::{CreateTableTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
 use crate::rpc::router::RegionRoute;
 
 pub mod alter_table;
@@ -71,8 +69,7 @@ pub trait TableMetadataAllocator: Send + Sync {
     async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
-        table_info: &mut RawTableInfo,
-        partitions: &[Partition],
+        task: &CreateTableTask,
     ) -> Result<TableMetadata>;
 }
 

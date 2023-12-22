@@ -43,6 +43,7 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
@@ -111,6 +112,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for StandaloneOptions {
@@ -130,6 +132,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -153,6 +156,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -254,12 +259,20 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+        let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             None,
         )?;
 
+        self.convert_options(cli_options, opts)
+    }
+
+    pub fn convert_options(
+        &self,
+        cli_options: &CliOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &cli_options.log_dir {
@@ -401,6 +414,10 @@ impl StartCommand {
             .with_plugin(fe_plugins)
             .try_build()
             .await
+            .context(StartFrontendSnafu)?;
+
+        frontend
+            .build_export_metrics_task(&opts.frontend.export_metrics)
             .context(StartFrontendSnafu)?;
 
         frontend

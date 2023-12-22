@@ -15,6 +15,7 @@
 use common_telemetry::logging::LoggingOptions;
 use meta_client::MetaClientOptions;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::http::HttpOptions;
 use servers::Mode;
@@ -44,6 +45,7 @@ pub struct FrontendOptions {
     pub logging: LoggingOptions,
     pub datanode: DatanodeOptions,
     pub user_provider: Option<String>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for FrontendOptions {
@@ -64,6 +66,7 @@ impl Default for FrontendOptions {
             logging: LoggingOptions::default(),
             datanode: DatanodeOptions::default(),
             user_provider: None,
+            export_metrics: ExportMetricsOption::default(),
         }
     }
 }

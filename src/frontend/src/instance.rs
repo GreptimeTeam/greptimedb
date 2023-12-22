@@ -55,6 +55,7 @@ use query::QueryEngineRef;
 use raft_engine::{Config, ReadableSize, RecoveryMode};
 use servers::error as server_error;
 use servers::error::{AuthSnafu, ExecuteQuerySnafu, ParsePromQLSnafu};
+use servers::export_metrics::{ExportMetricsOption, ExportMetricsTask};
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
@@ -77,7 +78,8 @@ pub use standalone::StandaloneDatanodeManager;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
-    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, TableOperationSnafu,
+    PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu, StartServerSnafu,
+    TableOperationSnafu,
 };
 use crate::frontend::{FrontendOptions, TomlSerializable};
 use crate::heartbeat::HeartbeatTask;
@@ -116,6 +118,7 @@ pub struct Instance {
     heartbeat_task: Option<HeartbeatTask>,
     inserter: InserterRef,
     deleter: DeleterRef,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Instance {
@@ -193,6 +196,12 @@ impl Instance {
         Ok(())
     }
 
+    pub fn build_export_metrics_task(&mut self, opts: &ExportMetricsOption) -> Result<()> {
+        self.export_metrics_task =
+            ExportMetricsTask::try_new(opts, Some(&self.plugins)).context(StartServerSnafu)?;
+        Ok(())
+    }
+
     pub fn catalog_manager(&self) -> &CatalogManagerRef {
         &self.catalog_manager
     }
@@ -221,6 +230,10 @@ impl FrontendInstance for Instance {
         }
 
         self.script_executor.start(self)?;
+
+        if let Some(t) = self.export_metrics_task.as_ref() {
+            t.start()
+        }
 
         futures::future::try_join_all(self.servers.iter().map(|(name, handler)| async move {
             info!("Starting service: {name}");

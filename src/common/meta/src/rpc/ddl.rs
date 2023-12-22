@@ -32,7 +32,7 @@ use table::metadata::{RawTableInfo, TableId};
 use crate::error::{self, Result};
 use crate::table_name::TableName;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
@@ -100,6 +100,7 @@ impl TryFrom<Task> for DdlTask {
     }
 }
 
+#[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
     pub task: DdlTask,
 }
@@ -173,7 +174,7 @@ impl From<SubmitDdlTaskResponse> for PbSubmitDdlTaskResponse {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct DropTableTask {
     pub catalog: String,
     pub schema: String,
@@ -224,7 +225,7 @@ impl TryFrom<PbDropTableTask> for DropTableTask {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct CreateTableTask {
     pub create_table: CreateTableExpr,
     pub partitions: Vec<Partition>,
@@ -319,7 +320,7 @@ impl<'de> Deserialize<'de> for CreateTableTask {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct AlterTableTask {
     pub alter_table: AlterExpr,
 }
@@ -389,7 +390,7 @@ impl<'de> Deserialize<'de> for AlterTableTask {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct TruncateTableTask {
     pub catalog: String,
     pub schema: String,

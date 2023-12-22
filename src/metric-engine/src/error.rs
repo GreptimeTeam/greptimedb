@@ -35,6 +35,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to open mito region, region type: {}", region_type))]
+    OpenMitoRegion {
+        region_type: String,
+        source: BoxedError,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to close mito region, region id: {}", region_id))]
+    CloseMitoRegion {
+        region_id: RegionId,
+        source: BoxedError,
+        location: Location,
+    },
+
     #[snafu(display("Region `{}` already exists", region_id))]
     RegionAlreadyExists {
         region_id: RegionId,
@@ -146,6 +160,8 @@ impl ErrorExt for Error {
             ColumnNotFound { .. } => StatusCode::TableColumnNotFound,
 
             CreateMitoRegion { source, .. }
+            | OpenMitoRegion { source, .. }
+            | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. } => source.status_code(),
 

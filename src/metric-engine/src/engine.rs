@@ -13,7 +13,9 @@
 // limitations under the License.
 
 mod alter;
+mod close;
 mod create;
+mod open;
 mod put;
 mod read;
 mod region_metadata;
@@ -22,7 +24,8 @@ mod state;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::SendableRecordBatchStream;
 use mito2::engine::MitoEngine;
@@ -122,12 +125,14 @@ impl RegionEngine for MetricEngine {
             RegionRequest::Delete(_) => todo!(),
             RegionRequest::Create(create) => self.inner.create_region(region_id, create).await,
             RegionRequest::Drop(_) => todo!(),
-            RegionRequest::Open(_) => todo!(),
-            RegionRequest::Close(_) => todo!(),
+            RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => self.inner.alter_region(region_id, alter).await,
             RegionRequest::Flush(_) => todo!(),
             RegionRequest::Compact(_) => todo!(),
             RegionRequest::Truncate(_) => todo!(),
+            /// It always Ok(0), all data is latest.
+            RegionRequest::Catchup(_) => Ok(0),
         };
 
         result.map_err(BoxedError::new)
@@ -157,11 +162,18 @@ impl RegionEngine for MetricEngine {
 
     /// Stops the engine
     async fn stop(&self) -> Result<(), BoxedError> {
-        todo!()
+        // don't need to stop the underlying mito engine
+        Ok(())
     }
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
-        todo!()
+        // ignore the region not found error
+        let result = self.inner.mito.set_writable(region_id, writable);
+
+        match result {
+            Err(e) if e.status_code() == StatusCode::RegionNotFound => Ok(()),
+            _ => result,
+        }
     }
 
     async fn set_readonly_gracefully(
@@ -196,4 +208,72 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: RwLock<MetricEngineState>,
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::region_request::{RegionCloseRequest, RegionOpenRequest};
+
+    use super::*;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn close_open_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+
+        // close physical region
+        let physical_region_id = env.default_physical_region_id();
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // reopen physical region
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: physical_region_option,
+            skip_wal_replay: false,
+        };
+        engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // close nonexistent region
+        let nonexistent_region_id = RegionId::new(12313, 12);
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap_err();
+
+        // open nonexistent region
+        let invalid_open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            region_dir: env.default_region_dir(),
+            options: HashMap::new(),
+            skip_wal_replay: false,
+        };
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Open(invalid_open_request),
+            )
+            .await
+            .unwrap_err();
+    }
 }

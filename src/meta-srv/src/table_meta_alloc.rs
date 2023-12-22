@@ -12,18 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::Partition;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
 use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult};
+use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
 use common_meta::wal::{allocate_region_wal_options, WalOptionsAllocatorRef};
 use common_telemetry::{debug, warn};
 use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, TableId, MAX_REGION_SEQ};
-use table::metadata::RawTableInfo;
 
 use crate::error::{self, Result, TooManyPartitionsSnafu};
 use crate::metasrv::{SelectorContext, SelectorRef};
@@ -57,13 +56,11 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
     async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
-        raw_table_info: &mut RawTableInfo,
-        partitions: &[Partition],
+        task: &CreateTableTask,
     ) -> MetaResult<TableMetadata> {
         let (table_id, region_routes) = handle_create_region_routes(
             ctx.cluster_id,
-            raw_table_info,
-            partitions,
+            task,
             &self.ctx,
             &self.selector,
             &self.table_id_sequence,
@@ -95,12 +92,14 @@ impl TableMetadataAllocator for MetaSrvTableMetadataAllocator {
 /// pre-allocates create table's table id and region routes.
 async fn handle_create_region_routes(
     cluster_id: u64,
-    table_info: &mut RawTableInfo,
-    partitions: &[Partition],
+    task: &CreateTableTask,
     ctx: &SelectorContext,
     selector: &SelectorRef,
     table_id_sequence: &SequenceRef,
 ) -> Result<(TableId, Vec<RegionRoute>)> {
+    let table_info = &task.table_info;
+    let partitions = &task.partitions;
+
     let mut peers = selector
         .select(
             cluster_id,
@@ -138,7 +137,6 @@ async fn handle_create_region_routes(
         .next()
         .await
         .context(error::NextSequenceSnafu)? as u32;
-    table_info.ident.table_id = table_id;
 
     ensure!(
         partitions.len() <= MAX_REGION_SEQ as usize,

@@ -15,6 +15,7 @@
 //! Structs and utilities for writing regions.
 
 mod handle_alter;
+mod handle_catchup;
 mod handle_close;
 mod handle_compaction;
 mod handle_create;
@@ -546,6 +547,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     continue;
                 }
                 DdlRequest::Truncate(_) => self.handle_truncate_request(ddl.region_id).await,
+                DdlRequest::Catchup(req) => self.handle_catchup_request(ddl.region_id, req).await,
             };
 
             ddl.sender.send(res);

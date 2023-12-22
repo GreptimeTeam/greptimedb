@@ -386,8 +386,7 @@ async fn handle_create_table_task(
         .table_metadata_allocator
         .create(
             &TableMetadataAllocatorContext { cluster_id },
-            &mut create_table_task.table_info,
-            &create_table_task.partitions,
+            &create_table_task,
         )
         .await?;
 
@@ -396,6 +395,8 @@ async fn handle_create_table_task(
         region_routes,
         region_wal_options,
     } = table_meta;
+
+    create_table_task.table_info.ident.table_id = table_id;
 
     let id = ddl_manager
         .submit_create_table_task(
@@ -454,9 +455,7 @@ impl DdlTaskExecutor for DdlManager {
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::meta::Partition;
     use common_procedure::local::LocalManager;
-    use table::metadata::RawTableInfo;
 
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
@@ -471,6 +470,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
+    use crate::rpc::ddl::CreateTableTask;
     use crate::state_store::KvStateStore;
 
     /// A dummy implemented [DatanodeManager].
@@ -491,8 +491,7 @@ mod tests {
         async fn create(
             &self,
             _ctx: &TableMetadataAllocatorContext,
-            _table_info: &mut RawTableInfo,
-            _partitions: &[Partition],
+            _task: &CreateTableTask,
         ) -> Result<TableMetadata> {
             unimplemented!()
         }

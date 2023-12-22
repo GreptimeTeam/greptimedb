@@ -25,7 +25,7 @@ use common_config::wal::{KafkaConfig, RaftEngineConfig};
 use common_config::{WalConfig, WAL_OPTIONS_KEY};
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
-use common_meta::key::datanode_table::DatanodeTableManager;
+use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
@@ -33,7 +33,7 @@ use common_telemetry::{error, info, warn};
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::client::MetaClient;
@@ -43,6 +43,7 @@ use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
+use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
@@ -84,6 +85,7 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -94,6 +96,10 @@ impl Datanode {
         self.wait_coordinated().await;
 
         self.start_telemetry();
+
+        if let Some(t) = self.export_metrics_task.as_ref() {
+            t.start()
+        }
 
         self.start_services().await
     }
@@ -213,6 +219,7 @@ impl DatanodeBuilder {
 
     pub async fn build(mut self) -> Result<Datanode> {
         let mode = &self.opts.mode;
+        let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
 
         let meta_client = self.meta_client.take();
 
@@ -233,8 +240,26 @@ impl DatanodeBuilder {
 
         let region_server = self.new_region_server(region_event_listener).await?;
 
-        self.initialize_region_server(&region_server, kv_backend, !controlled_by_metasrv)
-            .await?;
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
+
+        let open_all_regions =
+            open_all_regions(region_server.clone(), table_values, !controlled_by_metasrv);
+
+        if self.opts.initialize_region_in_background {
+            // Opens regions in background.
+            common_runtime::spawn_bg(async move {
+                if let Err(err) = open_all_regions.await {
+                    error!(err; "Failed to open regions during the startup.");
+                }
+            });
+        } else {
+            open_all_regions.await?;
+        }
 
         let heartbeat_task = if let Some(meta_client) = meta_client {
             Some(HeartbeatTask::try_new(&self.opts, region_server.clone(), meta_client).await?)
@@ -258,6 +283,10 @@ impl DatanodeBuilder {
                 None
             };
 
+        let export_metrics_task =
+            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
+                .context(StartServerSnafu)?;
+
         Ok(Datanode {
             services,
             heartbeat_task,
@@ -266,6 +295,7 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
+            export_metrics_task,
         })
     }
 
@@ -331,6 +361,7 @@ impl DatanodeBuilder {
         Ok((server, addr))
     }
 
+    #[cfg(test)]
     /// Open all regions belong to this datanode.
     async fn initialize_region_server(
         &self,
@@ -338,67 +369,16 @@ impl DatanodeBuilder {
         kv_backend: KvBackendRef,
         open_with_writable: bool,
     ) -> Result<()> {
-        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
-        let mut regions = vec![];
-        let mut table_values = datanode_table_manager.tables(node_id);
 
-        while let Some(table_value) = table_values.next().await {
-            let table_value = table_value.context(GetMetadataSnafu)?;
-            for region_number in table_value.regions {
-                // Augments region options with wal options if a wal options is provided.
-                let mut region_options = table_value.region_info.region_options.clone();
-                table_value
-                    .region_info
-                    .region_wal_options
-                    .get(&region_number.to_string())
-                    .and_then(|wal_options| {
-                        region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
-                    });
+        let datanode_table_manager = DatanodeTableManager::new(kv_backend.clone());
+        let table_values = datanode_table_manager
+            .tables(node_id)
+            .try_collect::<Vec<_>>()
+            .await
+            .context(GetMetadataSnafu)?;
 
-                regions.push((
-                    RegionId::new(table_value.table_id, region_number),
-                    table_value.region_info.engine.clone(),
-                    table_value.region_info.region_storage_path.clone(),
-                    region_options,
-                ));
-            }
-        }
-        info!("going to open {} regions", regions.len());
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
-        let mut tasks = vec![];
-
-        for (region_id, engine, store_path, options) in regions {
-            let region_dir = region_dir(&store_path, region_id);
-            let semaphore_moved = semaphore.clone();
-            tasks.push(async move {
-                let _permit = semaphore_moved.acquire().await;
-                region_server
-                    .handle_request(
-                        region_id,
-                        RegionRequest::Open(RegionOpenRequest {
-                            engine: engine.clone(),
-                            region_dir,
-                            options,
-                            skip_wal_replay: false,
-                        }),
-                    )
-                    .await?;
-                if open_with_writable {
-                    if let Err(e) = region_server.set_writable(region_id, true) {
-                        error!(
-                            e; "failed to set writable for region {region_id}"
-                        );
-                    }
-                }
-                Ok(())
-            });
-        }
-        let _ = try_join_all(tasks).await?;
-
-        info!("region server is initialized");
-
-        Ok(())
+        open_all_regions(region_server.clone(), table_values, open_with_writable).await
     }
 
     async fn new_region_server(
@@ -542,6 +522,72 @@ impl DatanodeBuilder {
         }
         Ok(Arc::new(object_store_manager))
     }
+}
+
+/// Open all regions belong to this datanode.
+async fn open_all_regions(
+    region_server: RegionServer,
+    table_values: Vec<DatanodeTableValue>,
+    open_with_writable: bool,
+) -> Result<()> {
+    let mut regions = vec![];
+    for table_value in table_values {
+        for region_number in table_value.regions {
+            // Augments region options with wal options if a wal options is provided.
+            let mut region_options = table_value.region_info.region_options.clone();
+            table_value
+                .region_info
+                .region_wal_options
+                .get(&region_number.to_string())
+                .and_then(|wal_options| {
+                    region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
+                });
+
+            regions.push((
+                RegionId::new(table_value.table_id, region_number),
+                table_value.region_info.engine.clone(),
+                table_value.region_info.region_storage_path.clone(),
+                region_options,
+            ));
+        }
+    }
+    info!("going to open {} regions", regions.len());
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(OPEN_REGION_PARALLELISM));
+    let mut tasks = vec![];
+
+    let region_server_ref = &region_server;
+    for (region_id, engine, store_path, options) in regions {
+        let region_dir = region_dir(&store_path, region_id);
+        let semaphore_moved = semaphore.clone();
+
+        tasks.push(async move {
+            let _permit = semaphore_moved.acquire().await;
+            region_server_ref
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: engine.clone(),
+                        region_dir,
+                        options,
+                        skip_wal_replay: false,
+                    }),
+                )
+                .await?;
+            if open_with_writable {
+                if let Err(e) = region_server_ref.set_writable(region_id, true) {
+                    error!(
+                        e; "failed to set writable for region {region_id}"
+                    );
+                }
+            }
+            Ok(())
+        });
+    }
+    let _ = try_join_all(tasks).await?;
+
+    info!("all regions are opened");
+
+    Ok(())
 }
 
 #[cfg(test)]

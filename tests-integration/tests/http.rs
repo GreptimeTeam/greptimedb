@@ -753,10 +753,18 @@ timeout = "10s"
 connect_timeout = "1s"
 tcp_nodelay = true
 
+[frontend.export_metrics]
+enable = false
+db = ""
+write_interval = "30s"
+
+[frontend.export_metrics.headers]
+
 [datanode]
 mode = "standalone"
 node_id = 0
 require_lease_before_startup = true
+initialize_region_in_background = false
 rpc_addr = "127.0.0.1:3001"
 rpc_runtime_size = 8
 rpc_max_recv_message_size = "512MiB"
@@ -807,6 +815,13 @@ parallel_scan_channel_size = 32
 
 [datanode.logging]
 enable_otlp_tracing = false
+
+[datanode.export_metrics]
+enable = false
+db = ""
+write_interval = "30s"
+
+[datanode.export_metrics.headers]
 
 [logging]
 enable_otlp_tracing = false"#,
