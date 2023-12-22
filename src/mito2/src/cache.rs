@@ -17,6 +17,7 @@
 mod cache_size;
 #[cfg(test)]
 pub(crate) mod test_util;
+#[allow(unused)]
 pub(crate) mod upload_cache;
 
 use std::mem;
@@ -52,6 +53,8 @@ pub struct CacheManager {
     /// Cache for SST pages.
     page_cache: Option<PageCache>,
     /// Upload cache.
+    // TODO(yingwen): Remove this once the upload cache is ready.
+    #[allow(unused)]
     upload_cache: Option<UploadCacheRef>,
 }
 
@@ -185,11 +188,6 @@ impl CacheManager {
                 .add(page_cache_weight(&page_key, &pages).into());
             cache.insert(page_key, pages);
         }
-    }
-
-    /// Returns the upload cache.
-    pub(crate) fn upload_cache(&self) -> &Option<UploadCacheRef> {
-        &self.upload_cache
     }
 }
 

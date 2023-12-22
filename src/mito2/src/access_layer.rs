@@ -21,10 +21,8 @@ use store_api::metadata::RegionMetadataRef;
 use crate::cache::upload_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
-use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
-use crate::sst::parquet::writer::ParquetWriter;
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -85,19 +83,6 @@ impl AccessLayer {
         // TODO(yingwen): Use local store in the cache manager once the upload cache is ready.
         UploadPartWriter::new(self.object_store.clone(), metadata)
             .with_region_dir(self.region_dir.clone())
-    }
-
-    /// Returns a new parquet writer to write the SST for specific `file_id`.
-    // TODO(hl): maybe rename to [sst_writer].
-    pub(crate) fn write_sst(
-        &self,
-        file_id: FileId,
-        metadata: RegionMetadataRef,
-        source: Source,
-        cache_manager: &Option<CacheManagerRef>,
-    ) -> ParquetWriter {
-        let path = sst_file_path(&self.region_dir, file_id);
-        ParquetWriter::new(path, metadata, source, self.object_store.clone())
     }
 }
 

@@ -58,16 +58,17 @@ impl UploadCache {
         }
     }
 
-    fn upload(&self, upload: Upload) -> Result<()> {
+    /// Adds files to the cache.
+    pub(crate) fn upload(&self, upload: Upload) -> Result<()> {
         // Add the upload metadata to the manifest.
         unimplemented!()
     }
 }
 
 /// A remote write request to upload files.
-struct Upload {
+pub(crate) struct Upload {
     /// Parts to upload.
-    parts: Vec<UploadPart>,
+    pub(crate) parts: Vec<UploadPart>,
 }
 
 /// Metadata of SSTs to upload together.
@@ -182,35 +183,6 @@ impl UploadPartWriter {
     /// Adds multiple SSTs to this part.
     pub(crate) fn extend_ssts(&mut self, iter: impl IntoIterator<Item = FileMeta>) {
         self.file_metas.extend(iter)
-    }
-
-    /// Write sst to the part to specific level.
-    pub(crate) async fn write_sst(
-        &mut self,
-        file_id: FileId,
-        level: Level,
-        source: Source,
-        write_opts: &WriteOptions,
-    ) -> Result<()> {
-        let path = sst_file_path(&self.region_dir, file_id);
-        let mut writer = ParquetWriter::new(
-            path,
-            self.metadata.clone(),
-            source,
-            self.local_store.clone(),
-        );
-        let Some(sst_info) = writer.write_all(write_opts).await? else {
-            // No data written.
-            return Ok(());
-        };
-        self.file_metas.push(FileMeta {
-            region_id: self.metadata.region_id,
-            file_id,
-            time_range: sst_info.time_range,
-            level,
-            file_size: sst_info.file_size,
-        });
-        Ok(())
     }
 
     /// Returns [FileMeta] of written files.
