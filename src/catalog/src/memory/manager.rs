@@ -143,6 +143,12 @@ impl MemoryCatalogManager {
                 schema: DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
             })
             .unwrap();
+        manager
+            .register_schema_sync(RegisterSchemaRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: INFORMATION_SCHEMA_NAME.to_string(),
+            })
+            .unwrap();
 
         manager
     }
@@ -256,6 +262,7 @@ impl MemoryCatalogManager {
             Arc::downgrade(self) as Weak<dyn CatalogManager>,
         );
         let information_schema = information_schema_provider.tables().clone();
+
         let mut catalog = HashMap::new();
         catalog.insert(INFORMATION_SCHEMA_NAME.to_string(), information_schema);
         catalog
