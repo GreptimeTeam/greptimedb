@@ -39,9 +39,9 @@ pub struct KafkaConfig {
     #[serde(skip)]
     #[serde(default)]
     pub compression: RsKafkaCompression,
-    /// The maximum log size an rskakfa batch producer could buffer.
+    /// The maximum log size a kakfa batch producer could buffer.
     pub max_batch_size: ReadableSize,
-    /// The linger duration of a rskafka batch producer.
+    /// The linger duration of a kafka batch producer.
     #[serde(with = "humantime_serde")]
     pub linger: Duration,
     /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.

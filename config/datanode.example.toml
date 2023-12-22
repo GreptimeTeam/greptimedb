@@ -58,9 +58,9 @@ sync_write = false
 # topic_name_prefix = "greptimedb_wal_kafka_topic"
 # Number of partitions per topic.
 # num_partitions = 1
-# The maximum log size an rskafka batch producer could buffer.
+# The maximum log size a kafka batch producer could buffer.
 # max_batch_size = "4MB"
-# The linger duration of an rskafka batch producer.
+# The linger duration of a kafka batch producer.
 # linger = "200ms"
 # The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
 # max_wait_time = "100ms"
