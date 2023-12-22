@@ -49,7 +49,7 @@ pub struct KafkaConfig {
     #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
     /// Exponential backoff rate, i.e. next backoff = base * current backoff.
-    pub backoff_base: f64,
+    pub backoff_base: u32,
     /// Stop reconnecting if the total wait time reaches the deadline.
     /// If it's None, the reconnecting won't terminate.
     #[serde(with = "humantime_serde")]
@@ -68,7 +68,7 @@ impl Default for KafkaConfig {
             create_topic_timeout: Duration::from_secs(30),
             backoff_init: Duration::from_millis(500),
             backoff_max: Duration::from_secs(10),
-            backoff_base: 2.0,
+            backoff_base: 2,
             backoff_deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
         }
     }

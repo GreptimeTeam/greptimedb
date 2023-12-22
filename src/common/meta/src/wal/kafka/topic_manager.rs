@@ -105,7 +105,7 @@ impl TopicManager {
         let backoff_config = BackoffConfig {
             init_backoff: self.config.backoff_init,
             max_backoff: self.config.backoff_max,
-            base: self.config.backoff_base,
+            base: self.config.backoff_base as f64,
             deadline: self.config.backoff_deadline,
         };
         let client = ClientBuilder::new(self.config.broker_endpoints.clone())

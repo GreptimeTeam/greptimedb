@@ -31,14 +31,12 @@ use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 // The `DEFAULT_PARTITION` refers to the index of the partition.
 const DEFAULT_PARTITION: i32 = 0;
 
-/// Arc wrapper of Client.
-pub(crate) type ClientRef = Arc<Client>;
 /// Arc wrapper of ClientManager.
 pub(crate) type ClientManagerRef = Arc<ClientManager>;
 
 /// A client through which to contact Kafka cluster. Each client associates with one partition of a topic.
 /// Since a topic only has one partition in our design, the mapping between clients and topics are one-one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Client {
     /// A raw client used to construct a batch producer and/or a stream consumer for a specific topic.
     pub(crate) raw_client: Arc<PartitionClient>,
@@ -70,7 +68,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: DashMap<Topic, ClientRef>,
+    client_pool: DashMap<Topic, Client>,
 }
 
 impl ClientManager {
@@ -81,7 +79,6 @@ impl ClientManager {
             init_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(10),
             base: 2.,
-            // Stop reconnecting if the total wait time reaches the deadline.
             deadline: Some(Duration::from_secs(60 * 5)),
         };
         let client = ClientBuilder::new(config.broker_endpoints.clone())
@@ -101,7 +98,7 @@ impl ClientManager {
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
-    pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<ClientRef> {
+    pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
         match self.client_pool.entry(topic.to_string()) {
             DashMapEntry::Occupied(entry) => Ok(entry.get().clone()),
             DashMapEntry::Vacant(entry) => {
@@ -111,7 +108,7 @@ impl ClientManager {
         }
     }
 
-    async fn try_create_client(&self, topic: &Topic) -> Result<ClientRef> {
+    async fn try_create_client(&self, topic: &Topic) -> Result<Client> {
         // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
@@ -125,6 +122,6 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
-        Ok(Arc::new(Client::new(raw_client, &self.config)))
+        Ok(Client::new(raw_client, &self.config))
     }
 }

@@ -87,7 +87,29 @@ enable = true
 # - "Kafka"
 provider = "raft_engine"
 
-# There's no kafka wal config for standalone mode.
+# Kafka wal options.
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
+# broker_endpoints = ["127.0.0.1:9090"]
+# Number of topics shall be created beforehand.
+# num_topics = 64
+# Topic name prefix.
+# topic_name_prefix = "greptimedb_wal_topic"
+# Number of partitions per topic.
+# num_partitions = 1
+# The maximum log size a kafka batch producer could buffer.
+# max_batch_size = "4MB"
+# The linger duration of a kafka batch producer.
+# linger = "200ms"
+# The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
+# max_wait_time = "100ms"
+# The initial backoff for kafka clients.
+# backoff_init = "500ms"
+# The maximum backoff for kafka clients.
+# backoff_max = "10s"
+# Exponential backoff rate, i.e. next backoff = base * current backoff.
+# backoff_base = 2.0
+# Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
+# backoff_deadline = "5mins"
 
 # WAL data directory
 # dir = "/tmp/greptimedb/wal"

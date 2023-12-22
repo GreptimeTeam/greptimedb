@@ -47,6 +47,18 @@ pub struct KafkaConfig {
     /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
     #[serde(with = "humantime_serde")]
     pub max_wait_time: Duration,
+    /// The initial backoff for kafka clients.
+    #[serde(with = "humantime_serde")]
+    pub backoff_init: Duration,
+    /// The maximum backoff for kafka clients.
+    #[serde(with = "humantime_serde")]
+    pub backoff_max: Duration,
+    /// Exponential backoff rate, i.e. next backoff = base * current backoff.
+    pub backoff_base: u32,
+    /// Stop reconnecting if the total wait time reaches the deadline.
+    /// If it's None, the reconnecting won't terminate.
+    #[serde(with = "humantime_serde")]
+    pub backoff_deadline: Option<Duration>,
 }
 
 impl Default for KafkaConfig {
@@ -60,6 +72,10 @@ impl Default for KafkaConfig {
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
             max_wait_time: Duration::from_millis(100),
+            backoff_init: Duration::from_millis(500),
+            backoff_max: Duration::from_secs(10),
+            backoff_base: 2,
+            backoff_deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
         }
     }
 }

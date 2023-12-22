@@ -75,7 +75,7 @@ mod tests {
             create_topic_timeout = "30s"
             backoff_init = "500ms"
             backoff_max = "10s"
-            backoff_base = 2.0
+            backoff_base = 2
             backoff_deadline = "5mins"
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
@@ -89,7 +89,7 @@ mod tests {
             create_topic_timeout: Duration::from_secs(30),
             backoff_init: Duration::from_millis(500),
             backoff_max: Duration::from_secs(10),
-            backoff_base: 2.0,
+            backoff_base: 2,
             backoff_deadline: Some(Duration::from_secs(60 * 5)),
         };
         assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));

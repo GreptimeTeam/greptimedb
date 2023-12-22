@@ -76,6 +76,10 @@ mod tests {
             max_batch_size = "4MB"
             linger = "200ms"
             max_wait_time = "100ms"
+            backoff_init = "500ms"
+            backoff_max = "10s"
+            backoff_base = 2
+            backoff_deadline = "5mins"
         "#;
         let decoded: KafkaConfig = toml::from_str(toml_str).unwrap();
         let expected = KafkaConfig {
@@ -87,6 +91,10 @@ mod tests {
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
             max_wait_time: Duration::from_millis(100),
+            backoff_init: Duration::from_millis(500),
+            backoff_max: Duration::from_secs(10),
+            backoff_base: 2,
+            backoff_deadline: Some(Duration::from_secs(60 * 5)),
         };
         assert_eq!(decoded, expected);
     }
