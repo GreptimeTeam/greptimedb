@@ -21,7 +21,7 @@ use common_telemetry::debug;
 use futures::future::try_join_all;
 use futures::TryStreamExt;
 use lazy_static::lazy_static;
-use object_store::{util, Entry, ErrorKind, ObjectStore};
+use object_store::{util, Entry, ErrorKind, Lister, ObjectStore};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, ResultExt};
@@ -148,6 +148,23 @@ impl ManifestObjectStore {
         format!("{}{}", self.path, LAST_CHECKPOINT_FILE)
     }
 
+    /// Returns the manifest dir
+    pub(crate) fn manifest_dir(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns a iterator of manifests.
+    pub(crate) async fn manifest_lister(&self) -> Result<Option<Lister>> {
+        match self.object_store.lister_with(&self.path).await {
+            Ok(streamer) => Ok(Some(streamer)),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                debug!("Manifest directory does not exists: {}", self.path);
+                Ok(None)
+            }
+            Err(e) => Err(e).context(OpenDalSnafu)?,
+        }
+    }
+
     /// Return all `R`s in the root directory that meet the `filter` conditions (that is, the `filter` closure returns `Some(R)`),
     /// and discard `R` that does not meet the conditions (that is, the `filter` closure returns `None`)
     /// Return an empty vector when directory is not found.
@@ -155,13 +172,8 @@ impl ManifestObjectStore {
     where
         F: Fn(Entry) -> Option<R>,
     {
-        let streamer = match self.object_store.lister_with(&self.path).await {
-            Ok(streamer) => streamer,
-            Err(e) if e.kind() == ErrorKind::NotFound => {
-                debug!("Manifest directory does not exists: {}", self.path);
-                return Ok(vec![]);
-            }
-            Err(e) => Err(e).context(OpenDalSnafu)?,
+        let Some(streamer) = self.manifest_lister().await? else {
+            return Ok(vec![]);
         };
 
         streamer
@@ -171,7 +183,12 @@ impl ManifestObjectStore {
             .context(OpenDalSnafu)
     }
 
-    /// Scan the manifest files in the range of [start, end) and return all manifest entries.
+    /// Sorts the manifest files.
+    fn sort_manifests(entries: &mut [(ManifestVersion, Entry)]) {
+        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+    }
+
+    /// Scans the manifest files in the range of [start, end) and return all manifest entries.
     pub async fn scan(
         &self,
         start: ManifestVersion,
@@ -192,7 +209,7 @@ impl ManifestObjectStore {
             })
             .await?;
 
-        entries.sort_unstable_by(|(v1, _), (v2, _)| v1.cmp(v2));
+        Self::sort_manifests(&mut entries);
 
         Ok(entries)
     }

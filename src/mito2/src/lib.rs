@@ -17,6 +17,7 @@
 //! Mito is the a region engine to store timeseries data.
 
 #![feature(let_chains)]
+#![feature(assert_matches)]
 
 #[cfg(any(test, feature = "test"))]
 #[cfg_attr(feature = "test", allow(unused))]

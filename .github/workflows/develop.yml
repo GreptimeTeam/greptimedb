@@ -175,6 +175,7 @@ jobs:
       - name: Setup etcd server
         working-directory: tests-integration/fixtures/etcd
         run: docker compose -f docker-compose-standalone.yml up -d --wait
+      #TODO(niebaye) Add a step to setup kafka clusters. Maybe add a docker file for starting kafka clusters.
       - name: Run nextest cases
         run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F pyo3_backend -F dashboard
         env:

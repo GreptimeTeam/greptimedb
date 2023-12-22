@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
-use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -28,7 +27,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::build_wal_options_allocator;
+use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -44,15 +43,16 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
     ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
 use crate::App;
@@ -112,6 +112,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for StandaloneOptions {
@@ -131,6 +132,7 @@ impl Default for StandaloneOptions {
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -154,6 +156,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -175,6 +179,7 @@ pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 #[async_trait]
@@ -190,6 +195,11 @@ impl App for Instance {
             .start()
             .await
             .context(StartProcedureManagerSnafu)?;
+
+        self.wal_options_allocator
+            .start()
+            .await
+            .context(StartWalOptionsAllocatorSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
@@ -249,12 +259,20 @@ pub struct StartCommand {
 
 impl StartCommand {
     fn load_options(&self, cli_options: &CliOptions) -> Result<Options> {
-        let mut opts: StandaloneOptions = Options::load_layered_options(
+        let opts: StandaloneOptions = Options::load_layered_options(
             self.config_file.as_deref(),
             self.env_prefix.as_ref(),
             None,
         )?;
 
+        self.convert_options(cli_options, opts)
+    }
+
+    pub fn convert_options(
+        &self,
+        cli_options: &CliOptions,
+        mut opts: StandaloneOptions,
+    ) -> Result<Options> {
         opts.mode = Mode::Standalone;
 
         if let Some(dir) = &cli_options.log_dir {
@@ -375,14 +393,13 @@ impl StartCommand {
                 .build(),
         );
         // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
-        let wal_options_allocator =
-            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
-                .await
-                .map_err(BoxedError::new)
-                .context(OtherSnafu)?;
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            common_meta::wal::WalConfig::default(),
+            kv_backend.clone(),
+        ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
             table_id_sequence,
-            wal_options_allocator,
+            wal_options_allocator.clone(),
         ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
@@ -400,6 +417,10 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         frontend
+            .build_export_metrics_task(&opts.frontend.export_metrics)
+            .context(StartFrontendSnafu)?;
+
+        frontend
             .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;
@@ -408,6 +429,7 @@ impl StartCommand {
             datanode,
             frontend,
             procedure_manager,
+            wal_options_allocator,
         })
     }
 

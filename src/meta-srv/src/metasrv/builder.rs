@@ -19,7 +19,6 @@ use std::time::Duration;
 use client::client_manager::DatanodeClients;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_error::ext::BoxedError;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::TableMetadataAllocatorRef;
@@ -31,14 +30,14 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::state_store::KvStateStore;
-use common_meta::wal::build_wal_options_allocator;
+use common_meta::wal::WalOptionsAllocator;
 use common_procedure::local::{LocalManager, ManagerConfig};
 use common_procedure::ProcedureManagerRef;
 use snafu::ResultExt;
 
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::{MetaPeerClientBuilder, MetaPeerClientRef};
-use crate::error::{self, OtherSnafu, Result};
+use crate::error::{self, Result};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::check_leader_handler::CheckLeaderHandler;
 use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -206,10 +205,10 @@ impl MetaSrvBuilder {
             table_id: None,
         };
 
-        let wal_options_allocator = build_wal_options_allocator(&options.wal, &kv_backend)
-            .await
-            .map_err(BoxedError::new)
-            .context(OtherSnafu)?;
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            options.wal.clone(),
+            kv_backend.clone(),
+        ));
         let table_metadata_allocator = table_metadata_allocator.unwrap_or_else(|| {
             let sequence = Arc::new(
                 SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
@@ -221,7 +220,7 @@ impl MetaSrvBuilder {
                 selector_ctx.clone(),
                 selector.clone(),
                 sequence.clone(),
-                wal_options_allocator,
+                wal_options_allocator.clone(),
             ))
         });
 
@@ -314,6 +313,7 @@ impl MetaSrvBuilder {
             procedure_manager,
             mailbox,
             ddl_executor: ddl_manager,
+            wal_options_allocator,
             table_metadata_manager,
             greptimedb_telemetry_task: get_greptimedb_telemetry_task(
                 Some(metasrv_home),

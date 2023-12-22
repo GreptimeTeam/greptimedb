@@ -102,7 +102,7 @@ impl MetricEngineInner {
                 region_type: DATA_REGION_SUBDIR,
             })?;
 
-        info!("Created physical metric region {region_id:?}");
+        info!("Created physical metric region {region_id}");
         PHYSICAL_REGION_COUNT.inc();
 
         // remember this table
