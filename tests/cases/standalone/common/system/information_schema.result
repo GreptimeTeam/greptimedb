@@ -1,8 +1,9 @@
--- scripts table has different table ids in different modes
+-- should not able to create information_schema
 create database information_schema;
 
 Error: 1004(InvalidArguments), Schema information_schema already exists
 
+-- scripts table has different table ids in different modes
 select *
 from information_schema.tables
 where table_name != 'scripts'

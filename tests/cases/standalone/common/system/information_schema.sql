@@ -1,6 +1,7 @@
--- scripts table has different table ids in different modes
+-- should not able to create information_schema
 create database information_schema;
 
+-- scripts table has different table ids in different modes
 select *
 from information_schema.tables
 where table_name != 'scripts'
