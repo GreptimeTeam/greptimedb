@@ -19,7 +19,7 @@ use rskafka::client::partition::Compression as RsKafkaCompression;
 use serde::{Deserialize, Serialize};
 
 /// Topic name prefix.
-pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_kafka_topic";
+pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
 /// Kafka wal topic.
 pub type Topic = String;
 

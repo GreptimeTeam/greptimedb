@@ -55,7 +55,7 @@ sync_write = false
 # Number of topics shall be created beforehand.
 # num_topics = 64
 # Topic name prefix.
-# topic_name_prefix = "greptimedb_wal_kafka_topic"
+# topic_name_prefix = "greptimedb_wal_topic"
 # Number of partitions per topic.
 # num_partitions = 1
 # The maximum log size a kafka batch producer could buffer.

@@ -69,7 +69,7 @@ mod tests {
             broker_endpoints = ["127.0.0.1:9090"]
             num_topics = 32
             selector_type = "round_robin"
-            topic_name_prefix = "greptimedb_wal_kafka"
+            topic_name_prefix = "greptimedb_wal_topic"
             num_partitions = 1
             replication_factor = 3
             create_topic_timeout = "30s"
@@ -83,7 +83,7 @@ mod tests {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 32,
             selector_type: KafkaTopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_kafka".to_string(),
+            topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
             replication_factor: 3,
             create_topic_timeout: Duration::from_secs(30),

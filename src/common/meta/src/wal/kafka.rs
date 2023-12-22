@@ -62,7 +62,7 @@ impl Default for KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_kafka".to_string(),
+            topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
             replication_factor: 3,
             create_topic_timeout: Duration::from_secs(30),

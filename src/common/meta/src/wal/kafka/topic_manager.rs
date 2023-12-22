@@ -181,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_persisted_topics() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let topic_name_prefix = "greptimedb_wal_kafka";
+        let topic_name_prefix = "greptimedb_wal_topic";
         let num_topics = 16;
 
         // Constructs mock topics.

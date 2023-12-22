@@ -61,7 +61,7 @@ provider = "raft_engine"
 # - "round_robin" (default)
 # selector_type = "round_robin"
 # A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
-# topic_name_prefix = "greptimedb_wal_kafka"
+# topic_name_prefix = "greptimedb_wal_topic"
 # Number of partitions per topic.
 # num_partitions = 1
 # Expected number of replicas of each partition.
