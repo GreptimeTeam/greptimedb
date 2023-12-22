@@ -399,6 +399,13 @@ pub enum Error {
         error: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Invalid file metadata"))]
+    ConvertMetaData {
+        location: Location,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -459,6 +466,7 @@ impl ErrorExt for Error {
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
+            ConvertMetaData { .. } => StatusCode::Internal,
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,

@@ -450,4 +450,9 @@ impl ParquetReader {
 
         Ok(None)
     }
+
+    #[cfg(test)]
+    pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
+        self.reader_builder.parquet_meta.clone()
+    }
 }

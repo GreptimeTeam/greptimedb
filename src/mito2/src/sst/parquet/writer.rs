@@ -14,22 +14,19 @@
 
 //! Parquet writer.
 
-use std::sync::Arc;
-
 use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::debug;
 use common_time::Timestamp;
 use object_store::ObjectStore;
-use parquet::basic::{ColumnOrder, Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::{FileMetaData, KeyValue, ParquetMetaData, RowGroupMetaData};
+use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
-use parquet::format::{ColumnOrder as TColumnOrder, FileMetaData as TFileMetaData};
-use parquet::schema::types;
-use parquet::schema::types::{from_thrift, ColumnPath, SchemaDescPtr, SchemaDescriptor};
+use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
+use super::helper::to_parquet_metadata;
 use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::parquet::format::WriteFormat;
@@ -116,15 +113,15 @@ impl ParquetWriter {
         // Safety: num rows > 0 so we must have min/max.
         let time_range = stats.time_range.unwrap();
 
-        // convert file_meta to ParquetMetaData
-        let parquet_metadata = convert_t_file_meta_to_parquet_meta_data(file_meta);
+        // convert FileMetaData to ParquetMetaData
+        let parquet_metadata = to_parquet_metadata(file_meta).ok();
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
             time_range,
             file_size,
             num_rows: stats.num_rows,
-            file_metadata: parquet_metadata.ok(),
+            file_metadata: parquet_metadata,
         }))
     }
 
@@ -174,66 +171,5 @@ impl SourceStats {
         } else {
             self.time_range = Some((min_in_batch, max_in_batch));
         }
-    }
-}
-
-// refer to https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L72-L90
-/// Convert [TFileMetaData] to [ParquetMetaData]
-fn convert_t_file_meta_to_parquet_meta_data(
-    t_file_metadata: TFileMetaData,
-) -> Result<ParquetMetaData> {
-    let schema = from_thrift(&t_file_metadata.schema)?;
-    let schema_desc_ptr = Arc::new(SchemaDescriptor::new(schema));
-    let row_groups: Vec<_> = t_file_metadata
-        .row_groups
-        .into_iter()
-        .map(|rg| RowGroupMetaData::from_thrift(schema_desc_ptr.clone(), rg)?)
-        .collect();
-
-    let column_orders = parse_column_orders(t_file_metadata.column_orders, &schema_desc_ptr);
-
-    let file_metadata = FileMetaData::new(
-        t_file_metadata.version,
-        t_file_metadata.num_rows,
-        t_file_metadata.created_by,
-        t_file_metadata.key_value_metadata,
-        schema_desc_ptr,
-        column_orders,
-    );
-
-    Ok(ParquetMetaData::new(file_metadata, row_groups))
-}
-
-// Port from https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L106-L137
-/// Parses column orders from Thrift definition.
-/// If no column orders are defined, returns `None`.
-fn parse_column_orders(
-    t_column_orders: Option<Vec<TColumnOrder>>,
-    schema_descr: &SchemaDescriptor,
-) -> Option<Vec<ColumnOrder>> {
-    match t_column_orders {
-        Some(orders) => {
-            // Should always be the case
-            assert_eq!(
-                orders.len(),
-                schema_descr.num_columns(),
-                "Column order length mismatch"
-            );
-            let mut res = Vec::new();
-            for (i, column) in schema_descr.columns().iter().enumerate() {
-                match orders[i] {
-                    TColumnOrder::TYPEORDER(_) => {
-                        let sort_order = ColumnOrder::get_sort_order(
-                            column.logical_type(),
-                            column.converted_type(),
-                            column.physical_type(),
-                        );
-                        res.push(ColumnOrder::TYPE_DEFINED_ORDER(sort_order));
-                    }
-                }
-            }
-            Some(res)
-        }
-        None => None,
     }
 }
