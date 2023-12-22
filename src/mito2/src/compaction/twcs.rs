@@ -28,6 +28,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::upload_cache::UploadPart;
 use crate::cache::CacheManagerRef;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
@@ -279,10 +280,15 @@ impl TwcsCompactionTask {
 
     /// Merges all SST files.
     /// Returns `(output files, input files)`.
-    async fn merge_ssts(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
+    async fn merge_ssts(&mut self) -> error::Result<(UploadPart, Vec<FileMeta>)> {
         let mut futs = Vec::with_capacity(self.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(self.outputs.iter().map(|o| o.inputs.len()).sum());
+        let mut part_writer = self
+            .sst_layer
+            .upload_part_writer(self.metadata.clone(), &self.cache_manager)
+            .with_storage(self.storage.clone())
+            .with_request_sender(Some(self.request_sender.clone()));
         for output in self.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
@@ -304,28 +310,28 @@ impl TwcsCompactionTask {
             };
             let metadata = self.metadata.clone();
             let sst_layer = self.sst_layer.clone();
-            let mut writer = self
-                .sst_layer
-                .upload_part_writer(self.metadata.clone(), &self.cache_manager)
-                .with_storage(self.storage.clone())
-                .with_request_sender(Some(self.request_sender.clone()));
+            let reader = build_sst_reader(metadata, sst_layer, &output.inputs).await?;
+            let region_id = self.region_id;
+            let mut sst_writer =
+                part_writer.new_sst_writer(output.output_file_id, Source::Reader(reader));
             futs.push(async move {
-                let reader = build_sst_reader(metadata, sst_layer, &output.inputs).await?;
-
-                writer
-                    .write_sst(
-                        output.output_file_id,
-                        output.output_level,
-                        Source::Reader(reader),
-                        &write_opts,
-                    )
-                    .await?;
-
-                Ok(writer.written_file_metas().last().cloned())
+                // TODO(yingwen): move source to write_all().
+                let file_meta_opt =
+                    sst_writer
+                        .write_all(&write_opts)
+                        .await?
+                        .map(|sst_info| FileMeta {
+                            region_id,
+                            file_id: output.output_file_id,
+                            time_range: sst_info.time_range,
+                            level: output.output_level,
+                            file_size: sst_info.file_size,
+                        });
+                Ok(file_meta_opt)
             });
         }
 
-        let mut outputs = Vec::with_capacity(futs.len());
+        part_writer.reserve_capacity(futs.len());
         while !futs.is_empty() {
             let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
             for _ in 0..MAX_PARALLEL_COMPACTION {
@@ -338,11 +344,12 @@ impl TwcsCompactionTask {
                 .context(error::JoinSnafu)?
                 .into_iter()
                 .collect::<error::Result<Vec<_>>>()?;
-            outputs.extend(metas.into_iter().flatten());
+            part_writer.extend_ssts(metas.into_iter().flatten());
         }
 
+        let part = part_writer.finish();
         let inputs = compacted_inputs.into_iter().collect();
-        Ok((outputs, inputs))
+        Ok((part, inputs))
     }
 
     async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
@@ -350,13 +357,13 @@ impl TwcsCompactionTask {
         let merge_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["merge"])
             .start_timer();
-        let (output, mut compacted) = self.merge_ssts().await.map_err(|e| {
+        let (part, mut compacted) = self.merge_ssts().await.map_err(|e| {
             error!(e; "Failed to compact region: {}", self.region_id);
             merge_timer.stop_and_discard();
             e
         })?;
         compacted.extend(self.expired_ssts.iter().map(FileHandle::meta));
-        Ok((output, compacted))
+        Ok((part.file_metas, compacted))
     }
 
     /// Handles compaction failure, notifies all waiters.

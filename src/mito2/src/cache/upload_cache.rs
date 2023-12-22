@@ -31,7 +31,6 @@ use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::WriteOptions;
 use crate::wal::EntryId;
 
-// TODO(yingwen): Works with CacheManager.
 /// A cache for uploading files to remote object stores.
 ///
 /// It keeps files in local disk and sends files to object store in background.
@@ -162,6 +161,27 @@ impl UploadPartWriter {
     /// Reserve capacity for `additional` files.
     pub(crate) fn reserve_capacity(&mut self, addtional: usize) {
         self.file_metas.reserve(addtional);
+    }
+
+    /// Builds a new parquet writer to write to this part.
+    pub(crate) fn new_sst_writer(&self, file_id: FileId, source: Source) -> ParquetWriter {
+        let path = sst_file_path(&self.region_dir, file_id);
+        ParquetWriter::new(
+            path,
+            self.metadata.clone(),
+            source,
+            self.local_store.clone(),
+        )
+    }
+
+    /// Adds a SST to this part.
+    pub(crate) fn add_sst(&mut self, file_meta: FileMeta) {
+        self.file_metas.push(file_meta);
+    }
+
+    /// Adds multiple SSTs to this part.
+    pub(crate) fn extend_ssts(&mut self, iter: impl IntoIterator<Item = FileMeta>) {
+        self.file_metas.extend(iter)
     }
 
     /// Write sst to the part to specific level.

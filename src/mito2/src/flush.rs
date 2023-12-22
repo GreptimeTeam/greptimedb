@@ -40,7 +40,7 @@ use crate::request::{
     SenderWriteRequest, WorkerRequest,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::FileId;
+use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::parquet::WriteOptions;
 use crate::worker::WorkerListener;
@@ -307,7 +307,7 @@ impl RegionFlushTask {
     async fn flush_memtables(
         &self,
         version: &VersionRef,
-        writer: &mut UploadPartWriter,
+        part_writer: &mut UploadPartWriter,
     ) -> Result<()> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
@@ -322,7 +322,7 @@ impl RegionFlushTask {
         }
 
         let memtables = version.memtables.immutables();
-        writer.reserve_capacity(memtables.len());
+        part_writer.reserve_capacity(memtables.len());
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -334,11 +334,23 @@ impl RegionFlushTask {
             let source = Source::Iter(iter);
 
             // Flush to level 0.
-            writer.write_sst(file_id, 0, source, &write_opts).await?;
+            let mut sst_writer = part_writer.new_sst_writer(file_id, source);
+            let Some(sst_info) = sst_writer.write_all(&write_opts).await? else {
+                // No data written.
+                continue;
+            };
+            let file_meta = FileMeta {
+                region_id: self.region_id,
+                file_id,
+                time_range: sst_info.time_range,
+                level: 0,
+                file_size: sst_info.file_size,
+            };
+            part_writer.add_sst(file_meta);
         }
 
-        if !writer.written_file_metas().is_empty() {
-            let flushed_bytes = writer
+        if !part_writer.written_file_metas().is_empty() {
+            let flushed_bytes = part_writer
                 .written_file_metas()
                 .iter()
                 .map(|meta| meta.file_size)
@@ -346,7 +358,7 @@ impl RegionFlushTask {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = writer
+        let file_ids: Vec<_> = part_writer
             .written_file_metas()
             .iter()
             .map(|f| f.file_id)
