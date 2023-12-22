@@ -18,7 +18,7 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::cache::upload_cache::UploadPartWriter;
+use crate::cache::write_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::sst::file::{FileHandle, FileId};
@@ -80,7 +80,7 @@ impl AccessLayer {
         metadata: RegionMetadataRef,
         _cache_manager: &Option<CacheManagerRef>,
     ) -> UploadPartWriter {
-        // TODO(yingwen): Use local store in the cache manager once the upload cache is ready.
+        // TODO(yingwen): Use local store in the cache manager once the cache is ready.
         UploadPartWriter::new(self.object_store.clone(), metadata)
             .with_region_dir(self.region_dir.clone())
     }

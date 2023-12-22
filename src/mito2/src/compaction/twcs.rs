@@ -28,7 +28,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::upload_cache::UploadPart;
+use crate::cache::write_cache::UploadPart;
 use crate::cache::CacheManagerRef;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;

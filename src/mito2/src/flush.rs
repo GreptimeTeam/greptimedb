@@ -25,7 +25,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
 use crate::access_layer::AccessLayerRef;
-use crate::cache::upload_cache::UploadPartWriter;
+use crate::cache::write_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
