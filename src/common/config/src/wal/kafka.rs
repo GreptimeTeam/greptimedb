@@ -54,6 +54,7 @@ pub struct KafkaConfig {
     #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
     /// Exponential backoff rate, i.e. next backoff = base * current backoff.
+    // Sets to u32 type since some structs containing the KafkaConfig need to derive the Eq trait.
     pub backoff_base: u32,
     /// Stop reconnecting if the total wait time reaches the deadline.
     /// If it's None, the reconnecting won't terminate.

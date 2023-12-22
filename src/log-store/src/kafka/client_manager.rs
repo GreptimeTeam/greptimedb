@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
 use dashmap::mapref::entry::Entry as DashMapEntry;
@@ -76,10 +75,10 @@ impl ClientManager {
     pub(crate) async fn try_new(config: &KafkaConfig) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
-            init_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(10),
-            base: 2.,
-            deadline: Some(Duration::from_secs(60 * 5)),
+            init_backoff: config.backoff_init,
+            max_backoff: config.backoff_max,
+            base: config.backoff_base as f64,
+            deadline: config.backoff_deadline,
         };
         let client = ClientBuilder::new(config.broker_endpoints.clone())
             .backoff_config(backoff_config)
