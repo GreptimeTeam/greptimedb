@@ -290,12 +290,46 @@ pub enum Error {
         "Failed to encode a wal options to json string, wal_options: {:?}",
         wal_options
     ))]
-    EncodeWalOptionsToJson {
+    EncodeWalOptions {
         wal_options: WalOptions,
         #[snafu(source)]
         error: serde_json::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid number of topics {}", num_topics))]
+    InvalidNumTopics {
+        num_topics: usize,
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Failed to build a kafka client, broker endpoints: {:?}",
+        broker_endpoints
+    ))]
+    BuildKafkaClient {
+        broker_endpoints: Vec<String>,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to build a kafka controller client"))]
+    BuildKafkaCtrlClient {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to create a kafka wal topic"))]
+    CreateKafkaWalTopic {
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("The topic pool is empty"))]
+    EmptyTopicPool { location: Location },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -331,7 +365,11 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | ConvertRawTableInfo { .. }
             | RegionOperatingRace { .. }
-            | EncodeWalOptionsToJson { .. } => StatusCode::Unexpected,
+            | EncodeWalOptions { .. }
+            | BuildKafkaClient { .. }
+            | BuildKafkaCtrlClient { .. }
+            | CreateKafkaWalTopic { .. }
+            | EmptyTopicPool { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
@@ -356,6 +394,8 @@ impl ErrorExt for Error {
             RetryLater { source, .. } => source.status_code(),
             InvalidCatalogValue { source, .. } => source.status_code(),
             ConvertAlterTableRequest { source, .. } => source.status_code(),
+
+            InvalidNumTopics { .. } => StatusCode::InvalidArguments,
         }
     }
 

@@ -6,6 +6,7 @@ rpc_hostname = '127.0.0.1'
 rpc_runtime_size = 8
 
 [wal]
+provider = "raft_engine"
 file_size = '1GB'
 purge_interval = '10m'
 purge_threshold = '10GB'

@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
-use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -28,7 +27,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::build_wal_options_allocator;
+use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -51,9 +50,9 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
     ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
 use crate::App;
@@ -180,6 +179,7 @@ pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 #[async_trait]
@@ -195,6 +195,11 @@ impl App for Instance {
             .start()
             .await
             .context(StartProcedureManagerSnafu)?;
+
+        self.wal_options_allocator
+            .start()
+            .await
+            .context(StartWalOptionsAllocatorSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
@@ -388,14 +393,13 @@ impl StartCommand {
                 .build(),
         );
         // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
-        let wal_options_allocator =
-            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
-                .await
-                .map_err(BoxedError::new)
-                .context(OtherSnafu)?;
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            common_meta::wal::WalConfig::default(),
+            kv_backend.clone(),
+        ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
             table_id_sequence,
-            wal_options_allocator,
+            wal_options_allocator.clone(),
         ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
@@ -425,6 +429,7 @@ impl StartCommand {
             datanode,
             frontend,
             procedure_manager,
+            wal_options_allocator,
         })
     }
 

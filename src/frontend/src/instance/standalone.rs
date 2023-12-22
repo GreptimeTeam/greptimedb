@@ -26,8 +26,8 @@ use common_meta::peer::Peer;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::options_allocator::build_region_wal_options;
-use common_meta::wal::WalOptionsAllocator;
+use common_meta::wal::options_allocator::allocate_region_wal_options;
+use common_meta::wal::WalOptionsAllocatorRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
@@ -108,11 +108,14 @@ impl Datanode for RegionInvoker {
 
 pub struct StandaloneTableMetadataAllocator {
     table_id_sequence: SequenceRef,
-    wal_options_allocator: WalOptionsAllocator,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 impl StandaloneTableMetadataAllocator {
-    pub fn new(table_id_sequence: SequenceRef, wal_options_allocator: WalOptionsAllocator) -> Self {
+    pub fn new(
+        table_id_sequence: SequenceRef,
+        wal_options_allocator: WalOptionsAllocatorRef,
+    ) -> Self {
         Self {
             table_id_sequence,
             wal_options_allocator,
@@ -185,7 +188,7 @@ impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
             .map(|route| route.region.id.region_number())
             .collect();
         let region_wal_options =
-            build_region_wal_options(region_numbers, &self.wal_options_allocator)?;
+            allocate_region_wal_options(region_numbers, &self.wal_options_allocator)?;
 
         debug!(
             "Allocated region wal options {:?} for table {}",

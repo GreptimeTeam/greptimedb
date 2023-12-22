@@ -23,7 +23,9 @@ use serde_with::with_prefix;
 use crate::error::Result;
 use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::kafka::Topic as KafkaWalTopic;
-pub use crate::wal::options_allocator::{build_wal_options_allocator, WalOptionsAllocator};
+pub use crate::wal::options_allocator::{
+    allocate_region_wal_options, WalOptionsAllocator, WalOptionsAllocatorRef,
+};
 
 /// Wal config for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -38,6 +40,8 @@ pub enum WalConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::wal::kafka::topic_selector::SelectorType as KafkaTopicSelectorType;
 
@@ -65,19 +69,31 @@ mod tests {
             broker_endpoints = ["127.0.0.1:9090"]
             num_topics = 32
             selector_type = "round_robin"
-            topic_name_prefix = "greptimedb_kafka_wal"
+            topic_name_prefix = "greptimedb_wal_kafka"
             num_partitions = 1
             replication_factor = 3
+            create_topic_timeout = "30s"
+            backoff_init = "500ms"
+            backoff_max = "10s"
+            backoff_base = 2.0
+            backoff_deadline = "5mins"
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
         let expected_kafka_config = KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
             num_topics: 32,
             selector_type: KafkaTopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_kafka_wal".to_string(),
+            topic_name_prefix: "greptimedb_wal_kafka".to_string(),
             num_partitions: 1,
             replication_factor: 3,
+            create_topic_timeout: Duration::from_secs(30),
+            backoff_init: Duration::from_millis(500),
+            backoff_max: Duration::from_secs(10),
+            backoff_base: 2.0,
+            backoff_deadline: Some(Duration::from_secs(60 * 5)),
         };
         assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));
     }
+
+    // TODO(niebayes): the integrate test needs to test that the example config file can be successfully parsed.
 }
