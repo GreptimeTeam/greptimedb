@@ -21,12 +21,12 @@ common-macro.workspace = true
 common-meta.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
-dashmap = "5.4"
+dashmap.workspace = true
 futures-util.workspace = true
 futures.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
-rskafka = "0.5"
+rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
