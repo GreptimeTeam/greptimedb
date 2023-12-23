@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use common_config::wal::WalOptions;
 use common_error::ext::ErrorExt;
 
-use crate::logstore::entry::{Entry, Id as EntryId, Offset as EntryOffset};
+use crate::logstore::entry::{Entry, Id as EntryId};
 use crate::logstore::entry_stream::SendableEntryStream;
 use crate::logstore::namespace::{Id as NamespaceId, Namespace};
 
@@ -34,46 +34,46 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     type Namespace: Namespace;
     type Entry: Entry;
 
-    /// Stop components of logstore.
+    /// Stops components of the logstore.
     async fn stop(&self) -> Result<(), Self::Error>;
 
-    /// Append an `Entry` to WAL with given namespace and return append response containing
-    /// the entry id.
+    /// Appends an entry to the log store and returns a response containing the id of the append entry.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
-    /// Append a batch of entries and return an append batch response containing the start entry ids of
-    /// log entries written to each region.
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the entry, the first entry of the entries belong to the region, written into the log store.
     async fn append_batch(
         &self,
         entries: Vec<Self::Entry>,
     ) -> Result<AppendBatchResponse, Self::Error>;
 
-    /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
+    // TODO(niebayes): update docs for entry id.
     async fn read(
         &self,
         ns: &Self::Namespace,
         id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
-    /// Create a new `Namespace`.
+    /// Creates a new `Namespace`.
     async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    /// Delete an existing `Namespace` with given ref.
+    /// Deletes an existing `Namespace` with given ref.
     async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    /// List all existing namespaces.
+    /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
-    /// Create an entry of the associate Entry type
+    /// Creates an entry of the associate Entry type.
     fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
         -> Self::Entry;
 
-    /// Create a namespace of the associate Namespace type
+    /// Creates a namespace of the associates Namespace type.
     // TODO(sunng87): confusion with `create_namespace`
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
 
-    /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
+    /// Marks all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
     /// the log files if all entries inside are obsolete. This method may not delete log
     /// files immediately.
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
@@ -82,18 +82,14 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 /// The response of an `append` operation.
 #[derive(Debug)]
 pub struct AppendResponse {
-    /// The logical id of the appended log entry.
+    /// The id of the entry written into the log store.
     pub entry_id: EntryId,
-    /// The physical start offset of the appended log entry.
-    /// Depends on the `LogStore` implementation, the entry offset may be missing.
-    pub offset: Option<EntryOffset>,
 }
 
 /// The response of an `append_batch` operation.
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
-    /// Key: region id (as u64). Value: the known minimum start offset of the appended log entries belonging to the region.
-    /// Depends on the `LogStore` implementation, the entry offsets may be missing.
-    // TODO(niebayes): the offset seems shouldn't be exposed to users of wal. But for now, let's keep it.
-    pub offsets: HashMap<u64, EntryOffset>,
+    /// Key: region id (as u64).
+    /// Value: the id of the entry, the first entry of the entries belong to the region, written into the log store.
+    pub entry_ids: HashMap<u64, EntryId>,
 }

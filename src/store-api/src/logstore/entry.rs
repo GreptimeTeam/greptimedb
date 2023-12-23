@@ -16,21 +16,25 @@ use common_error::ext::ErrorExt;
 
 use crate::logstore::namespace::Namespace;
 
-/// An entry's logical id, allocated by log store users.
+/// An entry's id.
+/// An append operation tries to append an entry at the id.
+/// A read operation tries to read an entry at the id.
 pub type Id = u64;
-/// An entry's physical offset in the underlying log store.
+/// An entry's offset. It's not used for now.
 pub type Offset = usize;
 
-/// Entry is the minimal data storage unit in `LogStore`.
+/// Entry is the minimal data storage unit through which users interact with the log store.
+/// The log store implementation may have larger or smaller data storage unit than an entry.
 pub trait Entry: Send + Sync {
     type Error: ErrorExt + Send + Sync;
     type Namespace: Namespace;
 
-    /// Return contained data of entry.
+    /// Returns the contained data of the entry.
     fn data(&self) -> &[u8];
 
-    /// Return entry id that monotonically increments.
+    /// Returns the id of the entry.
     fn id(&self) -> Id;
 
+    /// Returns the namespace of the entry.
     fn namespace(&self) -> Self::Namespace;
 }

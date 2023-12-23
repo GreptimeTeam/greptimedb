@@ -121,16 +121,15 @@ pub enum Error {
         error: String,
     },
 
-    #[snafu(display("Failed to encode a record key, key: {}", key))]
-    EncodeKey {
-        key: String,
+    #[snafu(display("Failed to encode a record meta"))]
+    EncodeMeta {
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
     },
 
-    #[snafu(display("Failed to decode a record key"))]
-    DecodeKey {
+    #[snafu(display("Failed to decode a record meta"))]
+    DecodeMeta {
         location: Location,
         #[snafu(source)]
         error: serde_json::Error,
@@ -142,40 +141,34 @@ pub enum Error {
     #[snafu(display("Missing required value in a record"))]
     MissingValue { location: Location },
 
-    #[snafu(display("Failed to produce entries to Kafka, topic: {}", topic))]
-    ProduceEntries {
+    #[snafu(display("Cannot build a record from empty entries"))]
+    EmptyEntries { location: Location },
+
+    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
+    ProduceRecord {
         topic: KafkaWalTopic,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display("The produce tasks return an empty offset vector, topic: {}", topic))]
-    EmptyOffsets {
-        topic: KafkaWalTopic,
-        location: Location,
-    },
-
     #[snafu(display(
-        "Failed to cast a kafka offset to entry offset, kafka_offset: {}",
-        offset
-    ))]
-    CastOffset { offset: i64, location: Location },
-
-    #[snafu(display(
-        "Failed to read a record from Kafka, offset {}, topic: {}, region id: {}",
-        offset,
+        "Failed to read a record from Kafka, topic: {}, region_id: {}, offset: {}",
         topic,
         region_id,
+        offset,
     ))]
     ConsumeRecord {
-        offset: i64,
         topic: String,
         region_id: u64,
+        offset: i64,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
+
+    #[snafu(display("Failed to do a cast"))]
+    Cast { location: Location },
 }
 
 impl ErrorExt for Error {

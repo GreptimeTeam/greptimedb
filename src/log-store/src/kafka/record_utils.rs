@@ -12,70 +12,205 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
-
 use common_config::wal::KafkaWalTopic as Topic;
-use rskafka::record::Record;
+use rskafka::record::{Record, RecordAndOffset};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{DecodeKeySnafu, EncodeKeySnafu, MissingKeySnafu, MissingValueSnafu, Result};
+use crate::error::{
+    ConsumeRecordSnafu, DecodeMetaSnafu, EmptyEntriesSnafu, EncodeMetaSnafu, GetClientSnafu,
+    MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
+};
+use crate::kafka::client_manager::ClientManagerRef;
+use crate::kafka::offset::Offset;
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
 
-/// The key of a record.
-/// A kafka record consists of key, value, headers, and datetime. The value of a record
-/// is the entry data. Either of the key or the headers can be chosen to store the entry metadata
-/// including topic, region id, and entry id. Currently, the entry metadata is stored in the key.
-#[derive(Debug, Serialize, Deserialize)]
-struct RecordKey {
-    topic: Topic,
+type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client::error::Error>;
+
+/// Record metadata which will be serialized/deserialized to/from the `key` of a Record.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct RecordMeta {
+    /// The namespace of the entries wrapped in the record.
+    ns: NamespaceImpl,
+    /// Ids of the entries built into the record.
+    entry_ids: Vec<EntryId>,
+    /// entry_offsets[i] is the end offset (exclusive) of the data of the i-th entry in the record value.
+    entry_offsets: Vec<usize>,
+}
+
+impl RecordMeta {
+    fn new(ns: NamespaceImpl, entries: &[EntryImpl]) -> Self {
+        Self {
+            ns,
+            entry_ids: entries.iter().map(|entry| entry.id).collect(),
+            entry_offsets: entries
+                .iter()
+                .map(|entry| entry.data.len())
+                .scan(0, |presum, x| {
+                    *presum += x;
+                    Some(*presum)
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Produces a record to a kafka topic.
+pub(crate) struct RecordProducer {
+    /// The namespace of the entries.
+    ns: NamespaceImpl,
+    /// Entries are buffered before being built into a record.
+    entries: Vec<EntryImpl>,
+}
+
+impl RecordProducer {
+    /// Creates a new producer for producing entries with the given namespace.
+    pub(crate) fn new(ns: NamespaceImpl) -> Self {
+        Self {
+            ns,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Populates the entry buffer with the given entries.
+    pub(crate) fn with_entries(self, entries: Vec<EntryImpl>) -> Self {
+        Self { entries, ..self }
+    }
+
+    /// Pushes an entry into the entry buffer.
+    pub(crate) fn push(&mut self, entry: EntryImpl) {
+        self.entries.push(entry);
+    }
+
+    /// Produces the buffered entries to kafka sever as a kafka record.
+    /// Returns the kafka offset of the produced record.
+    // TODO(niebayes): since the total size of a region's entries may be way-too large,
+    // the producer may need to support splitting entries into multiple records.
+    pub(crate) async fn produce(self, client_manager: &ClientManagerRef) -> Result<Offset> {
+        ensure!(!self.entries.is_empty(), EmptyEntriesSnafu);
+
+        // Produces the record through a client. The client determines when to send the record to kafka server.
+        let client = client_manager
+            .get_or_insert(&self.ns.topic)
+            .await
+            .map_err(|e| {
+                GetClientSnafu {
+                    topic: &self.ns.topic,
+                    error: e.to_string(),
+                }
+                .build()
+            })?;
+        client
+            .producer
+            .produce(encode_to_record(self.ns.clone(), self.entries)?)
+            .await
+            .map(Offset)
+            .context(ProduceRecordSnafu {
+                topic: &self.ns.topic,
+            })
+    }
+}
+
+fn encode_to_record(ns: NamespaceImpl, entries: Vec<EntryImpl>) -> Result<Record> {
+    let meta = RecordMeta::new(ns, &entries);
+    let data = entries.into_iter().flat_map(|entry| entry.data).collect();
+    Ok(Record {
+        key: Some(serde_json::to_vec(&meta).context(EncodeMetaSnafu)?),
+        value: Some(data),
+        timestamp: rskafka::chrono::Utc::now(),
+        headers: Default::default(),
+    })
+}
+
+fn decode_from_record(record: Record) -> Result<Vec<EntryImpl>> {
+    let key = record.key.context(MissingKeySnafu)?;
+    let value = record.value.context(MissingValueSnafu)?;
+    let meta: RecordMeta = serde_json::from_slice(&key).context(DecodeMetaSnafu)?;
+
+    let mut entries = Vec::with_capacity(meta.entry_ids.len());
+    let mut start_offset = 0;
+    for (i, end_offset) in meta.entry_offsets.iter().enumerate() {
+        entries.push(EntryImpl {
+            // TODO(niebayes): try to avoid the clone.
+            data: value[start_offset..*end_offset].to_vec(),
+            id: meta.entry_ids[i],
+            ns: meta.ns.clone(),
+        });
+        start_offset = *end_offset;
+    }
+    Ok(entries)
+}
+
+/// Handles the result of a consume operation on a kafka topic.
+pub(crate) fn handle_consume_result(
+    result: ConsumeResult,
+    topic: &Topic,
     region_id: u64,
-    entry_id: EntryId,
-}
-
-impl ToString for RecordKey {
-    fn to_string(&self) -> String {
-        format!("{}/{}/{}", self.topic, self.region_id, self.entry_id)
+    offset: i64,
+) -> Result<Vec<EntryImpl>> {
+    match result {
+        Ok((record_and_offset, _)) => {
+            // Only produces entries belong to the region with the given region id.
+            // Since a record only contains entries from a single region, it suffices to check the first entry only.
+            let entries = decode_from_record(record_and_offset.record)?;
+            if let Some(entry) = entries.first()
+                && entry.id == region_id
+            {
+                Ok(entries)
+            } else {
+                Ok(vec![])
+            }
+        }
+        Err(e) => Err(e).context(ConsumeRecordSnafu {
+            topic,
+            region_id,
+            offset,
+        }),
     }
 }
 
-// When writing to a region, a wal entry is constructed from all mutations on the region.
-// I.e., a wal entry is itself a log batch and hence no need to group multiple entries into a record.
-// That's why the mapping between entries and records are one-one.
-impl TryInto<Record> for EntryImpl {
-    type Error = crate::error::Error;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn try_into(self) -> Result<Record> {
-        let key = RecordKey {
-            topic: self.ns.topic,
-            region_id: self.ns.region_id,
-            entry_id: self.id,
+    fn new_test_entry<D: AsRef<[u8]>>(data: D, entry_id: EntryId, ns: NamespaceImpl) -> EntryImpl {
+        EntryImpl {
+            data: data.as_ref().to_vec(),
+            id: entry_id,
+            ns,
+        }
+    }
+
+    #[test]
+    fn test_serde_record_meta() {
+        let ns = NamespaceImpl {
+            region_id: 1,
+            topic: "test_topic".to_string(),
         };
-        let raw_key = serde_json::to_vec(&key).context(EncodeKeySnafu {
-            key: key.to_string(),
-        })?;
-
-        Ok(Record {
-            key: Some(raw_key),
-            value: Some(self.data),
-            headers: BTreeMap::default(),
-            timestamp: rskafka::chrono::Utc::now(),
-        })
+        let entries = vec![
+            new_test_entry(b"111", 1, ns.clone()),
+            new_test_entry(b"2222", 2, ns.clone()),
+            new_test_entry(b"33333", 3, ns.clone()),
+        ];
+        let meta = RecordMeta::new(ns, &entries);
+        let encoded = serde_json::to_vec(&meta).unwrap();
+        let decoded: RecordMeta = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(meta, decoded);
     }
-}
 
-impl TryFrom<Record> for EntryImpl {
-    type Error = crate::error::Error;
-
-    fn try_from(record: Record) -> Result<Self> {
-        let raw_key = record.key.context(MissingKeySnafu)?;
-        let key: RecordKey = serde_json::from_slice(&raw_key).context(DecodeKeySnafu)?;
-        let data = record.value.context(MissingValueSnafu)?;
-
-        Ok(Self {
-            id: key.entry_id,
-            ns: NamespaceImpl::new(key.region_id, key.topic),
-            data,
-        })
+    #[test]
+    fn test_encdec_record() {
+        let ns = NamespaceImpl {
+            region_id: 1,
+            topic: "test_topic".to_string(),
+        };
+        let entries = vec![
+            new_test_entry(b"111", 1, ns.clone()),
+            new_test_entry(b"2222", 2, ns.clone()),
+            new_test_entry(b"33333", 3, ns.clone()),
+        ];
+        let record = encode_to_record(ns, entries.clone()).unwrap();
+        let decoded_entries = decode_from_record(record).unwrap();
+        assert_eq!(entries, decoded_entries);
     }
 }

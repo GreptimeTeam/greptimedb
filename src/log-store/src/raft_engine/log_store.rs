@@ -178,10 +178,7 @@ impl LogStore for RaftEngineLogStore {
             .engine
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
-        Ok(AppendResponse {
-            entry_id,
-            offset: None,
-        })
+        Ok(AppendResponse { entry_id })
     }
 
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
