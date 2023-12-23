@@ -234,32 +234,33 @@ mod tests {
         let reader = builder.build().await.unwrap();
         let reader_metadata = reader.parquet_metadata();
 
-        // Due to ParquetMetaData not implementing PartialEq
-        // we check the fields manually
-        assert_eq!(
-            writer_metadata.file_metadata().version(),
-            reader_metadata.file_metadata().version()
+        // Because ParquetMetaData doesn't implement PartialEq,
+        // check all fields manually
+        macro_rules! assert_metadata {
+            ( $writer:expr, $reader:expr, $($method:ident,)+ ) => {
+                $(
+                    assert_eq!($writer.$method(), $reader.$method());
+                )+
+            }
+        }
+
+        assert_metadata!(
+            writer_metadata.file_metadata(),
+            reader_metadata.file_metadata(),
+            version,
+            num_rows,
+            created_by,
+            key_value_metadata,
+            schema_descr,
+            column_orders,
         );
-        assert_eq!(
-            writer_metadata.file_metadata().schema_descr(),
-            reader_metadata.file_metadata().schema_descr()
+
+        assert_metadata!(
+            writer_metadata,
+            reader_metadata,
+            row_groups,
+            column_index,
+            offset_index,
         );
-        assert_eq!(
-            writer_metadata.file_metadata().num_rows(),
-            reader_metadata.file_metadata().num_rows()
-        );
-        assert_eq!(
-            writer_metadata.file_metadata().created_by(),
-            reader_metadata.file_metadata().created_by()
-        );
-        assert_eq!(
-            writer_metadata.file_metadata().key_value_metadata(),
-            reader_metadata.file_metadata().key_value_metadata()
-        );
-        assert_eq!(
-            writer_metadata.file_metadata().column_orders(),
-            reader_metadata.file_metadata().column_orders()
-        );
-        assert_eq!(writer_metadata.row_groups(), reader_metadata.row_groups());
     }
 }
