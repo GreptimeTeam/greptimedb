@@ -78,7 +78,7 @@ impl LogStore for KafkaLogStore {
     }
 
     /// Appends a batch of entries to the log store. The response contains a map where the key
-    /// is a region id while the value if the id of the entry, the first entry of the entries belong to the region,
+    /// is a region id while the value is the id of the entry, the first entry of the entries belong to the region,
     /// written into the log store.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
         if entries.is_empty() {
