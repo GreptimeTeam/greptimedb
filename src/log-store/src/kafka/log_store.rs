@@ -85,7 +85,7 @@ impl LogStore for KafkaLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
-        // Groups entries by region id and push them to an associated record producer.
+        // Groups entries by region id and pushes them to an associated record producer.
         let mut producers: HashMap<_, RecordProducer> = HashMap::with_capacity(entries.len());
         for entry in entries {
             producers
