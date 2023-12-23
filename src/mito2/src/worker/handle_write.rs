@@ -73,6 +73,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_ctx.set_error(e);
                 }
             }
+
             match wal_writer.write_to_wal().await.map_err(Arc::new) {
                 Ok(response) => {
                     update_next_entry_ids(&mut region_ctxs, &response);
