@@ -1936,6 +1936,8 @@ dependencies = [
  "prometheus",
  "snafu",
  "tokio",
+ "tokio-metrics",
+ "tokio-metrics-collector",
  "tokio-test",
  "tokio-util",
 ]
@@ -9700,6 +9702,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.39",
+]
+
+[[package]]
+name = "tokio-metrics"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eace09241d62c98b7eeb1107d4c5c64ca3bd7da92e8c218c153ab3a78f9be112"
+dependencies = [
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "tokio-metrics-collector"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d767da47381602cc481653456823b3ebb600e83d5dd4e0293da9b5566c6c00f0"
+dependencies = [
+ "lazy_static",
+ "parking_lot 0.12.1",
+ "prometheus",
+ "tokio",
+ "tokio-metrics",
 ]
 
 [[package]]

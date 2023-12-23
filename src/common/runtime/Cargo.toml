@@ -17,5 +17,8 @@ snafu.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 
+tokio-metrics = "0.3"
+tokio-metrics-collector = { version = "0.2" }
+
 [dev-dependencies]
 tokio-test = "0.4"
