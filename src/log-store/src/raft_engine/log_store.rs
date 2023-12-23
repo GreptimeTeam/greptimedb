@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -179,8 +180,7 @@ impl LogStore for RaftEngineLogStore {
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
         Ok(AppendResponse {
-            entry_id,
-            offset: None,
+            last_entry_id: entry_id,
         })
     }
 
@@ -192,11 +192,18 @@ impl LogStore for RaftEngineLogStore {
             return Ok(AppendBatchResponse::default());
         }
 
+        // Records the last entry id for each region's entries.
+        let mut last_entry_ids = HashMap::with_capacity(entries.len());
         let mut batch = LogBatch::with_capacity(entries.len());
 
         for e in entries {
             self.check_entry(&e)?;
+            // For raft-engine log store, the namespace id is the region id.
             let ns_id = e.namespace_id;
+            last_entry_ids
+                .entry(ns_id)
+                .and_modify(|x: &mut u64| *x = (*x).max(e.id))
+                .or_insert(e.id);
             batch
                 .add_entries::<MessageType>(ns_id, &[e])
                 .context(AddEntryLogBatchSnafu)?;
@@ -207,8 +214,7 @@ impl LogStore for RaftEngineLogStore {
             .write(&mut batch, self.config.sync_write)
             .context(RaftEngineSnafu)?;
 
-        // The user of raft-engine log store does not care about the response.
-        Ok(AppendBatchResponse::default())
+        Ok(AppendBatchResponse { last_entry_ids })
     }
 
     /// Create a stream of entries from logstore in the given namespace. The end of stream is
@@ -452,7 +458,7 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(i, response.entry_id);
+            assert_eq!(i, response.last_entry_id);
         }
         let mut entries = HashSet::with_capacity(1024);
         let mut s = logstore.read(&Namespace::with_id(1), 0).await.unwrap();

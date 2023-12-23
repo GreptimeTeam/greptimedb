@@ -416,6 +416,12 @@ pub enum Error {
         error: ArrowError,
         location: Location,
     },
+
+    #[snafu(display("Missing the last entry id for region {}", region_id))]
+    MissingLastEntryId {
+        region_id: RegionId,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -453,7 +459,8 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
-            | UnexpectedReplay { .. } => StatusCode::Unexpected,
+            | UnexpectedReplay { .. }
+            | MissingLastEntryId { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
