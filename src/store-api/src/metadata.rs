@@ -217,6 +217,13 @@ impl RegionMetadata {
         self.id_to_index.get(&column_id).copied()
     }
 
+    /// Find column index by name.
+    pub fn column_index_by_name(&self, column_name: &str) -> Option<usize> {
+        self.column_metadatas
+            .iter()
+            .position(|col| col.column_schema.name == column_name)
+    }
+
     /// Returns the time index column
     ///
     /// # Panics
@@ -272,7 +279,7 @@ impl RegionMetadata {
         );
 
         // prepare new indices
-        let mut indices_to_preserve = projection
+        let indices_to_preserve = projection
             .iter()
             .map(|id| {
                 self.column_index_by_id(*id)
@@ -282,8 +289,6 @@ impl RegionMetadata {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        indices_to_preserve.sort_unstable();
-        indices_to_preserve.reverse();
 
         // project schema
         let projected_schema =
@@ -294,30 +299,18 @@ impl RegionMetadata {
                     projection: projection.to_vec(),
                 })?;
 
-        // project columns
-        let mut projected_column_metadatas = self.column_metadatas.clone();
+        // project columns, generate projected primary key and new id_to_index
+        let mut projected_column_metadatas = Vec::with_capacity(indices_to_preserve.len());
+        let mut projected_primary_key = vec![];
+        let mut projected_id_to_index = HashMap::with_capacity(indices_to_preserve.len());
         for index in indices_to_preserve {
-            projected_column_metadatas.remove(index);
+            let col = self.column_metadatas[index].clone();
+            if col.semantic_type == SemanticType::Tag {
+                projected_primary_key.push(col.column_id);
+            }
+            projected_id_to_index.insert(col.column_id, projected_column_metadatas.len());
+            projected_column_metadatas.push(col);
         }
-
-        // generate projected primary key
-        let projected_primary_key = projected_column_metadatas
-            .iter()
-            .filter_map(|col| {
-                if col.semantic_type == SemanticType::Tag {
-                    Some(col.column_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // generate new id_to_index
-        let projected_id_to_index = projected_column_metadatas
-            .iter()
-            .enumerate()
-            .map(|(idx, col)| (col.column_id, idx))
-            .collect();
 
         Ok(RegionMetadata {
             schema: Arc::new(projected_schema),

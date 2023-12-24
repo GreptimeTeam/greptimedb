@@ -288,7 +288,7 @@ mod tests {
         // add columns
         let logical_region_id = env.default_logical_region_id();
         let columns = &["odd", "even", "Ev_En"];
-        let alter_request = test_util::alter_logical_region_add_tag_columns(columns);
+        let alter_request = test_util::alter_logical_region_add_tag_columns(123456, columns);
         engine
             .handle_request(logical_region_id, RegionRequest::Alter(alter_request))
             .await

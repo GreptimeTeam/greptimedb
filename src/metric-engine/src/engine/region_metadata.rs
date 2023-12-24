@@ -34,28 +34,40 @@ impl MetricEngineInner {
         logical_region_id: RegionId,
     ) -> Result<Vec<ColumnMetadata>> {
         // load logical and physical columns, and intersect them to get logical column metadata
-        let logical_columns = self
+        let mut logical_column_metadata = self
             .metadata_region
             .logical_columns(physical_region_id, logical_region_id)
             .await?
             .into_iter()
-            .collect::<HashMap<String, SemanticType>>();
-        let physical_columns = self
-            .data_region
-            .physical_columns(physical_region_id)
-            .await?;
-        let mut logical_column_metadata = physical_columns
-            .into_iter()
-            .filter_map(|mut col| {
-                // recover the semantic type of logical columns
-                logical_columns
-                    .get(&col.column_schema.name)
-                    .map(|semantic_type| {
-                        col.semantic_type = *semantic_type;
-                        col
-                    })
-            })
+            .map(|(_, column_metadata)| column_metadata)
             .collect::<Vec<_>>();
+        // let physical_columns = self
+        //     .data_region
+        //     .physical_columns(physical_region_id)
+        //     .await?
+        //     .into_iter()
+        //     .map(|col| (col.column_schema.name.clone(), col))
+        //     .collect::<HashMap<String, ColumnMetadata>>();
+        // let mut logical_column_metadata = physical_columns
+        //     .into_iter()
+        //     .filter_map(|mut col| {
+        //         // recover the semantic type of logical columns
+        //         logical_columns
+        //             .get(&col.column_schema.name)
+        //             .map(|semantic_type| {
+        //                 col.semantic_type = *semantic_type;
+        //                 col
+        //             })
+        //     })
+        //     .collect::<Vec<_>>();
+        // let logical_column_metadata = logical_columns
+        //     .into_iter()
+        //     .map(|(name, semantic_type)| {
+        //         let mut col = physical_columns.get(&name).unwrap().clone();
+        //         col.semantic_type = col.semantic_type;
+        //         col
+        //     })
+        //     .collect::<Vec<_>>();
 
         // sort columns on column id to ensure the order
         logical_column_metadata.sort_unstable_by_key(|col| col.column_id);

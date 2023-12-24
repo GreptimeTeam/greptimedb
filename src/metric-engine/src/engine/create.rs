@@ -189,7 +189,7 @@ impl MetricEngineInner {
                     metadata_region_id,
                     logical_region_id,
                     &col.column_schema.name,
-                    col.semantic_type,
+                    col,
                 )
                 .await?;
         }
@@ -225,7 +225,7 @@ impl MetricEngineInner {
                     metadata_region_id,
                     logical_region_id,
                     &col.column_schema.name,
-                    col.semantic_type,
+                    col,
                 )
                 .await?;
         }

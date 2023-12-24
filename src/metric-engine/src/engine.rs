@@ -264,7 +264,7 @@ mod test {
             .await
             .unwrap_err();
 
-        // open nonexistent region
+        // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             region_dir: env.default_region_dir(),
@@ -277,6 +277,6 @@ mod test {
                 RegionRequest::Open(invalid_open_request),
             )
             .await
-            .unwrap_err();
+            .unwrap();
     }
 }

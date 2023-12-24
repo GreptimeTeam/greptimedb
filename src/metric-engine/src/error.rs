@@ -63,6 +63,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to deserialize column metadata from {}", raw))]
+    DeserializeColumnMetadata {
+        raw: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode base64 column value"))]
     DecodeColumnValue {
         #[snafu(source)]
@@ -156,6 +164,7 @@ impl ErrorExt for Error {
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
+            | DeserializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
             | ParseRegionId { .. }
             | InvalidMetadata { .. } => StatusCode::Unexpected,

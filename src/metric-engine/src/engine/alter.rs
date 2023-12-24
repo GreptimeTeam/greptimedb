@@ -97,7 +97,7 @@ impl MetricEngineInner {
                     metadata_region_id,
                     region_id,
                     &col.column_metadata.column_schema.name,
-                    col.column_metadata.semantic_type,
+                    &col.column_metadata,
                 )
                 .await?;
         }
