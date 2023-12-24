@@ -95,7 +95,7 @@ pub struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Self {
-            runtime_name: format!("runtime_{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
+            runtime_name: format!("runtime-{}", RUNTIME_ID.fetch_add(1, Ordering::Relaxed)),
             thread_name: "default-worker".to_string(),
             builder: RuntimeBuilder::new_multi_thread(),
         }
@@ -160,6 +160,7 @@ impl Builder {
             .name(format!("{}-blocker", self.thread_name))
             .spawn(move || runtime.block_on(recv_stop));
 
+        #[cfg(tokio_unstable)]
         register_collector(name.clone(), &handle);
 
         Ok(Runtime {
@@ -172,9 +173,11 @@ impl Builder {
     }
 }
 
+#[cfg(tokio_unstable)]
 pub fn register_collector(name: String, handle: &Handle) {
+    let name = name.replace("-", "_");
     let monitor = tokio_metrics::RuntimeMonitor::new(handle);
-    let collector = tokio_metrics_collector::RuntimeCollector::new(monitor, name.clone());
+    let collector = tokio_metrics_collector::RuntimeCollector::new(monitor, name);
     let _ = prometheus::register(Box::new(collector));
 }
 
@@ -250,9 +253,13 @@ mod tests {
 
         assert!(metric_text.contains("runtime_threads_idle{thread_name=\"test_runtime_metric\"}"));
         assert!(metric_text.contains("runtime_threads_alive{thread_name=\"test_runtime_metric\"}"));
-        assert!(metric_text.contains("runtime_0_tokio_budget_forced_yield_count"));
-        assert!(metric_text.contains("runtime_0_tokio_injection_queue_depth"));
-        assert!(metric_text.contains("runtime_0_tokio_workers_count"));
+
+        #[cfg(tokio_unstable)]
+        {
+            assert!(metric_text.contains("runtime_0_tokio_budget_forced_yield_count"));
+            assert!(metric_text.contains("runtime_0_tokio_injection_queue_depth"));
+            assert!(metric_text.contains("runtime_0_tokio_workers_count"));
+        }
     }
 
     #[test]
