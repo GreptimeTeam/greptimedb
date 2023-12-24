@@ -11,7 +11,7 @@ This RFC proposes to enclose the usage of `RegionId` into the region engine only
 # Motivation
 `ColumnId` is an identifier for columns. It's assigned by meta server, stored in `TableInfo` and `RegionMetadata` and used in region engine to distinguish columns.
 
-At present, Both Frontend, datanode and Metasrv are aware of `ColumnId` but it's only used in region engine. Thus this RFC proposes to remove it from Frontend (mainly used in `TableInfo`) and Metasrv.
+At present, Both Frontend, Datanode and Metasrv are aware of `ColumnId` but it's only used in region engine. Thus this RFC proposes to remove it from Frontend (mainly used in `TableInfo`) and Metasrv.
 
 # Details
 
