@@ -27,7 +27,7 @@ use crate::error::Result;
 impl MetricEngineInner {
     /// Load column metadata of a logical region.
     ///
-    /// The return value is ordered.
+    /// The return value is ordered on [ColumnId].
     pub async fn load_logical_columns(
         &self,
         physical_region_id: RegionId,
@@ -41,33 +41,6 @@ impl MetricEngineInner {
             .into_iter()
             .map(|(_, column_metadata)| column_metadata)
             .collect::<Vec<_>>();
-        // let physical_columns = self
-        //     .data_region
-        //     .physical_columns(physical_region_id)
-        //     .await?
-        //     .into_iter()
-        //     .map(|col| (col.column_schema.name.clone(), col))
-        //     .collect::<HashMap<String, ColumnMetadata>>();
-        // let mut logical_column_metadata = physical_columns
-        //     .into_iter()
-        //     .filter_map(|mut col| {
-        //         // recover the semantic type of logical columns
-        //         logical_columns
-        //             .get(&col.column_schema.name)
-        //             .map(|semantic_type| {
-        //                 col.semantic_type = *semantic_type;
-        //                 col
-        //             })
-        //     })
-        //     .collect::<Vec<_>>();
-        // let logical_column_metadata = logical_columns
-        //     .into_iter()
-        //     .map(|(name, semantic_type)| {
-        //         let mut col = physical_columns.get(&name).unwrap().clone();
-        //         col.semantic_type = col.semantic_type;
-        //         col
-        //     })
-        //     .collect::<Vec<_>>();
 
         // sort columns on column id to ensure the order
         logical_column_metadata.sort_unstable_by_key(|col| col.column_id);

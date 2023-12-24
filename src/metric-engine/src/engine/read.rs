@@ -216,19 +216,6 @@ impl MetricEngineInner {
         let logical_columns = self
             .load_logical_columns(physical_region_id, logical_region_id)
             .await?;
-        //     .into_iter()
-        //     .map(|col| col.column_schema.name)
-        //     .collect::<Vec<_>>();
-        // let physical_metadata = self
-        //     .mito
-        //     .get_metadata(physical_region_id)
-        //     .await
-        //     .context(MitoReadOperationSnafu)?;
-
-        // let mut logical_metadata = physical_metadata
-        //     .project(&logical_columns)
-        //     .context(InvalidMetadataSnafu)?;
-        // logical_metadata.region_id = logical_region_id;
 
         let primary_keys = logical_columns
             .iter()
