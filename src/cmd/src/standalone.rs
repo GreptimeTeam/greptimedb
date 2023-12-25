@@ -31,6 +31,7 @@ use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use common_time::timezone::set_default_time_zone;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -50,8 +51,8 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, InitTimeZoneSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
@@ -97,6 +98,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
+    pub default_time_zone: Option<String>,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -120,6 +122,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
+            default_time_zone: None,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -146,6 +149,7 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
+            default_time_zone: self.default_time_zone,
             http: self.http,
             grpc: self.grpc,
             mysql: self.mysql,
@@ -365,6 +369,9 @@ impl StartCommand {
         info!("Standalone start command: {:#?}", self);
 
         info!("Building standalone instance with {opts:#?}");
+
+        set_default_time_zone(opts.frontend.default_time_zone.as_deref().unwrap_or(""))
+            .context(InitTimeZoneSnafu)?;
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {

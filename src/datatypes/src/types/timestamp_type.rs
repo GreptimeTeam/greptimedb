@@ -203,6 +203,7 @@ impl_data_type_for_timestamp!(Microsecond);
 
 #[cfg(test)]
 mod tests {
+    use common_time::timezone::set_default_time_zone;
     use common_time::{Date, DateTime};
 
     use super::*;
@@ -230,7 +231,7 @@ mod tests {
     // $TZ doesn't take effort
     #[test]
     fn test_timestamp_cast() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_time_zone("Asia/Shanghai").unwrap();
         // String -> TimestampSecond
         let s = Value::String("2021-01-01 01:02:03".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype()

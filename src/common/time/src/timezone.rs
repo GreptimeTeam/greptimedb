@@ -15,14 +15,39 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use chrono::{FixedOffset, Local, Offset};
+use chrono::FixedOffset;
 use chrono_tz::Tz;
+use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     InvalidTimeZoneOffsetSnafu, ParseOffsetStrSnafu, ParseTimeZoneNameSnafu, Result,
 };
 use crate::util::find_tz_from_env;
+
+/// System time zone in `frontend`/`standalone`,
+/// config by option `default_time_zone` in toml,
+/// default value is `UTC` when `default_time_zone` is not set.
+pub static DEFAULT_TIME_ZONE: OnceCell<TimeZone> = OnceCell::new();
+
+// Set the System time zone by `tz_str`
+pub fn set_default_time_zone(tz_str: &str) -> Result<()> {
+    let tz = if tz_str.is_empty() {
+        TimeZone::Named(Tz::UTC)
+    } else {
+        TimeZone::from_tz_string(tz_str)?
+    };
+    DEFAULT_TIME_ZONE.get_or_init(|| tz);
+    Ok(())
+}
+
+#[inline(always)]
+/// If the `tz=Some(time_zone)`, return `time_zone` directly,
+/// or return current system time zone.
+pub fn get_time_zone(tz: Option<TimeZone>) -> TimeZone {
+    tz.or(DEFAULT_TIME_ZONE.get().cloned())
+        .unwrap_or(TimeZone::Named(Tz::UTC))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimeZone {
@@ -32,7 +57,7 @@ pub enum TimeZone {
 
 impl TimeZone {
     /// Compute timezone from given offset hours and minutes
-    /// Return `None` if given offset exceeds scope
+    /// Return `Err` if given offset exceeds scope
     pub fn hours_mins_opt(offset_hours: i32, offset_mins: u32) -> Result<Self> {
         let offset_secs = if offset_hours > 0 {
             offset_hours * 3600 + offset_mins as i32 * 60
@@ -57,10 +82,10 @@ impl TimeZone {
     /// - `SYSTEM`
     /// - Offset to UTC: `+08:00` , `-11:30`
     /// - Named zones: `Asia/Shanghai`, `Europe/Berlin`
-    pub fn from_tz_string(tz_string: &str) -> Result<Option<Self>> {
+    pub fn from_tz_string(tz_string: &str) -> Result<Self> {
         // Use system timezone
         if tz_string.eq_ignore_ascii_case("SYSTEM") {
-            Ok(None)
+            Ok(TimeZone::Named(find_tz_from_env().unwrap_or(Tz::UTC)))
         } else if let Some((hrs, mins)) = tz_string.split_once(':') {
             let hrs = hrs
                 .parse::<i32>()
@@ -68,9 +93,9 @@ impl TimeZone {
             let mins = mins
                 .parse::<u32>()
                 .context(ParseOffsetStrSnafu { raw: tz_string })?;
-            Self::hours_mins_opt(hrs, mins).map(Some)
+            Self::hours_mins_opt(hrs, mins)
         } else if let Ok(tz) = Tz::from_str(tz_string) {
-            Ok(Some(Self::Named(tz)))
+            Ok(Self::Named(tz))
         } else {
             ParseTimeZoneNameSnafu { raw: tz_string }.fail()
         }
@@ -87,12 +112,9 @@ impl Display for TimeZone {
 }
 
 #[inline]
+/// Return current system config time zone, default config is UTC
 pub fn system_time_zone_name() -> String {
-    if let Some(tz) = find_tz_from_env() {
-        Local::now().with_timezone(&tz).offset().fix().to_string()
-    } else {
-        Local::now().offset().to_string()
-    }
+    format!("{}", get_time_zone(None))
 }
 
 #[cfg(test)]
@@ -101,36 +123,35 @@ mod tests {
 
     #[test]
     fn test_from_tz_string() {
-        assert_eq!(None, TimeZone::from_tz_string("SYSTEM").unwrap());
+        assert_eq!(
+            TimeZone::Named(Tz::UTC),
+            TimeZone::from_tz_string("SYSTEM").unwrap()
+        );
 
-        let utc_plus_8 = Some(TimeZone::Offset(FixedOffset::east_opt(3600 * 8).unwrap()));
+        let utc_plus_8 = TimeZone::Offset(FixedOffset::east_opt(3600 * 8).unwrap());
         assert_eq!(utc_plus_8, TimeZone::from_tz_string("+8:00").unwrap());
         assert_eq!(utc_plus_8, TimeZone::from_tz_string("+08:00").unwrap());
         assert_eq!(utc_plus_8, TimeZone::from_tz_string("08:00").unwrap());
 
-        let utc_minus_8 = Some(TimeZone::Offset(FixedOffset::west_opt(3600 * 8).unwrap()));
+        let utc_minus_8 = TimeZone::Offset(FixedOffset::west_opt(3600 * 8).unwrap());
         assert_eq!(utc_minus_8, TimeZone::from_tz_string("-08:00").unwrap());
         assert_eq!(utc_minus_8, TimeZone::from_tz_string("-8:00").unwrap());
 
-        let utc_minus_8_5 = Some(TimeZone::Offset(
-            FixedOffset::west_opt(3600 * 8 + 60 * 30).unwrap(),
-        ));
+        let utc_minus_8_5 = TimeZone::Offset(FixedOffset::west_opt(3600 * 8 + 60 * 30).unwrap());
         assert_eq!(utc_minus_8_5, TimeZone::from_tz_string("-8:30").unwrap());
 
-        let utc_plus_max = Some(TimeZone::Offset(FixedOffset::east_opt(3600 * 14).unwrap()));
+        let utc_plus_max = TimeZone::Offset(FixedOffset::east_opt(3600 * 14).unwrap());
         assert_eq!(utc_plus_max, TimeZone::from_tz_string("14:00").unwrap());
 
-        let utc_minus_max = Some(TimeZone::Offset(
-            FixedOffset::west_opt(3600 * 13 + 60 * 59).unwrap(),
-        ));
+        let utc_minus_max = TimeZone::Offset(FixedOffset::west_opt(3600 * 13 + 60 * 59).unwrap());
         assert_eq!(utc_minus_max, TimeZone::from_tz_string("-13:59").unwrap());
 
         assert_eq!(
-            Some(TimeZone::Named(Tz::Asia__Shanghai)),
+            TimeZone::Named(Tz::Asia__Shanghai),
             TimeZone::from_tz_string("Asia/Shanghai").unwrap()
         );
         assert_eq!(
-            Some(TimeZone::Named(Tz::UTC)),
+            TimeZone::Named(Tz::UTC),
             TimeZone::from_tz_string("UTC").unwrap()
         );
 
@@ -147,15 +168,11 @@ mod tests {
         assert_eq!("UTC", TimeZone::Named(Tz::UTC).to_string());
         assert_eq!(
             "+01:00",
-            TimeZone::from_tz_string("01:00")
-                .unwrap()
-                .unwrap()
-                .to_string()
+            TimeZone::from_tz_string("01:00").unwrap().to_string()
         );
         assert_eq!(
             "Asia/Shanghai",
             TimeZone::from_tz_string("Asia/Shanghai")
-                .unwrap()
                 .unwrap()
                 .to_string()
         );

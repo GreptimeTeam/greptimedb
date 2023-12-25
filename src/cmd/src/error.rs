@@ -43,6 +43,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init default time zone"))]
+    InitTimeZone {
+        location: Location,
+        source: common_time::error::Error,
+    },
+
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
         location: Location,
@@ -268,6 +274,7 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
+            | Error::InitTimeZone { .. }
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
