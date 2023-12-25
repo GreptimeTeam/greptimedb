@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use parquet::basic::ColumnOrder;
 use parquet::file::metadata::{FileMetaData, ParquetMetaData, RowGroupMetaData};
-use parquet::format::{ColumnOrder as TColumnOrder, FileMetaData as TFileMetaData};
+use parquet::format;
 use parquet::schema::types::{from_thrift, SchemaDescriptor};
 use snafu::ResultExt;
 
@@ -24,8 +24,8 @@ use crate::error;
 use crate::error::Result;
 
 // Refer to https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L74-L90
-/// Convert [TFileMetaData] to [ParquetMetaData]
-pub fn to_parquet_metadata(t_file_metadata: TFileMetaData) -> Result<ParquetMetaData> {
+/// Convert [format::FileMetaData] to [ParquetMetaData]
+pub fn to_parquet_metadata(t_file_metadata: format::FileMetaData) -> Result<ParquetMetaData> {
     let schema = from_thrift(&t_file_metadata.schema).context(error::ConvertMetaDataSnafu)?;
     let schema_desc_ptr = Arc::new(SchemaDescriptor::new(schema));
 
@@ -55,7 +55,7 @@ pub fn to_parquet_metadata(t_file_metadata: TFileMetaData) -> Result<ParquetMeta
 /// Parses column orders from Thrift definition.
 /// If no column orders are defined, returns `None`.
 fn parse_column_orders(
-    t_column_orders: Option<Vec<TColumnOrder>>,
+    t_column_orders: Option<Vec<format::ColumnOrder>>,
     schema_descr: &SchemaDescriptor,
 ) -> Option<Vec<ColumnOrder>> {
     match t_column_orders {
@@ -69,7 +69,7 @@ fn parse_column_orders(
             let mut res = Vec::new();
             for (i, column) in schema_descr.columns().iter().enumerate() {
                 match orders[i] {
-                    TColumnOrder::TYPEORDER(_) => {
+                    format::ColumnOrder::TYPEORDER(_) => {
                         let sort_order = ColumnOrder::get_sort_order(
                             column.logical_type(),
                             column.converted_type(),
