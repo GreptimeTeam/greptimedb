@@ -130,7 +130,7 @@ impl TopicManager {
                 )
             })
             .collect::<Vec<_>>();
-        // TODO(niebayes): Determine how rskafka handles an already-exist topic. Check if an error would be raised.
+        // FIXME(niebayes): try to create an already-exist topic would raise an error.
         futures::future::try_join_all(tasks)
             .await
             .context(CreateKafkaWalTopicSnafu)

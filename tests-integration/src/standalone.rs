@@ -23,7 +23,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::WalOptionsAllocator;
+use common_meta::wal::{WalConfig as MetaSrvWalConfig, WalOptionsAllocator};
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -118,9 +118,9 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
+        let wal_meta = MetaSrvWalConfig::default();
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            common_meta::wal::WalConfig::default(),
+            wal_meta.clone(),
             kv_backend.clone(),
         ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
@@ -163,6 +163,7 @@ impl GreptimeDbStandaloneBuilder {
                 frontend: FrontendOptions::default(),
                 datanode: opts,
                 logging: LoggingOptions::default(),
+                wal_meta,
             },
             guard,
         }
