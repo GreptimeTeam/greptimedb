@@ -22,6 +22,7 @@ use api::v1::WalEntry;
 use async_stream::try_stream;
 use common_config::wal::WalOptions;
 use common_error::ext::BoxedError;
+use common_telemetry::debug;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use prost::Message;
@@ -73,6 +74,11 @@ impl<S: LogStore> Wal<S> {
         start_id: EntryId,
         wal_options: &'a WalOptions,
     ) -> Result<WalEntryStream> {
+        debug!(
+            "Scanning log entries for region {} starting from {} with wal_options {:?}",
+            region_id, start_id, wal_options
+        );
+
         let stream = try_stream!({
             let namespace = self.store.namespace(region_id.into(), wal_options);
             let mut stream = self

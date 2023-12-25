@@ -26,8 +26,8 @@ use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
-use common_telemetry::info;
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::{debug, info};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
@@ -474,6 +474,11 @@ impl CreateRequestBuilder {
                 physical_region_id.as_u64().to_string(),
             );
         }
+
+        debug!(
+            "Set region options {:?} for region {}",
+            request.options, region_id
+        );
 
         Ok(request)
     }

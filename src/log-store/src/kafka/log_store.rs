@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, WalOptions};
+use common_telemetry::debug;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use store_api::logstore::entry::Id as EntryId;
@@ -82,6 +83,8 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
+        debug!("LogStore handles append_batch with entries {:?}", entries);
+
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
         }
@@ -97,6 +100,8 @@ impl LogStore for KafkaLogStore {
 
         // Builds a record from entries belong to a region and produces them to kafka server.
         let region_ids = producers.keys().cloned().collect::<Vec<_>>();
+        debug!("Constructed producers for regions {:?}", region_ids);
+
         let tasks = producers
             .into_values()
             .map(|producer| producer.produce(&self.client_manager))
@@ -108,6 +113,8 @@ impl LogStore for KafkaLogStore {
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>>>()?;
+        debug!("The entries are appended at offsets {:?}", entry_ids);
+
         Ok(AppendBatchResponse {
             last_entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
         })
@@ -120,6 +127,11 @@ impl LogStore for KafkaLogStore {
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
+        debug!(
+            "LogStore handles read at entry_id {} for ns {:?}",
+            entry_id, ns
+        );
+
         let topic = ns.topic.clone();
         let region_id = ns.region_id;
 
@@ -131,12 +143,20 @@ impl LogStore for KafkaLogStore {
             .raw_client
             .clone();
 
+        debug!("Got the client of topic {} for region {}", topic, region_id);
+
         // Reads the entries starting from exactly the specified offset.
         let offset = Offset::try_from(entry_id)?.0;
         let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(offset))
             .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
             .with_max_wait_ms(self.config.max_wait_time.as_millis() as i32)
             .build();
+
+        debug!(
+            "Built a stream consumer for topic {} at offset {}",
+            topic, offset
+        );
+
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
                 yield handle_consume_result(consume_result, &topic, region_id, offset);

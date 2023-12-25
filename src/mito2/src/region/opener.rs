@@ -226,6 +226,10 @@ impl RegionOpener {
     ) -> Result<Option<MitoRegion>> {
         let region_options = self.options.as_ref().unwrap().clone();
         let wal_options = region_options.wal_options.clone();
+        debug!(
+            "Try to open region {} with wal options {:?}",
+            self.region_id, wal_options
+        );
 
         let region_manifest_options = self.manifest_options(config, &region_options)?;
         let Some(manifest_manager) = RegionManifestManager::open(region_manifest_options).await?
@@ -256,6 +260,10 @@ impl RegionOpener {
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
+            info!(
+                "Start replaying memtable at flushed_entry_id {} for region {}",
+                flushed_entry_id, region_id
+            );
             replay_memtable(
                 wal,
                 &wal_options,

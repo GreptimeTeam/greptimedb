@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use common_telemetry::debug;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -184,6 +185,11 @@ impl DatanodeTableManager {
                             .map(|wal_options| (region_number.to_string(), wal_options.clone()))
                     })
                     .collect();
+
+                debug!(
+                    "Persist region wal options {:?} for table {}",
+                    filtered_region_wal_options, table_id
+                );
 
                 let key = DatanodeTableKey::new(datanode_id, table_id);
                 let val = DatanodeTableValue::new(
