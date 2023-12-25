@@ -56,7 +56,11 @@ impl EtcdLock {
 
     fn lock_key(&self, key: Vec<u8>) -> Vec<u8> {
         match &self.store_key_prefix {
-            Some(prefix) => format!("{}{}", prefix, String::from_utf8_lossy(&key)).into_bytes(),
+            Some(prefix) => {
+                let mut prefix = prefix.as_bytes().to_vec();
+                prefix.extend_from_slice(&key);
+                prefix
+            }
             None => key,
         }
     }
