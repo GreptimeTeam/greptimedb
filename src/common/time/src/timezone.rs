@@ -28,7 +28,7 @@ use crate::util::find_tz_from_env;
 /// System time zone in `frontend`/`standalone`,
 /// config by option `default_time_zone` in toml,
 /// default value is `UTC` when `default_time_zone` is not set.
-pub static DEFAULT_TIME_ZONE: OnceCell<TimeZone> = OnceCell::new();
+static DEFAULT_TIME_ZONE: OnceCell<TimeZone> = OnceCell::new();
 
 // Set the System time zone by `tz_str`
 pub fn set_default_time_zone(tz_str: &str) -> Result<()> {
