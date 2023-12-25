@@ -23,6 +23,8 @@ At present, Both Frontend, Datanode and Metasrv are aware of `ColumnId` but it's
 
 The first thing doesn't matter IMO. This concept doesn't exist anymore outside of region server, and each region is autonomous and independent -- the only guarantee it should hold is those columns exist. But if we consider region repartition, where the SST file would be re-assign to different regions, things would become a bit more complicated. A possible solution is store the relation between name and ColumnId in the manifest, but it's out of the scope of this RFC. We can likely give a workaround by introducing a indirection mapping layer of different version of partitions.
 
+And more importantly, we can still assume columns have the same column ids across regions. We have procedure to maintain consistency between regions and the region engine should ensure alterations are idempotent. So it is possible that region repartition doesn't need to consider column ids or other region metadata in the future.
+
 Users write and query column by their names, not by ColumnId or something else. The second point also means to change the column reference in ScanRequest from index to name. This change can hugely alleviate the misuse of the column index, which has given us many surprises.
 
 And for the last one, column order only matters in table info. This order is used in user-faced table structure operation, like add column, describe column or as the default order of INSERT clause. None of them is connected with the order in storage.
