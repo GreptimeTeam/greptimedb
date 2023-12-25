@@ -39,7 +39,7 @@ impl TableRouteKey {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TableRouteValue {
     Physical(PhysicalTableRouteValue),
     Logical(LogicalTableRouteValue),
