@@ -21,40 +21,44 @@ use once_cell::sync::OnceCell;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    InvalidTimeZoneOffsetSnafu, ParseOffsetStrSnafu, ParseTimeZoneNameSnafu, Result,
+    InvalidTimezoneOffsetSnafu, ParseOffsetStrSnafu, ParseTimezoneNameSnafu, Result,
 };
 use crate::util::find_tz_from_env;
 
-/// System time zone in `frontend`/`standalone`,
-/// config by option `default_time_zone` in toml,
-/// default value is `UTC` when `default_time_zone` is not set.
-static DEFAULT_TIME_ZONE: OnceCell<TimeZone> = OnceCell::new();
+/// System timezone in `frontend`/`standalone`,
+/// config by option `default_timezone` in toml,
+/// default value is `UTC` when `default_timezone` is not set.
+static DEFAULT_TIMEZONE: OnceCell<Timezone> = OnceCell::new();
 
-// Set the System time zone by `tz_str`
-pub fn set_default_time_zone(tz_str: Option<&str>) -> Result<()> {
+// Set the System timezone by `tz_str`
+pub fn set_default_timezone(tz_str: Option<&str>) -> Result<()> {
     let tz = match tz_str {
-        None | Some("") => TimeZone::Named(Tz::UTC),
-        Some(tz) => TimeZone::from_tz_string(tz)?,
+        None | Some("") => Timezone::Named(Tz::UTC),
+        Some(tz) => Timezone::from_tz_string(tz)?,
     };
-    DEFAULT_TIME_ZONE.get_or_init(|| tz);
+    DEFAULT_TIMEZONE.get_or_init(|| tz);
     Ok(())
 }
 
 #[inline(always)]
-/// If the `tz=Some(time_zone)`, return `time_zone` directly,
-/// or return current system time zone.
-pub fn get_time_zone(tz: Option<TimeZone>) -> TimeZone {
-    tz.or(DEFAULT_TIME_ZONE.get().cloned())
-        .unwrap_or(TimeZone::Named(Tz::UTC))
+/// If the `tz=Some(timezone)`, return `timezone` directly,
+/// or return current system timezone.
+pub fn get_timezone(tz: Option<Timezone>) -> Timezone {
+    tz.unwrap_or_else(|| {
+        DEFAULT_TIMEZONE
+            .get()
+            .cloned()
+            .unwrap_or(Timezone::Named(Tz::UTC))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimeZone {
+pub enum Timezone {
     Offset(FixedOffset),
     Named(Tz),
 }
 
-impl TimeZone {
+impl Timezone {
     /// Compute timezone from given offset hours and minutes
     /// Return `Err` if given offset exceeds scope
     pub fn hours_mins_opt(offset_hours: i32, offset_mins: u32) -> Result<Self> {
@@ -66,7 +70,7 @@ impl TimeZone {
 
         FixedOffset::east_opt(offset_secs)
             .map(Self::Offset)
-            .context(InvalidTimeZoneOffsetSnafu {
+            .context(InvalidTimezoneOffsetSnafu {
                 hours: offset_hours,
                 minutes: offset_mins,
             })
@@ -84,7 +88,7 @@ impl TimeZone {
     pub fn from_tz_string(tz_string: &str) -> Result<Self> {
         // Use system timezone
         if tz_string.eq_ignore_ascii_case("SYSTEM") {
-            Ok(TimeZone::Named(find_tz_from_env().unwrap_or(Tz::UTC)))
+            Ok(Timezone::Named(find_tz_from_env().unwrap_or(Tz::UTC)))
         } else if let Some((hrs, mins)) = tz_string.split_once(':') {
             let hrs = hrs
                 .parse::<i32>()
@@ -96,12 +100,12 @@ impl TimeZone {
         } else if let Ok(tz) = Tz::from_str(tz_string) {
             Ok(Self::Named(tz))
         } else {
-            ParseTimeZoneNameSnafu { raw: tz_string }.fail()
+            ParseTimezoneNameSnafu { raw: tz_string }.fail()
         }
     }
 }
 
-impl Display for TimeZone {
+impl Display for Timezone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Named(tz) => write!(f, "{}", tz.name()),
@@ -111,9 +115,9 @@ impl Display for TimeZone {
 }
 
 #[inline]
-/// Return current system config time zone, default config is UTC
-pub fn system_time_zone_name() -> String {
-    format!("{}", get_time_zone(None))
+/// Return current system config timezone, default config is UTC
+pub fn system_timezone_name() -> String {
+    format!("{}", get_timezone(None))
 }
 
 #[cfg(test)]
@@ -123,55 +127,55 @@ mod tests {
     #[test]
     fn test_from_tz_string() {
         assert_eq!(
-            TimeZone::Named(Tz::UTC),
-            TimeZone::from_tz_string("SYSTEM").unwrap()
+            Timezone::Named(Tz::UTC),
+            Timezone::from_tz_string("SYSTEM").unwrap()
         );
 
-        let utc_plus_8 = TimeZone::Offset(FixedOffset::east_opt(3600 * 8).unwrap());
-        assert_eq!(utc_plus_8, TimeZone::from_tz_string("+8:00").unwrap());
-        assert_eq!(utc_plus_8, TimeZone::from_tz_string("+08:00").unwrap());
-        assert_eq!(utc_plus_8, TimeZone::from_tz_string("08:00").unwrap());
+        let utc_plus_8 = Timezone::Offset(FixedOffset::east_opt(3600 * 8).unwrap());
+        assert_eq!(utc_plus_8, Timezone::from_tz_string("+8:00").unwrap());
+        assert_eq!(utc_plus_8, Timezone::from_tz_string("+08:00").unwrap());
+        assert_eq!(utc_plus_8, Timezone::from_tz_string("08:00").unwrap());
 
-        let utc_minus_8 = TimeZone::Offset(FixedOffset::west_opt(3600 * 8).unwrap());
-        assert_eq!(utc_minus_8, TimeZone::from_tz_string("-08:00").unwrap());
-        assert_eq!(utc_minus_8, TimeZone::from_tz_string("-8:00").unwrap());
+        let utc_minus_8 = Timezone::Offset(FixedOffset::west_opt(3600 * 8).unwrap());
+        assert_eq!(utc_minus_8, Timezone::from_tz_string("-08:00").unwrap());
+        assert_eq!(utc_minus_8, Timezone::from_tz_string("-8:00").unwrap());
 
-        let utc_minus_8_5 = TimeZone::Offset(FixedOffset::west_opt(3600 * 8 + 60 * 30).unwrap());
-        assert_eq!(utc_minus_8_5, TimeZone::from_tz_string("-8:30").unwrap());
+        let utc_minus_8_5 = Timezone::Offset(FixedOffset::west_opt(3600 * 8 + 60 * 30).unwrap());
+        assert_eq!(utc_minus_8_5, Timezone::from_tz_string("-8:30").unwrap());
 
-        let utc_plus_max = TimeZone::Offset(FixedOffset::east_opt(3600 * 14).unwrap());
-        assert_eq!(utc_plus_max, TimeZone::from_tz_string("14:00").unwrap());
+        let utc_plus_max = Timezone::Offset(FixedOffset::east_opt(3600 * 14).unwrap());
+        assert_eq!(utc_plus_max, Timezone::from_tz_string("14:00").unwrap());
 
-        let utc_minus_max = TimeZone::Offset(FixedOffset::west_opt(3600 * 13 + 60 * 59).unwrap());
-        assert_eq!(utc_minus_max, TimeZone::from_tz_string("-13:59").unwrap());
+        let utc_minus_max = Timezone::Offset(FixedOffset::west_opt(3600 * 13 + 60 * 59).unwrap());
+        assert_eq!(utc_minus_max, Timezone::from_tz_string("-13:59").unwrap());
 
         assert_eq!(
-            TimeZone::Named(Tz::Asia__Shanghai),
-            TimeZone::from_tz_string("Asia/Shanghai").unwrap()
+            Timezone::Named(Tz::Asia__Shanghai),
+            Timezone::from_tz_string("Asia/Shanghai").unwrap()
         );
         assert_eq!(
-            TimeZone::Named(Tz::UTC),
-            TimeZone::from_tz_string("UTC").unwrap()
+            Timezone::Named(Tz::UTC),
+            Timezone::from_tz_string("UTC").unwrap()
         );
 
-        assert!(TimeZone::from_tz_string("WORLD_PEACE").is_err());
-        assert!(TimeZone::from_tz_string("A0:01").is_err());
-        assert!(TimeZone::from_tz_string("20:0A").is_err());
-        assert!(TimeZone::from_tz_string(":::::").is_err());
-        assert!(TimeZone::from_tz_string("Asia/London").is_err());
-        assert!(TimeZone::from_tz_string("Unknown").is_err());
+        assert!(Timezone::from_tz_string("WORLD_PEACE").is_err());
+        assert!(Timezone::from_tz_string("A0:01").is_err());
+        assert!(Timezone::from_tz_string("20:0A").is_err());
+        assert!(Timezone::from_tz_string(":::::").is_err());
+        assert!(Timezone::from_tz_string("Asia/London").is_err());
+        assert!(Timezone::from_tz_string("Unknown").is_err());
     }
 
     #[test]
     fn test_timezone_to_string() {
-        assert_eq!("UTC", TimeZone::Named(Tz::UTC).to_string());
+        assert_eq!("UTC", Timezone::Named(Tz::UTC).to_string());
         assert_eq!(
             "+01:00",
-            TimeZone::from_tz_string("01:00").unwrap().to_string()
+            Timezone::from_tz_string("01:00").unwrap().to_string()
         );
         assert_eq!(
             "Asia/Shanghai",
-            TimeZone::from_tz_string("Asia/Shanghai")
+            Timezone::from_tz_string("Asia/Shanghai")
                 .unwrap()
                 .to_string()
         );

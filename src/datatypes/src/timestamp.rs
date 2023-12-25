@@ -122,13 +122,13 @@ define_timestamp_with_unit!(Nanosecond);
 
 #[cfg(test)]
 mod tests {
-    use common_time::timezone::set_default_time_zone;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 
     #[test]
     fn test_to_serde_json_value() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let ts = TimestampSecond::new(123);
         let val = serde_json::Value::from(ts);
         match val {

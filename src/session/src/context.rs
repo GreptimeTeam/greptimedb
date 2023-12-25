@@ -21,8 +21,8 @@ use arc_swap::ArcSwap;
 use auth::UserInfoRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
-use common_time::timezone::get_time_zone;
-use common_time::TimeZone;
+use common_time::timezone::get_timezone;
+use common_time::Timezone;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
@@ -36,7 +36,7 @@ pub struct QueryContext {
     current_catalog: String,
     current_schema: String,
     current_user: ArcSwap<Option<UserInfoRef>>,
-    time_zone: TimeZone,
+    timezone: Timezone,
     sql_dialect: Box<dyn Dialect + Send + Sync>,
 }
 
@@ -58,7 +58,7 @@ impl From<&RegionRequestHeader> for QueryContext {
             current_catalog: catalog.to_string(),
             current_schema: schema.to_string(),
             current_user: Default::default(),
-            time_zone: get_time_zone(None),
+            timezone: get_timezone(None),
             sql_dialect: Box::new(GreptimeDbDialect {}),
         }
     }
@@ -116,8 +116,8 @@ impl QueryContext {
     }
 
     #[inline]
-    pub fn time_zone(&self) -> TimeZone {
-        self.time_zone.clone()
+    pub fn timezone(&self) -> Timezone {
+        self.timezone.clone()
     }
 
     #[inline]
@@ -143,7 +143,7 @@ impl QueryContextBuilder {
             current_user: self
                 .current_user
                 .unwrap_or_else(|| ArcSwap::new(Arc::new(None))),
-            time_zone: self.time_zone.unwrap_or(get_time_zone(None)),
+            timezone: self.timezone.unwrap_or(get_timezone(None)),
             sql_dialect: self
                 .sql_dialect
                 .unwrap_or_else(|| Box::new(GreptimeDbDialect {})),

@@ -32,7 +32,7 @@ use crate::service_config::{
 pub struct FrontendOptions {
     pub mode: Mode,
     pub node_id: Option<String>,
-    pub default_time_zone: Option<String>,
+    pub default_timezone: Option<String>,
     pub heartbeat: HeartbeatOptions,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
@@ -54,7 +54,7 @@ impl Default for FrontendOptions {
         Self {
             mode: Mode::Standalone,
             node_id: None,
-            default_time_zone: None,
+            default_timezone: None,
             heartbeat: HeartbeatOptions::frontend_default(),
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),

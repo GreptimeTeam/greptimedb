@@ -43,8 +43,8 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to init default time zone"))]
-    InitTimeZone {
+    #[snafu(display("Failed to init default timezone"))]
+    InitTimezone {
         location: Location,
         source: common_time::error::Error,
     },
@@ -274,7 +274,7 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
-            | Error::InitTimeZone { .. }
+            | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }

@@ -521,7 +521,7 @@ mod tests {
 
     use api::v1::ColumnDataType;
     use common_time::timestamp::TimeUnit;
-    use common_time::timezone::set_default_time_zone;
+    use common_time::timezone::set_default_timezone;
     use datatypes::types::BooleanType;
     use datatypes::value::OrderedFloat;
 
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),

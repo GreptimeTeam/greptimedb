@@ -20,7 +20,7 @@ use chrono::{Days, LocalResult, Months, NaiveDateTime, TimeZone as ChronoTimeZon
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, InvalidDateStrSnafu, Result};
-use crate::timezone::TimeZone;
+use crate::timezone::Timezone;
 use crate::util::{format_utc_datetime, local_datetime_to_utc};
 use crate::{Date, Interval};
 
@@ -110,11 +110,11 @@ impl DateTime {
         NaiveDateTime::from_timestamp_millis(self.0)
     }
 
-    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<TimeZone>) -> Option<NaiveDateTime> {
+    pub fn to_chrono_datetime_with_timezone(&self, tz: Option<Timezone>) -> Option<NaiveDateTime> {
         let datetime = self.to_chrono_datetime();
         datetime.map(|v| match tz {
-            Some(TimeZone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
-            Some(TimeZone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
+            Some(Timezone::Offset(offset)) => offset.from_utc_datetime(&v).naive_local(),
+            Some(Timezone::Named(tz)) => tz.from_utc_datetime(&v).naive_local(),
             None => Utc.from_utc_datetime(&v).naive_local(),
         })
     }
@@ -155,11 +155,11 @@ impl DateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timezone::set_default_time_zone;
+    use crate::timezone::set_default_timezone;
 
     #[test]
     pub fn test_new_date_time() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!("1970-01-01 08:00:00+0800", DateTime::new(0).to_string());
         assert_eq!("1970-01-01 08:00:01+0800", DateTime::new(1000).to_string());
         assert_eq!("1970-01-01 07:59:59+0800", DateTime::new(-1000).to_string());
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     pub fn test_parse_from_string() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let time = "1970-01-01 00:00:00+0800";
         let dt = DateTime::from_str(time).unwrap();
         assert_eq!(time, &dt.to_string());
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_parse_local_date_time() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(
             -28800000,
             DateTime::from_str("1970-01-01 00:00:00").unwrap().val()

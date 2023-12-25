@@ -101,7 +101,7 @@ impl LogicalPrimitiveType for DateTimeType {
 #[cfg(test)]
 mod tests {
 
-    use common_time::timezone::set_default_time_zone;
+    use common_time::timezone::set_default_timezone;
     use common_time::Timestamp;
 
     use super::*;
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(dt, Value::DateTime(DateTime::from(1000)));
 
         // cast from String
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let val = Value::String("1970-01-01 00:00:00+0800".into());
         let dt = ConcreteDataType::datetime_datatype().try_cast(val).unwrap();
         assert_eq!(

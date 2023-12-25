@@ -17,21 +17,21 @@ use std::str::FromStr;
 use chrono::{LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 
-use crate::timezone::get_time_zone;
+use crate::timezone::get_timezone;
 
 pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
-    match get_time_zone(None) {
-        crate::TimeZone::Offset(offset) => {
+    match get_timezone(None) {
+        crate::Timezone::Offset(offset) => {
             offset.from_utc_datetime(utc).format(pattern).to_string()
         }
-        crate::TimeZone::Named(tz) => tz.from_utc_datetime(utc).format(pattern).to_string(),
+        crate::Timezone::Named(tz) => tz.from_utc_datetime(utc).format(pattern).to_string(),
     }
 }
 
 pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
-    match get_time_zone(None) {
-        crate::TimeZone::Offset(offset) => offset.from_local_datetime(local).map(|x| x.naive_utc()),
-        crate::TimeZone::Named(tz) => tz.from_local_datetime(local).map(|x| x.naive_utc()),
+    match get_timezone(None) {
+        crate::Timezone::Offset(offset) => offset.from_local_datetime(local).map(|x| x.naive_utc()),
+        crate::Timezone::Named(tz) => tz.from_local_datetime(local).map(|x| x.naive_utc()),
     }
 }
 

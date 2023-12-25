@@ -120,13 +120,13 @@ define_time_with_unit!(Nanosecond, i64);
 
 #[cfg(test)]
 mod tests {
-    use common_time::timezone::set_default_time_zone;
+    use common_time::timezone::set_default_timezone;
 
     use super::*;
 
     #[test]
     fn test_to_serde_json_value() {
-        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let time = TimeSecond::new(123);
         let val = serde_json::Value::from(time);
         match val {
