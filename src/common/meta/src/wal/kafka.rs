@@ -60,13 +60,16 @@ pub struct KafkaConfig {
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let broker_endpoints = vec!["127.0.0.1:9092".to_string()];
+        let replication_factor = broker_endpoints.len() as i16;
+
         Self {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor,
             create_topic_timeout: Duration::from_secs(30),
             backoff_init: Duration::from_millis(500),
             backoff_max: Duration::from_secs(10),

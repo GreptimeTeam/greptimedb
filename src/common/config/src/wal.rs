@@ -37,7 +37,7 @@ pub enum WalConfig {
 
 impl Default for WalConfig {
     fn default() -> Self {
-        WalConfig::RaftEngine(RaftEngineConfig::default())
+        WalConfig::Kafka(KafkaConfig::default())
     }
 }
 

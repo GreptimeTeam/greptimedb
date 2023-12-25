@@ -28,14 +28,19 @@ pub use crate::wal::options_allocator::{
 };
 
 /// Wal config for metasrv.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "provider")]
 pub enum WalConfig {
-    #[default]
     #[serde(rename = "raft_engine")]
     RaftEngine,
     #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        WalConfig::Kafka(KafkaConfig::default())
+    }
 }
 
 #[cfg(test)]

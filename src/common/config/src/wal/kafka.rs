@@ -59,7 +59,7 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: RsKafkaCompression::NoCompression,
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
