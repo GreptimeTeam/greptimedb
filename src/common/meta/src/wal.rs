@@ -94,6 +94,4 @@ mod tests {
         };
         assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));
     }
-
-    // TODO(niebayes): the integrate test needs to test that the example config file can be successfully parsed.
 }
