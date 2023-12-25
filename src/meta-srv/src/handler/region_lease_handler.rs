@@ -104,6 +104,7 @@ mod test {
     use std::sync::Arc;
 
     use common_meta::distributed_time_constants;
+    use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -161,7 +162,11 @@ mod test {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
             .await
             .unwrap();
 
@@ -303,7 +308,11 @@ mod test {
         let table_metadata_manager = keeper.table_metadata_manager();
 
         table_metadata_manager
-            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
             .await
             .unwrap();
 
