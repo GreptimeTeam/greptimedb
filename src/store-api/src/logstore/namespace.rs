@@ -14,8 +14,11 @@
 
 use std::hash::Hash;
 
+/// The namespace id.
+/// Usually the namespace id is identical with the region id.
 pub type Id = u64;
 
 pub trait Namespace: Send + Sync + Clone + std::fmt::Debug + Hash + PartialEq + Eq {
+    /// Returns the namespace id.
     fn id(&self) -> Id;
 }

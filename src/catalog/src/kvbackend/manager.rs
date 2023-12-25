@@ -127,13 +127,11 @@ impl CatalogManager for KvBackendCatalogManager {
             .try_collect::<BTreeSet<_>>()
             .await
             .map_err(BoxedError::new)
-            .context(ListSchemasSnafu { catalog })?
-            .into_iter()
-            .collect::<Vec<_>>();
+            .context(ListSchemasSnafu { catalog })?;
 
-        keys.extend_from_slice(&self.system_catalog.schema_names());
+        keys.extend(self.system_catalog.schema_names());
 
-        Ok(keys)
+        Ok(keys.into_iter().collect())
     }
 
     async fn table_names(&self, catalog: &str, schema: &str) -> CatalogResult<Vec<String>> {

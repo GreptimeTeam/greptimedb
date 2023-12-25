@@ -30,6 +30,8 @@ type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client
 /// Record metadata which will be serialized/deserialized to/from the `key` of a Record.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct RecordMeta {
+    /// Meta version. Used for backward compatibility.
+    version: u32,
     /// The namespace of the entries wrapped in the record.
     ns: NamespaceImpl,
     /// Ids of the entries built into the record.
@@ -41,6 +43,7 @@ struct RecordMeta {
 impl RecordMeta {
     fn new(ns: NamespaceImpl, entries: &[EntryImpl]) -> Self {
         Self {
+            version: 0,
             ns,
             entry_ids: entries.iter().map(|entry| entry.id).collect(),
             entry_offsets: entries

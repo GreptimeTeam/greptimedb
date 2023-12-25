@@ -53,7 +53,7 @@ impl LogStore for KafkaLogStore {
     type Entry = EntryImpl;
     type Namespace = NamespaceImpl;
 
-    /// Creates an entry.
+    /// Creates an entry of the associated Entry type.
     fn entry<D: AsRef<[u8]>>(
         &self,
         data: D,
@@ -74,19 +74,20 @@ impl LogStore for KafkaLogStore {
             .produce(&self.client_manager)
             .await
             .map(TryInto::try_into)??;
-        Ok(AppendResponse { entry_id })
+        Ok(AppendResponse {
+            last_entry_id: entry_id,
+        })
     }
 
-    /// Appends a batch of entries to the log store. The response contains a map where the key
-    /// is a region id while the value is the id of the entry, the first entry of the entries belong to the region,
-    /// written into the log store.
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
         }
 
         // Groups entries by region id and pushes them to an associated record producer.
-        let mut producers: HashMap<_, RecordProducer> = HashMap::with_capacity(entries.len());
+        let mut producers = HashMap::with_capacity(entries.len());
         for entry in entries {
             producers
                 .entry(entry.ns.region_id)
@@ -108,7 +109,7 @@ impl LogStore for KafkaLogStore {
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>>>()?;
         Ok(AppendBatchResponse {
-            entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
+            last_entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
         })
     }
 
@@ -144,7 +145,7 @@ impl LogStore for KafkaLogStore {
         Ok(Box::pin(stream))
     }
 
-    /// Creates a namespace.
+    /// Creates a namespace of the associated Namespace type.
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
         // Safety: upon start, the datanode checks the consistency of the wal providers in the wal config of the
         // datanode and that of the metasrv. Therefore, the wal options passed into the kafka log store
@@ -158,21 +159,24 @@ impl LogStore for KafkaLogStore {
         }
     }
 
+    /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
+    /// Deletes an existing `Namespace` specified by the given ref.
     async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
+    /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         Ok(vec![])
     }
 
-    /// Marks all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
-    /// the log files if all entries inside are obsolete. This method may not delete log
-    /// files immediately.
+    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
+    /// so that the log store can safely delete those entries. This method does not guarantee
+    /// that the obsolete entries are deleted immediately.
     async fn obsolete(&self, _ns: Self::Namespace, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }

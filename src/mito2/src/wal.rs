@@ -27,7 +27,7 @@ use futures::StreamExt;
 use prost::Message;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
-use store_api::logstore::LogStore;
+use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -165,8 +165,7 @@ impl<S: LogStore> WalWriter<S> {
     }
 
     /// Write all buffered entries to the WAL.
-    // TODO(niebayes): returns an `AppendBatchResponse` and handle it properly.
-    pub async fn write_to_wal(&mut self) -> Result<()> {
+    pub async fn write_to_wal(&mut self) -> Result<AppendBatchResponse> {
         // TODO(yingwen): metrics.
 
         let entries = mem::take(&mut self.entries);
@@ -175,7 +174,6 @@ impl<S: LogStore> WalWriter<S> {
             .await
             .map_err(BoxedError::new)
             .context(WriteWalSnafu)
-            .map(|_| ())
     }
 }
 

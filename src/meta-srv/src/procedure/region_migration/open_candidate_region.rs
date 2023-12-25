@@ -90,6 +90,7 @@ impl OpenCandidateRegion {
             &region_storage_path,
             region_options,
             region_wal_options,
+            true,
         ));
 
         Ok(open_instruction)
@@ -215,6 +216,7 @@ mod tests {
             region_storage_path: "/bar/foo/region/".to_string(),
             region_options: Default::default(),
             region_wal_options: Default::default(),
+            skip_wal_replay: true,
         })
     }
 

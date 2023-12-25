@@ -41,7 +41,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
-    /// while the value is the id of the entry, the first entry of the entries belong to the region, written into the log store.
+    /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(
         &self,
         entries: Vec<Self::Entry>,
@@ -56,40 +56,39 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>, Self::Error>;
 
-    /// Creates a new `Namespace`.
+    /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
-    /// Deletes an existing `Namespace` with given ref.
+    /// Deletes an existing `Namespace` specified by the given ref.
     async fn delete_namespace(&self, ns: &Self::Namespace) -> Result<(), Self::Error>;
 
     /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>, Self::Error>;
 
-    /// Creates an entry of the associate Entry type.
+    /// Creates an entry of the associated Entry type
     fn entry<D: AsRef<[u8]>>(&self, data: D, entry_id: EntryId, ns: Self::Namespace)
         -> Self::Entry;
 
-    /// Creates a namespace of the associates Namespace type.
+    /// Creates a namespace of the associated Namespace type
     // TODO(sunng87): confusion with `create_namespace`
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace;
 
-    /// Marks all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
-    /// the log files if all entries inside are obsolete. This method may not delete log
-    /// files immediately.
+    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
+    /// so that the log store can safely delete those entries. This method does not guarantee
+    /// that the obsolete entries are deleted immediately.
     async fn obsolete(&self, ns: Self::Namespace, entry_id: EntryId) -> Result<(), Self::Error>;
 }
 
 /// The response of an `append` operation.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AppendResponse {
-    /// The id of the entry written into the log store.
-    pub entry_id: EntryId,
+    /// The id of the entry appended to the log store.
+    pub last_entry_id: EntryId,
 }
 
 /// The response of an `append_batch` operation.
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
-    /// Key: region id (as u64).
-    /// Value: the id of the entry, the first entry of the entries belong to the region, written into the log store.
-    pub entry_ids: HashMap<u64, EntryId>,
+    /// Key: region id (as u64). Value: the id of the last successfully written entry of the region.
+    pub last_entry_ids: HashMap<u64, EntryId>,
 }

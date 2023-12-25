@@ -55,7 +55,8 @@ impl RegionHeartbeatResponseHandler {
                 region_storage_path,
                 region_options,
                 region_wal_options,
-            }) => Ok(Box::new(|region_server| {
+                skip_wal_replay,
+            }) => Ok(Box::new(move |region_server| {
                 Box::pin(async move {
                     let region_id = Self::region_ident_to_region_id(&region_ident);
                     // TODO(niebayes): extends region options with region_wal_options.
@@ -64,7 +65,7 @@ impl RegionHeartbeatResponseHandler {
                         engine: region_ident.engine,
                         region_dir: region_dir(&region_storage_path, region_id),
                         options: region_options,
-                        skip_wal_replay: false,
+                        skip_wal_replay,
                     });
                     let result = region_server.handle_request(region_id, request).await;
 
@@ -244,6 +245,7 @@ mod tests {
             path,
             HashMap::new(),
             HashMap::new(),
+            false,
         ))
     }
 

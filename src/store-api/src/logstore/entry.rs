@@ -17,11 +17,8 @@ use common_error::ext::ErrorExt;
 use crate::logstore::namespace::Namespace;
 
 /// An entry's id.
-/// An append operation tries to append an entry at the id.
-/// A read operation tries to read an entry at the id.
+/// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
-/// An entry's offset. It's not used for now.
-pub type Offset = usize;
 
 /// Entry is the minimal data storage unit through which users interact with the log store.
 /// The log store implementation may have larger or smaller data storage unit than an entry.
@@ -33,6 +30,7 @@ pub trait Entry: Send + Sync {
     fn data(&self) -> &[u8];
 
     /// Returns the id of the entry.
+    /// Usually the namespace id is identical with the region id.
     fn id(&self) -> Id;
 
     /// Returns the namespace of the entry.
