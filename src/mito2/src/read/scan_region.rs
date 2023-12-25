@@ -197,7 +197,7 @@ impl ScanRegion {
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
-            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().copied())?,
+            Some(p) => ProjectionMapper::new(&self.version.metadata, p.iter().cloned())?,
             None => ProjectionMapper::all(&self.version.metadata)?,
         };
 

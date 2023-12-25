@@ -18,7 +18,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datafusion::error::DataFusionError;
-use datatypes::arrow::error::ArrowError;
 use snafu::{Location, Snafu};
 
 use crate::metadata::TableId;
@@ -51,8 +50,7 @@ pub enum Error {
 
     #[snafu(display("Table projection error"))]
     TableProjection {
-        #[snafu(source)]
-        error: ArrowError,
+        source: common_recordbatch::error::Error,
         location: Location,
     },
 

@@ -23,8 +23,7 @@ use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{
-    METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
-    METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+    METADATA_SCHEMA_KEY_COLUMN_NAME, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_NAME,
 };
 use store_api::region_engine::RegionEngine;
@@ -315,8 +314,8 @@ impl MetadataRegion {
     pub async fn get_all(&self, region_id: RegionId) -> Result<HashMap<String, String>> {
         let scan_req = ScanRequest {
             projection: Some(vec![
-                METADATA_SCHEMA_KEY_COLUMN_INDEX,
-                METADATA_SCHEMA_VALUE_COLUMN_INDEX,
+                METADATA_SCHEMA_KEY_COLUMN_NAME.to_string(),
+                METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string(),
             ]),
             filters: vec![],
             output_ordering: None,
@@ -360,7 +359,7 @@ impl MetadataRegion {
         let filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
 
         ScanRequest {
-            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string()]),
             filters: vec![filter_expr.into()],
             output_ordering: None,
             limit: None,
@@ -490,7 +489,7 @@ mod test {
         let key = "test_key";
         let expected_filter_expr = col(METADATA_SCHEMA_KEY_COLUMN_NAME).eq(lit(key));
         let expected_scan_request = ScanRequest {
-            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_INDEX]),
+            projection: Some(vec![METADATA_SCHEMA_VALUE_COLUMN_NAME.to_string()]),
             filters: vec![expected_filter_expr.into()],
             output_ordering: None,
             limit: None,

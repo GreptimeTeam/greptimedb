@@ -86,10 +86,15 @@ impl TableProvider for DfTableProviderAdapter {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn DfPhysicalPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).map(Into::into).collect();
+        let col_names = projection.map(|v| {
+            v.iter()
+                .map(|&i| self.table.schema().column_name_by_index(i).to_string())
+                .collect::<Vec<_>>()
+        });
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;
-            request.projection = projection.cloned();
+            request.projection = col_names;
             request.limit = limit;
             request.clone()
         };

@@ -22,9 +22,11 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion_common::DFSchemaRef;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 
-use crate::error::{self, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result};
+use crate::error::{
+    self, ColumnNotFoundSnafu, DuplicateColumnSnafu, Error, ProjectArrowSchemaSnafu, Result,
+};
 pub use crate::schema::column_schema::{ColumnSchema, Metadata, COMMENT_KEY, TIME_INDEX_KEY};
 pub use crate::schema::constraint::ColumnDefaultConstraint;
 pub use crate::schema::raw::RawSchema;
@@ -168,6 +170,23 @@ impl Schema {
             timestamp_index,
             version: self.version,
         })
+    }
+
+    /// Generate a new projected schema using given column names.
+    ///
+    /// # Error
+    ///
+    /// If the column name not found
+    pub fn try_project_with_names(&self, names: &[String]) -> Result<Self> {
+        let mut indices = Vec::with_capacity(names.len());
+        for name in names {
+            let index = self
+                .column_index_by_name(name)
+                .with_context(|| ColumnNotFoundSnafu { name })?;
+            indices.push(index);
+        }
+
+        self.try_project(&indices)
     }
 }
 

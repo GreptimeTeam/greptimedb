@@ -61,24 +61,22 @@ impl ProjectionMapper {
     /// Returns a new mapper with projection.
     pub fn new(
         metadata: &RegionMetadataRef,
-        projection: impl Iterator<Item = usize>,
+        projection: impl Iterator<Item = String>,
     ) -> Result<ProjectionMapper> {
         let projection: Vec<_> = projection.collect();
         let mut column_schemas = Vec::with_capacity(projection.len());
         let mut column_ids = Vec::with_capacity(projection.len());
-        for idx in &projection {
+        let mut column_metas = Vec::with_capacity(projection.len());
+        for name in &projection {
             // For each projection index, we get the column id for projection.
-            let column = metadata
-                .column_metadatas
-                .get(*idx)
-                .context(InvalidRequestSnafu {
-                    region_id: metadata.region_id,
-                    reason: format!("projection index {} is out of bound", idx),
-                })?;
+            let column = metadata.column_by_name(name).context(InvalidRequestSnafu {
+                region_id: metadata.region_id,
+                reason: format!("projection name {} not found", name),
+            })?;
 
             column_ids.push(column.column_id);
-            // Safety: idx is valid.
-            column_schemas.push(metadata.schema.column_schemas()[*idx].clone());
+            column_schemas.push(column.column_schema.clone());
+            column_metas.push(column)
         }
         let codec = McmpRowCodec::new(
             metadata
@@ -100,9 +98,7 @@ impl ProjectionMapper {
         // For each projected column, compute its index in batches.
         let mut batch_indices = Vec::with_capacity(projection.len());
         let mut has_tags = false;
-        for idx in &projection {
-            // Safety: idx is valid.
-            let column = &metadata.column_metadatas[*idx];
+        for column in column_metas {
             // Get column index in a batch by its semantic type and column id.
             let batch_index = match column.semantic_type {
                 SemanticType::Tag => {
@@ -135,9 +131,47 @@ impl ProjectionMapper {
         })
     }
 
-    /// Returns a new mapper without projection.
+    /// Fast path to return a new mapper without projection.
     pub fn all(metadata: &RegionMetadataRef) -> Result<ProjectionMapper> {
-        ProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
+        let mut batch_indices = Vec::with_capacity(metadata.column_metadatas.len());
+        let batch_fields = metadata.field_columns().map(|c| c.column_id).collect();
+        let mut field_cursor = 0;
+        for column in &metadata.column_metadatas {
+            // Get column index in a batch by its semantic type and column id.
+            let batch_index = match column.semantic_type {
+                SemanticType::Tag => {
+                    // Safety: It is a primary key column.
+                    let index = metadata.primary_key_index(column.column_id).unwrap();
+                    BatchIndex::Tag(index)
+                }
+                SemanticType::Timestamp => BatchIndex::Timestamp,
+                SemanticType::Field => {
+                    field_cursor += 1;
+                    BatchIndex::Field(field_cursor - 1)
+                }
+            };
+            batch_indices.push(batch_index);
+        }
+        let codec = McmpRowCodec::new(
+            metadata
+                .primary_key_columns()
+                .map(|c| SortField::new(c.column_schema.data_type.clone()))
+                .collect(),
+        );
+        let column_ids = metadata
+            .column_metadatas
+            .iter()
+            .map(|meta| meta.column_id)
+            .collect();
+        Ok(Self {
+            metadata: metadata.clone(),
+            batch_indices,
+            has_tags: !metadata.primary_key.is_empty(),
+            codec,
+            output_schema: metadata.schema.clone(),
+            column_ids,
+            batch_fields,
+        })
     }
 
     /// Returns the metadata that created the mapper.
@@ -371,7 +405,9 @@ mod tests {
                 .build(),
         );
         // Columns v1, k0
-        let mapper = ProjectionMapper::new(&metadata, [4, 1].into_iter()).unwrap();
+        let mapper =
+            ProjectionMapper::new(&metadata, ["v1".to_string(), "k0".to_string()].into_iter())
+                .unwrap();
         assert_eq!([4, 1], mapper.column_ids());
         assert_eq!([4], mapper.batch_fields());
 
