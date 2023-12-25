@@ -58,7 +58,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -191,8 +191,6 @@ table = { path = "src/table" }
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "abbd357c1e193cd270ea65ee7652334a150b628f"
-
-[profile.dev]
 
 [profile.release]
 debug = 1
