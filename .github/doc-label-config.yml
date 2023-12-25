@@ -1,2 +1,4 @@
 Doc not needed:
-    - '- \[x\]  I have written the necessary rustdoc comments'
+    - '- \[x\]  This PR does not require documentation updates.'
+Doc update required:
+    - '- \[ \]  This PR does not require documentation updates.'
