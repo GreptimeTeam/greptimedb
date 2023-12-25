@@ -66,14 +66,13 @@ impl LogStore for NoopLogStore {
 
     async fn append(&self, mut _e: Self::Entry) -> Result<AppendResponse> {
         Ok(AppendResponse {
-            entry_id: 0,
-            offset: None,
+            last_entry_id: Default::default(),
         })
     }
 
     async fn append_batch(&self, _e: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
         Ok(AppendBatchResponse {
-            offsets: HashMap::new(),
+            last_entry_ids: HashMap::new(),
         })
     }
 
