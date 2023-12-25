@@ -16,11 +16,12 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
-use super::DeserializedValueWithBytes;
-use crate::error::Result;
+use super::{DeserializedValueWithBytes, TableMetaValue};
+use crate::error::{Result, SerdeJsonSnafu};
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
@@ -38,6 +39,7 @@ impl TableRouteKey {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[serde(tag = "type")]
 pub enum TableRouteValue {
     Physical(PhysicalTableRouteValue),
     Logical(LogicalTableRouteValue),
@@ -113,6 +115,25 @@ impl TableRouteValue {
                 .map(|region_id| region_id.region_number())
                 .collect::<Vec<_>>(),
         }
+    }
+}
+
+impl TableMetaValue for TableRouteValue {
+    fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
+        let r = serde_json::from_slice::<TableRouteValue>(raw_value);
+        match r {
+            // Compatible with old TableRouteValue.
+            Err(e) if e.is_data() => Ok(Self::Physical(
+                serde_json::from_slice::<PhysicalTableRouteValue>(raw_value)
+                    .context(SerdeJsonSnafu)?,
+            )),
+            Ok(x) => Ok(x),
+            Err(e) => Err(e).context(SerdeJsonSnafu),
+        }
+    }
+
+    fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+        serde_json::to_vec(self).context(SerdeJsonSnafu)
     }
 }
 
@@ -330,5 +351,22 @@ impl TableRouteManager {
             .await?
             .map(|table_route| region_distribution(table_route.region_routes()))
             .transpose()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_route_compatibility() {
+        let old_raw_v = r#"{"region_routes":[{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]},{"region":{"id":1,"name":"r1","partition":null,"attrs":{}},"leader_peer":{"id":2,"addr":"a2"},"follower_peers":[]}],"version":0}"#;
+        let v = TableRouteValue::try_from_raw_value(old_raw_v.as_bytes()).unwrap();
+
+        let new_raw_v = format!("{:?}", v);
+        assert_eq!(
+            new_raw_v,
+            r#"Physical(PhysicalTableRouteValue { region_routes: [RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None }, RegionRoute { region: Region { id: 1(0, 1), name: "r1", partition: None, attrs: {} }, leader_peer: Some(Peer { id: 2, addr: "a2" }), follower_peers: [], leader_status: None }], version: 0 })"#
+        );
     }
 }

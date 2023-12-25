@@ -147,6 +147,14 @@ pub trait TableMetaKey {
     fn as_raw_key(&self) -> Vec<u8>;
 }
 
+pub trait TableMetaValue {
+    fn try_from_raw_value(raw_value: &[u8]) -> Result<Self>
+    where
+        Self: Sized;
+
+    fn try_as_raw_value(&self) -> Result<Vec<u8>>;
+}
+
 pub type TableMetadataManagerRef = Arc<TableMetadataManager>;
 
 pub struct TableMetadataManager {
@@ -221,7 +229,9 @@ impl<T: DeserializeOwned + Serialize> Serialize for DeserializedValueWithBytes<T
     }
 }
 
-impl<'de, T: DeserializeOwned + Serialize> Deserialize<'de> for DeserializedValueWithBytes<T> {
+impl<'de, T: DeserializeOwned + Serialize + TableMetaValue> Deserialize<'de>
+    for DeserializedValueWithBytes<T>
+{
     /// - Deserialize behaviors:
     ///
     /// The `inner` field will be deserialized from the `bytes` field.
@@ -248,11 +258,11 @@ impl<T: Serialize + DeserializeOwned + Clone> Clone for DeserializedValueWithByt
     }
 }
 
-impl<T: Serialize + DeserializeOwned> DeserializedValueWithBytes<T> {
+impl<T: Serialize + DeserializeOwned + TableMetaValue> DeserializedValueWithBytes<T> {
     /// Returns a struct containing a deserialized value and an original `bytes`.
     /// It accepts original bytes of inner.
     pub fn from_inner_bytes(bytes: Bytes) -> Result<Self> {
-        let inner = serde_json::from_slice(&bytes).context(error::SerdeJsonSnafu)?;
+        let inner = T::try_from_raw_value(&bytes)?;
         Ok(Self { bytes, inner })
     }
 
@@ -706,12 +716,12 @@ impl_table_meta_key!(TableNameKey<'_>, TableInfoKey, DatanodeTableKey);
 macro_rules! impl_table_meta_value {
     ($($val_ty: ty), *) => {
         $(
-            impl $val_ty {
-                pub fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
+            impl $crate::key::TableMetaValue for $val_ty {
+                fn try_from_raw_value(raw_value: &[u8]) -> Result<Self> {
                     serde_json::from_slice(raw_value).context(SerdeJsonSnafu)
                 }
 
-                pub fn try_as_raw_value(&self) -> Result<Vec<u8>> {
+                fn try_as_raw_value(&self) -> Result<Vec<u8>> {
                     serde_json::to_vec(self).context(SerdeJsonSnafu)
                 }
             }
@@ -739,8 +749,7 @@ macro_rules! impl_optional_meta_value {
 impl_table_meta_value! {
     TableNameValue,
     TableInfoValue,
-    DatanodeTableValue,
-    TableRouteValue
+    DatanodeTableValue
 }
 
 impl_optional_meta_value! {
