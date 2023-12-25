@@ -91,7 +91,7 @@ impl ClientManager {
         Ok(Self {
             config: config.clone(),
             client_factory: client,
-            client_pool: DashMap::with_capacity(config.num_topics),
+            client_pool: DashMap::new(),
         })
     }
 

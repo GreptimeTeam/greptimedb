@@ -304,7 +304,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a kafka client, broker endpoints: {:?}",
+        "Failed to build a Kafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
     BuildKafkaClient {
@@ -314,14 +314,14 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to build a kafka controller client"))]
+    #[snafu(display("Failed to build a Kafka controller client"))]
     BuildKafkaCtrlClient {
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to create a kafka wal topic"))]
+    #[snafu(display("Failed to create a Kafka wal topic"))]
     CreateKafkaWalTopic {
         location: Location,
         #[snafu(source)]

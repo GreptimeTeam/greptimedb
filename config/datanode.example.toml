@@ -51,9 +51,6 @@ sync_write = false
 
 # Kafka wal options, see `standalone.example.toml`.
 # broker_endpoints = ["127.0.0.1:9090"]
-# num_topics = 64
-# topic_name_prefix = "greptimedb_wal_topic"
-# num_partitions = 1
 # max_batch_size = "4MB"
 # linger = "200ms"
 # max_wait_time = "100ms"

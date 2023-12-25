@@ -87,7 +87,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a kafka client, broker endpoints: {:?}",
+        "Failed to build a Kafka client, broker endpoints: {:?}",
         broker_endpoints
     ))]
     BuildClient {
@@ -98,7 +98,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Failed to build a kafka partition client, topic: {}, partition: {}",
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
         topic,
         partition
     ))]

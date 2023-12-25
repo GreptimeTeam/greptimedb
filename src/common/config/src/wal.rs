@@ -70,9 +70,6 @@ mod tests {
     fn test_serde_kafka_config() {
         let toml_str = r#"
             broker_endpoints = ["127.0.0.1:9090"]
-            num_topics = 32
-            topic_name_prefix = "greptimedb_wal_topic"
-            num_partitions = 1
             max_batch_size = "4MB"
             linger = "200ms"
             max_wait_time = "100ms"
@@ -84,9 +81,6 @@ mod tests {
         let decoded: KafkaConfig = toml::from_str(toml_str).unwrap();
         let expected = KafkaConfig {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
-            num_topics: 32,
-            topic_name_prefix: "greptimedb_wal_topic".to_string(),
-            num_partitions: 1,
             compression: RsKafkaCompression::default(),
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),

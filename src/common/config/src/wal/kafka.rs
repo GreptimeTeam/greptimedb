@@ -29,12 +29,6 @@ pub type Topic = String;
 pub struct KafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
-    /// Number of topics shall be created beforehand.
-    pub num_topics: usize,
-    /// Topic name prefix.
-    pub topic_name_prefix: String,
-    /// Number of partitions per topic.
-    pub num_partitions: i32,
     /// The compression algorithm used to compress log entries.
     #[serde(skip)]
     #[serde(default)]
@@ -66,9 +60,6 @@ impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
             broker_endpoints: vec!["127.0.0.1:9090".to_string()],
-            num_topics: 64,
-            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
-            num_partitions: 1,
             compression: RsKafkaCompression::NoCompression,
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
