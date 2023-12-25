@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use chrono::DateTime;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
@@ -145,7 +146,11 @@ pub(crate) async fn prepare_table_region_and_info_value(
         region_route_factory(4, 3),
     ];
     table_metadata_manager
-        .create_table_metadata(table_info, region_routes, HashMap::default())
+        .create_table_metadata(
+            table_info,
+            TableRouteValue::new_physical(region_routes),
+            HashMap::default(),
+        )
         .await
         .unwrap();
 }

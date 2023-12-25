@@ -187,6 +187,7 @@ mod tests {
     use std::assert_matches::assert_matches;
 
     use common_catalog::consts::MITO2_ENGINE;
+    use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
@@ -409,7 +410,11 @@ mod tests {
         }];
 
         env.table_metadata_manager()
-            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::new_physical(region_routes),
+                HashMap::default(),
+            )
             .await
             .unwrap();
 

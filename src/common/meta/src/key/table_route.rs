@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use super::DeserializedValueWithBytes;
@@ -55,11 +55,8 @@ pub struct LogicalTableRouteValue {
 }
 
 impl TableRouteValue {
-    pub fn new(region_routes: Vec<RegionRoute>) -> Self {
-        Self::Physical(PhysicalTableRouteValue {
-            region_routes,
-            version: 0,
-        })
+    pub fn new_physical(region_routes: Vec<RegionRoute>) -> Self {
+        Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
@@ -101,6 +98,40 @@ impl TableRouteValue {
             TableRouteValue::Physical(x) => x,
             _ => unreachable!("Mistakenly been treated as a Physical TableRoute: {self:?}"),
         }
+    }
+
+    pub fn region_numbers(&self) -> Vec<RegionNumber> {
+        match self {
+            TableRouteValue::Physical(x) => x
+                .region_routes
+                .iter()
+                .map(|region_route| region_route.region.id.region_number())
+                .collect::<Vec<_>>(),
+            TableRouteValue::Logical(x) => x
+                .region_ids()
+                .iter()
+                .map(|region_id| region_id.region_number())
+                .collect::<Vec<_>>(),
+        }
+    }
+}
+
+impl PhysicalTableRouteValue {
+    pub fn new(region_routes: Vec<RegionRoute>) -> Self {
+        Self {
+            region_routes,
+            version: 0,
+        }
+    }
+}
+
+impl LogicalTableRouteValue {
+    pub fn physical_table_id(&self) -> TableId {
+        todo!()
+    }
+
+    pub fn region_ids(&self) -> Vec<RegionId> {
+        todo!()
     }
 }
 
