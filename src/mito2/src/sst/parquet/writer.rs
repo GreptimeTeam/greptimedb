@@ -114,14 +114,14 @@ impl ParquetWriter {
         let time_range = stats.time_range.unwrap();
 
         // convert FileMetaData to ParquetMetaData
-        let parquet_metadata = to_parquet_metadata(file_meta).ok();
+        let parquet_metadata = to_parquet_metadata(file_meta)?;
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
             time_range,
             file_size,
             num_rows: stats.num_rows,
-            file_metadata: parquet_metadata,
+            file_metadata: Some(parquet_metadata),
         }))
     }
 
