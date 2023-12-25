@@ -17,11 +17,11 @@
 use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 
-use store_api::logstore::{AppendBatchResponse, LogStore};
+use store_api::logstore::LogStore;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::RegionId;
 
-use crate::error::{MissingLastEntryIdSnafu, RejectWriteSnafu, Result};
+use crate::error::{RejectWriteSnafu, Result};
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
@@ -75,7 +75,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             match wal_writer.write_to_wal().await.map_err(Arc::new) {
                 Ok(response) => {
-                    update_next_entry_ids(&mut region_ctxs, &response);
+                    for (region_id, region_ctx) in region_ctxs.iter_mut() {
+                        // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
+                        // response is returned or the last entry ids for each region do exist.
+                        let last_entry_id =
+                            response.last_entry_ids.get(&region_id.as_u64()).unwrap();
+                        region_ctx.set_next_entry_id(last_entry_id + 1);
+                    }
                 }
                 Err(e) => {
                     // Failed to write wal.
@@ -206,23 +212,4 @@ fn maybe_fill_missing_columns(request: &mut WriteRequest, metadata: &RegionMetad
     }
 
     Ok(())
-}
-
-/// Updates the next entry id for each region with the returned last entry id contained in the response.
-fn update_next_entry_ids(
-    region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
-    response: &AppendBatchResponse,
-) {
-    for (region_id, region_ctx) in region_ctxs.iter_mut() {
-        // Missing a last entry id is not deemed as a critical error and hence no need to abort writing to memtable.
-        let Some(last_entry_id) = response.last_entry_ids.get(&region_id.as_u64()) else {
-            let e = MissingLastEntryIdSnafu {
-                region_id: *region_id,
-            }
-            .build();
-            region_ctx.set_error(Arc::new(e));
-            continue;
-        };
-        region_ctx.set_next_entry_id(last_entry_id + 1);
-    }
 }

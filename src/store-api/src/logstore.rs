@@ -41,7 +41,7 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse, Self::Error>;
 
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
-    /// while the value is the id of the entry, the last entry of the entries belong to the region, written into the log store.
+    /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(
         &self,
         entries: Vec<Self::Entry>,
@@ -88,7 +88,6 @@ pub struct AppendResponse {
 /// The response of an `append_batch` operation.
 #[derive(Debug, Default)]
 pub struct AppendBatchResponse {
-    /// Key: region id (as u64).
-    /// Value: the id of the entry, the last entry of the entries belong to the region, appended to the log store.
+    /// Key: region id (as u64). Value: the id of the last successfully written entry of the region.
     pub last_entry_ids: HashMap<u64, EntryId>,
 }

@@ -387,7 +387,7 @@ mod tests {
 
     use common_base::readable_size::ReadableSize;
     use common_telemetry::debug;
-    use common_test_util::temp_dir::create_temp_dir;
+    use common_test_util::temp_dir::{create_temp_dir, TempDir};
     use futures_util::StreamExt;
     use store_api::logstore::entry_stream::SendableEntryStream;
     use store_api::logstore::namespace::Namespace as NamespaceTrait;
@@ -532,10 +532,7 @@ mod tests {
         size
     }
 
-    #[tokio::test]
-    async fn test_compaction() {
-        common_telemetry::init_default_ut_logging();
-        let dir = create_temp_dir("raft-engine-logstore-test");
+    async fn new_test_log_store(dir: &TempDir) -> RaftEngineLogStore {
         let path = dir.path().to_str().unwrap().to_string();
 
         let config = RaftEngineConfig {
@@ -545,7 +542,15 @@ mod tests {
             ..Default::default()
         };
 
-        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
+        RaftEngineLogStore::try_new(path, config).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_compaction() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("raft-engine-logstore-test");
+        let logstore = new_test_log_store(&dir).await;
+
         let namespace = Namespace::with_id(42);
         for id in 0..4096 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -568,16 +573,8 @@ mod tests {
     async fn test_obsolete() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("raft-engine-logstore-test");
-        let path = dir.path().to_str().unwrap().to_string();
+        let logstore = new_test_log_store(&dir).await;
 
-        let config = RaftEngineConfig {
-            file_size: ReadableSize::mb(2),
-            purge_threshold: ReadableSize::mb(4),
-            purge_interval: Duration::from_secs(5),
-            ..Default::default()
-        };
-
-        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
         let namespace = Namespace::with_id(42);
         for id in 0..1024 {
             let entry = Entry::create(id, namespace.id(), [b'x'; 4096].to_vec());
@@ -597,16 +594,7 @@ mod tests {
     async fn test_append_batch() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("logstore-append-batch-test");
-        let path = dir.path().to_str().unwrap().to_string();
-
-        let config = RaftEngineConfig {
-            file_size: ReadableSize::mb(2),
-            purge_threshold: ReadableSize::mb(4),
-            purge_interval: Duration::from_secs(5),
-            ..Default::default()
-        };
-
-        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
+        let logstore = new_test_log_store(&dir).await;
 
         let entries = (0..8)
             .flat_map(|ns_id| {
@@ -628,16 +616,7 @@ mod tests {
     async fn test_append_batch_interleaved() {
         common_telemetry::init_default_ut_logging();
         let dir = create_temp_dir("logstore-append-batch-test");
-
-        let path = dir.path().to_str().unwrap().to_string();
-        let config = RaftEngineConfig {
-            file_size: ReadableSize::mb(2),
-            purge_threshold: ReadableSize::mb(4),
-            purge_interval: Duration::from_secs(5),
-            ..Default::default()
-        };
-
-        let logstore = RaftEngineLogStore::try_new(path, config).await.unwrap();
+        let logstore = new_test_log_store(&dir).await;
 
         let entries = vec![
             Entry::create(0, 0, [b'0'; 4096].to_vec()),
@@ -651,5 +630,31 @@ mod tests {
 
         assert_eq!((Some(0), Some(2)), logstore.span(&Namespace::with_id(0)));
         assert_eq!((Some(0), Some(1)), logstore.span(&Namespace::with_id(1)));
+    }
+
+    #[tokio::test]
+    async fn test_append_batch_response() {
+        common_telemetry::init_default_ut_logging();
+        let dir = create_temp_dir("logstore-append-batch-test");
+        let logstore = new_test_log_store(&dir).await;
+
+        let entries = vec![
+            // Entry[0] from region 0.
+            Entry::create(0, 0, [b'0'; 4096].to_vec()),
+            // Entry[0] from region 1.
+            Entry::create(0, 1, [b'1'; 4096].to_vec()),
+            // Entry[1] from region 1.
+            Entry::create(1, 0, [b'1'; 4096].to_vec()),
+            // Entry[1] from region 0.
+            Entry::create(1, 1, [b'0'; 4096].to_vec()),
+            // Entry[2] from region 2.
+            Entry::create(2, 2, [b'2'; 4096].to_vec()),
+        ];
+
+        // Ensure the last entry id returned for each region is the expected one.
+        let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
+        assert_eq!(last_entry_ids[&0], 1);
+        assert_eq!(last_entry_ids[&1], 1);
+        assert_eq!(last_entry_ids[&2], 2);
     }
 }
