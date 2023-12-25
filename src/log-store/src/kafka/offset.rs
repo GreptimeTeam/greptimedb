@@ -12,12 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains)]
+use crate::error::{CastSnafu, Result};
+use crate::kafka::EntryId;
 
-pub mod error;
-pub mod kafka;
-mod noop;
-pub mod raft_engine;
-pub mod test_util;
+/// A wrapper of kafka offset.
+pub(crate) struct Offset(pub i64);
 
-pub use noop::NoopLogStore;
+impl TryFrom<Offset> for EntryId {
+    type Error = crate::error::Error;
+
+    fn try_from(offset: Offset) -> Result<Self> {
+        EntryId::try_from(offset.0).map_err(|_| CastSnafu.build())
+    }
+}
+
+impl TryFrom<EntryId> for Offset {
+    type Error = crate::error::Error;
+
+    fn try_from(entry_id: EntryId) -> Result<Self> {
+        i64::try_from(entry_id)
+            .map(Offset)
+            .map_err(|_| CastSnafu.build())
+    }
+}

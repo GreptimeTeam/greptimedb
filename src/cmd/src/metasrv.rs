@@ -117,6 +117,10 @@ struct StartCommand {
     /// The working home directory of this metasrv instance.
     #[clap(long)]
     data_home: Option<String>,
+
+    /// If it's not empty, the metasrv will store all data with this key prefix.
+    #[clap(long)]
+    store_key_prefix: Option<String>,
 }
 
 impl StartCommand {
@@ -172,6 +176,8 @@ impl StartCommand {
         if let Some(data_home) = &self.data_home {
             opts.data_home = data_home.clone();
         }
+
+        opts.store_key_prefix = self.store_key_prefix.clone();
 
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;

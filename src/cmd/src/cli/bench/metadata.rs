@@ -14,6 +14,7 @@
 
 use std::time::Instant;
 
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::table_name::TableName;
 
@@ -53,7 +54,11 @@ impl TableMetadataBencher {
                 let start = Instant::now();
 
                 self.table_metadata_manager
-                    .create_table_metadata(table_info, region_routes, region_wal_options)
+                    .create_table_metadata(
+                        table_info,
+                        TableRouteValue::physical(region_routes),
+                        region_wal_options,
+                    )
                     .await
                     .unwrap();
 

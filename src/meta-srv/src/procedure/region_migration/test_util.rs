@@ -22,6 +22,7 @@ use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
 use common_meta::instruction::{
     DowngradeRegionReply, InstructionReply, SimpleReply, UpgradeRegionReply,
 };
+use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
@@ -143,6 +144,22 @@ impl TestingEnv {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
         }
+    }
+
+    // Creates a table metadata with the physical table route.
+    pub async fn create_physical_table_metadata(
+        &self,
+        table_info: RawTableInfo,
+        region_routes: Vec<RegionRoute>,
+    ) {
+        self.table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
     }
 }
 
@@ -369,7 +386,11 @@ impl ProcedureMigrationTestSuite {
     ) {
         self.env
             .table_metadata_manager()
-            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                HashMap::default(),
+            )
             .await
             .unwrap();
     }

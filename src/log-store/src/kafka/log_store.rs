@@ -13,22 +13,37 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, WalOptions};
+use futures_util::StreamExt;
+use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
 use crate::error::{Error, Result};
+use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
+use crate::kafka::offset::Offset;
+use crate::kafka::record_utils::{handle_consume_result, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
+/// A log store backed by Kafka.
 #[derive(Debug)]
-pub struct KafkaLogStore;
+pub struct KafkaLogStore {
+    config: KafkaConfig,
+    /// Manages kafka clients through which the log store contact the Kafka cluster.
+    client_manager: ClientManagerRef,
+}
 
 impl KafkaLogStore {
-    pub async fn try_new(config: KafkaConfig) -> Result<Self> {
-        todo!()
+    /// Tries to create a Kafka log store.
+    pub async fn try_new(config: &KafkaConfig) -> Result<Self> {
+        Ok(Self {
+            client_manager: Arc::new(ClientManager::try_new(config).await?),
+            config: config.clone(),
+        })
     }
 }
 
@@ -38,68 +53,135 @@ impl LogStore for KafkaLogStore {
     type Entry = EntryImpl;
     type Namespace = NamespaceImpl;
 
-    /// Create an entry of the associate Entry type.
+    /// Creates an entry of the associated Entry type.
     fn entry<D: AsRef<[u8]>>(
         &self,
         data: D,
         entry_id: EntryId,
         ns: Self::Namespace,
     ) -> Self::Entry {
-        EntryImpl::new(data.as_ref().to_vec(), entry_id, ns)
+        EntryImpl {
+            data: data.as_ref().to_vec(),
+            id: entry_id,
+            ns,
+        }
     }
 
-    /// Append an `Entry` to WAL with given namespace and return append response containing
-    /// the entry id.
+    /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        todo!()
+        let entry_id = RecordProducer::new(entry.ns.clone())
+            .with_entries(vec![entry])
+            .produce(&self.client_manager)
+            .await
+            .map(TryInto::try_into)??;
+        Ok(AppendResponse {
+            last_entry_id: entry_id,
+        })
     }
 
-    /// For a batch of log entries belonging to multiple regions, each assigned to a specific topic,
-    /// we need to determine the minimum log offset returned for each region in this batch.
-    /// During replay, we use this offset to fetch log entries for a region from its assigned topic.
-    /// After fetching, we filter the entries to obtain log entries relevant to that specific region.
+    /// Appends a batch of entries and returns a response containing a map where the key is a region id
+    /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        todo!()
+        if entries.is_empty() {
+            return Ok(AppendBatchResponse::default());
+        }
+
+        // Groups entries by region id and pushes them to an associated record producer.
+        let mut producers = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            producers
+                .entry(entry.ns.region_id)
+                .or_insert(RecordProducer::new(entry.ns.clone()))
+                .push(entry);
+        }
+
+        // Builds a record from entries belong to a region and produces them to kafka server.
+        let region_ids = producers.keys().cloned().collect::<Vec<_>>();
+        let tasks = producers
+            .into_values()
+            .map(|producer| producer.produce(&self.client_manager))
+            .collect::<Vec<_>>();
+        // Each produce operation returns a kafka offset of the produced record.
+        // The offsets are then converted to entry ids.
+        let entry_ids = futures::future::try_join_all(tasks)
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(AppendBatchResponse {
+            last_entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
+        })
     }
 
-    /// Create a new `EntryStream` to asynchronously generates `Entry` with ids
-    /// starting from `id`. The generated entries will be filtered by the namespace.
+    /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
+    /// starting from `entry_id`. The generated entries will be filtered by the namespace.
     async fn read(
         &self,
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
-        todo!()
+        let topic = ns.topic.clone();
+        let region_id = ns.region_id;
+
+        // Gets the client associated with the topic.
+        let client = self
+            .client_manager
+            .get_or_insert(&topic)
+            .await?
+            .raw_client
+            .clone();
+
+        // Reads the entries starting from exactly the specified offset.
+        let offset = Offset::try_from(entry_id)?.0;
+        let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(offset))
+            .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
+            .with_max_wait_ms(self.config.max_wait_time.as_millis() as i32)
+            .build();
+        let stream = async_stream::stream!({
+            while let Some(consume_result) = stream_consumer.next().await {
+                yield handle_consume_result(consume_result, &topic, region_id, offset);
+            }
+        });
+        Ok(Box::pin(stream))
     }
 
-    /// Create a namespace of the associate Namespace type
+    /// Creates a namespace of the associated Namespace type.
     fn namespace(&self, ns_id: NamespaceId, wal_options: &WalOptions) -> Self::Namespace {
-        todo!()
+        // Safety: upon start, the datanode checks the consistency of the wal providers in the wal config of the
+        // datanode and that of the metasrv. Therefore, the wal options passed into the kafka log store
+        // must be of type WalOptions::Kafka.
+        let WalOptions::Kafka(kafka_options) = wal_options else {
+            unreachable!()
+        };
+        NamespaceImpl {
+            region_id: ns_id,
+            topic: kafka_options.topic.clone(),
+        }
     }
 
-    /// Create a new `Namespace`.
+    /// Creates a new `Namespace` from the given ref.
     async fn create_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
-    /// Delete an existing `Namespace` with given ref.
+    /// Deletes an existing `Namespace` specified by the given ref.
     async fn delete_namespace(&self, _ns: &Self::Namespace) -> Result<()> {
         Ok(())
     }
 
-    /// List all existing namespaces.
+    /// Lists all existing namespaces.
     async fn list_namespaces(&self) -> Result<Vec<Self::Namespace>> {
         Ok(vec![])
     }
 
-    /// Mark all entry ids `<=id` of given `namespace` as obsolete so that logstore can safely delete
-    /// the log files if all entries inside are obsolete. This method may not delete log
-    /// files immediately.
+    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
+    /// so that the log store can safely delete those entries. This method does not guarantee
+    /// that the obsolete entries are deleted immediately.
     async fn obsolete(&self, _ns: Self::Namespace, _entry_id: EntryId) -> Result<()> {
         Ok(())
     }
 
-    /// Stop components of logstore.
+    /// Stops components of the logstore.
     async fn stop(&self) -> Result<()> {
         Ok(())
     }

@@ -63,6 +63,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to deserialize column metadata from {}", raw))]
+    DeserializeColumnMetadata {
+        raw: String,
+        #[snafu(source)]
+        error: serde_json::Error,
+        location: Location,
+    },
+
     #[snafu(display("Failed to decode base64 column value"))]
     DecodeColumnValue {
         #[snafu(source)]
@@ -132,6 +140,12 @@ pub enum Error {
 
     #[snafu(display("Alter request to physical region is forbidden"))]
     ForbiddenPhysicalAlter { location: Location },
+
+    #[snafu(display("Invalid region metadata"))]
+    InvalidMetadata {
+        source: store_api::metadata::MetadataError,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -150,8 +164,10 @@ impl ErrorExt for Error {
 
             MissingInternalColumn { .. }
             | DeserializeSemanticType { .. }
+            | DeserializeColumnMetadata { .. }
             | DecodeColumnValue { .. }
-            | ParseRegionId { .. } => StatusCode::Unexpected,
+            | ParseRegionId { .. }
+            | InvalidMetadata { .. } => StatusCode::Unexpected,
 
             PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 StatusCode::RegionNotFound
