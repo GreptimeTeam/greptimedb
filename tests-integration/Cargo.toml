@@ -34,6 +34,7 @@ datatypes.workspace = true
 dotenv = "0.15"
 frontend = { workspace = true, features = ["testing"] }
 futures.workspace = true
+log-store.workspace = true
 meta-client.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
 mysql_async = { version = "0.33", default-features = false, features = [
@@ -44,6 +45,7 @@ once_cell.workspace = true
 operator.workspace = true
 query.workspace = true
 rand.workspace = true
+rskafka.workspace = true
 rstest = "0.17"
 rstest_reuse = "0.5"
 secrecy = "0.8"

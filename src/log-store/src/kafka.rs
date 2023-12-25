@@ -29,8 +29,8 @@ use crate::error::Error;
 /// Kafka Namespace implementation.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct NamespaceImpl {
-    region_id: u64,
-    topic: Topic,
+    pub region_id: u64,
+    pub topic: Topic,
 }
 
 impl Namespace for NamespaceImpl {
@@ -49,11 +49,11 @@ impl Display for NamespaceImpl {
 #[derive(Debug, PartialEq, Clone)]
 pub struct EntryImpl {
     /// Entry payload.
-    data: Vec<u8>,
+    pub data: Vec<u8>,
     /// The logical entry id.
-    id: EntryId,
+    pub id: EntryId,
     /// The namespace used to identify and isolate log entries from different regions.
-    ns: NamespaceImpl,
+    pub ns: NamespaceImpl,
 }
 
 impl Entry for EntryImpl {
