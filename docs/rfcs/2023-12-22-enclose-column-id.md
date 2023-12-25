@@ -1,12 +1,12 @@
 ---
-Feature Name: Enclose Region Id
+Feature Name: Enclose Column Id
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/2982
 Date: 2023-12-22
 Author: "Ruihang Xia <waynestxia@gmail.com>"
 ---
 
 # Summary
-This RFC proposes to enclose the usage of `RegionId` into the region engine only.
+This RFC proposes to enclose the usage of `ColumnId` into the region engine only.
 
 # Motivation
 `ColumnId` is an identifier for columns. It's assigned by meta server, stored in `TableInfo` and `RegionMetadata` and used in region engine to distinguish columns.
@@ -15,13 +15,13 @@ At present, Both Frontend, Datanode and Metasrv are aware of `ColumnId` but it's
 
 # Details
 
-`RegionId` is used widely on both read and write paths. Removing it from Frontend and Metasrv implies several things:
+`ColumnId` is used widely on both read and write paths. Removing it from Frontend and Metasrv implies several things:
 
 - A column may have different column id in different regions.
 - A column is identified by its name in all components.
 - Column order in the region engine is not restricted, i.e., no need to be in the same order with table info.
 
-The first thing doesn't matter IMO. This concept doesn't exist anymore outside of region server, and each region is autonomous and independent -- the only guarantee it should hold is those columns exist. But if we consider region repartition, where the SST file would be re-assign to different regions, things would become a bit more complicated. A possible solution is store the relation between name and RegionId in the manifest, but it's out of the scope of this RFC. We can likely give a workaround by introducing a indirection mapping layer of different version of partitions.
+The first thing doesn't matter IMO. This concept doesn't exist anymore outside of region server, and each region is autonomous and independent -- the only guarantee it should hold is those columns exist. But if we consider region repartition, where the SST file would be re-assign to different regions, things would become a bit more complicated. A possible solution is store the relation between name and ColumnId in the manifest, but it's out of the scope of this RFC. We can likely give a workaround by introducing a indirection mapping layer of different version of partitions.
 
 Users write and query column by their names, not by ColumnId or something else. The second point also means to change the column reference in ScanRequest from index to name. This change can hugely alleviate the misuse of the column index, which has given us many surprises.
 
