@@ -95,6 +95,14 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let metadata = human_panic::Metadata {
+        version: env!("CARGO_PKG_VERSION").into(),
+        name: "GreptimeDB".into(),
+        authors: Default::default(),
+        homepage: "https://github.com/GreptimeTeam/greptimedb/discussions".into(),
+    };
+    human_panic::setup_panic!(metadata);
+
     common_telemetry::set_panic_hook();
 
     let cli = greptimedb_cli();
