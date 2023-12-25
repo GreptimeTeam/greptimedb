@@ -56,7 +56,7 @@ impl TableMetadataBencher {
                 self.table_metadata_manager
                     .create_table_metadata(
                         table_info,
-                        TableRouteValue::new_physical(region_routes),
+                        TableRouteValue::physical(region_routes),
                         region_wal_options,
                     )
                     .await

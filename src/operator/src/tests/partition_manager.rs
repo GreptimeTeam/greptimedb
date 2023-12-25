@@ -115,7 +115,7 @@ pub(crate) async fn create_partition_rule_manager(
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
-            TableRouteValue::new_physical(vec![
+            TableRouteValue::physical(vec![
                 RegionRoute {
                     region: Region {
                         id: 3.into(),
@@ -179,7 +179,7 @@ pub(crate) async fn create_partition_rule_manager(
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(2, "table_2", regions.clone().into_iter()).into(),
-            TableRouteValue::new_physical(vec![
+            TableRouteValue::physical(vec![
                 RegionRoute {
                     region: Region {
                         id: 1.into(),

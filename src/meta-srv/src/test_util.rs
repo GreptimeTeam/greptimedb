@@ -148,7 +148,7 @@ pub(crate) async fn prepare_table_region_and_info_value(
     table_metadata_manager
         .create_table_metadata(
             table_info,
-            TableRouteValue::new_physical(region_routes),
+            TableRouteValue::physical(region_routes),
             HashMap::default(),
         )
         .await

@@ -224,7 +224,7 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let err = state
@@ -250,7 +250,7 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let err = state
@@ -278,7 +278,7 @@ mod tests {
             leader_status: Some(RegionStatus::Downgraded),
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let new_region_routes = state
@@ -316,7 +316,7 @@ mod tests {
             },
         ];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let table_metadata_manager = env.table_metadata_manager();
@@ -373,7 +373,7 @@ mod tests {
             leader_status: None,
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
@@ -396,7 +396,7 @@ mod tests {
             leader_status: None,
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
@@ -419,7 +419,7 @@ mod tests {
             leader_status: Some(RegionStatus::Downgraded),
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let err = state.check_metadata_updated(&mut ctx).await.unwrap_err();
@@ -449,7 +449,7 @@ mod tests {
             .unwrap();
         ctx.volatile_ctx.opening_region_guard = Some(guard);
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let table_metadata_manager = env.table_metadata_manager();

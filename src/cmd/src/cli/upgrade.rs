@@ -153,7 +153,7 @@ impl MigrateTableMetadata {
         )
         .unwrap();
 
-        let new_table_value = NextTableRouteValue::new_physical(table_route.region_routes);
+        let new_table_value = NextTableRouteValue::physical(table_route.region_routes);
 
         let table_id = table_route.table.id as u32;
         let new_key = TableRouteKey::new(table_id);

@@ -127,7 +127,7 @@ mod tests {
             region_routes
         };
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let table_metadata_manager = env.table_metadata_manager();
@@ -210,7 +210,7 @@ mod tests {
             region_routes
         };
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let table_metadata_manager = env.table_metadata_manager();

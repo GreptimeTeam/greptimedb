@@ -776,14 +776,14 @@ mod tests {
         let region_routes = vec![region_route.clone()];
 
         let expected_region_routes =
-            TableRouteValue::new_physical(vec![region_route.clone(), region_route.clone()]);
+            TableRouteValue::physical(vec![region_route.clone(), region_route.clone()]);
         let expected = serde_json::to_vec(&expected_region_routes).unwrap();
 
         // Serialize behaviors:
         // The inner field will be ignored.
         let value = DeserializedValueWithBytes {
             // ignored
-            inner: TableRouteValue::new_physical(region_routes.clone()),
+            inner: TableRouteValue::physical(region_routes.clone()),
             bytes: Bytes::from(expected.clone()),
         };
 
@@ -835,7 +835,7 @@ mod tests {
         table_metadata_manager
             .create_table_metadata(
                 table_info,
-                TableRouteValue::new_physical(region_routes),
+                TableRouteValue::physical(region_routes),
                 HashMap::default(),
             )
             .await
@@ -903,9 +903,9 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let datanode_id = 2;
-        let table_route_value = DeserializedValueWithBytes::from_inner(
-            TableRouteValue::new_physical(region_routes.clone()),
-        );
+        let table_route_value = DeserializedValueWithBytes::from_inner(TableRouteValue::physical(
+            region_routes.clone(),
+        ));
 
         // creates metadata.
         create_physical_table_metadata(
@@ -1133,7 +1133,7 @@ mod tests {
             new_test_table_info(region_routes.iter().map(|r| r.region.id.region_number())).into();
         let table_id = table_info.ident.table_id;
         let current_table_route_value = DeserializedValueWithBytes::from_inner(
-            TableRouteValue::new_physical(region_routes.clone()),
+            TableRouteValue::physical(region_routes.clone()),
         );
 
         // creates metadata.
@@ -1204,7 +1204,7 @@ mod tests {
         let region_storage_path =
             region_storage_path(&table_info.catalog_name, &table_info.schema_name);
         let current_table_route_value = DeserializedValueWithBytes::from_inner(
-            TableRouteValue::new_physical(region_routes.clone()),
+            TableRouteValue::physical(region_routes.clone()),
         );
 
         // creates metadata.

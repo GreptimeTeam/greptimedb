@@ -294,7 +294,7 @@ mod tests {
         table_metadata_manager
             .create_table_metadata(
                 table_info,
-                TableRouteValue::new_physical(vec![region_route]),
+                TableRouteValue::physical(vec![region_route]),
                 HashMap::default(),
             )
             .await
@@ -385,7 +385,7 @@ mod tests {
         table_metadata_manager
             .create_table_metadata(
                 table_info,
-                TableRouteValue::new_physical(vec![region_route]),
+                TableRouteValue::physical(vec![region_route]),
                 HashMap::default(),
             )
             .await

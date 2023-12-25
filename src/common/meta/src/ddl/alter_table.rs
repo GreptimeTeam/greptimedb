@@ -189,7 +189,7 @@ impl AlterTableProcedure {
             .table_route_manager()
             .get(table_id)
             .await?
-            .with_context(|| TableRouteNotFoundSnafu { table_id })?
+            .context(TableRouteNotFoundSnafu { table_id })?
             .into_inner();
         let region_routes = table_route.region_routes();
 

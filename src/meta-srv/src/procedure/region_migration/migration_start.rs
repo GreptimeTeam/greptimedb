@@ -186,7 +186,7 @@ mod tests {
             ..Default::default()
         };
 
-        env.create_physical_table_route(table_info, vec![region_route])
+        env.create_physical_table_metadata(table_info, vec![region_route])
             .await;
 
         let err = state
@@ -218,7 +218,7 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
@@ -249,7 +249,7 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
@@ -274,7 +274,7 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_route(table_info, region_routes)
+        env.create_physical_table_metadata(table_info, region_routes)
             .await;
 
         let (next, _) = state.next(&mut ctx).await.unwrap();

@@ -55,7 +55,7 @@ pub struct LogicalTableRouteValue {
 }
 
 impl TableRouteValue {
-    pub fn new_physical(region_routes: Vec<RegionRoute>) -> Self {
+    pub fn physical(region_routes: Vec<RegionRoute>) -> Self {
         Self::Physical(PhysicalTableRouteValue::new(region_routes))
     }
 
