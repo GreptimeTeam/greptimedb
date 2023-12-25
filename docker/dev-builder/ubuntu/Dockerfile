@@ -43,4 +43,5 @@ ARG RUST_TOOLCHAIN
 RUN rustup toolchain install ${RUST_TOOLCHAIN}
 
 # Install nextest.
-RUN cargo install cargo-nextest --locked
+RUN cargo install cargo-binstall --locked
+RUN cargo binstall cargo-nextest --no-confirm
