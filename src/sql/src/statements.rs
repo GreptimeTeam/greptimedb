@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     pub fn test_parse_datetime_literal() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         let value = sql_value_to_value(
             "datetime_col",
             &ConcreteDataType::datetime_datatype(),

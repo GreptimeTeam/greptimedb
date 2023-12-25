@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_cast_with_opt() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         // non-strict mode
         let cast_option = CastOption { strict: false };
         let src_value = Value::Int8(-1);

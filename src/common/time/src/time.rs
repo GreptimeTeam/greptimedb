@@ -108,13 +108,13 @@ impl Time {
         self.as_formatted_string("%H:%M:%S%.f%z", None)
     }
 
-    /// Format Time for server timezone.
-    pub fn to_local_string(&self) -> String {
+    /// Format Time for system time zone.
+    pub fn to_system_tz_string(&self) -> String {
         self.as_formatted_string("%H:%M:%S%.f", None)
     }
 
     /// Format Time for given timezone.
-    /// When timezone is None, using server time zone by default.
+    /// When timezone is None, using system time zone by default.
     pub fn to_timezone_aware_string(&self, tz: Option<TimeZone>) -> String {
         self.as_formatted_string("%H:%M:%S%.f", tz)
     }
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_to_iso8601_string() {
-        set_default_time_zone("+10:00").unwrap();
+        set_default_time_zone(Some("+10:00")).unwrap();
         let time_millis = 1000001;
         let ts = Time::new_millisecond(time_millis);
         assert_eq!("10:16:40.001+1000", ts.to_iso8601_string());
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_serialize_to_json_value() {
-        set_default_time_zone("+10:00").unwrap();
+        set_default_time_zone(Some("+10:00")).unwrap();
         assert_eq!(
             "10:00:01+1000",
             match serde_json::Value::from(Time::new(1, TimeUnit::Second)) {
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_to_timezone_aware_string() {
-        set_default_time_zone("+10:00").unwrap();
+        set_default_time_zone(Some("+10:00")).unwrap();
 
         assert_eq!(
             "10:00:00.001",

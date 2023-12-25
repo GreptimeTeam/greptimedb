@@ -370,7 +370,7 @@ impl StartCommand {
 
         info!("Building standalone instance with {opts:#?}");
 
-        set_default_time_zone(opts.frontend.default_time_zone.as_deref().unwrap_or(""))
+        set_default_time_zone(opts.frontend.default_time_zone.as_deref())
             .context(InitTimeZoneSnafu)?;
 
         // Ensure the data_home directory exists.

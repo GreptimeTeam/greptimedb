@@ -231,7 +231,7 @@ mod tests {
     // $TZ doesn't take effort
     #[test]
     fn test_timestamp_cast() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         // String -> TimestampSecond
         let s = Value::String("2021-01-01 01:02:03".to_string().into());
         let ts = ConcreteDataType::timestamp_second_datatype()

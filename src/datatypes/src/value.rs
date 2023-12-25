@@ -1876,7 +1876,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");

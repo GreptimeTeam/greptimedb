@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_datetime_vector() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         let v = DateTimeVector::new(PrimitiveArray::from(vec![1000, 2000, 3000]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());

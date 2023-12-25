@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_to_serde_json_value() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         let time = TimeSecond::new(123);
         let val = serde_json::Value::from(time);
         match val {

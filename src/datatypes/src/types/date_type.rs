@@ -109,7 +109,7 @@ mod tests {
     // $TZ doesn't take effort
     #[test]
     fn test_date_cast() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         // timestamp -> date
         let ts = Value::Timestamp(Timestamp::from_str("2000-01-01 08:00:01").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();

@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     pub fn test_new_date_time() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         assert_eq!("1970-01-01 08:00:00+0800", DateTime::new(0).to_string());
         assert_eq!("1970-01-01 08:00:01+0800", DateTime::new(1000).to_string());
         assert_eq!("1970-01-01 07:59:59+0800", DateTime::new(-1000).to_string());
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     pub fn test_parse_from_string() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         let time = "1970-01-01 00:00:00+0800";
         let dt = DateTime::from_str(time).unwrap();
         assert_eq!(time, &dt.to_string());
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_parse_local_date_time() {
-        set_default_time_zone("Asia/Shanghai").unwrap();
+        set_default_time_zone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(
             -28800000,
             DateTime::from_str("1970-01-01 00:00:00").unwrap().val()

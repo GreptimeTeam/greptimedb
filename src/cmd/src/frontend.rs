@@ -218,8 +218,7 @@ impl StartCommand {
         logging::info!("Frontend start command: {:#?}", self);
         logging::info!("Frontend options: {:#?}", opts);
 
-        set_default_time_zone(opts.default_time_zone.as_deref().unwrap_or(""))
-            .context(InitTimeZoneSnafu)?;
+        set_default_time_zone(opts.default_time_zone.as_deref()).context(InitTimeZoneSnafu)?;
 
         let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
             msg: "'meta_client'",

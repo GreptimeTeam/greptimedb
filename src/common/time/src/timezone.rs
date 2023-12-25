@@ -31,11 +31,10 @@ use crate::util::find_tz_from_env;
 static DEFAULT_TIME_ZONE: OnceCell<TimeZone> = OnceCell::new();
 
 // Set the System time zone by `tz_str`
-pub fn set_default_time_zone(tz_str: &str) -> Result<()> {
-    let tz = if tz_str.is_empty() {
-        TimeZone::Named(Tz::UTC)
-    } else {
-        TimeZone::from_tz_string(tz_str)?
+pub fn set_default_time_zone(tz_str: Option<&str>) -> Result<()> {
+    let tz = match tz_str {
+        None | Some("") => TimeZone::Named(Tz::UTC),
+        Some(tz) => TimeZone::from_tz_string(tz)?,
     };
     DEFAULT_TIME_ZONE.get_or_init(|| tz);
     Ok(())
