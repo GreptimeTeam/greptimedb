@@ -1,0 +1,19 @@
+name: "PR Doc Labeler"
+on:
+  pull_request:
+    types: [opened, edited]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  triage:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: github/issue-labeler@v3.3
+      with:
+        configuration-path: .github/doc-label-config.yml
+        enable-versioned-regex: false
+        repo-token: ${{ github.token }}
