@@ -193,7 +193,8 @@ impl LogStore for RaftEngineLogStore {
         }
 
         // Records the last entry id for each region's entries.
-        let mut last_entry_ids = HashMap::with_capacity(entries.len());
+        let mut last_entry_ids: HashMap<NamespaceId, EntryId> =
+            HashMap::with_capacity(entries.len());
         let mut batch = LogBatch::with_capacity(entries.len());
 
         for e in entries {
@@ -202,7 +203,7 @@ impl LogStore for RaftEngineLogStore {
             let ns_id = e.namespace_id;
             last_entry_ids
                 .entry(ns_id)
-                .and_modify(|x: &mut u64| *x = (*x).max(e.id))
+                .and_modify(|x| *x = (*x).max(e.id))
                 .or_insert(e.id);
             batch
                 .add_entries::<MessageType>(ns_id, &[e])
