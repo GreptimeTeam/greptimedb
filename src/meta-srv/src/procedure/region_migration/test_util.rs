@@ -146,7 +146,7 @@ impl TestingEnv {
         }
     }
 
-    // Creates a table metadata with the physical table route. 
+    // Creates a table metadata with the physical table route.
     pub async fn create_physical_table_metadata(
         &self,
         table_info: RawTableInfo,
