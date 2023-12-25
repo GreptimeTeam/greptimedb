@@ -160,8 +160,8 @@ impl UploadPartWriter {
     }
 
     /// Reserve capacity for `additional` files.
-    pub(crate) fn reserve_capacity(&mut self, addtional: usize) {
-        self.file_metas.reserve(addtional);
+    pub(crate) fn reserve_capacity(&mut self, additional: usize) {
+        self.file_metas.reserve(additional);
     }
 
     /// Builds a new parquet writer to write to this part.
