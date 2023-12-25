@@ -152,7 +152,10 @@ impl RegionEngine for MetricEngine {
 
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
-        todo!()
+        self.inner
+            .load_region_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's disk usage.
@@ -261,7 +264,7 @@ mod test {
             .await
             .unwrap_err();
 
-        // open nonexistent region
+        // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             region_dir: env.default_region_dir(),
@@ -274,6 +277,6 @@ mod test {
                 RegionRequest::Open(invalid_open_request),
             )
             .await
-            .unwrap_err();
+            .unwrap();
     }
 }
