@@ -19,7 +19,7 @@ use common_recordbatch::OrderOption;
 pub struct ScanRequest {
     /// Indices of columns to read, `None` to read all columns. This indices is
     /// based on table schema.
-    pub projection: Option<Vec<usize>>,
+    pub projection: Option<Vec<String>>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
     /// Expected output ordering. This is only a hint and isn't guaranteed.

@@ -99,6 +99,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Column {name} not found"))]
+    ColumnNotFound { name: String, location: Location },
+
     #[snafu(display("Unsupported column default constraint expression: {}", expr))]
     UnsupportedDefaultExpr { expr: String, location: Location },
 

@@ -29,13 +29,13 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::VectorRef;
 use futures::Stream;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::ScanRequest;
 
 use self::file_stream::{CreateScanPlanContext, ScanPlanConfig};
 use crate::error::{
     BuildBackendSnafu, CreateDefaultSnafu, ExtractColumnFromFilterSnafu,
-    MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, ProjectionOutOfBoundsSnafu, Result,
+    MissingColumnNoDefaultSnafu, ProjectSchemaSnafu, Result,
 };
 use crate::region::FileRegion;
 
@@ -70,7 +70,7 @@ impl FileRegion {
 
     fn projection_pushdown_to_file(
         &self,
-        req_projection: &Option<Vec<usize>>,
+        req_projection: &Option<Vec<String>>,
     ) -> Result<Option<Vec<usize>>> {
         let Some(scan_projection) = req_projection.as_ref() else {
             return Ok(None);
@@ -78,19 +78,10 @@ impl FileRegion {
 
         let file_column_schemas = &self.file_options.file_column_schemas;
         let mut file_projection = Vec::with_capacity(scan_projection.len());
-        for column_index in scan_projection {
-            ensure!(
-                *column_index < self.metadata.schema.num_columns(),
-                ProjectionOutOfBoundsSnafu {
-                    column_index: *column_index,
-                    bounds: self.metadata.schema.num_columns()
-                }
-            );
-
-            let column_name = self.metadata.schema.column_name_by_index(*column_index);
+        for column_name in scan_projection {
             let file_column_index = file_column_schemas
                 .iter()
-                .position(|c| c.name == column_name);
+                .position(|c| c.name == *column_name);
             if let Some(file_column_index) = file_column_index {
                 file_projection.push(file_column_index);
             }
@@ -126,12 +117,12 @@ impl FileRegion {
         Ok(file_filters)
     }
 
-    fn scan_schema(&self, req_projection: &Option<Vec<usize>>) -> Result<SchemaRef> {
-        let schema = if let Some(indices) = req_projection {
+    fn scan_schema(&self, req_projection: &Option<Vec<String>>) -> Result<SchemaRef> {
+        let schema = if let Some(names) = req_projection {
             Arc::new(
                 self.metadata
                     .schema
-                    .try_project(indices)
+                    .try_project_with_names(names)
                     .context(ProjectSchemaSnafu)?,
             )
         } else {

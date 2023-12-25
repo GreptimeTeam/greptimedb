@@ -89,6 +89,17 @@ pub enum Error {
         projection: Vec<usize>,
     },
 
+    #[snafu(display(
+        "Failed to project RecordBatch with schema {:?} and column names {:?}",
+        schema,
+        projection,
+    ))]
+    ProjectRecordBatchWithName {
+        location: Location,
+        schema: datatypes::schema::SchemaRef,
+        projection: Vec<String>,
+    },
+
     #[snafu(display("Column {} not exists in table {}", column_name, table_name))]
     ColumnNotExists {
         column_name: String,
@@ -120,7 +131,8 @@ impl ErrorExt for Error {
             | Error::Format { .. }
             | Error::InitRecordbatchStream { .. }
             | Error::ColumnNotExists { .. }
-            | Error::ProjectArrowRecordBatch { .. } => StatusCode::Internal,
+            | Error::ProjectArrowRecordBatch { .. }
+            | Error::ProjectRecordBatchWithName { .. } => StatusCode::Internal,
 
             Error::External { source, .. } => source.status_code(),
 

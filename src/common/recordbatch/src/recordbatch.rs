@@ -26,7 +26,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
     self, CastVectorSnafu, ColumnNotExistsSnafu, DataTypesSnafu, ProjectArrowRecordBatchSnafu,
-    Result,
+    ProjectRecordBatchWithNameSnafu, Result,
 };
 use crate::DfRecordBatch;
 
@@ -67,6 +67,7 @@ impl RecordBatch {
         })
     }
 
+    /// Projects this record batch using column indices
     pub fn try_project(&self, indices: &[usize]) -> Result<Self> {
         let schema = Arc::new(self.schema.try_project(indices).context(DataTypesSnafu)?);
         let mut columns = Vec::with_capacity(indices.len());
@@ -85,6 +86,19 @@ impl RecordBatch {
             columns,
             df_record_batch,
         })
+    }
+
+    /// Projects this record batch using column names.
+    pub fn try_project_with_names(&self, names: &[String]) -> Result<Self> {
+        let indices = names
+            .iter()
+            .map(|name| self.schema.column_index_by_name(name))
+            .collect::<Option<Vec<_>>>()
+            .with_context(|| ProjectRecordBatchWithNameSnafu {
+                schema: self.schema.clone(),
+                projection: names,
+            })?;
+        self.try_project(&indices)
     }
 
     /// Create a new [`RecordBatch`] from `schema` and `df_record_batch`.

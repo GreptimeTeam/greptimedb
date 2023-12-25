@@ -205,11 +205,11 @@ impl InformationTableDataSource {
         Self { table }
     }
 
-    fn try_project(&self, projection: &[usize]) -> std::result::Result<SchemaRef, BoxedError> {
+    fn try_project(&self, projection: &[String]) -> std::result::Result<SchemaRef, BoxedError> {
         let schema = self
             .table
             .schema()
-            .try_project(projection)
+            .try_project_with_names(projection)
             .context(SchemaConversionSnafu)
             .map_err(BoxedError::new)?;
         Ok(Arc::new(schema))
@@ -234,7 +234,7 @@ impl DataSource for InformationTableDataSource {
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
             .map(move |batch| match &projection {
-                Some(p) => batch.and_then(|b| b.try_project(p)),
+                Some(p) => batch.and_then(|b| b.try_project_with_names(p)),
                 None => batch,
             });
 
