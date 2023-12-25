@@ -526,7 +526,10 @@ mod tests {
 
             enable_memory_catalog = true
 
-            [wal]
+            [wal_meta]
+            provider = "raft_engine"
+
+            [wal_datanode]
             provider = "raft_engine"
             dir = "/tmp/greptimedb/test/wal"
             file_size = "1GB"
@@ -534,6 +537,7 @@ mod tests {
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
+
             [storage]
             data_home = "/tmp/greptimedb/"
             type = "File"
