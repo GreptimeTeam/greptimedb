@@ -23,7 +23,7 @@ use snafu::ResultExt;
 use crate::error;
 use crate::error::Result;
 
-// refer to https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L74-L90
+// Refer to https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L74-L90
 /// Convert [TFileMetaData] to [ParquetMetaData]
 pub fn to_parquet_metadata(t_file_metadata: TFileMetaData) -> Result<ParquetMetaData> {
     let schema = from_thrift(&t_file_metadata.schema).context(error::ConvertMetaDataSnafu)?;
