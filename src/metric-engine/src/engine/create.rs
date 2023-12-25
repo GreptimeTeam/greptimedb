@@ -185,12 +185,7 @@ impl MetricEngineInner {
             .await?;
         for col in &request.column_metadatas {
             self.metadata_region
-                .add_column(
-                    metadata_region_id,
-                    logical_region_id,
-                    &col.column_schema.name,
-                    col,
-                )
+                .add_column(metadata_region_id, logical_region_id, col)
                 .await?;
         }
 
@@ -221,12 +216,7 @@ impl MetricEngineInner {
         // register columns to metadata region
         for col in &new_columns {
             self.metadata_region
-                .add_column(
-                    metadata_region_id,
-                    logical_region_id,
-                    &col.column_schema.name,
-                    col,
-                )
+                .add_column(metadata_region_id, logical_region_id, col)
                 .await?;
         }
 

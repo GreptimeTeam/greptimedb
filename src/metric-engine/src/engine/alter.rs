@@ -93,12 +93,7 @@ impl MetricEngineInner {
         // register columns to logical region
         for col in columns {
             self.metadata_region
-                .add_column(
-                    metadata_region_id,
-                    region_id,
-                    &col.column_metadata.column_schema.name,
-                    &col.column_metadata,
-                )
+                .add_column(metadata_region_id, region_id, &col.column_metadata)
                 .await?;
         }
 

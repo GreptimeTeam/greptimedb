@@ -97,11 +97,11 @@ impl MetadataRegion {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        column_name: &str,
         column_metadata: &ColumnMetadata,
     ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
-        let column_key = Self::concat_column_key(logical_region_id, column_name);
+        let column_key =
+            Self::concat_column_key(logical_region_id, &column_metadata.column_schema.name);
 
         self.put_if_absent(
             region_id,
@@ -629,12 +629,7 @@ mod test {
             column_id: 5,
         };
         metadata_region
-            .add_column(
-                physical_region_id,
-                logical_region_id,
-                column_name,
-                &column_metadata,
-            )
+            .add_column(physical_region_id, logical_region_id, &column_metadata)
             .await
             .unwrap();
         let actual_semantic_type = metadata_region
@@ -645,12 +640,7 @@ mod test {
 
         // duplicate column won't be updated
         let is_updated = metadata_region
-            .add_column(
-                physical_region_id,
-                logical_region_id,
-                column_name,
-                &column_metadata,
-            )
+            .add_column(physical_region_id, logical_region_id, &column_metadata)
             .await
             .unwrap();
         assert!(!is_updated);
