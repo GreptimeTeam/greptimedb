@@ -105,7 +105,7 @@ impl TopicManager {
         let backoff_config = BackoffConfig {
             init_backoff: self.config.backoff_init,
             max_backoff: self.config.backoff_max,
-            base: self.config.backoff_base,
+            base: self.config.backoff_base as f64,
             deadline: self.config.backoff_deadline,
         };
         let client = ClientBuilder::new(self.config.broker_endpoints.clone())
@@ -181,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn test_restore_persisted_topics() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let topic_name_prefix = "greptimedb_wal_kafka";
+        let topic_name_prefix = "greptimedb_wal_topic";
         let num_topics = 16;
 
         // Constructs mock topics.

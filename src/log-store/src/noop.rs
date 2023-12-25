@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use common_config::wal::WalOptions;
 use store_api::logstore::entry::{Entry, Id as EntryId};
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace};
@@ -65,15 +63,11 @@ impl LogStore for NoopLogStore {
     }
 
     async fn append(&self, mut _e: Self::Entry) -> Result<AppendResponse> {
-        Ok(AppendResponse {
-            last_entry_id: Default::default(),
-        })
+        Ok(AppendResponse::default())
     }
 
     async fn append_batch(&self, _e: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        Ok(AppendBatchResponse {
-            last_entry_ids: HashMap::new(),
-        })
+        Ok(AppendBatchResponse::default())
     }
 
     async fn read(
