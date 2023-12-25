@@ -256,9 +256,9 @@ mod tests {
 
         #[cfg(tokio_unstable)]
         {
-            assert!(metric_text.contains("runtime_0_tokio_budget_forced_yield_count"));
-            assert!(metric_text.contains("runtime_0_tokio_injection_queue_depth"));
-            assert!(metric_text.contains("runtime_0_tokio_workers_count"));
+            assert!(metric_text.contains("runtime_0_tokio_budget_forced_yield_count 0"));
+            assert!(metric_text.contains("runtime_0_tokio_injection_queue_depth 0"));
+            assert!(metric_text.contains("runtime_0_tokio_workers_count 5"));
         }
     }
 
