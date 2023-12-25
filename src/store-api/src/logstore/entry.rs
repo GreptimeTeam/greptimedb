@@ -19,9 +19,6 @@ use crate::logstore::namespace::Namespace;
 /// An entry's id.
 /// Different log store implementations may interpret the id to different meanings.
 pub type Id = u64;
-/// An entry's offset.
-/// Notice: it's currently not used.
-pub type Offset = usize;
 
 /// Entry is the minimal data storage unit through which users interact with the log store.
 /// The log store implementation may have larger or smaller data storage unit than an entry.
