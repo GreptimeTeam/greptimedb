@@ -379,7 +379,7 @@ impl TableCreator {
         }
     }
 
-    /// Register opening regions if doesn't exist.
+    /// Registers and returns the guards of the opening region if they don't exist.
     fn register_opening_regions(
         &self,
         context: &DdlContext,
