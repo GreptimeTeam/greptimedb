@@ -98,7 +98,7 @@ impl Datanode {
         self.start_telemetry();
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start()
+            t.start(None)
         }
 
         self.start_services().await
@@ -284,7 +284,7 @@ impl DatanodeBuilder {
             };
 
         let export_metrics_task =
-            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
+            ExportMetricsTask::try_new(&self.opts.export_metrics, None, Some(&self.plugins))
                 .context(StartServerSnafu)?;
 
         Ok(Datanode {

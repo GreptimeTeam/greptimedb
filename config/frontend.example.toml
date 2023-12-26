@@ -89,8 +89,8 @@ tcp_nodelay = true
 # enable = false
 # The url of metrics export endpoint, default is `frontend` default HTTP endpoint.
 # endpoint = "127.0.0.1:4000"
-# The database name of exported metrics stores, user needs to specify a valid database
-# db = ""
+# The database name of exported metrics stores, default is `information_schema`
+# db = "information_schema"
 # The interval of export metrics
 # write_interval = "30s"
 # HTTP headers of Prometheus remote-write carry

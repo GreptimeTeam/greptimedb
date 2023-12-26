@@ -78,8 +78,9 @@ impl MetaSrvInstance {
         );
         // put meta_srv into plugins for later use
         plugins.insert::<Arc<MetaSrv>>(Arc::new(meta_srv.clone()));
-        let export_metrics_task = ExportMetricsTask::try_new(&opts.export_metrics, Some(&plugins))
-            .context(InitExportMetricsTaskSnafu)?;
+        let export_metrics_task =
+            ExportMetricsTask::try_new(&opts.export_metrics, None, Some(&plugins))
+                .context(InitExportMetricsTaskSnafu)?;
         Ok(MetaSrvInstance {
             meta_srv,
             http_srv,
@@ -94,7 +95,7 @@ impl MetaSrvInstance {
         self.meta_srv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start()
+            t.start(None)
         }
 
         let (tx, rx) = mpsc::channel::<()>(1);
