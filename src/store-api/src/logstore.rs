@@ -49,7 +49,6 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with ids
     /// starting from `id`.
-    // TODO(niebayes): update docs for entry id.
     async fn read(
         &self,
         ns: &Self::Namespace,

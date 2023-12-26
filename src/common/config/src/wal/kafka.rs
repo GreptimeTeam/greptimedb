@@ -121,13 +121,16 @@ pub struct StandaloneKafkaConfig {
 
 impl Default for StandaloneKafkaConfig {
     fn default() -> Self {
+        let base = KafkaConfig::default();
+        let replication_factor = base.broker_endpoints.len() as i16;
+
         Self {
-            base: KafkaConfig::default(),
+            base,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor,
             create_topic_timeout: Duration::from_secs(30),
         }
     }

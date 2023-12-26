@@ -12,20 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_config::wal::KafkaWalTopic as Topic;
-use rskafka::record::{Record, RecordAndOffset};
+use rskafka::record::Record;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    ConsumeRecordSnafu, DecodeMetaSnafu, EmptyEntriesSnafu, EncodeMetaSnafu, GetClientSnafu,
-    MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
+    DecodeMetaSnafu, EmptyEntriesSnafu, EncodeMetaSnafu, GetClientSnafu, MissingKeySnafu,
+    MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::offset::Offset;
 use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
-
-type ConsumeResult = std::result::Result<(RecordAndOffset, i64), rskafka::client::error::Error>;
 
 /// Record metadata which will be serialized/deserialized to/from the `key` of a Record.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -125,7 +122,7 @@ fn encode_to_record(ns: NamespaceImpl, entries: Vec<EntryImpl>) -> Result<Record
     })
 }
 
-fn decode_from_record(record: Record) -> Result<Vec<EntryImpl>> {
+pub(crate) fn decode_from_record(record: Record) -> Result<Vec<EntryImpl>> {
     let key = record.key.context(MissingKeySnafu)?;
     let value = record.value.context(MissingValueSnafu)?;
     let meta: RecordMeta = serde_json::from_slice(&key).context(DecodeMetaSnafu)?;
@@ -142,34 +139,6 @@ fn decode_from_record(record: Record) -> Result<Vec<EntryImpl>> {
         start_offset = *end_offset;
     }
     Ok(entries)
-}
-
-/// Handles the result of a consume operation on a kafka topic.
-pub(crate) fn handle_consume_result(
-    result: ConsumeResult,
-    topic: &Topic,
-    region_id: u64,
-    offset: i64,
-) -> Result<Vec<EntryImpl>> {
-    match result {
-        Ok((record_and_offset, _)) => {
-            // Only produces entries belong to the region with the given region id.
-            // Since a record only contains entries from a single region, it suffices to check the first entry only.
-            let entries = decode_from_record(record_and_offset.record)?;
-            if let Some(entry) = entries.first()
-                && entry.id == region_id
-            {
-                Ok(entries)
-            } else {
-                Ok(vec![])
-            }
-        }
-        Err(e) => Err(e).context(ConsumeRecordSnafu {
-            topic,
-            region_id,
-            offset,
-        }),
-    }
 }
 
 #[cfg(test)]

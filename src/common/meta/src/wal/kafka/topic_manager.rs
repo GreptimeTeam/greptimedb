@@ -17,10 +17,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_config::wal::kafka::TopicSelectorType;
-use common_telemetry::debug;
+use common_telemetry::{debug, error, info};
+use rskafka::client::controller::ControllerClient;
+use rskafka::client::error::Error as RsKafkaError;
+use rskafka::client::error::ProtocolError::TopicAlreadyExists;
 use rskafka::client::ClientBuilder;
 use rskafka::BackoffConfig;
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, AsErrorSource, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, CreateKafkaWalTopicSnafu, DecodeJsonSnafu,
@@ -79,7 +82,6 @@ impl TopicManager {
             .await?
             .into_iter()
             .collect::<HashSet<Topic>>();
-        debug!("Restored {} topics", created_topics.len());
 
         // Creates missing topics.
         let to_be_created = topics
@@ -92,10 +94,10 @@ impl TopicManager {
                 Some(i)
             })
             .collect::<Vec<_>>();
+
         if !to_be_created.is_empty() {
             self.try_create_topics(topics, &to_be_created).await?;
             Self::persist_created_topics(topics, &self.kv_backend).await?;
-            debug!("Persisted {} topics", topics.len());
         }
         Ok(())
     }
@@ -119,23 +121,12 @@ impl TopicManager {
             .controller_client()
             .context(BuildKafkaCtrlClientSnafu)?;
 
-        // Spawns tokio tasks for creating missing topics.
+        // Try to create missing topics.
         let tasks = to_be_created
             .iter()
-            .map(|i| {
-                client.create_topic(
-                    topics[*i].clone(),
-                    self.config.num_partitions,
-                    self.config.replication_factor,
-                    self.config.create_topic_timeout.as_millis() as i32,
-                )
-            })
+            .map(|i| self.try_create_topic(&topics[*i], &client))
             .collect::<Vec<_>>();
-        // FIXME(niebayes): try to create an already-exist topic would raise an error.
-        futures::future::try_join_all(tasks)
-            .await
-            .context(CreateKafkaWalTopicSnafu)
-            .map(|_| ())
+        futures::future::try_join_all(tasks).await.map(|_| ())
     }
 
     /// Selects one topic from the topic pool through the topic selector.
@@ -148,6 +139,32 @@ impl TopicManager {
         (0..num_topics)
             .map(|_| self.topic_selector.select(&self.topic_pool))
             .collect()
+    }
+
+    async fn try_create_topic(&self, topic: &Topic, client: &ControllerClient) -> Result<()> {
+        match client
+            .create_topic(
+                topic.clone(),
+                self.config.num_partitions,
+                self.config.replication_factor,
+                self.config.create_topic_timeout.as_millis() as i32,
+            )
+            .await
+        {
+            Ok(_) => {
+                info!("Successfully created topic {}", topic);
+                Ok(())
+            }
+            Err(e) => {
+                if Self::is_topic_already_exist_err(&e) {
+                    info!("The topic {} already exists", topic);
+                    Ok(())
+                } else {
+                    error!("Failed to create a topic {}, error {:?}", topic, e);
+                    Err(e).context(CreateKafkaWalTopicSnafu)
+                }
+            }
+        }
     }
 
     async fn restore_created_topics(kv_backend: &KvBackendRef) -> Result<Vec<Topic>> {
@@ -170,6 +187,16 @@ impl TopicManager {
             })
             .await
             .map(|_| ())
+    }
+
+    fn is_topic_already_exist_err(e: &RsKafkaError) -> bool {
+        matches!(
+            e,
+            &RsKafkaError::ServerError {
+                protocol_error: TopicAlreadyExists,
+                ..
+            }
+        )
     }
 }
 

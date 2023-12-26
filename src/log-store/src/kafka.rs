@@ -17,6 +17,8 @@ pub mod log_store;
 mod offset;
 mod record_utils;
 
+use std::fmt::Display;
+
 use common_meta::wal::KafkaWalTopic as Topic;
 use serde::{Deserialize, Serialize};
 use store_api::logstore::entry::{Entry, Id as EntryId};
@@ -34,6 +36,12 @@ pub struct NamespaceImpl {
 impl Namespace for NamespaceImpl {
     fn id(&self) -> u64 {
         self.region_id
+    }
+}
+
+impl Display for NamespaceImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.topic, self.region_id)
     }
 }
 
@@ -62,5 +70,17 @@ impl Entry for EntryImpl {
 
     fn namespace(&self) -> Self::Namespace {
         self.ns.clone()
+    }
+}
+
+impl Display for EntryImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Entry (ns: {}, id: {}, data_len: {})",
+            self.ns,
+            self.id,
+            self.data.len()
+        )
     }
 }
