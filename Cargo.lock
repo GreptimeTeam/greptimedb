@@ -4873,7 +4873,6 @@ dependencies = [
 name = "metric-engine"
 version = "0.5.0"
 dependencies = [
- "ahash 0.8.6",
  "api",
  "aquamarine",
  "async-trait",
@@ -4889,6 +4888,7 @@ dependencies = [
  "datatypes",
  "lazy_static",
  "mito2",
+ "mur3",
  "object-store",
  "prometheus",
  "serde_json",
@@ -5065,6 +5065,12 @@ name = "multimap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5ce46fe64a9d73be07dcbe690a38ce1b293be448fd8ce1e6c1b8062c9f72c6a"
+
+[[package]]
+name = "mur3"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97af489e1e21b68de4c390ecca6703318bc1aa16e9733bcb62c089b73c6fbb1b"
 
 [[package]]
 name = "mysql-common-derive"
