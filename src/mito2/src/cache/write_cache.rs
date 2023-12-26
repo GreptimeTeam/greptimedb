@@ -59,7 +59,7 @@ impl WriteCache {
     }
 
     /// Adds files to the cache.
-    pub(crate) fn upload(&self, upload: Upload) -> Result<()> {
+    pub(crate) async fn upload(&self, upload: Upload) -> Result<()> {
         // Add the upload metadata to the manifest.
         unimplemented!()
     }
