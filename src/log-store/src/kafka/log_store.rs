@@ -139,13 +139,15 @@ impl LogStore for KafkaLogStore {
             .raw_client
             .clone();
 
-        // Gets the offset of the lastest record in the topic. Actually, it's the lastest record of the single partition in the topic.
+        // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
         // The read operation terminates when this record is consumed.
+        // Warning: the `get_offset` returns the end offset of the latest record. For our usage, it should be decremented.
         let end_offset = client
             .get_offset(OffsetAt::Latest)
             .await
-            .context(GetOffsetSnafu { ns: ns.clone() })?;
-        // Reads entries with offsets in the range [start_offset, end_offset].
+            .context(GetOffsetSnafu { ns: ns.clone() })?
+            - 1;
+        // Reads entries with offsets in the range [start_offset, end_offset).
         let start_offset = Offset::try_from(entry_id)?.0;
 
         // Abort if there're no new entries.
@@ -161,16 +163,25 @@ impl LogStore for KafkaLogStore {
             .build();
 
         debug!(
-            "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
+            "Built a stream consumer for ns {} to consume entries in range [{}, {})",
             ns, start_offset, end_offset
         );
 
         let ns_clone = ns.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
-                let (record, offset) = consume_result.context(ConsumeRecordSnafu {
+                // Each next will prdoce a `RecordAndOffset` and a high watermark offset.
+                // The `RecordAndOffset` contains the record data and its start offset.
+                // The high watermark offset is the end offset of the latest record in the partition.
+                let (record, high_watermark) = consume_result.context(ConsumeRecordSnafu {
                     ns: ns_clone.clone(),
                 })?;
+                let record_offset = record.offset;
+                debug!(
+                    "Read a record at offset {} for ns {}, high watermark: {}",
+                    record_offset, ns_clone, high_watermark
+                );
+
                 let entries = decode_from_record(record.record)?;
 
                 // Filters entries by region id.
@@ -183,8 +194,11 @@ impl LogStore for KafkaLogStore {
                 }
 
                 // Terminates the stream if the entry with the end offset was read.
-                if offset >= end_offset {
-                    debug!("Stream for ns {} terminates at offset {}", ns_clone, offset);
+                if record_offset >= end_offset {
+                    debug!(
+                        "Stream consumer for ns {} terminates at offset {}",
+                        ns_clone, record_offset
+                    );
                     break;
                 }
             }

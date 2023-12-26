@@ -162,7 +162,7 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
-    #[snafu(display("Failed to get the lastest offset, ns: {}", ns))]
+    #[snafu(display("Failed to get the latest offset, ns: {}", ns))]
     GetOffset {
         ns: KafkaNamespace,
         location: Location,

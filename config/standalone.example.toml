@@ -103,7 +103,7 @@ provider = "raft_engine"
 # Number of partitions per topic.
 # num_partitions = 1
 # Expected number of replicas of each partition.
-# replication_factor = 3
+# replication_factor = 1
 
 # The maximum log size a kafka batch producer could buffer.
 # max_batch_size = "4MB"
