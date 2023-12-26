@@ -24,8 +24,7 @@ use table::metadata::TableId;
 
 use crate::error::{InvalidTableMetadataSnafu, Result};
 use crate::key::{
-    RegionDistribution, TableMetaKey, TableMetaValue, DATANODE_TABLE_KEY_PATTERN,
-    DATANODE_TABLE_KEY_PREFIX,
+    RegionDistribution, TableMetaKey, DATANODE_TABLE_KEY_PATTERN, DATANODE_TABLE_KEY_PREFIX,
 };
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::kv_backend::KvBackendRef;

@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use catalog::kvbackend::MetaKvBackend;
-use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
@@ -115,7 +114,7 @@ pub(crate) async fn create_partition_rule_manager(
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(1, "table_1", regions.clone().into_iter()).into(),
-            TableRouteValue::physical(vec![
+            vec![
                 RegionRoute {
                     region: Region {
                         id: 3.into(),
@@ -170,7 +169,7 @@ pub(crate) async fn create_partition_rule_manager(
                     follower_peers: vec![],
                     leader_status: None,
                 },
-            ]),
+            ],
             region_wal_options.clone(),
         )
         .await
@@ -179,7 +178,7 @@ pub(crate) async fn create_partition_rule_manager(
     table_metadata_manager
         .create_table_metadata(
             new_test_table_info(2, "table_2", regions.clone().into_iter()).into(),
-            TableRouteValue::physical(vec![
+            vec![
                 RegionRoute {
                     region: Region {
                         id: 1.into(),
@@ -240,7 +239,7 @@ pub(crate) async fn create_partition_rule_manager(
                     follower_peers: vec![],
                     leader_status: None,
                 },
-            ]),
+            ],
             region_wal_options,
         )
         .await

@@ -182,6 +182,7 @@ impl AlterTableProcedure {
 
     pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
+        let table_ref = self.data.table_ref();
 
         let table_route = self
             .context
@@ -189,7 +190,9 @@ impl AlterTableProcedure {
             .table_route_manager()
             .get(table_id)
             .await?
-            .context(TableRouteNotFoundSnafu { table_id })?
+            .with_context(|| TableRouteNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?
             .into_inner();
         let region_routes = table_route.region_routes();
 

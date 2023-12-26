@@ -188,7 +188,6 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -292,11 +291,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(
-                table_info,
-                TableRouteValue::physical(vec![region_route]),
-                HashMap::default(),
-            )
+            .create_table_metadata(table_info, vec![region_route.clone()], HashMap::default())
             .await
             .unwrap();
 
@@ -383,11 +378,7 @@ mod tests {
         let keeper = new_test_keeper();
         let table_metadata_manager = keeper.table_metadata_manager();
         table_metadata_manager
-            .create_table_metadata(
-                table_info,
-                TableRouteValue::physical(vec![region_route]),
-                HashMap::default(),
-            )
+            .create_table_metadata(table_info, vec![region_route.clone()], HashMap::default())
             .await
             .unwrap();
 

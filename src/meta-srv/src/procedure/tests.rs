@@ -100,12 +100,12 @@ fn test_region_request_builder() {
     let procedure = CreateTableProcedure::new(
         1,
         create_table_task(),
-        TableRouteValue::physical(test_data::new_region_routes()),
+        test_data::new_region_routes(),
         HashMap::default(),
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     );
 
-    let template = procedure.new_region_request_builder(None).unwrap();
+    let template = procedure.new_region_request_builder().unwrap();
 
     let expected = PbCreateRegionRequest {
         region_id: 0,
@@ -191,7 +191,7 @@ async fn test_on_datanode_create_regions() {
     let mut procedure = CreateTableProcedure::new(
         1,
         create_table_task(),
-        TableRouteValue::physical(region_routes),
+        region_routes,
         HashMap::default(),
         test_data::new_ddl_context(datanode_manager),
     );
@@ -247,7 +247,7 @@ async fn test_on_datanode_drop_regions() {
     let procedure = DropTableProcedure::new(
         1,
         drop_table_task,
-        DeserializedValueWithBytes::from_inner(TableRouteValue::physical(region_routes)),
+        DeserializedValueWithBytes::from_inner(TableRouteValue::new(region_routes)),
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
         test_data::new_ddl_context(datanode_manager),
     );
@@ -373,7 +373,7 @@ async fn test_submit_alter_region_requests() {
         .table_metadata_manager
         .create_table_metadata(
             table_info.clone(),
-            TableRouteValue::physical(region_routes),
+            region_routes.clone(),
             HashMap::default(),
         )
         .await

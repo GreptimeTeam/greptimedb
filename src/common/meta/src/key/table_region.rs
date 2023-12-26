@@ -71,8 +71,8 @@ impl_table_meta_value! {TableRegionValue}
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use crate::key::TableMetaValue;
 
     #[test]
     fn test_serde() {

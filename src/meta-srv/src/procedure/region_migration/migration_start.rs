@@ -137,6 +137,7 @@ impl RegionMigrationStart {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -186,8 +187,10 @@ mod tests {
             ..Default::default()
         };
 
-        env.create_physical_table_metadata(table_info, vec![region_route])
-            .await;
+        env.table_metadata_manager()
+            .create_table_metadata(table_info, vec![region_route], HashMap::default())
+            .await
+            .unwrap();
 
         let err = state
             .retrieve_region_route(&mut ctx, RegionId::new(1024, 3))
@@ -218,8 +221,10 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        env.table_metadata_manager()
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
@@ -249,8 +254,10 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        env.table_metadata_manager()
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
@@ -274,8 +281,10 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        env.table_metadata_manager()
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
