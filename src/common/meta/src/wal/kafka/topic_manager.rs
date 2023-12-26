@@ -189,15 +189,13 @@ impl TopicManager {
     }
 
     fn is_topic_already_exist_err(e: &RsKafkaError) -> bool {
-        if let &RsKafkaError::ServerError {
-            protocol_error: TopicAlreadyExists,
-            ..
-        } = e
-        {
-            true
-        } else {
-            false
-        }
+        matches!(
+            e,
+            &RsKafkaError::ServerError {
+                protocol_error: TopicAlreadyExists,
+                ..
+            }
+        )
     }
 }
 

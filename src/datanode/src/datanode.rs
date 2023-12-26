@@ -29,7 +29,7 @@ use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue}
 use common_meta::kv_backend::KvBackendRef;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
-use common_telemetry::{debug, error, info, warn};
+use common_telemetry::{error, info, warn};
 use file_engine::engine::FileRegionEngine;
 use futures::future;
 use futures_util::future::try_join_all;
@@ -545,10 +545,6 @@ async fn open_all_regions(
                 .and_then(|wal_options| {
                     region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
                 });
-            debug!(
-                "Read region options {:?} for region {} from kv backend",
-                region_options, region_number
-            );
 
             regions.push((
                 RegionId::new(table_value.table_id, region_number),
