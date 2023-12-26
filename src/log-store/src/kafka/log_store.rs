@@ -142,7 +142,6 @@ impl LogStore for KafkaLogStore {
         // Gets the offset of the latest record in the topic. Actually, it's the latest record of the single partition in the topic.
         // The read operation terminates when this record is consumed.
         // Warning: the `get_offset` returns the end offset of the latest record. For our usage, it should be decremented.
-        // See: https://kafka.apache.org/36/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html#endOffsets(java.util.Collection)
         let end_offset = client
             .get_offset(OffsetAt::Latest)
             .await

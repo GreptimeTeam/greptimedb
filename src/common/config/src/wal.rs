@@ -46,7 +46,7 @@ impl From<StandaloneWalConfig> for WalConfig {
 
 impl Default for WalConfig {
     fn default() -> Self {
-        WalConfig::Kafka(KafkaConfig::default())
+        WalConfig::RaftEngine(RaftEngineConfig::default())
     }
 }
 
