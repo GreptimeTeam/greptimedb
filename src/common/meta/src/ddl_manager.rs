@@ -279,7 +279,7 @@ async fn handle_truncate_table_task(
         table_name: table_ref.to_string(),
     })?;
 
-    let table_route = table_route_value.into_inner().region_routes().clone();
+    let table_route = table_route_value.into_inner().region_routes;
 
     let id = ddl_manager
         .submit_truncate_table_task(

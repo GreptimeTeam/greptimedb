@@ -377,7 +377,7 @@ impl ProcedureMigrationTestSuite {
     /// Verifies table metadata after region migration.
     pub(crate) async fn verify_table_metadata(&self) {
         let region_id = self.context.persistent_ctx.region_id;
-        let table_route = self
+        let region_routes = self
             .env
             .table_metadata_manager
             .table_route_manager()
@@ -385,25 +385,22 @@ impl ProcedureMigrationTestSuite {
             .await
             .unwrap()
             .unwrap()
-            .into_inner();
-        let region_routes = table_route.region_routes();
+            .into_inner()
+            .region_routes;
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;
         let removed_follower_id = self.context.persistent_ctx.from_peer.id;
 
         let region_route = region_routes
-            .iter()
+            .into_iter()
             .find(|route| route.region.id == region_id)
             .unwrap();
 
         assert!(!region_route.is_leader_downgraded());
-        assert_eq!(
-            region_route.leader_peer.as_ref().unwrap().id,
-            expected_leader_id
-        );
+        assert_eq!(region_route.leader_peer.unwrap().id, expected_leader_id);
         assert!(!region_route
             .follower_peers
-            .iter()
+            .into_iter()
             .any(|route| route.id == removed_follower_id))
     }
 }

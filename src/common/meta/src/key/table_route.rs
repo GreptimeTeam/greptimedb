@@ -38,69 +38,41 @@ impl TableRouteKey {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub enum TableRouteValue {
-    Physical(PhysicalTableRouteValue),
-    Logical(LogicalTableRouteValue),
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct PhysicalTableRouteValue {
+pub struct TableRouteValue {
     pub region_routes: Vec<RegionRoute>,
     version: u64,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct LogicalTableRouteValue {
-    // TODO(LFC): Add table route for MetricsEngine table.
-}
-
 impl TableRouteValue {
     pub fn new(region_routes: Vec<RegionRoute>) -> Self {
-        Self::Physical(PhysicalTableRouteValue {
+        Self {
             region_routes,
             version: 0,
-        })
+        }
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
-        let version = self.physical_table_route().version;
-        Self::Physical(PhysicalTableRouteValue {
+        Self {
             region_routes,
-            version: version + 1,
-        })
+            version: self.version + 1,
+        }
     }
 
     /// Returns the version.
     ///
     /// For test purpose.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(any(tets, feature = "testing"))]
     pub fn version(&self) -> u64 {
-        self.physical_table_route().version
+        self.version
     }
 
     /// Returns the corresponding [RegionRoute].
     pub fn region_route(&self, region_id: RegionId) -> Option<RegionRoute> {
-        self.physical_table_route()
-            .region_routes
+        self.region_routes
             .iter()
             .find(|route| route.region.id == region_id)
             .cloned()
-    }
-
-    /// Gets the [RegionRoute]s of this [TableRouteValue::Physical].
-    ///
-    /// # Panics
-    /// The route type is not the [TableRouteValue::Physical].
-    pub fn region_routes(&self) -> &Vec<RegionRoute> {
-        &self.physical_table_route().region_routes
-    }
-
-    fn physical_table_route(&self) -> &PhysicalTableRouteValue {
-        match self {
-            TableRouteValue::Physical(x) => x,
-            _ => unreachable!("Mistakenly been treated as a Physical TableRoute: {self:?}"),
-        }
     }
 }
 
@@ -297,7 +269,7 @@ impl TableRouteManager {
     ) -> Result<Option<RegionDistribution>> {
         self.get(table_id)
             .await?
-            .map(|table_route| region_distribution(table_route.region_routes()))
+            .map(|table_route| region_distribution(&table_route.into_inner().region_routes))
             .transpose()
     }
 }
