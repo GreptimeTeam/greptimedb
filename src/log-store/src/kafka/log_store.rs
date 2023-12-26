@@ -102,7 +102,6 @@ impl LogStore for KafkaLogStore {
 
         // Builds a record from entries belong to a region and produces them to kafka server.
         let region_ids = producers.keys().cloned().collect::<Vec<_>>();
-        debug!("Constructed producers for regions {:?}", region_ids);
 
         let tasks = producers
             .into_values()
