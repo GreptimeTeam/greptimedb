@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-ahash.workspace = true
 api.workspace = true
 aquamarine.workspace = true
 async-trait.workspace = true
@@ -20,6 +19,7 @@ datafusion.workspace = true
 datatypes.workspace = true
 lazy_static = "1.4"
 mito2.workspace = true
+mur3 = "0.1"
 object-store.workspace = true
 prometheus.workspace = true
 serde_json.workspace = true
