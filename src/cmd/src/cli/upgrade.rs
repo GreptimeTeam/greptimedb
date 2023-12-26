@@ -27,7 +27,7 @@ use common_meta::key::table_info::{TableInfoKey, TableInfoValue};
 use common_meta::key::table_name::{TableNameKey, TableNameValue};
 use common_meta::key::table_region::{TableRegionKey, TableRegionValue};
 use common_meta::key::table_route::{TableRouteKey, TableRouteValue as NextTableRouteValue};
-use common_meta::key::{RegionDistribution, TableMetaKey, TableMetaValue};
+use common_meta::key::{RegionDistribution, TableMetaKey};
 use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::range_stream::PaginationStream;
@@ -153,7 +153,7 @@ impl MigrateTableMetadata {
         )
         .unwrap();
 
-        let new_table_value = NextTableRouteValue::physical(table_route.region_routes);
+        let new_table_value = NextTableRouteValue::new(table_route.region_routes);
 
         let table_id = table_route.table.id as u32;
         let new_key = TableRouteKey::new(table_id);

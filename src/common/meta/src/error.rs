@@ -135,9 +135,9 @@ pub enum Error {
         source: table::error::Error,
     },
 
-    #[snafu(display("Failed to find table route for table id {}", table_id))]
+    #[snafu(display("Table route not found: {}", table_name))]
     TableRouteNotFound {
-        table_id: TableId,
+        table_name: String,
         location: Location,
     },
 

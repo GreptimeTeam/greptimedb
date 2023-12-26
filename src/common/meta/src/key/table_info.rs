@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use table::engine::TableReference;
 use table::metadata::{RawTableInfo, TableId};
 
-use super::{DeserializedValueWithBytes, TableMetaValue, TABLE_INFO_KEY_PREFIX};
+use super::{DeserializedValueWithBytes, TABLE_INFO_KEY_PREFIX};
 use crate::error::Result;
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};

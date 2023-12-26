@@ -59,6 +59,7 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -127,10 +128,12 @@ mod tests {
             region_routes
         };
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
         let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
+
         let old_table_route = table_metadata_manager
             .table_route_manager()
             .get(table_id)
@@ -163,14 +166,15 @@ mod tests {
 
         state.rollback_downgraded_region(&mut ctx).await.unwrap();
 
-        let table_route = table_metadata_manager
+        let region_routes = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner();
-        assert_eq!(&expected_region_routes, table_route.region_routes());
+            .into_inner()
+            .region_routes;
+        assert_eq!(expected_region_routes, region_routes);
     }
 
     #[tokio::test]
@@ -210,10 +214,11 @@ mod tests {
             region_routes
         };
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
         let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
@@ -224,13 +229,14 @@ mod tests {
 
         assert!(ctx.volatile_ctx.table_route.is_none());
 
-        let table_route = table_metadata_manager
+        let region_routes = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner();
-        assert_eq!(&expected_region_routes, table_route.region_routes());
+            .into_inner()
+            .region_routes;
+        assert_eq!(expected_region_routes, region_routes);
     }
 }

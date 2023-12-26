@@ -33,7 +33,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let mut region_routes = table_route_value.region_routes().clone();
+        let mut region_routes = table_route_value.region_routes.clone();
         let region_route = region_routes
             .iter_mut()
             .find(|route| route.region.id == region_id)
@@ -81,7 +81,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let region_routes = table_route_value.region_routes().clone();
+        let region_routes = table_route_value.region_routes.clone();
         let region_route = region_routes
             .into_iter()
             .find(|route| route.region.id == region_id)
@@ -176,6 +176,7 @@ impl UpdateMetadata {
 #[cfg(test)]
 mod tests {
     use std::assert_matches::assert_matches;
+    use std::collections::HashMap;
 
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -224,8 +225,11 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let err = state
             .build_upgrade_candidate_region_metadata(&mut ctx)
@@ -250,8 +254,11 @@ mod tests {
             ..Default::default()
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let err = state
             .build_upgrade_candidate_region_metadata(&mut ctx)
@@ -278,8 +285,11 @@ mod tests {
             leader_status: Some(RegionStatus::Downgraded),
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let new_region_routes = state
             .build_upgrade_candidate_region_metadata(&mut ctx)
@@ -316,10 +326,12 @@ mod tests {
             },
         ];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
         let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
+
         let original_table_route = table_metadata_manager
             .table_route_manager()
             .get(table_id)
@@ -373,8 +385,11 @@ mod tests {
             leader_status: None,
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
         assert!(!updated);
@@ -396,8 +411,11 @@ mod tests {
             leader_status: None,
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let updated = state.check_metadata_updated(&mut ctx).await.unwrap();
         assert!(updated);
@@ -419,8 +437,11 @@ mod tests {
             leader_status: Some(RegionStatus::Downgraded),
         }];
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
+        let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let err = state.check_metadata_updated(&mut ctx).await.unwrap_err();
         assert_matches!(err, Error::Unexpected { .. });
@@ -449,23 +470,24 @@ mod tests {
             .unwrap();
         ctx.volatile_ctx.opening_region_guard = Some(guard);
 
-        env.create_physical_table_metadata(table_info, region_routes)
-            .await;
-
         let table_metadata_manager = env.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(table_info, region_routes, HashMap::default())
+            .await
+            .unwrap();
 
         let (next, _) = state.next(&mut ctx).await.unwrap();
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
 
-        let table_route = table_metadata_manager
+        let region_routes = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner();
-        let region_routes = table_route.region_routes();
+            .into_inner()
+            .region_routes;
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());

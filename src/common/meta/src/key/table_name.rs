@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 use table::metadata::TableId;
 
-use super::{TableMetaValue, TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
+use super::{TABLE_NAME_KEY_PATTERN, TABLE_NAME_KEY_PREFIX};
 use crate::error::{Error, InvalidTableMetadataSnafu, Result};
 use crate::key::{to_removed_key, TableMetaKey};
 use crate::kv_backend::memory::MemoryKvBackend;
