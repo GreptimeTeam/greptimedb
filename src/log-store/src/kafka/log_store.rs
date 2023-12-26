@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, WalOptions};
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
@@ -153,7 +153,10 @@ impl LogStore for KafkaLogStore {
         // Abort if there're no new entries.
         // FIXME(niebayes): how come this case happens?
         if start_offset > end_offset {
-            debug!("No new entries in ns {}", ns);
+            warn!(
+                "No new entries for ns {} in range [{}, {})",
+                ns, start_offset, end_offset
+            );
             return Ok(futures_util::stream::empty().boxed());
         }
 
