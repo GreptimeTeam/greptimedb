@@ -1,7 +1,7 @@
 name: "PR Doc Labeler"
 on:
   pull_request:
-    types: [opened, edited]
+    types: [opened, edited, synchronize, ready_for_review, auto_merge_enabled, labeled, unlabeled]
 
 permissions:
   pull-requests: write
