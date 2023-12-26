@@ -17,6 +17,7 @@ pub mod options_allocator;
 
 use std::collections::HashMap;
 
+use common_config::wal::StandaloneWalConfig;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
@@ -28,18 +29,29 @@ pub use crate::wal::options_allocator::{
 };
 
 /// Wal config for metasrv.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "provider")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "provider", rename_all = "snake_case")]
 pub enum WalConfig {
-    #[serde(rename = "raft_engine")]
+    #[default]
     RaftEngine,
-    #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
 }
 
-impl Default for WalConfig {
-    fn default() -> Self {
-        WalConfig::Kafka(KafkaConfig::default())
+impl From<StandaloneWalConfig> for WalConfig {
+    fn from(value: StandaloneWalConfig) -> Self {
+        match value {
+            StandaloneWalConfig::RaftEngine(config) => WalConfig::RaftEngine,
+            StandaloneWalConfig::Kafka(config) => WalConfig::Kafka(KafkaConfig {
+                broker_endpoints: config.base.broker_endpoints,
+                num_topics: config.num_topics,
+                selector_type: config.selector_type,
+                topic_name_prefix: config.topic_name_prefix,
+                num_partitions: config.num_partitions,
+                replication_factor: config.replication_factor,
+                create_topic_timeout: config.create_topic_timeout,
+                backoff: config.base.backoff,
+            }),
+        }
     }
 }
 
@@ -47,8 +59,9 @@ impl Default for WalConfig {
 mod tests {
     use std::time::Duration;
 
+    use common_config::wal::kafka::{KafkaBackoffConfig, TopicSelectorType};
+
     use super::*;
-    use crate::wal::kafka::topic_selector::SelectorType as KafkaTopicSelectorType;
 
     #[test]
     fn test_serde_wal_config() {
@@ -62,7 +75,7 @@ mod tests {
         // Test serde raft-engine wal config with extra other wal config.
         let toml_str = r#"
             provider = "raft_engine"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
@@ -71,7 +84,7 @@ mod tests {
         // Test serde kafka wal config.
         let toml_str = r#"
             provider = "kafka"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
             selector_type = "round_robin"
             topic_name_prefix = "greptimedb_wal_topic"
@@ -85,17 +98,19 @@ mod tests {
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
         let expected_kafka_config = KafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
-            selector_type: KafkaTopicSelectorType::RoundRobin,
+            selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
             replication_factor: 3,
             create_topic_timeout: Duration::from_secs(30),
-            backoff_init: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(10),
-            backoff_base: 2,
-            backoff_deadline: Some(Duration::from_secs(60 * 5)),
+            backoff: KafkaBackoffConfig {
+                init: Duration::from_millis(500),
+                max: Duration::from_secs(10),
+                base: 2,
+                deadline: Some(Duration::from_secs(60 * 5)),
+            },
         };
         assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));
     }

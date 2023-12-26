@@ -18,7 +18,8 @@ use std::{fs, path};
 use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::{metadata_store_dir, KvBackendConfig, WalConfig as DatanodeWalConfig};
+use common_config::wal::StandaloneWalConfig;
+use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -27,9 +28,7 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::{
-    WalConfig as MetaSrvWalConfig, WalOptionsAllocator, WalOptionsAllocatorRef,
-};
+use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
@@ -106,8 +105,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal_meta: MetaSrvWalConfig,
-    pub wal_datanode: DatanodeWalConfig,
+    pub wal: StandaloneWalConfig,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -130,8 +128,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal_meta: MetaSrvWalConfig::default(),
-            wal_datanode: DatanodeWalConfig::default(),
+            wal: StandaloneWalConfig::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -170,7 +167,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             node_id: Some(0),
             enable_telemetry: self.enable_telemetry,
-            wal: self.wal_datanode,
+            wal: self.wal.into(),
             storage: self.storage,
             region_engine: self.region_engine,
             rpc_addr: self.grpc.addr,
@@ -342,7 +339,7 @@ impl StartCommand {
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
-        let wal_meta = opts.wal_meta.clone();
+        let wal_meta = opts.wal.clone().into();
         let datanode = opts.datanode_options().clone();
 
         Ok(Options::Standalone(Box::new(MixOptions {
@@ -484,6 +481,7 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
@@ -594,7 +592,7 @@ mod tests {
         assert_eq!(None, fe_opts.mysql.reject_no_database);
         assert!(fe_opts.influxdb.enable);
 
-        let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+        let WalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
             unreachable!()
         };
         assert_eq!("/tmp/greptimedb/test/wal", raft_engine_config.dir.unwrap());
@@ -740,8 +738,7 @@ mod tests {
         assert_eq!(options.opentsdb, default_options.opentsdb);
         assert_eq!(options.influxdb, default_options.influxdb);
         assert_eq!(options.prom_store, default_options.prom_store);
-        assert_eq!(options.wal_meta, default_options.wal_meta);
-        assert_eq!(options.wal_datanode, default_options.wal_datanode);
+        assert_eq!(options.wal, default_options.wal);
         assert_eq!(options.metadata_store, default_options.metadata_store);
         assert_eq!(options.procedure, default_options.procedure);
         assert_eq!(options.logging, default_options.logging);

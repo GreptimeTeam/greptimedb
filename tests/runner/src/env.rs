@@ -190,7 +190,7 @@ impl Env {
                     "start".to_string(),
                     "-c".to_string(),
                     self.generate_config_file(subcommand, db_ctx),
-                    "--http-addr=127.0.0.1:5001".to_string(),
+                    "--http-addr=127.0.0.1:5002".to_string(),
                 ];
                 (args, SERVER_ADDR.to_string())
             }
@@ -213,7 +213,7 @@ impl Env {
                     "true".to_string(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
-                    "--http-addr=127.0.0.1:5001".to_string(),
+                    "--http-addr=127.0.0.1:5002".to_string(),
                 ];
                 (args, METASRV_ADDR.to_string())
             }

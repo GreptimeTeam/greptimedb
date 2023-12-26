@@ -40,9 +40,6 @@ use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
 use crate::metadata_region::MetadataRegion;
 
-/// Fixed random state for generating tsid
-pub(crate) const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);
-
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine
 ///
