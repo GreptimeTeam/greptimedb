@@ -56,6 +56,7 @@ impl Default for SelectorOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum SelectorType {
     #[default]
     LoadBased,
