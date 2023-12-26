@@ -97,7 +97,7 @@ num_partitions = 1
 replication_factor = 3
 backoff_init = "500ms"
 backoff_max = "10s"
-backoff_base = 2.0
+backoff_base = 2
 backoff_deadline = "5mins"
 
 # WAL options for datanode.
@@ -114,7 +114,7 @@ linger = "200ms"
 max_wait_time = "100ms"
 backoff_init = "500ms"
 backoff_max = "10s"
-backoff_base = 2.0
+backoff_base = 2
 backoff_deadline = "5mins"
 
 # WAL data directory

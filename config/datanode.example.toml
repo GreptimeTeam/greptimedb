@@ -56,7 +56,7 @@ sync_write = false
 # max_wait_time = "100ms"
 # backoff_init = "500ms"
 # backoff_max = "10s"
-# backoff_base = 2.0
+# backoff_base = 2
 # backoff_deadline = "5mins"
 
 # Storage options, see `standalone.example.toml`.
