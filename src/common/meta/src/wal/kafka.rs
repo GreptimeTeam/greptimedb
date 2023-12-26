@@ -51,7 +51,7 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),

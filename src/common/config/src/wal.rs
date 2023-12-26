@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn test_serde_kafka_config() {
         let toml_str = r#"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             max_batch_size = "4MB"
             linger = "200ms"
             produce_record_timeout = "100ms"
@@ -101,7 +101,7 @@ mod tests {
         "#;
         let decoded: KafkaConfig = toml::from_str(toml_str).unwrap();
         let expected = KafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: RsKafkaCompression::default(),
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),

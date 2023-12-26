@@ -75,7 +75,7 @@ mod tests {
         // Test serde raft-engine wal config with extra other wal config.
         let toml_str = r#"
             provider = "raft_engine"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
@@ -84,7 +84,7 @@ mod tests {
         // Test serde kafka wal config.
         let toml_str = r#"
             provider = "kafka"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
             selector_type = "round_robin"
             topic_name_prefix = "greptimedb_wal_topic"
@@ -98,7 +98,7 @@ mod tests {
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
         let expected_kafka_config = KafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
