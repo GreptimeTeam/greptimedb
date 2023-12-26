@@ -89,7 +89,7 @@ mod tests {
             selector_type = "round_robin"
             topic_name_prefix = "greptimedb_wal_topic"
             num_partitions = 1
-            replication_factor = 3
+            replication_factor = 1
             create_topic_timeout = "30s"
             backoff_init = "500ms"
             backoff_max = "10s"
@@ -103,7 +103,7 @@ mod tests {
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor: 1,
             create_topic_timeout: Duration::from_secs(30),
             backoff: KafkaBackoffConfig {
                 init: Duration::from_millis(500),
