@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_config::wal::kafka::TopicSelectorType;
 use common_telemetry::debug;
 use rskafka::client::ClientBuilder;
 use rskafka::BackoffConfig;
@@ -28,7 +29,7 @@ use crate::error::{
 use crate::kv_backend::KvBackendRef;
 use crate::rpc::store::PutRequest;
 use crate::wal::kafka::topic::Topic;
-use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, SelectorType, TopicSelectorRef};
+use crate::wal::kafka::topic_selector::{RoundRobinTopicSelector, TopicSelectorRef};
 use crate::wal::kafka::KafkaConfig;
 
 const CREATED_TOPICS_KEY: &str = "__created_wal_topics/kafka/";
@@ -51,7 +52,7 @@ impl TopicManager {
             .collect::<Vec<_>>();
 
         let selector = match config.selector_type {
-            SelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
+            TopicSelectorType::RoundRobin => RoundRobinTopicSelector::with_shuffle(),
         };
 
         Self {
@@ -103,10 +104,10 @@ impl TopicManager {
     async fn try_create_topics(&self, topics: &[Topic], to_be_created: &[usize]) -> Result<()> {
         // Builds an kafka controller client for creating topics.
         let backoff_config = BackoffConfig {
-            init_backoff: self.config.backoff_init,
-            max_backoff: self.config.backoff_max,
-            base: self.config.backoff_base as f64,
-            deadline: self.config.backoff_deadline,
+            init_backoff: self.config.backoff.init,
+            max_backoff: self.config.backoff.max,
+            base: self.config.backoff.base as f64,
+            deadline: self.config.backoff.deadline,
         };
         let client = ClientBuilder::new(self.config.broker_endpoints.clone())
             .backoff_config(backoff_config)
@@ -130,7 +131,7 @@ impl TopicManager {
                 )
             })
             .collect::<Vec<_>>();
-        // TODO(niebayes): Determine how rskafka handles an already-exist topic. Check if an error would be raised.
+        // FIXME(niebayes): try to create an already-exist topic would raise an error.
         futures::future::try_join_all(tasks)
             .await
             .context(CreateKafkaWalTopicSnafu)

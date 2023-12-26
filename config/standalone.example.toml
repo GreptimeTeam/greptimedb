@@ -80,22 +80,40 @@ enable = true
 # Whether to enable Prometheus remote write and read in HTTP API, true by default.
 enable = true
 
-# WAL options.
 [wal]
 # Available wal providers:
-# - "RaftEngine" (default)
-# - "Kafka"
+# - "raft_engine" (default)
+# - "kafka"
 provider = "raft_engine"
 
+# There're none raft-engine wal config since meta srv only involves in remote wal currently.
+
 # Kafka wal options.
-# The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
-# broker_endpoints = ["127.0.0.1:9090"]
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
+# broker_endpoints = ["127.0.0.1:9092"]
+
+# Number of topics to be created upon start.
+# num_topics = 64
+# Topic selector type.
+# Available selector types: 
+# - "round_robin" (default)
+# selector_type = "round_robin"
+# A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
+# topic_name_prefix = "greptimedb_wal_topic"
+# Number of partitions per topic.
+# num_partitions = 1
+# Expected number of replicas of each partition.
+# replication_factor = 3
+
 # The maximum log size a kafka batch producer could buffer.
 # max_batch_size = "4MB"
 # The linger duration of a kafka batch producer.
 # linger = "200ms"
 # The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
-# max_wait_time = "100ms"
+# produce_record_timeout = "100ms"
+# Above which a topic creation operation will be cancelled.
+# create_topic_timeout = "30s"
+
 # The initial backoff for kafka clients.
 # backoff_init = "500ms"
 # The maximum backoff for kafka clients.
