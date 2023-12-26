@@ -25,11 +25,11 @@ use crate::error::Result;
 
 // Refer to https://github.com/apache/arrow-rs/blob/7e134f4d277c0b62c27529fc15a4739de3ad0afd/parquet/src/file/footer.rs#L74-L90
 /// Convert [format::FileMetaData] to [ParquetMetaData]
-pub fn to_parquet_metadata(t_file_metadata: format::FileMetaData) -> Result<ParquetMetaData> {
+pub fn parse_parquet_metadata(t_file_metadata: format::FileMetaData) -> Result<ParquetMetaData> {
     let schema = from_thrift(&t_file_metadata.schema).context(error::ConvertMetaDataSnafu)?;
     let schema_desc_ptr = Arc::new(SchemaDescriptor::new(schema));
 
-    let mut row_groups = Vec::new();
+    let mut row_groups = Vec::with_capacity(t_file_metadata.row_groups.len());
     for rg in t_file_metadata.row_groups {
         row_groups.push(
             RowGroupMetaData::from_thrift(schema_desc_ptr.clone(), rg)
@@ -66,7 +66,7 @@ fn parse_column_orders(
                 schema_descr.num_columns(),
                 "Column order length mismatch"
             );
-            let mut res = Vec::new();
+            let mut res = Vec::with_capacity(schema_descr.num_columns());
             for (i, column) in schema_descr.columns().iter().enumerate() {
                 match orders[i] {
                     format::ColumnOrder::TYPEORDER(_) => {

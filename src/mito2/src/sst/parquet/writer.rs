@@ -26,7 +26,7 @@ use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
-use super::helper::to_parquet_metadata;
+use super::helper::parse_parquet_metadata;
 use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
 use crate::sst::parquet::format::WriteFormat;
@@ -114,7 +114,7 @@ impl ParquetWriter {
         let time_range = stats.time_range.unwrap();
 
         // convert FileMetaData to ParquetMetaData
-        let parquet_metadata = to_parquet_metadata(file_meta)?;
+        let parquet_metadata = parse_parquet_metadata(file_meta)?;
 
         // object_store.write will make sure all bytes are written or an error is raised.
         Ok(Some(SstInfo {
