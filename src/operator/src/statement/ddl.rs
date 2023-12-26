@@ -50,8 +50,8 @@ use table::TableRef;
 use super::StatementExecutor;
 use crate::error::{
     self, AlterExprToRequestSnafu, CatalogSnafu, ColumnDataTypeSnafu, ColumnNotFoundSnafu,
-    DeserializePartitionSnafu, InvalidPartitionColumnsSnafu, ParseSqlSnafu, Result,
-    SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    DeserializePartitionSnafu, InvalidPartitionColumnsSnafu, InvalidTableNameSnafu, ParseSqlSnafu,
+    Result, SchemaNotFoundSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
     UnrecognizedTableOptionSnafu,
 };
 use crate::expr_factory;
@@ -131,8 +131,8 @@ impl StatementExecutor {
 
         ensure!(
             NAME_PATTERN_REG.is_match(&create_table.table_name),
-            error::UnexpectedSnafu {
-                violated: format!("Invalid table name: {}", create_table.table_name)
+            InvalidTableNameSnafu {
+                table_name: create_table.table_name.clone(),
             }
         );
 

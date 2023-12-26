@@ -49,6 +49,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use common_telemetry::logging::{debug, error, info};
+use common_telemetry::tracing::Level;
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -61,7 +62,7 @@ use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
 use tower::timeout::TimeoutLayer;
 use tower::ServiceBuilder;
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultOnFailure, TraceLayer};
 
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
@@ -710,7 +711,10 @@ impl HttpServer {
             .layer(
                 ServiceBuilder::new()
                     .layer(HandleErrorLayer::new(handle_error))
-                    .layer(TraceLayer::new_for_http())
+                    .layer(
+                        TraceLayer::new_for_http()
+                            .on_failure(DefaultOnFailure::new().level(Level::DEBUG)),
+                    )
                     .layer(TimeoutLayer::new(self.options.timeout))
                     .layer(DefaultBodyLimit::max(
                         self.options

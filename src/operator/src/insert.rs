@@ -27,7 +27,7 @@ use common_meta::datanode_manager::{AffectedRows, DatanodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use datatypes::schema::Schema;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -301,7 +301,7 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let create_table_expr = &mut build_create_table_expr(&table_ref, request_schema)?;
 
-        info!(
+        debug!(
             "Table {}.{}.{} does not exist, try create table",
             table_ref.catalog, table_ref.schema, table_ref.table,
         );
@@ -320,7 +320,7 @@ impl Inserter {
                 Ok(())
             }
             Err(err) => {
-                error!(
+                debug!(
                     "Failed to create table {}.{}.{}: {}",
                     table_ref.catalog, table_ref.schema, table_ref.table, err
                 );
