@@ -1,0 +1,11 @@
+[package]
+name = "tests-compatibility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+client.workspace = true
+common-telemetry.workspace = true
+common-test-util.workspace = true
+tokio.workspace = true

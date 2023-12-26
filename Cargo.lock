@@ -2068,11 +2068,17 @@ name = "common-test-util"
 version = "0.6.0"
 dependencies = [
  "client",
+ "common-error",
  "common-query",
  "common-recordbatch",
+ "common-time",
  "once_cell",
  "rand",
+ "serde",
+ "strum 0.25.0",
  "tempfile",
+ "tinytemplate",
+ "tokio",
 ]
 
 [[package]]
@@ -9327,11 +9333,11 @@ dependencies = [
  "common-grpc",
  "common-query",
  "common-recordbatch",
+ "common-test-util",
  "common-time",
  "serde",
  "serde_json",
  "sqlness",
- "tinytemplate",
  "tokio",
 ]
 
@@ -9946,6 +9952,16 @@ name = "termtree"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3369f5ac52d5eb6ab48c6b4ffdc8efbcad6b89c765749064ba298f2c68a16a76"
+
+[[package]]
+name = "tests-compatibility"
+version = "0.6.0"
+dependencies = [
+ "client",
+ "common-telemetry",
+ "common-test-util",
+ "tokio",
+]
 
 [[package]]
 name = "tests-fuzz"

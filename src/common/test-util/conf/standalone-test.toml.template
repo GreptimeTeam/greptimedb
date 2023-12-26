@@ -20,8 +20,8 @@ linger = "5ms"
 type = 'File'
 data_home = '{data_home}'
 
-[grpc_options]
-addr = '127.0.0.1:4001'
+[grpc]
+addr = "{grpc_addr}"
 runtime_size = 8
 
 [procedure]
