@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cache files sent to remote object stores.
+//! A write-through cache for remote object stores.
 
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ use crate::wal::EntryId;
 
 /// A cache for uploading files to remote object stores.
 ///
-/// It keeps files in local disk and sends files to object store in background.
+/// It keeps files in local disk and then sends files to object stores.
 pub(crate) struct WriteCache {
     /// Local object storage to store files to upload.
     local_store: ObjectStore,
