@@ -79,9 +79,9 @@ pub(crate) struct TaskTracker<T: Send + Sync + Clone> {
 
 /// The registering result of a async task.
 pub(crate) enum RegisterResult<T: Send + Sync + Clone> {
-    // The watcher of previous running task.
+    // The watcher of the running task.
     Busy(TaskWatcher<T>),
-    // The watcher of registered task.
+    // The watcher of the newly registered task.
     Running(TaskWatcher<T>),
 }
 
