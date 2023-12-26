@@ -31,6 +31,7 @@ use store_api::storage::RegionId;
 
 use crate::error;
 use crate::region_server::RegionServer;
+
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
 #[derive(Clone)]
 pub struct RegionHeartbeatResponseHandler {

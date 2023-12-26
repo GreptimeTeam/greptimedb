@@ -41,6 +41,9 @@ use crate::metrics;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
+//TODO(weny): remove it.
+#[allow(dead_code)]
+pub(crate) mod task_tracker;
 
 pub struct HeartbeatTask {
     node_id: u64,
