@@ -18,6 +18,7 @@ pub mod raft_engine;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
+use self::kafka::StandaloneKafkaConfig;
 pub use crate::wal::kafka::{KafkaConfig, KafkaOptions as KafkaWalOptions, Topic as KafkaWalTopic};
 pub use crate::wal::raft_engine::RaftEngineConfig;
 
@@ -27,12 +28,19 @@ pub const WAL_OPTIONS_KEY: &str = "wal_options";
 
 /// Wal config for datanode.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "provider")]
+#[serde(tag = "provider", rename_all = "snake_case")]
 pub enum WalConfig {
-    #[serde(rename = "raft_engine")]
     RaftEngine(RaftEngineConfig),
-    #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
+}
+
+impl From<StandaloneWalConfig> for WalConfig {
+    fn from(value: StandaloneWalConfig) -> Self {
+        match value {
+            StandaloneWalConfig::RaftEngine(config) => WalConfig::RaftEngine(config),
+            StandaloneWalConfig::Kafka(config) => WalConfig::Kafka(config.base),
+        }
+    }
 }
 
 impl Default for WalConfig {
@@ -41,16 +49,28 @@ impl Default for WalConfig {
     }
 }
 
+/// Wal config for datanode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum StandaloneWalConfig {
+    RaftEngine(RaftEngineConfig),
+    Kafka(StandaloneKafkaConfig),
+}
+
+impl Default for StandaloneWalConfig {
+    fn default() -> Self {
+        StandaloneWalConfig::RaftEngine(RaftEngineConfig::default())
+    }
+}
+
 /// Wal options allocated to a region.
 /// A wal options is encoded by metasrv with `serde_json::to_string`, and then decoded
 /// by datanode with `serde_json::from_str`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "wal.provider")]
+#[serde(tag = "wal.provider", rename_all = "snake_case")]
 pub enum WalOptions {
     #[default]
-    #[serde(rename = "raft_engine")]
     RaftEngine,
-    #[serde(rename = "kafka")]
     #[serde(with = "prefix_wal_kafka")]
     Kafka(KafkaWalOptions),
 }
@@ -64,6 +84,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use rskafka::client::partition::Compression as RsKafkaCompression;
 
+    use crate::wal::kafka::KafkaBackoffConfig;
     use crate::wal::{KafkaConfig, KafkaWalOptions, WalOptions};
 
     #[test]
@@ -72,7 +93,7 @@ mod tests {
             broker_endpoints = ["127.0.0.1:9090"]
             max_batch_size = "4MB"
             linger = "200ms"
-            max_wait_time = "100ms"
+            produce_record_timeout = "100ms"
             backoff_init = "500ms"
             backoff_max = "10s"
             backoff_base = 2
@@ -84,11 +105,13 @@ mod tests {
             compression: RsKafkaCompression::default(),
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
-            max_wait_time: Duration::from_millis(100),
-            backoff_init: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(10),
-            backoff_base: 2,
-            backoff_deadline: Some(Duration::from_secs(60 * 5)),
+            produce_record_timeout: Duration::from_millis(100),
+            backoff: KafkaBackoffConfig {
+                init: Duration::from_millis(500),
+                max: Duration::from_secs(10),
+                base: 2,
+                deadline: Some(Duration::from_secs(60 * 5)),
+            },
         };
         assert_eq!(decoded, expected);
     }

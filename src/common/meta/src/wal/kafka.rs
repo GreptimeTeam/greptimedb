@@ -18,11 +18,12 @@ pub mod topic_selector;
 
 use std::time::Duration;
 
+use common_config::wal::kafka::{kafka_backoff, KafkaBackoffConfig, TopicSelectorType};
+use common_config::wal::StandaloneWalConfig;
 use serde::{Deserialize, Serialize};
 
 pub use crate::wal::kafka::topic::Topic;
 pub use crate::wal::kafka::topic_manager::TopicManager;
-use crate::wal::kafka::topic_selector::SelectorType as TopicSelectorType;
 
 /// Configurations for kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,20 +43,9 @@ pub struct KafkaConfig {
     /// Above which a topic creation operation will be cancelled.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
-    /// The initial backoff for kafka clients.
-    #[serde(with = "humantime_serde")]
-    pub backoff_init: Duration,
-    /// The maximum backoff for kafka clients.
-    #[serde(with = "humantime_serde")]
-    pub backoff_max: Duration,
-    /// Exponential backoff rate, i.e. next backoff = base * current backoff.
-    // Sets to u32 type since the `backoff_base` field in the KafkaConfig for datanode is of type u32,
-    // and we want to unify their types.
-    pub backoff_base: u32,
-    /// Stop reconnecting if the total wait time reaches the deadline.
-    /// If it's None, the reconnecting won't terminate.
-    #[serde(with = "humantime_serde")]
-    pub backoff_deadline: Option<Duration>,
+    /// The backoff config.
+    #[serde(flatten, with = "kafka_backoff")]
+    pub backoff: KafkaBackoffConfig,
 }
 
 impl Default for KafkaConfig {
@@ -68,10 +58,7 @@ impl Default for KafkaConfig {
             num_partitions: 1,
             replication_factor: 3,
             create_topic_timeout: Duration::from_secs(30),
-            backoff_init: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(10),
-            backoff_base: 2,
-            backoff_deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
+            backoff: KafkaBackoffConfig::default(),
         }
     }
 }
