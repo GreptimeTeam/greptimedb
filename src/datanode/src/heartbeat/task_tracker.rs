@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common_runtime::JoinHandle;
 use futures_util::future::BoxFuture;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -55,7 +54,6 @@ pub async fn wait<T: Send + Sync + Clone>(watcher: &mut TaskWatcher<T>) -> Resul
 
 /// The running async task.
 pub(crate) struct Task<T: Send + Sync + Clone> {
-    handle: JoinHandle<()>,
     watcher: TaskWatcher<T>,
 }
 
@@ -93,11 +91,13 @@ impl<T: Send + Sync + Clone> RegisterResult<T> {
         }
     }
 
+    #[cfg(test)]
     /// Returns true if it's [RegisterResult::Busy].
     pub(crate) fn is_busy(&self) -> bool {
         matches!(self, RegisterResult::Busy(_))
     }
 
+    #[cfg(test)]
     /// Returns true if it's [RegisterResult::Running].
     pub(crate) fn is_running(&self) -> bool {
         matches!(self, RegisterResult::Running(_))
@@ -111,11 +111,13 @@ pub(crate) enum WaitResult<T> {
 }
 
 impl<T> WaitResult<T> {
+    #[cfg(test)]
     /// Returns true if it's [WaitResult::Timeout].
     pub(crate) fn is_timeout(&self) -> bool {
         matches!(self, WaitResult::Timeout)
     }
 
+    #[cfg(test)]
     /// Into the [WaitResult::Timeout] if it's.
     pub(crate) fn into_finish(self) -> Option<Result<T>> {
         match self {
@@ -151,19 +153,6 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
         }
     }
 
-    /// Waits for an specified region async task.
-    pub(crate) async fn wait_with_region(
-        &self,
-        region_id: RegionId,
-        timeout: Duration,
-    ) -> Option<WaitResult<T>> {
-        let inner = self.inner.read().await;
-        match inner.state.get(&region_id) {
-            Some(task) => Some(self.wait(&mut task.watcher.clone(), timeout).await),
-            None => None,
-        }
-    }
-
     /// Tries to register a new async task, returns [RegisterResult::Busy] if previous task is running.
     pub(crate) async fn try_register(
         &self,
@@ -177,7 +166,7 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
             let moved_inner = self.inner.clone();
             let (tx, rx) = watch::channel(TaskState::<T>::Running);
 
-            let handle = common_runtime::spawn_bg(async move {
+            common_runtime::spawn_bg(async move {
                 match fut.await {
                     Ok(result) => {
                         let _ = tx.send(TaskState::Done(result));
@@ -193,7 +182,6 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
             inner.state.insert(
                 region_id,
                 Task {
-                    handle,
                     watcher: rx.clone(),
                 },
             );
