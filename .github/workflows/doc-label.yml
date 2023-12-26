@@ -17,3 +17,4 @@ jobs:
         configuration-path: .github/doc-label-config.yml
         enable-versioned-regex: false
         repo-token: ${{ github.token }}
+        sync-labels: 1
