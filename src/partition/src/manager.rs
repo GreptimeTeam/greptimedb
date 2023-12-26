@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_meta::key::table_route::TableRouteManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::{convert_to_region_leader_map, RegionRoutes};
+use common_meta::rpc::router::RegionRoutes;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
@@ -76,56 +76,7 @@ impl PartitionRuleManager {
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
 
-        Ok(RegionRoutes(route.region_routes))
-    }
-
-    /// Find datanodes of corresponding regions of given table.
-    pub async fn find_region_datanodes(
-        &self,
-        table_id: TableId,
-        regions: Vec<RegionNumber>,
-    ) -> Result<HashMap<Peer, Vec<RegionNumber>>> {
-        let route = self
-            .table_route_manager
-            .get(table_id)
-            .await
-            .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?
-            .into_inner();
-        let mut datanodes = HashMap::with_capacity(regions.len());
-        let region_map = convert_to_region_leader_map(&route.region_routes);
-        for region in regions.iter() {
-            let datanode = *region_map.get(region).context(error::FindDatanodeSnafu {
-                table_id,
-                region: *region,
-            })?;
-            datanodes
-                .entry(datanode.clone())
-                .or_insert_with(Vec::new)
-                .push(*region);
-        }
-        Ok(datanodes)
-    }
-
-    /// Find all leader peers of given table.
-    pub async fn find_table_region_leaders(&self, table_id: TableId) -> Result<Vec<Peer>> {
-        let route = self
-            .table_route_manager
-            .get(table_id)
-            .await
-            .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?
-            .into_inner();
-        let mut peers = Vec::with_capacity(route.region_routes.len());
-
-        for peer in &route.region_routes {
-            peers.push(peer.leader_peer.clone().with_context(|| FindLeaderSnafu {
-                region_id: peer.region.id,
-                table_id,
-            })?);
-        }
-
-        Ok(peers)
+        Ok(RegionRoutes(route.region_routes().clone()))
     }
 
     pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
@@ -136,13 +87,15 @@ impl PartitionRuleManager {
             .context(error::TableRouteManagerSnafu)?
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
+        let region_routes = route.region_routes();
+
         ensure!(
-            !route.region_routes.is_empty(),
+            !region_routes.is_empty(),
             error::FindTableRoutesSnafu { table_id }
         );
 
-        let mut partitions = Vec::with_capacity(route.region_routes.len());
-        for r in route.region_routes.iter() {
+        let mut partitions = Vec::with_capacity(region_routes.len());
+        for r in region_routes {
             let partition = r
                 .region
                 .partition
