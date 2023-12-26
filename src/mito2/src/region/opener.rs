@@ -399,6 +399,8 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     }
 
     // set next_entry_id and write to memtable.
+    // FIXME(niebayes): figure out how to properly set last entry id when the replay is done.
+    last_entry_id = flushed_entry_id;
     region_write_ctx.set_next_entry_id(last_entry_id + 1);
     region_write_ctx.write_memtable();
 

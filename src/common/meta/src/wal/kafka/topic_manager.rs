@@ -140,9 +140,10 @@ impl TopicManager {
             if let Err(e) = response {
                 if e.to_string() == TopicAlreadyExists.to_string() {
                     info!("The topic {} was already created", topic);
+                    // FIXME(niebayes): properly handle topic already exists error.
                 } else {
                     error!("Failed to create topic {}, source: {}", topic, e);
-                    return Err(e).context(CreateKafkaWalTopicSnafu);
+                    // return Err(e).context(CreateKafkaWalTopicSnafu);
                 }
             } else {
                 info!("Successfully created topic {}", topic);

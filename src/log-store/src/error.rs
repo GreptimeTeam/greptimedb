@@ -20,6 +20,8 @@ use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
 use snafu::{Location, Snafu};
 
+use crate::kafka::NamespaceImpl as KafkaNamespace;
+
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
@@ -152,16 +154,17 @@ pub enum Error {
         error: rskafka::client::producer::Error,
     },
 
-    #[snafu(display(
-        "Failed to read a record from Kafka, topic: {}, region_id: {}, offset: {}",
-        topic,
-        region_id,
-        offset,
-    ))]
+    #[snafu(display("Failed to read a record from Kafka, ns: {}", ns))]
     ConsumeRecord {
-        topic: String,
-        region_id: u64,
-        offset: i64,
+        ns: KafkaNamespace,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to get the lastest offset, ns: {}", ns))]
+    GetOffset {
+        ns: KafkaNamespace,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::error::Error,
