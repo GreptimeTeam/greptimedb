@@ -52,8 +52,8 @@ provider = "raft_engine"
 # There're none raft-engine wal config since meta srv only involves in remote wal currently.
 
 # Kafka wal config.
-# The broker endpoints of the Kafka cluster. ["127.0.0.1:9090"] by default.
-# broker_endpoints = ["127.0.0.1:9090"]
+# The broker endpoints of the Kafka cluster. ["127.0.0.1:9092"] by default.
+# broker_endpoints = ["127.0.0.1:9092"]
 # Number of topics to be created upon start.
 # num_topics = 64
 # Topic selector type.

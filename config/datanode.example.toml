@@ -50,10 +50,10 @@ read_batch_size = 128
 sync_write = false
 
 # Kafka wal options, see `standalone.example.toml`.
-# broker_endpoints = ["127.0.0.1:9090"]
+# broker_endpoints = ["127.0.0.1:9092"]
 # max_batch_size = "4MB"
 # linger = "200ms"
-# max_wait_time = "100ms"
+# produce_record_timeout = "100ms"
 # backoff_init = "500ms"
 # backoff_max = "10s"
 # backoff_base = 2
