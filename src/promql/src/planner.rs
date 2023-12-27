@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::fmt::Display;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -52,7 +51,7 @@ use crate::error::{
 };
 use crate::extension_plan::{
     build_special_time_expr, EmptyMetric, HistogramFold, InstantManipulate, Millisecond,
-    RangeManipulate, SeriesDivide, SeriesNormalize,
+    RangeManipulate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 use crate::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, HoltWinters, IDelta,
@@ -1626,19 +1625,61 @@ impl PromPlanner {
             .unwrap_or_default();
 
         common_telemetry::info!("[DEBUG] tags not in left {tags_not_in_left:?}");
+        common_telemetry::info!("[DEBUG] tags not in right {tags_not_in_right:?}");
         common_telemetry::info!("[DEBUG] all tags {all_tags:?}");
 
+        // step 0: fild all columns in output schema
+        let all_columns_set = left
+            .schema()
+            .fields()
+            .iter()
+            .chain(right.schema().fields().iter())
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        let mut all_columns = all_columns_set.into_iter().collect::<Vec<_>>();
+        // sort to ensure the generated schema is not volatile
+        all_columns.sort_unstable();
+
         // step 1: align schema using project, fill non-exist columns with null
-        let left_proj_exprs =
-            left.schema()
-                .field_names()
-                .into_iter()
-                .map(col)
-                .chain(tags_not_in_left.iter().map(|tag_name| {
-                    DfExpr::Literal(ScalarValue::Utf8(None))
-                        // .alias(format!("{left_qualifier_string}.{tag_name}"))
-                        .alias(format!("{tag_name}"))
-                }));
+        let left_proj_exprs = all_columns.iter().map(|col| {
+            if tags_not_in_left.contains(col) {
+                DfExpr::Literal(ScalarValue::Utf8(None)).alias(format!("{col}"))
+            } else {
+                DfExpr::Column(Column::new(left_qualifier.clone(), col))
+            }
+        });
+        let right_proj_exprs = all_columns.iter().map(|col| {
+            if tags_not_in_right.contains(col) {
+                DfExpr::Literal(ScalarValue::Utf8(None)).alias(format!("{col}"))
+            } else {
+                DfExpr::Column(Column::new(right_qualifier.clone(), col))
+            }
+        });
+        // let left_proj_exprs =
+        //     left.schema()
+        //         .field_names()
+        //         .into_iter()
+        //         .map(col)
+        //         .chain(tags_not_in_left.iter().map(|tag_name| {
+        //             DfExpr::Literal(ScalarValue::Utf8(None))
+        //                 // .alias(format!("{left_qualifier_string}.{tag_name}"))
+        //                 .alias(format!("{tag_name}"))
+        //         }));
+        // let right_proj_exprs =
+        //     right
+        //         .schema()
+        //         .field_names()
+        //         .into_iter()
+        //         .map(col)
+        //         .chain(tags_not_in_right.iter().map(|tag_name| {
+        //             DfExpr::Literal(ScalarValue::Utf8(None))
+        //                 // .alias(format!("{right_qualifier_string}.{tag_name}"))
+        //                 .alias(format!("{tag_name}"))
+        //         }));
+
+        common_telemetry::info!("[DEBUG] left project exprs {left_proj_exprs:?}");
+        common_telemetry::info!("[DEBUG] right project exprs {right_proj_exprs:?}");
+
         let left_projected = LogicalPlanBuilder::from(left)
             .project(left_proj_exprs)
             .context(DataFusionPlanningSnafu)?
@@ -1646,17 +1687,6 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
-        let right_proj_exprs =
-            right
-                .schema()
-                .field_names()
-                .into_iter()
-                .map(col)
-                .chain(tags_not_in_right.iter().map(|tag_name| {
-                    DfExpr::Literal(ScalarValue::Utf8(None))
-                        // .alias(format!("{right_qualifier_string}.{tag_name}"))
-                        .alias(format!("{tag_name}"))
-                }));
         let right_projected = LogicalPlanBuilder::from(right)
             .project(right_proj_exprs)
             .context(DataFusionPlanningSnafu)?
@@ -1683,39 +1713,53 @@ impl PromPlanner {
         };
         // sort to ensure the generated plan is not volatile
         match_columns.sort_unstable();
-        match_columns.push(self.ctx.time_index_column.clone().unwrap());
+        // match_columns.push(self.ctx.time_index_column.clone().unwrap());
 
-        // step 3: right anti join
-        let filter = match_columns
-            .iter()
-            .cloned()
-            .map(|col| {
-                let left_col = DfExpr::Column(Column::new(left_qualifier.clone(), col));
-                left_col.is_not_null()
-            })
-            .reduce(|left, right| left.and(right))
-            .unwrap(); // Safety: match columns contains at least the time index col
-        let right_anti_join = LogicalPlanBuilder::from(left_projected.clone())
-            .join_detailed(
-                right_projected,
-                JoinType::RightAnti,
-                (match_columns.clone(), match_columns),
-                Some(filter),
-                true,
-            )
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        // // step 3: right anti join
+        // let filter = match_columns
+        //     .iter()
+        //     .cloned()
+        //     .map(|col| {
+        //         let left_col = DfExpr::Column(Column::new(left_qualifier.clone(), col));
+        //         left_col.is_not_null()
+        //     })
+        //     .reduce(|left, right| left.and(right))
+        //     .unwrap(); // Safety: match columns contains at least the time index col
+        // let right_anti_join = LogicalPlanBuilder::from(left_projected.clone())
+        //     .join_detailed(
+        //         right_projected,
+        //         JoinType::RightAnti,
+        //         (match_columns.clone(), match_columns),
+        //         Some(filter),
+        //         true,
+        //     )
+        //     .context(DataFusionPlanningSnafu)?
+        //     .build()
+        //     .context(DataFusionPlanningSnafu)?;
 
         common_telemetry::info!("[DEBUG] left projected {left_projected:?}");
-        common_telemetry::info!("[DEBUG] right anti join {right_anti_join:?}");
+        common_telemetry::info!("[DEBUG] right anti join {right_projected:?}");
 
-        // step 4: union left and right
-        let result = LogicalPlanBuilder::from(left_projected)
-            .union(right_anti_join)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        // // step 4: union left and right
+        // let result = LogicalPlanBuilder::from(left_projected)
+        //     .union(right_anti_join)
+        //     .context(DataFusionPlanningSnafu)?
+        //     .build()
+        //     .context(DataFusionPlanningSnafu)?;
+
+        // step 3: build `UnionDistinctOn` plan
+        let schema = left_projected.schema().clone();
+        let union_distinct_on = UnionDistinctOn::new(
+            left_projected,
+            right_projected,
+            match_columns,
+            self.ctx.time_index_column.clone().unwrap(),
+            schema,
+        );
+        let result = LogicalPlan::Extension(Extension {
+            node: Arc::new(union_distinct_on),
+        });
+
         Ok(result)
     }
 

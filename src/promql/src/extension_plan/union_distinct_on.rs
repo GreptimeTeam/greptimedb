@@ -28,8 +28,8 @@ use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::PhysicalSortExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    hash_utils, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, RecordBatchStream,
-    SendableRecordBatchStream, Statistics,
+    hash_utils, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning,
+    RecordBatchStream, SendableRecordBatchStream, Statistics,
 };
 use datatypes::arrow::compute;
 use futures::future::BoxFuture;
@@ -146,12 +146,9 @@ impl ExecutionPlan for UnionDistinctOnExec {
         self.output_schema.clone()
     }
 
-    // fn required_input_distribution(&self) -> Vec<Distribution> {
-    //     vec![
-    //         Distribution::HashPartitioned(todo!()),
-    //         Distribution::HashPartitioned(todo!()),
-    //     ]
-    // }
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition, Distribution::SinglePartition]
+    }
 
     fn output_partitioning(&self) -> Partitioning {
         Partitioning::UnknownPartitioning(1)
@@ -278,6 +275,7 @@ impl UnionDistinctOnStream {
             HashedDataFut::Empty => return Poll::Ready(None),
         };
 
+        // poll left and probe with right
         let next_left = ready!(self.left.poll_next_unpin(cx));
         match next_left {
             Some(Ok(left)) => {
@@ -287,6 +285,7 @@ impl UnionDistinctOnStream {
             }
             Some(Err(e)) => Poll::Ready(Some(Err(e))),
             None => {
+                common_telemetry::info!("[DEBUG] left stream is end");
                 // left stream is exhausted, so we can send the right part
                 let right = std::mem::replace(&mut self.right, HashedDataFut::Empty);
                 let HashedDataFut::Ready(data) = right else {
@@ -382,6 +381,15 @@ impl HashedData {
         // Finilize the hash map
         let batch = interleave_batches(batches, interleave_indices)?;
 
+        common_telemetry::info!(
+            "[DEBUG] right batch: {}",
+            datatypes::arrow::util::pretty::pretty_format_batches(&[batch.clone()])
+                .unwrap()
+                .to_string()
+        );
+
+        common_telemetry::info!("[DEBUG] initial hash map: {hash_map:?}");
+
         Ok(Self {
             hash_map,
             batch,
@@ -393,6 +401,13 @@ impl HashedData {
     /// Remove rows that hash value present in the input
     /// record batch from the hash map.
     pub fn update_map(&mut self, input: &RecordBatch) -> DataFusionResult<()> {
+        common_telemetry::info!(
+            "[DEBUG] incoming left batch: {}",
+            datatypes::arrow::util::pretty::pretty_format_batches(&[input.clone()])
+                .unwrap()
+                .to_string()
+        );
+
         // get columns for hashing
         let mut hashes_buffer = Vec::new();
         let arrays = self
@@ -402,8 +417,11 @@ impl HashedData {
             .collect::<Vec<_>>();
 
         // compute hash
+        hashes_buffer.resize(input.num_rows(), 0);
         let hash_values =
             hash_utils::create_hashes(&arrays, &self.random_state, &mut hashes_buffer)?;
+
+        common_telemetry::info!("[DEBUG] hashes to remove: {hash_values:?}");
 
         // remove those hashes
         for hash in hash_values {
@@ -415,7 +433,14 @@ impl HashedData {
 
     pub fn finish(self) -> DataFusionResult<RecordBatch> {
         let valid_indices = self.hash_map.values().copied().collect::<Vec<_>>();
-        take_batch(&self.batch, &valid_indices)
+        let result = take_batch(&self.batch, &valid_indices)?;
+        common_telemetry::info!(
+            "[DEBUG] right batch: {}",
+            datatypes::arrow::util::pretty::pretty_format_batches(&[result.clone()])
+                .unwrap()
+                .to_string()
+        );
+        Ok(result)
     }
 }
 
