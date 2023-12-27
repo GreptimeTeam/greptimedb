@@ -62,7 +62,13 @@ impl TableRouteValue {
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
+    /// 
+    /// # Panics
+    /// The route type is not the [TableRouteValue::Physical].
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Self {
+        if (!self.is_physical()) {
+            panic!("Mistakenly been treated as a Physical TableRoute: {self:?}");
+        }
         let version = self.physical_table_route().version;
         Self::Physical(PhysicalTableRouteValue {
             region_routes,
@@ -73,13 +79,25 @@ impl TableRouteValue {
     /// Returns the version.
     ///
     /// For test purpose.
+    /// 
+    /// # Panics
+    /// The route type is not the [TableRouteValue::Physical].
     #[cfg(any(test, feature = "testing"))]
     pub fn version(&self) -> u64 {
+        if (!self.is_physical()) {
+            panic!("Mistakenly been treated as a Physical TableRoute: {self:?}");
+        }
         self.physical_table_route().version
     }
 
     /// Returns the corresponding [RegionRoute].
+    /// 
+    /// # Panics
+    /// The route type is not the [TableRouteValue::Physical].
     pub fn region_route(&self, region_id: RegionId) -> Option<RegionRoute> {
+        if (!self.is_physical()) {
+            panic!("Mistakenly been treated as a Physical TableRoute: {self:?}");
+        }
         self.physical_table_route()
             .region_routes
             .iter()
@@ -97,6 +115,9 @@ impl TableRouteValue {
     /// # Panics
     /// The route type is not the [TableRouteValue::Physical].
     pub fn region_routes(&self) -> &Vec<RegionRoute> {
+        if (!self.is_physical()) {
+            panic!("Mistakenly been treated as a Physical TableRoute: {self:?}");
+        }
         &self.physical_table_route().region_routes
     }
 
