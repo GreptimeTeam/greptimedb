@@ -85,7 +85,7 @@ impl UpdateRegionMetadata {
             .context(error::TableMetadataManagerSnafu)?
             .context(TableRouteNotFoundSnafu { table_id })?;
 
-        let mut new_region_routes = table_route_value.region_routes().clone();
+        let mut new_region_routes = table_route_value.region_routes.clone();
 
         for region_route in new_region_routes.iter_mut() {
             if region_route.region.id.region_number() == failed_region.region_number {
@@ -233,8 +233,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .into_inner()
-                .region_routes()
-                .clone()
+                .region_routes
         }
 
         // Original region routes:
@@ -396,8 +395,8 @@ mod tests {
                 .unwrap()
                 .into_inner();
 
-            let peers = &extract_all_peers(table_route_value.region_routes());
-            let actual = table_route_value.region_routes();
+            let peers = &extract_all_peers(&table_route_value.region_routes);
+            let actual = &table_route_value.region_routes;
             let expected = &vec![
                 new_region_route(1, peers, 2),
                 new_region_route(2, peers, 3),
@@ -416,7 +415,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
 
-            let map = region_distribution(table_route_value.region_routes()).unwrap();
+            let map = region_distribution(&table_route_value.region_routes).unwrap();
             assert_eq!(map.len(), 2);
             assert_eq!(map.get(&2), Some(&vec![1, 3]));
             assert_eq!(map.get(&3), Some(&vec![2, 4]));

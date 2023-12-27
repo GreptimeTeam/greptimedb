@@ -14,7 +14,6 @@
 
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use ahash::RandomState;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType};
 use common_telemetry::{error, info};
@@ -25,12 +24,15 @@ use store_api::metric_engine_consts::{
 use store_api::region_request::{AffectedRows, RegionPutRequest};
 use store_api::storage::{RegionId, TableId};
 
-use crate::engine::{MetricEngineInner, RANDOM_STATE};
+use crate::engine::MetricEngineInner;
 use crate::error::{
     ColumnNotFoundSnafu, ForbiddenPhysicalAlterSnafu, LogicalRegionNotFoundSnafu, Result,
 };
 use crate::metrics::FORBIDDEN_OPERATION_COUNT;
 use crate::utils::{to_data_region_id, to_metadata_region_id};
+
+// A random number
+const TSID_HASH_SEED: u32 = 846793005;
 
 impl MetricEngineInner {
     /// Dispatch region put request
@@ -174,9 +176,8 @@ impl MetricEngineInner {
         });
 
         // fill internal columns
-        let mut random_state = RANDOM_STATE.clone();
         for row in &mut rows.rows {
-            Self::fill_internal_columns(&mut random_state, table_id, &tag_col_indices, row);
+            Self::fill_internal_columns(table_id, &tag_col_indices, row);
         }
 
         Ok(())
@@ -184,12 +185,11 @@ impl MetricEngineInner {
 
     /// Fills internal columns of a row with table name and a hash of tag values.
     fn fill_internal_columns(
-        random_state: &mut RandomState,
         table_id: TableId,
         tag_col_indices: &[(usize, String)],
         row: &mut Row,
     ) {
-        let mut hasher = random_state.build_hasher();
+        let mut hasher = mur3::Hasher128::with_seed(TSID_HASH_SEED);
         for (idx, name) in tag_col_indices {
             let tag = row.values[*idx].clone();
             name.hash(&mut hasher);
@@ -198,7 +198,8 @@ impl MetricEngineInner {
                 string.hash(&mut hasher);
             }
         }
-        let hash = hasher.finish();
+        // TSID is 64 bits, simply truncate the 128 bits hash
+        let (hash, _) = hasher.finish128();
 
         // fill table id and tsid
         row.values.push(ValueData::U32Value(table_id).into());
@@ -247,15 +248,15 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         let expected = "\
-+-------------------------+----------------+------------+---------------------+-------+
-| greptime_timestamp      | greptime_value | __table_id | __tsid              | job   |
-+-------------------------+----------------+------------+---------------------+-------+
-| 1970-01-01T00:00:00     | 0.0            | 3          | 4844750677434873907 | tag_0 |
-| 1970-01-01T00:00:00.001 | 1.0            | 3          | 4844750677434873907 | tag_0 |
-| 1970-01-01T00:00:00.002 | 2.0            | 3          | 4844750677434873907 | tag_0 |
-| 1970-01-01T00:00:00.003 | 3.0            | 3          | 4844750677434873907 | tag_0 |
-| 1970-01-01T00:00:00.004 | 4.0            | 3          | 4844750677434873907 | tag_0 |
-+-------------------------+----------------+------------+---------------------+-------+";
++-------------------------+----------------+------------+----------------------+-------+
+| greptime_timestamp      | greptime_value | __table_id | __tsid               | job   |
++-------------------------+----------------+------------+----------------------+-------+
+| 1970-01-01T00:00:00     | 0.0            | 3          | 12881218023286672757 | tag_0 |
+| 1970-01-01T00:00:00.001 | 1.0            | 3          | 12881218023286672757 | tag_0 |
+| 1970-01-01T00:00:00.002 | 2.0            | 3          | 12881218023286672757 | tag_0 |
+| 1970-01-01T00:00:00.003 | 3.0            | 3          | 12881218023286672757 | tag_0 |
+| 1970-01-01T00:00:00.004 | 4.0            | 3          | 12881218023286672757 | tag_0 |
++-------------------------+----------------+------------+----------------------+-------+";
         assert_eq!(expected, batches.pretty_print().unwrap(), "physical region");
 
         // read data from logical region
@@ -288,7 +289,7 @@ mod tests {
         // add columns
         let logical_region_id = env.default_logical_region_id();
         let columns = &["odd", "even", "Ev_En"];
-        let alter_request = test_util::alter_logical_region_add_tag_columns(columns);
+        let alter_request = test_util::alter_logical_region_add_tag_columns(123456, columns);
         engine
             .handle_request(logical_region_id, RegionRequest::Alter(alter_request))
             .await

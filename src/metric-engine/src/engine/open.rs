@@ -53,18 +53,12 @@ impl MetricEngineInner {
             self.recover_states(region_id).await?;
 
             Ok(0)
-        } else if self
-            .state
-            .read()
-            .await
-            .logical_regions()
-            .contains_key(&region_id)
-        {
-            // if the logical region is already open, do nothing
-            Ok(0)
         } else {
-            // throw RegionNotFound error
-            Err(LogicalRegionNotFoundSnafu { region_id }.build())
+            // Don't check if the logical region exist. Because a logical region cannot be opened
+            // individually, it is always "open" if its physical region is open. But the engine
+            // can't tell if the logical region is not exist or the physical region is not opened
+            // yet. Thus simply return `Ok` here to ignore all those errors.
+            Ok(0)
         }
     }
 

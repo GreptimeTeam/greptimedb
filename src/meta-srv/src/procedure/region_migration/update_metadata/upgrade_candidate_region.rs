@@ -33,7 +33,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let mut region_routes = table_route_value.region_routes().clone();
+        let mut region_routes = table_route_value.region_routes.clone();
         let region_route = region_routes
             .iter_mut()
             .find(|route| route.region.id == region_id)
@@ -81,7 +81,7 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let region_routes = table_route_value.region_routes().clone();
+        let region_routes = table_route_value.region_routes.clone();
         let region_route = region_routes
             .into_iter()
             .find(|route| route.region.id == region_id)
@@ -480,14 +480,14 @@ mod tests {
 
         let _ = next.as_any().downcast_ref::<RegionMigrationEnd>().unwrap();
 
-        let table_route = table_metadata_manager
+        let region_routes = table_metadata_manager
             .table_route_manager()
             .get(table_id)
             .await
             .unwrap()
             .unwrap()
-            .into_inner();
-        let region_routes = table_route.region_routes();
+            .into_inner()
+            .region_routes;
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());

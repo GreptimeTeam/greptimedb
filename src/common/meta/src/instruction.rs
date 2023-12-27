@@ -98,6 +98,8 @@ pub struct OpenRegion {
     pub region_options: HashMap<String, String>,
     #[serde(default)]
     pub region_wal_options: HashMap<String, String>,
+    #[serde(default)]
+    pub skip_wal_replay: bool,
 }
 
 impl OpenRegion {
@@ -106,12 +108,14 @@ impl OpenRegion {
         path: &str,
         region_options: HashMap<String, String>,
         region_wal_options: HashMap<String, String>,
+        skip_wal_replay: bool,
     ) -> Self {
         Self {
             region_ident,
             region_storage_path: path.to_string(),
             region_options,
             region_wal_options,
+            skip_wal_replay,
         }
     }
 }
@@ -227,12 +231,13 @@ mod tests {
             "test/foo",
             HashMap::new(),
             HashMap::new(),
+            false,
         ));
 
         let serialized = serde_json::to_string(&open_region).unwrap();
 
         assert_eq!(
-            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{}}}"#,
+            r#"{"OpenRegion":{"region_ident":{"cluster_id":1,"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{},"skip_wal_replay":false}}"#,
             serialized
         );
 
@@ -289,6 +294,7 @@ mod tests {
             region_storage_path,
             region_options,
             region_wal_options: HashMap::new(),
+            skip_wal_replay: false,
         };
         assert_eq!(expected, deserialized);
     }

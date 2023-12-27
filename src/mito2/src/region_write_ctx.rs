@@ -167,8 +167,6 @@ impl RegionWriteCtx {
             &self.wal_entry,
             &self.wal_options,
         )?;
-        // We only call this method one time, but we still bump next entry id for consistency.
-        self.next_entry_id += 1;
         Ok(())
     }
 

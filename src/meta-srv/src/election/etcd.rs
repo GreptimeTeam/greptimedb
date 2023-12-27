@@ -35,10 +35,15 @@ pub struct EtcdElection {
     is_leader: AtomicBool,
     infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
+    store_key_prefix: Option<String>,
 }
 
 impl EtcdElection {
-    pub async fn with_endpoints<E, S>(leader_value: E, endpoints: S) -> Result<ElectionRef>
+    pub async fn with_endpoints<E, S>(
+        leader_value: E,
+        endpoints: S,
+        store_key_prefix: Option<String>,
+    ) -> Result<ElectionRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -47,10 +52,14 @@ impl EtcdElection {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Self::with_etcd_client(leader_value, client).await
+        Self::with_etcd_client(leader_value, client, store_key_prefix).await
     }
 
-    pub async fn with_etcd_client<E>(leader_value: E, client: Client) -> Result<ElectionRef>
+    pub async fn with_etcd_client<E>(
+        leader_value: E,
+        client: Client,
+        store_key_prefix: Option<String>,
+    ) -> Result<ElectionRef>
     where
         E: AsRef<str>,
     {
@@ -91,7 +100,15 @@ impl EtcdElection {
             is_leader: AtomicBool::new(false),
             infancy: AtomicBool::new(false),
             leader_watcher: tx,
+            store_key_prefix,
         }))
+    }
+
+    fn election_key(&self) -> String {
+        match &self.store_key_prefix {
+            Some(prefix) => format!("{}{}", prefix, ELECTION_KEY),
+            None => ELECTION_KEY.to_string(),
+        }
     }
 }
 
@@ -128,7 +145,7 @@ impl Election for EtcdElection {
         // to confirm that it is a valid leader, because it is possible that the
         // election's lease expires.
         let res = election_client
-            .campaign(ELECTION_KEY, self.leader_value.clone(), lease_id)
+            .campaign(self.election_key(), self.leader_value.clone(), lease_id)
             .await
             .context(error::EtcdFailedSnafu)?;
 
@@ -188,7 +205,7 @@ impl Election for EtcdElection {
             let res = self
                 .client
                 .election_client()
-                .leader(ELECTION_KEY)
+                .leader(self.election_key())
                 .await
                 .context(error::EtcdFailedSnafu)?;
             let leader_value = res.kv().context(error::NoLeaderSnafu)?.value();

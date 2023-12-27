@@ -18,11 +18,12 @@ pub mod topic_selector;
 
 use std::time::Duration;
 
+use common_config::wal::kafka::{kafka_backoff, KafkaBackoffConfig, TopicSelectorType};
+use common_config::wal::StandaloneWalConfig;
 use serde::{Deserialize, Serialize};
 
 pub use crate::wal::kafka::topic::Topic;
 pub use crate::wal::kafka::topic_manager::TopicManager;
-use crate::wal::kafka::topic_selector::SelectorType as TopicSelectorType;
 
 /// Configurations for kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,34 +43,25 @@ pub struct KafkaConfig {
     /// Above which a topic creation operation will be cancelled.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
-    /// The initial backoff for kafka clients.
-    #[serde(with = "humantime_serde")]
-    pub backoff_init: Duration,
-    /// The maximum backoff for kafka clients.
-    #[serde(with = "humantime_serde")]
-    pub backoff_max: Duration,
-    /// Exponential backoff rate, i.e. next backoff = base * current backoff.
-    pub backoff_base: f64,
-    /// Stop reconnecting if the total wait time reaches the deadline.
-    /// If it's None, the reconnecting won't terminate.
-    #[serde(with = "humantime_serde")]
-    pub backoff_deadline: Option<Duration>,
+    /// The backoff config.
+    #[serde(flatten, with = "kafka_backoff")]
+    pub backoff: KafkaBackoffConfig,
 }
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let broker_endpoints = vec!["127.0.0.1:9092".to_string()];
+        let replication_factor = broker_endpoints.len() as i16;
+
         Self {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_wal_kafka".to_string(),
+            topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor,
             create_topic_timeout: Duration::from_secs(30),
-            backoff_init: Duration::from_millis(500),
-            backoff_max: Duration::from_secs(10),
-            backoff_base: 2.0,
-            backoff_deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
+            backoff: KafkaBackoffConfig::default(),
         }
     }
 }

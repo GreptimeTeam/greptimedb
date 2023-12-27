@@ -18,7 +18,8 @@ use std::{fs, path};
 use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
+use common_config::wal::StandaloneWalConfig;
+use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -104,7 +105,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal: WalConfig,
+    pub wal: StandaloneWalConfig,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -127,7 +128,7 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal: WalConfig::default(),
+            wal: StandaloneWalConfig::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
@@ -166,7 +167,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             node_id: Some(0),
             enable_telemetry: self.enable_telemetry,
-            wal: self.wal,
+            wal: self.wal.into(),
             storage: self.storage,
             region_engine: self.region_engine,
             rpc_addr: self.grpc.addr,
@@ -338,7 +339,8 @@ impl StartCommand {
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
-        let datanode = opts.datanode_options();
+        let wal_meta = opts.wal.clone().into();
+        let datanode = opts.datanode_options().clone();
 
         Ok(Options::Standalone(Box::new(MixOptions {
             procedure,
@@ -347,6 +349,7 @@ impl StartCommand {
             frontend,
             datanode,
             logging,
+            wal_meta,
         })))
     }
 
@@ -392,9 +395,8 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
-            common_meta::wal::WalConfig::default(),
+            opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
@@ -479,6 +481,7 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
@@ -529,6 +532,7 @@ mod tests {
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
+
             [storage]
             data_home = "/tmp/greptimedb/"
             type = "File"

@@ -25,10 +25,14 @@ use crate::error::Result;
 #[derive(Clone)]
 pub struct EtcdLock {
     client: Client,
+    store_key_prefix: Option<String>,
 }
 
 impl EtcdLock {
-    pub async fn with_endpoints<E, S>(endpoints: S) -> Result<DistLockRef>
+    pub async fn with_endpoints<E, S>(
+        endpoints: S,
+        store_key_prefix: Option<String>,
+    ) -> Result<DistLockRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -37,17 +41,34 @@ impl EtcdLock {
             .await
             .context(error::ConnectEtcdSnafu)?;
 
-        Self::with_etcd_client(client)
+        Self::with_etcd_client(client, store_key_prefix)
     }
 
-    pub fn with_etcd_client(client: Client) -> Result<DistLockRef> {
-        Ok(Arc::new(EtcdLock { client }))
+    pub fn with_etcd_client(
+        client: Client,
+        store_key_prefix: Option<String>,
+    ) -> Result<DistLockRef> {
+        Ok(Arc::new(EtcdLock {
+            client,
+            store_key_prefix,
+        }))
+    }
+
+    fn lock_key(&self, key: Vec<u8>) -> Vec<u8> {
+        match &self.store_key_prefix {
+            Some(prefix) => {
+                let mut prefix = prefix.as_bytes().to_vec();
+                prefix.extend_from_slice(&key);
+                prefix
+            }
+            None => key,
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl DistLock for EtcdLock {
-    async fn lock(&self, name: Vec<u8>, opts: Opts) -> Result<Vec<u8>> {
+    async fn lock(&self, key: Vec<u8>, opts: Opts) -> Result<Vec<u8>> {
         let expire = opts.expire_secs.unwrap_or(DEFAULT_EXPIRE_TIME_SECS) as i64;
 
         let mut client = self.client.clone();
@@ -61,7 +82,7 @@ impl DistLock for EtcdLock {
         let lock_opts = LockOptions::new().with_lease(lease_id);
 
         let resp = client
-            .lock(name, Some(lock_opts))
+            .lock(self.lock_key(key), Some(lock_opts))
             .await
             .context(error::LockSnafu)?;
 
@@ -70,7 +91,10 @@ impl DistLock for EtcdLock {
 
     async fn unlock(&self, key: Vec<u8>) -> Result<()> {
         let mut client = self.client.clone();
-        let _ = client.unlock(key).await.context(error::UnlockSnafu)?;
+        let _ = client
+            .unlock(self.lock_key(key))
+            .await
+            .context(error::UnlockSnafu)?;
         Ok(())
     }
 }

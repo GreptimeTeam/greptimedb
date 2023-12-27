@@ -58,7 +58,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.4.4"
+version = "0.5.0"
 edition = "2021"
 license = "Apache-2.0"
 
@@ -132,7 +132,7 @@ tempfile = "3"
 tokio = { version = "1.28", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
-toml = "0.7"
+toml = "0.8.8"
 tonic = { version = "0.10", features = ["tls"] }
 uuid = { version = "1", features = ["serde", "v4", "fast-rng"] }
 
@@ -191,8 +191,6 @@ table = { path = "src/table" }
 [workspace.dependencies.meter-macros]
 git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "abbd357c1e193cd270ea65ee7652334a150b628f"
-
-[profile.dev]
 
 [profile.release]
 debug = 1

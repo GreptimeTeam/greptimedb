@@ -40,9 +40,6 @@ use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
 use crate::metadata_region::MetadataRegion;
 
-/// Fixed random state for generating tsid
-pub(crate) const RANDOM_STATE: ahash::RandomState = ahash::RandomState::with_seeds(1, 2, 3, 4);
-
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine
 ///
@@ -152,7 +149,10 @@ impl RegionEngine for MetricEngine {
 
     /// Retrieves region's metadata.
     async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
-        todo!()
+        self.inner
+            .load_region_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
     }
 
     /// Retrieves region's disk usage.
@@ -261,7 +261,7 @@ mod test {
             .await
             .unwrap_err();
 
-        // open nonexistent region
+        // open nonexistent region won't report error
         let invalid_open_request = RegionOpenRequest {
             engine: METRIC_ENGINE_NAME.to_string(),
             region_dir: env.default_region_dir(),
@@ -274,6 +274,6 @@ mod test {
                 RegionRequest::Open(invalid_open_request),
             )
             .await
-            .unwrap_err();
+            .unwrap();
     }
 }
