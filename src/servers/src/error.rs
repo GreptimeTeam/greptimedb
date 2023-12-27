@@ -24,7 +24,7 @@ use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
@@ -620,7 +620,11 @@ impl IntoResponse for Error {
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
             _ => {
-                logging::error!(self; "Failed to handle HTTP request");
+                if self.status_code().should_log_error() {
+                    error!(self; "Failed to handle HTTP request: ");
+                } else {
+                    debug!("Failed to handle HTTP request: {self}");
+                }
 
                 HttpStatusCode::INTERNAL_SERVER_ERROR
             }

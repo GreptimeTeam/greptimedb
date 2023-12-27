@@ -15,6 +15,7 @@
 //! SST in parquet format.
 
 mod format;
+mod helper;
 mod page_reader;
 pub mod reader;
 pub mod row_group;
@@ -22,6 +23,7 @@ mod stats;
 pub mod writer;
 
 use common_base::readable_size::ReadableSize;
+use parquet::file::metadata::ParquetMetaData;
 
 use crate::sst::file::FileTimeRange;
 
@@ -59,6 +61,8 @@ pub struct SstInfo {
     pub file_size: u64,
     /// Number of rows.
     pub num_rows: usize,
+    /// File Meta Data
+    pub file_metadata: Option<ParquetMetaData>,
 }
 
 #[cfg(test)]
@@ -201,5 +205,69 @@ mod tests {
             column_idx: 0,
         };
         assert!(cache.as_ref().unwrap().get_pages(&page_key).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_parquet_metadata_eq() {
+        // create test env
+        let mut env = crate::test_util::TestEnv::new();
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = handle.file_path(FILE_DIR);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+
+        // write the sst file and get sst info
+        // sst info contains the parquet metadata, which is converted from FileMetaData
+        let mut writer =
+            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
+        let sst_info = writer
+            .write_all(&write_opts)
+            .await
+            .unwrap()
+            .expect("write_all should return sst info");
+        let writer_metadata = sst_info.file_metadata.unwrap();
+
+        // read the sst file metadata
+        let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store);
+        let reader = builder.build().await.unwrap();
+        let reader_metadata = reader.parquet_metadata();
+
+        // Because ParquetMetaData doesn't implement PartialEq,
+        // check all fields manually
+        macro_rules! assert_metadata {
+            ( $writer:expr, $reader:expr, $($method:ident,)+ ) => {
+                $(
+                    assert_eq!($writer.$method(), $reader.$method());
+                )+
+            }
+        }
+
+        assert_metadata!(
+            writer_metadata.file_metadata(),
+            reader_metadata.file_metadata(),
+            version,
+            num_rows,
+            created_by,
+            key_value_metadata,
+            schema_descr,
+            column_orders,
+        );
+
+        assert_metadata!(
+            writer_metadata,
+            reader_metadata,
+            row_groups,
+            column_index,
+            offset_index,
+        );
     }
 }

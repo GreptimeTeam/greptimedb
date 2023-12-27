@@ -14,6 +14,7 @@
 
 use clap::ArgMatches;
 use common_config::KvBackendConfig;
+use common_meta::wal::WalConfig as MetaSrvWalConfig;
 use common_telemetry::logging::{LoggingOptions, TracingOptions};
 use config::{Config, Environment, File, FileFormat};
 use datanode::config::{DatanodeOptions, ProcedureConfig};
@@ -37,6 +38,7 @@ pub struct MixOptions {
     pub frontend: FrontendOptions,
     pub datanode: DatanodeOptions,
     pub logging: LoggingOptions,
+    pub wal_meta: MetaSrvWalConfig,
 }
 
 impl From<MixOptions> for FrontendOptions {

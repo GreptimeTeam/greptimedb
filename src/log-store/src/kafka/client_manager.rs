@@ -75,10 +75,10 @@ impl ClientManager {
     pub(crate) async fn try_new(config: &KafkaConfig) -> Result<Self> {
         // Sets backoff config for the top-level kafka client and all clients constructed by it.
         let backoff_config = BackoffConfig {
-            init_backoff: config.backoff_init,
-            max_backoff: config.backoff_max,
-            base: config.backoff_base as f64,
-            deadline: config.backoff_deadline,
+            init_backoff: config.backoff.init,
+            max_backoff: config.backoff.max,
+            base: config.backoff.base as f64,
+            deadline: config.backoff.deadline,
         };
         let client = ClientBuilder::new(config.broker_endpoints.clone())
             .backoff_config(backoff_config)

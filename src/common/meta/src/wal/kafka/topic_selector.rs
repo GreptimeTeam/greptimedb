@@ -22,14 +22,6 @@ use snafu::ensure;
 use crate::error::{EmptyTopicPoolSnafu, Result};
 use crate::wal::kafka::topic::Topic;
 
-/// The type of the topic selector, i.e. with which strategy to select a topic.
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum SelectorType {
-    #[default]
-    #[serde(rename = "round_robin")]
-    RoundRobin,
-}
-
 /// Controls topic selection.
 pub(crate) trait TopicSelector: Send + Sync {
     /// Selects a topic from the topic pool.

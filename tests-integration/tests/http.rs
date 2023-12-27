@@ -747,6 +747,7 @@ enable = true
 
 [frontend.logging]
 enable_otlp_tracing = false
+append_stdout = true
 
 [frontend.datanode.client]
 timeout = "10s"
@@ -815,6 +816,7 @@ parallel_scan_channel_size = 32
 
 [datanode.logging]
 enable_otlp_tracing = false
+append_stdout = true
 
 [datanode.export_metrics]
 enable = false
@@ -824,7 +826,11 @@ write_interval = "30s"
 [datanode.export_metrics.headers]
 
 [logging]
-enable_otlp_tracing = false"#,
+enable_otlp_tracing = false
+append_stdout = true
+
+[wal_meta]
+provider = "raft_engine""#,
         store_type,
     );
     let body_text = drop_lines_with_inconsistent_results(res_get.text().await);

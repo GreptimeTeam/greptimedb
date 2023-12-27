@@ -43,6 +43,7 @@ pub struct LoggingOptions {
     pub enable_otlp_tracing: bool,
     pub otlp_endpoint: Option<String>,
     pub tracing_sample_ratio: Option<f64>,
+    pub append_stdout: bool,
 }
 
 impl PartialEq for LoggingOptions {
@@ -52,6 +53,7 @@ impl PartialEq for LoggingOptions {
             && self.enable_otlp_tracing == other.enable_otlp_tracing
             && self.otlp_endpoint == other.otlp_endpoint
             && self.tracing_sample_ratio == other.tracing_sample_ratio
+            && self.append_stdout == other.append_stdout
     }
 }
 
@@ -65,6 +67,7 @@ impl Default for LoggingOptions {
             enable_otlp_tracing: false,
             otlp_endpoint: None,
             tracing_sample_ratio: None,
+            append_stdout: true,
         }
     }
 }
@@ -129,10 +132,14 @@ pub fn init_global_logging(
     // Enable log compatible layer to convert log record to tracing span.
     LogTracer::init().expect("log tracer must be valid");
 
-    // Stdout layer.
-    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    let stdout_logging_layer = Layer::new().with_writer(stdout_writer);
-    guards.push(stdout_guard);
+    let stdout_logging_layer = if opts.append_stdout {
+        let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
+        guards.push(stdout_guard);
+
+        Some(Layer::new().with_writer(stdout_writer))
+    } else {
+        None
+    };
 
     // JSON log layer.
     let rolling_appender = RollingFileAppender::new(Rotation::HOURLY, dir, app_name);
@@ -184,7 +191,7 @@ pub fn init_global_logging(
             None
         };
 
-        let stdout_logging_layer = stdout_logging_layer.with_filter(filter.clone());
+        let stdout_logging_layer = stdout_logging_layer.map(|x| x.with_filter(filter.clone()));
 
         let file_logging_layer = file_logging_layer.with_filter(filter);
 
