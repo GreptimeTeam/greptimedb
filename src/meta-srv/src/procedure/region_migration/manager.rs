@@ -35,7 +35,6 @@ use crate::procedure::region_migration::{
 pub(crate) struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
-
     context_factory: ContextFactoryImpl,
 }
 
