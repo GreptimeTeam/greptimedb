@@ -35,6 +35,17 @@ use crate::worker::WorkerId;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display(
+        "Failed to set region {} to writable, it was expected to replayed to {}, but actually replayed to {}",
+        region_id, expected_last_entry_id, replayed_last_entry_id
+    ))]
+    UnexpectedReplay {
+        location: Location,
+        region_id: RegionId,
+        expected_last_entry_id: u64,
+        replayed_last_entry_id: u64,
+    },
+
     #[snafu(display("OpenDAL operator failed"))]
     OpenDal {
         location: Location,
@@ -392,6 +403,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Empty manifest directory, manifest_dir: {}", manifest_dir,))]
+    EmptyManifestDir {
+        manifest_dir: String,
+        location: Location,
+    },
+
     #[snafu(display("Failed to read arrow record batch from parquet file {}", path))]
     ArrowReader {
         path: String,
@@ -415,6 +432,13 @@ pub enum Error {
         #[snafu(source)]
         error: index::inverted_index::error::Error,
         location: Location,
+    },
+
+    #[snafu(display("Invalid file metadata"))]
+    ConvertMetaData {
+        location: Location,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
     },
 }
 
@@ -452,7 +476,8 @@ impl ErrorExt for Error {
             | NewRecordBatch { .. }
             | RegionCorrupted { .. }
             | CreateDefault { .. }
-            | InvalidParquet { .. } => StatusCode::Unexpected,
+            | InvalidParquet { .. }
+            | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
             | InvalidScanIndex { .. }
@@ -479,6 +504,7 @@ impl ErrorExt for Error {
             InvalidBatch { .. } => StatusCode::InvalidArguments,
             InvalidRecordBatch { .. } => StatusCode::InvalidArguments,
             ConvertVector { source, .. } => source.status_code(),
+            ConvertMetaData { .. } => StatusCode::Internal,
             ComputeArrow { .. } => StatusCode::Internal,
             ComputeVector { .. } => StatusCode::Internal,
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
@@ -496,7 +522,7 @@ impl ErrorExt for Error {
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionReadonly { .. } => StatusCode::RegionReadonly,
             JsonOptions { .. } => StatusCode::InvalidArguments,
-            EmptyRegionDir { .. } => StatusCode::RegionNotFound,
+            EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
         }
     }

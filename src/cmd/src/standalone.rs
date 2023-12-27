@@ -18,8 +18,8 @@ use std::{fs, path};
 use async_trait::async_trait;
 use clap::Parser;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::{metadata_store_dir, KvBackendConfig, WalConfig};
-use common_error::ext::BoxedError;
+use common_config::wal::StandaloneWalConfig;
+use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
 use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
@@ -28,10 +28,11 @@ use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::build_wal_options_allocator;
+use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use common_time::timezone::set_default_timezone;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
@@ -44,15 +45,16 @@ use frontend::service_config::{
 };
 use mito2::config::MitoConfig;
 use serde::{Deserialize, Serialize};
+use servers::export_metrics::ExportMetricsOption;
 use servers::http::HttpOptions;
 use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, OtherSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
-    StartProcedureManagerSnafu, StopProcedureManagerSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
 use crate::App;
@@ -97,6 +99,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
+    pub default_timezone: Option<String>,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -104,7 +107,7 @@ pub struct StandaloneOptions {
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
     pub prom_store: PromStoreOptions,
-    pub wal: WalConfig,
+    pub wal: StandaloneWalConfig,
     pub storage: StorageConfig,
     pub metadata_store: KvBackendConfig,
     pub procedure: ProcedureConfig,
@@ -112,6 +115,7 @@ pub struct StandaloneOptions {
     pub user_provider: Option<String>,
     /// Options for different store engines.
     pub region_engine: Vec<RegionEngineConfig>,
+    pub export_metrics: ExportMetricsOption,
 }
 
 impl Default for StandaloneOptions {
@@ -119,6 +123,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
+            default_timezone: None,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -126,11 +131,12 @@ impl Default for StandaloneOptions {
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
             prom_store: PromStoreOptions::default(),
-            wal: WalConfig::default(),
+            wal: StandaloneWalConfig::default(),
             storage: StorageConfig::default(),
             metadata_store: KvBackendConfig::default(),
             procedure: ProcedureConfig::default(),
             logging: LoggingOptions::default(),
+            export_metrics: ExportMetricsOption::default(),
             user_provider: None,
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig::default()),
@@ -144,6 +150,7 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
+            default_timezone: self.default_timezone,
             http: self.http,
             grpc: self.grpc,
             mysql: self.mysql,
@@ -154,6 +161,8 @@ impl StandaloneOptions {
             meta_client: None,
             logging: self.logging,
             user_provider: self.user_provider,
+            // Handle the export metrics task run by standalone to frontend for execution
+            export_metrics: self.export_metrics,
             ..Default::default()
         }
     }
@@ -162,7 +171,7 @@ impl StandaloneOptions {
         DatanodeOptions {
             node_id: Some(0),
             enable_telemetry: self.enable_telemetry,
-            wal: self.wal,
+            wal: self.wal.into(),
             storage: self.storage,
             region_engine: self.region_engine,
             rpc_addr: self.grpc.addr,
@@ -175,6 +184,7 @@ pub struct Instance {
     datanode: Datanode,
     frontend: FeInstance,
     procedure_manager: ProcedureManagerRef,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 #[async_trait]
@@ -190,6 +200,11 @@ impl App for Instance {
             .start()
             .await
             .context(StartProcedureManagerSnafu)?;
+
+        self.wal_options_allocator
+            .start()
+            .await
+            .context(StartWalOptionsAllocatorSnafu)?;
 
         self.frontend.start().await.context(StartFrontendSnafu)?;
         Ok(())
@@ -328,7 +343,8 @@ impl StartCommand {
         let procedure = opts.procedure.clone();
         let frontend = opts.clone().frontend_options();
         let logging = opts.logging.clone();
-        let datanode = opts.datanode_options();
+        let wal_meta = opts.wal.clone().into();
+        let datanode = opts.datanode_options().clone();
 
         Ok(Options::Standalone(Box::new(MixOptions {
             procedure,
@@ -337,6 +353,7 @@ impl StartCommand {
             frontend,
             datanode,
             logging,
+            wal_meta,
         })))
     }
 
@@ -355,6 +372,9 @@ impl StartCommand {
         info!("Standalone start command: {:#?}", self);
 
         info!("Building standalone instance with {opts:#?}");
+
+        set_default_timezone(opts.frontend.default_timezone.as_deref())
+            .context(InitTimezoneSnafu)?;
 
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
@@ -382,15 +402,13 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
-        let wal_options_allocator =
-            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
-                .await
-                .map_err(BoxedError::new)
-                .context(OtherSnafu)?;
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            opts.wal_meta.clone(),
+            kv_backend.clone(),
+        ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
             table_id_sequence,
-            wal_options_allocator,
+            wal_options_allocator.clone(),
         ));
 
         let ddl_task_executor = Self::create_ddl_task_executor(
@@ -408,6 +426,10 @@ impl StartCommand {
             .context(StartFrontendSnafu)?;
 
         frontend
+            .build_export_metrics_task(&opts.frontend.export_metrics)
+            .context(StartFrontendSnafu)?;
+
+        frontend
             .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;
@@ -416,6 +438,7 @@ impl StartCommand {
             datanode,
             frontend,
             procedure_manager,
+            wal_options_allocator,
         })
     }
 
@@ -465,6 +488,7 @@ mod tests {
 
     use auth::{Identity, Password, UserProviderRef};
     use common_base::readable_size::ReadableSize;
+    use common_config::WalConfig;
     use common_test_util::temp_dir::create_named_temp_file;
     use datanode::config::{FileConfig, GcsConfig};
     use servers::Mode;
@@ -515,6 +539,7 @@ mod tests {
             purge_interval = "10m"
             read_batch_size = 128
             sync_write = false
+
             [storage]
             data_home = "/tmp/greptimedb/"
             type = "File"

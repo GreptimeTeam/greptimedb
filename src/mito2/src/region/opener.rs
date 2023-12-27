@@ -53,7 +53,7 @@ pub(crate) struct RegionOpener {
     object_store_manager: ObjectStoreManagerRef,
     region_dir: String,
     scheduler: SchedulerRef,
-    options: HashMap<String, String>,
+    options: Option<RegionOptions>,
     cache_manager: Option<CacheManagerRef>,
     skip_wal_replay: bool,
 }
@@ -74,7 +74,7 @@ impl RegionOpener {
             object_store_manager,
             region_dir: normalize_dir(region_dir),
             scheduler,
-            options: HashMap::new(),
+            options: None,
             cache_manager: None,
             skip_wal_replay: false,
         }
@@ -86,9 +86,15 @@ impl RegionOpener {
         self
     }
 
+    /// Parses and sets options for the region.
+    pub(crate) fn parse_options(mut self, options: HashMap<String, String>) -> Result<Self> {
+        self.options = Some(RegionOptions::try_from(&options)?);
+        Ok(self)
+    }
+
     /// Sets options for the region.
-    pub(crate) fn options(mut self, value: HashMap<String, String>) -> Self {
-        self.options = value;
+    pub(crate) fn options(mut self, options: RegionOptions) -> Self {
+        self.options = Some(options);
         self
     }
 
@@ -108,9 +114,10 @@ impl RegionOpener {
     /// Opens the region if it already exists.
     ///
     /// # Panics
-    /// Panics if metadata is not set.
+    /// - Panics if metadata is not set.
+    /// - Panics if options is not set.
     pub(crate) async fn create_or_open<S: LogStore>(
-        self,
+        mut self,
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<MitoRegion> {
@@ -145,9 +152,8 @@ impl RegionOpener {
                 );
             }
         }
-        let options = RegionOptions::try_from(&self.options)?;
+        let options = self.options.take().unwrap();
         let wal_options = options.wal_options.clone();
-
         let object_store = self.object_store(&options.storage)?.clone();
 
         // Create a manifest manager for this region and writes regions to the manifest file.
@@ -218,7 +224,7 @@ impl RegionOpener {
         config: &MitoConfig,
         wal: &Wal<S>,
     ) -> Result<Option<MitoRegion>> {
-        let region_options = RegionOptions::try_from(&self.options)?;
+        let region_options = self.options.as_ref().unwrap().clone();
         let wal_options = region_options.wal_options.clone();
 
         let region_manifest_options = self.manifest_options(config, &region_options)?;
@@ -250,6 +256,10 @@ impl RegionOpener {
         let flushed_entry_id = version.flushed_entry_id;
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
+            info!(
+                "Start replaying memtable at flushed_entry_id {} for region {}",
+                flushed_entry_id, region_id
+            );
             replay_memtable(
                 wal,
                 &wal_options,
@@ -358,13 +368,13 @@ pub(crate) fn check_recovered_region(
 }
 
 /// Replays the mutations from WAL and inserts mutations to memtable of given region.
-async fn replay_memtable<S: LogStore>(
+pub(crate) async fn replay_memtable<S: LogStore>(
     wal: &Wal<S>,
     wal_options: &WalOptions,
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
-) -> Result<()> {
+) -> Result<EntryId> {
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
     // data in the WAL.
@@ -392,7 +402,7 @@ async fn replay_memtable<S: LogStore>(
         "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",
         region_id, rows_replayed, last_entry_id
     );
-    Ok(())
+    Ok(last_entry_id)
 }
 
 /// Returns the directory to the manifest files.

@@ -32,9 +32,9 @@ use snafu::{ensure, OptionExt, ResultExt};
 use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::region_engine::SetReadonlyResponse;
 use store_api::region_request::{
-    AffectedRows, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
-    RegionCreateRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
-    RegionTruncateRequest,
+    AffectedRows, RegionAlterRequest, RegionCatchupRequest, RegionCloseRequest,
+    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -550,6 +550,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Truncate(v),
             }),
+            RegionRequest::Catchup(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::Catchup(v),
+            }),
         };
 
         Ok((worker_request, receiver))
@@ -578,6 +583,7 @@ pub(crate) enum DdlRequest {
     Flush(RegionFlushRequest),
     Compact(RegionCompactRequest),
     Truncate(RegionTruncateRequest),
+    Catchup(RegionCatchupRequest),
 }
 
 /// Sender and Ddl request.

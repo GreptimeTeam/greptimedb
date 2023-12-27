@@ -3,6 +3,7 @@ enable_memory_catalog = false
 require_lease_before_startup = true
 
 [wal]
+provider = "raft_engine"
 file_size = '1GB'
 purge_interval = '10m'
 purge_threshold = '10GB'

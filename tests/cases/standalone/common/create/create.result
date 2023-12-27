@@ -52,7 +52,7 @@ Error: 4000(TableAlreadyExists), Table already exists: `greptime.public.test2`
 
 CREATE TABLE 'N.~' (i TIMESTAMP TIME INDEX);
 
-Error: 1002(Unexpected), Unexpected, violated: Invalid table name: N.~
+Error: 1004(InvalidArguments), Invalid table name: N.~
 
 DESC TABLE integers;
 

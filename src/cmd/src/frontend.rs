@@ -22,6 +22,7 @@ use client::client_manager::DatanodeClients;
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
 use common_telemetry::logging;
+use common_time::timezone::set_default_timezone;
 use frontend::frontend::FrontendOptions;
 use frontend::heartbeat::handler::invalidate_table_cache::InvalidateTableCacheHandler;
 use frontend::heartbeat::HeartbeatTask;
@@ -32,7 +33,7 @@ use servers::tls::{TlsMode, TlsOption};
 use servers::Mode;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, MissingConfigSnafu, Result, StartFrontendSnafu};
+use crate::error::{self, InitTimezoneSnafu, MissingConfigSnafu, Result, StartFrontendSnafu};
 use crate::options::{CliOptions, Options};
 use crate::App;
 
@@ -217,6 +218,8 @@ impl StartCommand {
         logging::info!("Frontend start command: {:#?}", self);
         logging::info!("Frontend options: {:#?}", opts);
 
+        set_default_timezone(opts.default_timezone.as_deref()).context(InitTimezoneSnafu)?;
+
         let meta_client_options = opts.meta_client.as_ref().context(MissingConfigSnafu {
             msg: "'meta_client'",
         })?;
@@ -248,6 +251,10 @@ impl StartCommand {
         .try_build()
         .await
         .context(StartFrontendSnafu)?;
+
+        instance
+            .build_export_metrics_task(&opts.export_metrics)
+            .context(StartFrontendSnafu)?;
 
         instance
             .build_servers(opts)

@@ -827,8 +827,8 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::DurationNanosecond(d) => d
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            ScalarValue::Decimal128(v, precision, scale) => v
-                .map(|x| Value::Decimal128(Decimal128::new(x, precision, scale)))
+            ScalarValue::Decimal128(v, p, s) => v
+                .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
             ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
@@ -1192,6 +1192,7 @@ impl<'a> ValueRef<'a> {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
+    use common_time::timezone::set_default_timezone;
     use num_traits::Float;
 
     use super::*;
@@ -1880,7 +1881,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");

@@ -483,6 +483,12 @@ pub enum Error {
         location: Location,
         source: query::error::Error,
     },
+
+    #[snafu(display("Invalid table name: {}", table_name))]
+    InvalidTableName {
+        table_name: String,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -507,7 +513,8 @@ impl ErrorExt for Error {
             | Error::InvalidPartitionColumns { .. }
             | Error::PrepareFileTable { .. }
             | Error::InferFileTableSchema { .. }
-            | Error::SchemaIncompatible { .. } => StatusCode::InvalidArguments,
+            | Error::SchemaIncompatible { .. }
+            | Error::InvalidTableName { .. } => StatusCode::InvalidArguments,
 
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
 

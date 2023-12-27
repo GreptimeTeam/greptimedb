@@ -58,7 +58,7 @@ openmetrics-parser = "0.4"
 opensrv-mysql = { git = "https://github.com/MichaelScofield/opensrv.git", rev = "1676c1d" }
 opentelemetry-proto.workspace = true
 parking_lot = "0.12"
-pgwire = "0.17"
+pgwire = "0.18"
 pin-project = "1.0"
 postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 pprof = { version = "0.13", features = [
@@ -72,6 +72,7 @@ prost.workspace = true
 query.workspace = true
 rand.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 rust-embed = { version = "6.6", features = ["debug-embed"] }
 rustls = "0.22"
 rustls-pemfile = "2.0"
@@ -79,7 +80,7 @@ rustls-pki-types = "1.0"
 schemars = "0.8"
 secrecy = { version = "0.8", features = ["serde", "alloc"] }
 serde.workspace = true
-serde_json = "1.0"
+serde_json.workspace = true
 session.workspace = true
 sha1 = "0.10"
 snafu.workspace = true
@@ -111,7 +112,7 @@ mysql_async = { version = "0.33", default-features = false, features = [
 ] }
 rand.workspace = true
 script = { workspace = true, features = ["python"] }
-serde_json = "1.0"
+serde_json.workspace = true
 session = { workspace = true, features = ["testing"] }
 table.workspace = true
 tokio-postgres = "0.7"

@@ -19,3 +19,4 @@ pub const COLUMNS: &str = "columns";
 pub const ENGINES: &str = "engines";
 pub const COLUMN_PRIVILEGES: &str = "column_privileges";
 pub const COLUMN_STATISTICS: &str = "column_statistics";
+pub const BUILD_INFO: &str = "build_info";

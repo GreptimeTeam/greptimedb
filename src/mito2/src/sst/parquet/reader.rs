@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use common_telemetry::debug;
 use common_time::range::TimestampRange;
 use datatypes::arrow::record_batch::RecordBatch;
-use object_store::{ObjectStore, Reader};
+use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use parquet::arrow::async_reader::AsyncFileReader;
 use parquet::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
@@ -196,7 +196,7 @@ impl ParquetReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
-            file_reader: reader,
+            object_store: self.object_store.clone(),
             projection: projection_mask,
             field_levels,
             cache_manager: self.cache_manager.clone(),
@@ -303,8 +303,8 @@ struct RowGroupReaderBuilder {
     file_path: String,
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
-    /// Reader to get data.
-    file_reader: BufReader<Reader>,
+    /// Object store as an Operator.
+    object_store: ObjectStore,
     /// Projection mask.
     projection: ProjectionMask,
     /// Field levels to read.
@@ -327,10 +327,12 @@ impl RowGroupReaderBuilder {
             &self.parquet_meta,
             row_group_idx,
             self.cache_manager.clone(),
+            &self.file_path,
+            self.object_store.clone(),
         );
         // Fetches data into memory.
         row_group
-            .fetch(&mut self.file_reader, &self.projection, None)
+            .fetch(&self.projection, None)
             .await
             .context(ReadParquetSnafu {
                 path: &self.file_path,
@@ -467,5 +469,10 @@ impl ParquetReader {
         }
 
         Ok(None)
+    }
+
+    #[cfg(test)]
+    pub fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
+        self.reader_builder.parquet_meta.clone()
     }
 }

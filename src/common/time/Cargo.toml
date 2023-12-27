@@ -10,8 +10,9 @@ chrono-tz = "0.8"
 chrono.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
+once_cell.workspace = true
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

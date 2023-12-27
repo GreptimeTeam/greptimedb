@@ -48,7 +48,7 @@ rstest = "0.17"
 rstest_reuse = "0.5"
 secrecy = "0.8"
 serde.workspace = true
-serde_json = "1.0"
+serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
 session.workspace = true
 snafu.workspace = true

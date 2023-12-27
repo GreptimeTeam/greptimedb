@@ -18,23 +18,27 @@ use std::sync::Arc;
 use api::v1::region::{QueryRequest, RegionRequest, RegionResponse};
 use async_trait::async_trait;
 use client::region::check_response_header;
+use common_catalog::consts::METRIC_ENGINE;
 use common_error::ext::BoxedError;
 use common_meta::datanode_manager::{AffectedRows, Datanode, DatanodeManager, DatanodeRef};
 use common_meta::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
 use common_meta::error::{self as meta_error, Result as MetaResult, UnsupportedSnafu};
+use common_meta::key::table_route::{
+    LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
+};
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::CreateTableTask;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceRef;
-use common_meta::wal::options_allocator::build_region_wal_options;
-use common_meta::wal::WalOptionsAllocator;
+use common_meta::wal::options_allocator::allocate_region_wal_options;
+use common_meta::wal::WalOptionsAllocatorRef;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, info, tracing};
 use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::{ensure, OptionExt, ResultExt};
-use store_api::storage::{RegionId, TableId};
+use store_api::storage::{RegionId, RegionNumber, TableId};
 
 use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
@@ -108,11 +112,14 @@ impl Datanode for RegionInvoker {
 
 pub struct StandaloneTableMetadataAllocator {
     table_id_sequence: SequenceRef,
-    wal_options_allocator: WalOptionsAllocator,
+    wal_options_allocator: WalOptionsAllocatorRef,
 }
 
 impl StandaloneTableMetadataAllocator {
-    pub fn new(table_id_sequence: SequenceRef, wal_options_allocator: WalOptionsAllocator) -> Self {
+    pub fn new(
+        table_id_sequence: SequenceRef,
+        wal_options_allocator: WalOptionsAllocatorRef,
+    ) -> Self {
         Self {
             table_id_sequence,
             wal_options_allocator,
@@ -148,17 +155,29 @@ impl StandaloneTableMetadataAllocator {
         };
         Ok(table_id)
     }
+
+    fn create_wal_options(
+        &self,
+        table_route: &TableRouteValue,
+    ) -> MetaResult<HashMap<RegionNumber, String>> {
+        match table_route {
+            TableRouteValue::Physical(x) => {
+                let region_numbers = x
+                    .region_routes
+                    .iter()
+                    .map(|route| route.region.id.region_number())
+                    .collect();
+                allocate_region_wal_options(region_numbers, &self.wal_options_allocator)
+            }
+            TableRouteValue::Logical(_) => Ok(HashMap::new()),
+        }
+    }
 }
 
-#[async_trait]
-impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
-    async fn create(
-        &self,
-        _ctx: &TableMetadataAllocatorContext,
-        task: &CreateTableTask,
-    ) -> MetaResult<TableMetadata> {
-        let table_id = self.allocate_table_id(task).await?;
-
+fn create_table_route(table_id: TableId, task: &CreateTableTask) -> TableRouteValue {
+    if task.create_table.engine == METRIC_ENGINE {
+        TableRouteValue::Logical(LogicalTableRouteValue {})
+    } else {
         let region_routes = task
             .partitions
             .iter()
@@ -179,13 +198,22 @@ impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
                 }
             })
             .collect::<Vec<_>>();
+        TableRouteValue::Physical(PhysicalTableRouteValue::new(region_routes))
+    }
+}
 
-        let region_numbers = region_routes
-            .iter()
-            .map(|route| route.region.id.region_number())
-            .collect();
-        let region_wal_options =
-            build_region_wal_options(region_numbers, &self.wal_options_allocator)?;
+#[async_trait]
+impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
+    async fn create(
+        &self,
+        _ctx: &TableMetadataAllocatorContext,
+        task: &CreateTableTask,
+    ) -> MetaResult<TableMetadata> {
+        let table_id = self.allocate_table_id(task).await?;
+
+        let table_route = create_table_route(table_id, task);
+
+        let region_wal_options = self.create_wal_options(&table_route)?;
 
         debug!(
             "Allocated region wal options {:?} for table {}",
@@ -194,8 +222,8 @@ impl TableMetadataAllocator for StandaloneTableMetadataAllocator {
 
         Ok(TableMetadata {
             table_id,
-            region_routes,
-            region_wal_options: HashMap::default(),
+            table_route,
+            region_wal_options,
         })
     }
 }

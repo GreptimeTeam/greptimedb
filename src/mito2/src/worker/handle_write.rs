@@ -73,12 +73,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_ctx.set_error(e);
                 }
             }
-            if let Err(e) = wal_writer.write_to_wal().await.map_err(Arc::new) {
-                // Failed to write wal.
-                for mut region_ctx in region_ctxs.into_values() {
-                    region_ctx.set_error(e.clone());
+            match wal_writer.write_to_wal().await.map_err(Arc::new) {
+                Ok(response) => {
+                    for (region_id, region_ctx) in region_ctxs.iter_mut() {
+                        // Safety: the log store implementation ensures that either the `write_to_wal` fails and no
+                        // response is returned or the last entry ids for each region do exist.
+                        let last_entry_id =
+                            response.last_entry_ids.get(&region_id.as_u64()).unwrap();
+                        region_ctx.set_next_entry_id(last_entry_id + 1);
+                    }
                 }
-                return;
+                Err(e) => {
+                    // Failed to write wal.
+                    for mut region_ctx in region_ctxs.into_values() {
+                        region_ctx.set_error(e.clone());
+                    }
+                    return;
+                }
             }
         }
 

@@ -17,11 +17,20 @@ use std::time::Duration;
 use common_base::readable_size::ReadableSize;
 use rskafka::client::partition::Compression as RsKafkaCompression;
 use serde::{Deserialize, Serialize};
+use serde_with::with_prefix;
 
 /// Topic name prefix.
-pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_kafka_topic";
+pub const TOPIC_NAME_PREFIX: &str = "greptimedb_wal_topic";
 /// Kafka wal topic.
 pub type Topic = String;
+
+/// The type of the topic selector, i.e. with which strategy to select a topic.
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicSelectorType {
+    #[default]
+    RoundRobin,
+}
 
 /// Configurations for kafka wal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,37 +38,100 @@ pub type Topic = String;
 pub struct KafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
-    /// Number of topics shall be created beforehand.
-    pub num_topics: usize,
-    /// Topic name prefix.
-    pub topic_name_prefix: String,
-    /// Number of partitions per topic.
-    pub num_partitions: i32,
     /// The compression algorithm used to compress log entries.
     #[serde(skip)]
     #[serde(default)]
     pub compression: RsKafkaCompression,
-    /// The maximum log size an rskakfa batch producer could buffer.
+    /// The maximum log size a kakfa batch producer could buffer.
     pub max_batch_size: ReadableSize,
-    /// The linger duration of an rskafka batch producer.
+    /// The linger duration of a kafka batch producer.
     #[serde(with = "humantime_serde")]
     pub linger: Duration,
     /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
     #[serde(with = "humantime_serde")]
-    pub max_wait_time: Duration,
+    pub produce_record_timeout: Duration,
+    /// The backoff config.
+    #[serde(flatten, with = "kafka_backoff")]
+    pub backoff: KafkaBackoffConfig,
 }
 
 impl Default for KafkaConfig {
     fn default() -> Self {
         Self {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
-            num_topics: 64,
-            topic_name_prefix: TOPIC_NAME_PREFIX.to_string(),
-            num_partitions: 1,
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: RsKafkaCompression::NoCompression,
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
-            max_wait_time: Duration::from_millis(100),
+            produce_record_timeout: Duration::from_millis(100),
+            backoff: KafkaBackoffConfig::default(),
+        }
+    }
+}
+
+with_prefix!(pub kafka_backoff "backoff_");
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KafkaBackoffConfig {
+    /// The initial backoff for kafka clients.
+    #[serde(with = "humantime_serde")]
+    pub init: Duration,
+    /// The maximum backoff for kafka clients.
+    #[serde(with = "humantime_serde")]
+    pub max: Duration,
+    /// Exponential backoff rate, i.e. next backoff = base * current backoff.
+    // Sets to u32 type since some structs containing the KafkaConfig need to derive the Eq trait.
+    pub base: u32,
+    /// Stop reconnecting if the total wait time reaches the deadline.
+    /// If it's None, the reconnecting won't terminate.
+    #[serde(with = "humantime_serde")]
+    pub deadline: Option<Duration>,
+}
+
+impl Default for KafkaBackoffConfig {
+    fn default() -> Self {
+        Self {
+            init: Duration::from_millis(500),
+            max: Duration::from_secs(10),
+            base: 2,
+            deadline: Some(Duration::from_secs(60 * 5)), // 5 mins
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StandaloneKafkaConfig {
+    #[serde(flatten)]
+    pub base: KafkaConfig,
+    /// Number of topics to be created upon start.
+    pub num_topics: usize,
+    /// The type of the topic selector with which to select a topic for a region.
+    pub selector_type: TopicSelectorType,
+    /// Topic name prefix.
+    pub topic_name_prefix: String,
+    /// Number of partitions per topic.
+    pub num_partitions: i32,
+    /// The replication factor of each topic.
+    pub replication_factor: i16,
+    /// Above which a topic creation operation will be cancelled.
+    #[serde(with = "humantime_serde")]
+    pub create_topic_timeout: Duration,
+}
+
+impl Default for StandaloneKafkaConfig {
+    fn default() -> Self {
+        let base = KafkaConfig::default();
+        let replication_factor = base.broker_endpoints.len() as i16;
+
+        Self {
+            base,
+            num_topics: 64,
+            selector_type: TopicSelectorType::RoundRobin,
+            topic_name_prefix: "greptimedb_wal_topic".to_string(),
+            num_partitions: 1,
+            replication_factor,
+            create_topic_timeout: Duration::from_secs(30),
         }
     }
 }

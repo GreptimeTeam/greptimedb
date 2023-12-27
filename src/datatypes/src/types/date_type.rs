@@ -101,6 +101,7 @@ impl LogicalPrimitiveType for DateType {
 #[cfg(test)]
 mod tests {
     use common_base::bytes::StringBytes;
+    use common_time::timezone::set_default_timezone;
     use common_time::Timestamp;
 
     use super::*;
@@ -108,7 +109,7 @@ mod tests {
     // $TZ doesn't take effort
     #[test]
     fn test_date_cast() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         // timestamp -> date
         let ts = Value::Timestamp(Timestamp::from_str("2000-01-01 08:00:01").unwrap());
         let date = ConcreteDataType::date_datatype().try_cast(ts).unwrap();

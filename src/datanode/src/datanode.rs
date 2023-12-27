@@ -43,6 +43,7 @@ use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
+use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
@@ -84,6 +85,7 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
+    export_metrics_task: Option<ExportMetricsTask>,
 }
 
 impl Datanode {
@@ -94,6 +96,10 @@ impl Datanode {
         self.wait_coordinated().await;
 
         self.start_telemetry();
+
+        if let Some(t) = self.export_metrics_task.as_ref() {
+            t.start()
+        }
 
         self.start_services().await
     }
@@ -277,6 +283,10 @@ impl DatanodeBuilder {
                 None
             };
 
+        let export_metrics_task =
+            ExportMetricsTask::try_new(&self.opts.export_metrics, Some(&self.plugins))
+                .context(StartServerSnafu)?;
+
         Ok(Datanode {
             services,
             heartbeat_task,
@@ -285,6 +295,7 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
+            export_metrics_task,
         })
     }
 
@@ -493,8 +504,11 @@ impl DatanodeBuilder {
 
     /// Builds [KafkaLogStore].
     async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
-        let _ = config;
-        todo!()
+        KafkaLogStore::try_new(config)
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)
+            .map(Arc::new)
     }
 
     /// Builds [ObjectStoreManager]

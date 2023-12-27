@@ -17,29 +17,51 @@ pub mod options_allocator;
 
 use std::collections::HashMap;
 
+use common_config::wal::StandaloneWalConfig;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
 use crate::error::Result;
 use crate::wal::kafka::KafkaConfig;
 pub use crate::wal::kafka::Topic as KafkaWalTopic;
-pub use crate::wal::options_allocator::{build_wal_options_allocator, WalOptionsAllocator};
+pub use crate::wal::options_allocator::{
+    allocate_region_wal_options, WalOptionsAllocator, WalOptionsAllocatorRef,
+};
 
 /// Wal config for metasrv.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
-#[serde(tag = "provider")]
+#[serde(tag = "provider", rename_all = "snake_case")]
 pub enum WalConfig {
     #[default]
-    #[serde(rename = "raft_engine")]
     RaftEngine,
-    #[serde(rename = "kafka")]
     Kafka(KafkaConfig),
+}
+
+impl From<StandaloneWalConfig> for WalConfig {
+    fn from(value: StandaloneWalConfig) -> Self {
+        match value {
+            StandaloneWalConfig::RaftEngine(config) => WalConfig::RaftEngine,
+            StandaloneWalConfig::Kafka(config) => WalConfig::Kafka(KafkaConfig {
+                broker_endpoints: config.base.broker_endpoints,
+                num_topics: config.num_topics,
+                selector_type: config.selector_type,
+                topic_name_prefix: config.topic_name_prefix,
+                num_partitions: config.num_partitions,
+                replication_factor: config.replication_factor,
+                create_topic_timeout: config.create_topic_timeout,
+                backoff: config.base.backoff,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use common_config::wal::kafka::{KafkaBackoffConfig, TopicSelectorType};
+
     use super::*;
-    use crate::wal::kafka::topic_selector::SelectorType as KafkaTopicSelectorType;
 
     #[test]
     fn test_serde_wal_config() {
@@ -53,7 +75,7 @@ mod tests {
         // Test serde raft-engine wal config with extra other wal config.
         let toml_str = r#"
             provider = "raft_engine"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
@@ -62,21 +84,33 @@ mod tests {
         // Test serde kafka wal config.
         let toml_str = r#"
             provider = "kafka"
-            broker_endpoints = ["127.0.0.1:9090"]
+            broker_endpoints = ["127.0.0.1:9092"]
             num_topics = 32
             selector_type = "round_robin"
-            topic_name_prefix = "greptimedb_kafka_wal"
+            topic_name_prefix = "greptimedb_wal_topic"
             num_partitions = 1
-            replication_factor = 3
+            replication_factor = 1
+            create_topic_timeout = "30s"
+            backoff_init = "500ms"
+            backoff_max = "10s"
+            backoff_base = 2
+            backoff_deadline = "5mins"
         "#;
         let wal_config: WalConfig = toml::from_str(toml_str).unwrap();
         let expected_kafka_config = KafkaConfig {
-            broker_endpoints: vec!["127.0.0.1:9090".to_string()],
+            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             num_topics: 32,
-            selector_type: KafkaTopicSelectorType::RoundRobin,
-            topic_name_prefix: "greptimedb_kafka_wal".to_string(),
+            selector_type: TopicSelectorType::RoundRobin,
+            topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor: 1,
+            create_topic_timeout: Duration::from_secs(30),
+            backoff: KafkaBackoffConfig {
+                init: Duration::from_millis(500),
+                max: Duration::from_secs(10),
+                base: 2,
+                deadline: Some(Duration::from_secs(60 * 5)),
+            },
         };
         assert_eq!(wal_config, WalConfig::Kafka(expected_kafka_config));
     }

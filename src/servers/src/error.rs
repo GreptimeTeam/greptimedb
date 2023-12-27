@@ -24,7 +24,7 @@ use catalog;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use common_telemetry::logging;
+use common_telemetry::{debug, error};
 use datatypes::prelude::ConcreteDataType;
 use query::parser::PromQuery;
 use serde_json::json;
@@ -213,6 +213,16 @@ pub enum Error {
         #[snafu(source)]
         error: snap::Error,
     },
+
+    #[snafu(display("Failed to send prometheus remote request"))]
+    SendPromRemoteRequest {
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
+    #[snafu(display("Invalid export metrics config, msg: {}", msg))]
+    InvalidExportMetricsConfig { msg: String, location: Location },
 
     #[snafu(display("Failed to compress prometheus remote request"))]
     CompressPromRemoteRequest {
@@ -427,6 +437,7 @@ impl ErrorExt for Error {
             | AlreadyStarted { .. }
             | InvalidPromRemoteReadQueryResult { .. }
             | TcpBind { .. }
+            | SendPromRemoteRequest { .. }
             | TcpIncoming { .. }
             | CatalogError { .. }
             | GrpcReflectionService { .. }
@@ -457,6 +468,7 @@ impl ErrorExt for Error {
             | CompressPromRemoteRequest { .. }
             | DecompressPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
+            | InvalidExportMetricsConfig { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
             | DataFrame { .. }
@@ -608,7 +620,11 @@ impl IntoResponse for Error {
             | Error::InvalidQuery { .. }
             | Error::TimePrecision { .. } => HttpStatusCode::BAD_REQUEST,
             _ => {
-                logging::error!(self; "Failed to handle HTTP request");
+                if self.status_code().should_log_error() {
+                    error!(self; "Failed to handle HTTP request: ");
+                } else {
+                    debug!("Failed to handle HTTP request: {self}");
+                }
 
                 HttpStatusCode::INTERNAL_SERVER_ERROR
             }

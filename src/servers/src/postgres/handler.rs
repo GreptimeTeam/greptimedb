@@ -25,7 +25,6 @@ use pgwire::api::portal::{Format, Portal};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler, StatementOrPortal};
 use pgwire::api::results::{DataRowEncoder, DescribeResponse, QueryResponse, Response, Tag};
 use pgwire::api::stmt::QueryParser;
-use pgwire::api::store::MemPortalStore;
 use pgwire::api::{ClientInfo, Type};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use query::query_engine::DescribeResult;
@@ -192,11 +191,6 @@ impl QueryParser for DefaultQueryParser {
 impl ExtendedQueryHandler for PostgresServerHandler {
     type Statement = SqlPlan;
     type QueryParser = DefaultQueryParser;
-    type PortalStore = MemPortalStore<Self::Statement>;
-
-    fn portal_store(&self) -> Arc<Self::PortalStore> {
-        self.portal_store.clone()
-    }
 
     fn query_parser(&self) -> Arc<Self::QueryParser> {
         self.query_parser.clone()

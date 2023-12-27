@@ -23,7 +23,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::build_wal_options_allocator;
+use common_meta::wal::{WalConfig as MetaSrvWalConfig, WalOptionsAllocator};
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -118,14 +118,14 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        // TODO(niebayes): add a wal config into the MixOptions and pass it to the allocator builder.
-        let wal_options_allocator =
-            build_wal_options_allocator(&common_meta::wal::WalConfig::default(), &kv_backend)
-                .await
-                .unwrap();
+        let wal_meta = MetaSrvWalConfig::default();
+        let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
+            wal_meta.clone(),
+            kv_backend.clone(),
+        ));
         let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
             table_id_sequence,
-            wal_options_allocator,
+            wal_options_allocator.clone(),
         ));
 
         let ddl_task_executor = Arc::new(
@@ -147,6 +147,7 @@ impl GreptimeDbStandaloneBuilder {
             .unwrap();
 
         procedure_manager.start().await.unwrap();
+        wal_options_allocator.start().await.unwrap();
 
         test_util::prepare_another_catalog_and_schema(&instance).await;
 
@@ -162,6 +163,7 @@ impl GreptimeDbStandaloneBuilder {
                 frontend: FrontendOptions::default(),
                 datanode: opts,
                 logging: LoggingOptions::default(),
+                wal_meta,
             },
             guard,
         }

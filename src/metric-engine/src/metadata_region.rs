@@ -22,6 +22,7 @@ use common_recordbatch::util::collect;
 use datafusion::prelude::{col, lit};
 use mito2::engine::MitoEngine;
 use snafu::ResultExt;
+use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME, METADATA_SCHEMA_VALUE_COLUMN_INDEX,
@@ -32,7 +33,7 @@ use store_api::region_request::RegionPutRequest;
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::error::{
-    CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeSemanticTypeSnafu,
+    CollectRecordBatchStreamSnafu, DecodeColumnValueSnafu, DeserializeColumnMetadataSnafu,
     MitoReadOperationSnafu, MitoWriteOperationSnafu, ParseRegionIdSnafu, RegionAlreadyExistsSnafu,
     Result,
 };
@@ -96,16 +97,16 @@ impl MetadataRegion {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        column_name: &str,
-        semantic_type: SemanticType,
+        column_metadata: &ColumnMetadata,
     ) -> Result<bool> {
         let region_id = utils::to_metadata_region_id(physical_region_id);
-        let column_key = Self::concat_column_key(logical_region_id, column_name);
+        let column_key =
+            Self::concat_column_key(logical_region_id, &column_metadata.column_schema.name);
 
         self.put_if_absent(
             region_id,
             column_key,
-            Self::serialize_semantic_type(semantic_type),
+            Self::serialize_column_metadata(column_metadata),
         )
         .await
     }
@@ -132,7 +133,7 @@ impl MetadataRegion {
         let column_key = Self::concat_column_key(logical_region_id, column_name);
         let semantic_type = self.get(region_id, &column_key).await?;
         semantic_type
-            .map(|s| Self::deserialize_semantic_type(&s))
+            .map(|s| Self::deserialize_column_metadata(&s).map(|c| c.semantic_type))
             .transpose()
     }
 
@@ -143,7 +144,7 @@ impl MetadataRegion {
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-    ) -> Result<Vec<(String, SemanticType)>> {
+    ) -> Result<Vec<(String, ColumnMetadata)>> {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let region_column_prefix = Self::concat_column_key_prefix(logical_region_id);
 
@@ -154,8 +155,8 @@ impl MetadataRegion {
             }
             // Safety: we have checked the prefix
             let (_, column_name) = Self::parse_column_key(&k)?.unwrap();
-            let semantic_type = Self::deserialize_semantic_type(&v)?;
-            columns.push((column_name, semantic_type));
+            let column_metadata = Self::deserialize_column_metadata(&v)?;
+            columns.push((column_name, column_metadata));
         }
 
         Ok(columns)
@@ -228,13 +229,14 @@ impl MetadataRegion {
         }
     }
 
-    pub fn serialize_semantic_type(semantic_type: SemanticType) -> String {
-        serde_json::to_string(&semantic_type).unwrap()
+    pub fn serialize_column_metadata(column_metadata: &ColumnMetadata) -> String {
+        serde_json::to_string(column_metadata).unwrap()
     }
 
-    pub fn deserialize_semantic_type(semantic_type: &str) -> Result<SemanticType> {
-        serde_json::from_str(semantic_type)
-            .with_context(|_| DeserializeSemanticTypeSnafu { raw: semantic_type })
+    pub fn deserialize_column_metadata(column_metadata: &str) -> Result<ColumnMetadata> {
+        serde_json::from_str(column_metadata).with_context(|_| DeserializeColumnMetadataSnafu {
+            raw: column_metadata,
+        })
     }
 }
 
@@ -411,6 +413,8 @@ impl MetadataRegion {
 
 #[cfg(test)]
 mod test {
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
     use store_api::region_request::RegionRequest;
 
     use super::*;
@@ -463,26 +467,21 @@ mod test {
     }
 
     #[test]
-    fn test_serialize_semantic_type() {
+    fn test_serialize_column_metadata() {
         let semantic_type = SemanticType::Tag;
-        let expected = "\"Tag\"".to_string();
+        let column_metadata = ColumnMetadata {
+            column_schema: ColumnSchema::new("blabla", ConcreteDataType::string_datatype(), false),
+            semantic_type,
+            column_id: 5,
+        };
+        let expected = "{\"column_schema\":{\"name\":\"blabla\",\"data_type\":{\"String\":null},\"is_nullable\":false,\"is_time_index\":false,\"default_constraint\":null,\"metadata\":{}},\"semantic_type\":\"Tag\",\"column_id\":5}".to_string();
         assert_eq!(
-            MetadataRegion::serialize_semantic_type(semantic_type),
-            expected
-        );
-    }
-
-    #[test]
-    fn test_deserialize_semantic_type() {
-        let semantic_type = "\"Tag\"";
-        let expected = SemanticType::Tag;
-        assert_eq!(
-            MetadataRegion::deserialize_semantic_type(semantic_type).unwrap(),
+            MetadataRegion::serialize_column_metadata(&column_metadata),
             expected
         );
 
-        let semantic_type = "\"InvalidType\"";
-        assert!(MetadataRegion::deserialize_semantic_type(semantic_type).is_err());
+        let semantic_type = "\"Invalid Column Metadata\"";
+        assert!(MetadataRegion::deserialize_column_metadata(semantic_type).is_err());
     }
 
     #[test]
@@ -620,13 +619,17 @@ mod test {
         let logical_region_id = RegionId::new(868, 8390);
         let column_name = "column1";
         let semantic_type = SemanticType::Tag;
-        metadata_region
-            .add_column(
-                physical_region_id,
-                logical_region_id,
+        let column_metadata = ColumnMetadata {
+            column_schema: ColumnSchema::new(
                 column_name,
-                semantic_type,
-            )
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            semantic_type,
+            column_id: 5,
+        };
+        metadata_region
+            .add_column(physical_region_id, logical_region_id, &column_metadata)
             .await
             .unwrap();
         let actual_semantic_type = metadata_region
@@ -637,12 +640,7 @@ mod test {
 
         // duplicate column won't be updated
         let is_updated = metadata_region
-            .add_column(
-                physical_region_id,
-                logical_region_id,
-                column_name,
-                SemanticType::Field,
-            )
+            .add_column(physical_region_id, logical_region_id, &column_metadata)
             .await
             .unwrap();
         assert!(!is_updated);

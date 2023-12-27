@@ -219,8 +219,8 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
         .unwrap();
 
     let _ = conn.execute("SET time_zone = 'UTC'").await.unwrap();
-    let time_zone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
-    assert_eq!(time_zone[0].get::<String, usize>(0), "UTC");
+    let timezone = conn.fetch_all("SELECT @@time_zone").await.unwrap();
+    assert_eq!(timezone[0].get::<String, usize>(0), "UTC");
 
     // test data
     let _ = conn

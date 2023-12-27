@@ -32,6 +32,7 @@ common-recordbatch.workspace = true
 common-telemetry = { workspace = true, features = [
     "deadlock_detection",
 ] }
+common-time.workspace = true
 config = "0.13"
 datanode.workspace = true
 datatypes.workspace = true
@@ -40,6 +41,7 @@ etcd-client.workspace = true
 file-engine.workspace = true
 frontend.workspace = true
 futures.workspace = true
+human-panic = "1.2.2"
 lazy_static.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true

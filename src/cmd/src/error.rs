@@ -43,6 +43,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Failed to init default timezone"))]
+    InitTimezone {
+        location: Location,
+        source: common_time::error::Error,
+    },
+
     #[snafu(display("Failed to start procedure manager"))]
     StartProcedureManager {
         location: Location,
@@ -53,6 +59,12 @@ pub enum Error {
     StopProcedureManager {
         location: Location,
         source: common_procedure::error::Error,
+    },
+
+    #[snafu(display("Failed to start wal options allocator"))]
+    StartWalOptionsAllocator {
+        location: Location,
+        source: common_meta::error::Error,
     },
 
     #[snafu(display("Failed to start datanode"))]
@@ -262,6 +274,7 @@ impl ErrorExt for Error {
             | Error::LoadLayeredConfig { .. }
             | Error::IllegalConfig { .. }
             | Error::InvalidReplCommand { .. }
+            | Error::InitTimezone { .. }
             | Error::ConnectEtcd { .. }
             | Error::NotDataFromOutput { .. }
             | Error::CreateDir { .. }
@@ -270,6 +283,7 @@ impl ErrorExt for Error {
 
             Error::StartProcedureManager { source, .. }
             | Error::StopProcedureManager { source, .. } => source.status_code(),
+            Error::StartWalOptionsAllocator { source, .. } => source.status_code(),
             Error::ReplCreation { .. } | Error::Readline { .. } => StatusCode::Internal,
             Error::RequestDatabase { source, .. } => source.status_code(),
             Error::CollectRecordBatches { source, .. }
