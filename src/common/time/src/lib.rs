@@ -31,4 +31,4 @@ pub use interval::Interval;
 pub use range::RangeMillis;
 pub use timestamp::Timestamp;
 pub use timestamp_millis::TimestampMillis;
-pub use timezone::TimeZone;
+pub use timezone::Timezone;

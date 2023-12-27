@@ -1190,6 +1190,7 @@ impl<'a> ValueRef<'a> {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType as ArrowDataType;
+    use common_time::timezone::set_default_timezone;
     use num_traits::Float;
 
     use super::*;
@@ -1875,7 +1876,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         assert_eq!(Value::Null.to_string(), "Null");
         assert_eq!(Value::UInt8(8).to_string(), "8");
         assert_eq!(Value::UInt16(16).to_string(), "16");

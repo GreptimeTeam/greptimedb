@@ -176,6 +176,7 @@ mod tests {
 
     use common_base::bytes::StringBytes;
     use common_time::time::Time;
+    use common_time::timezone::set_default_timezone;
     use common_time::{Date, DateTime, Timestamp};
     use ordered_float::OrderedFloat;
 
@@ -213,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_cast_with_opt() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         // non-strict mode
         let cast_option = CastOption { strict: false };
         let src_value = Value::Int8(-1);

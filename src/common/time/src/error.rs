@@ -51,8 +51,8 @@ pub enum Error {
     #[snafu(display("Timestamp arithmetic overflow, msg: {}", msg))]
     ArithmeticOverflow { msg: String, location: Location },
 
-    #[snafu(display("Invalid time zone offset: {hours}:{minutes}"))]
-    InvalidTimeZoneOffset {
+    #[snafu(display("Invalid timezone offset: {hours}:{minutes}"))]
+    InvalidTimezoneOffset {
         hours: i32,
         minutes: u32,
         location: Location,
@@ -66,8 +66,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid time zone string {raw}"))]
-    ParseTimeZoneName { raw: String, location: Location },
+    #[snafu(display("Invalid timezone string {raw}"))]
+    ParseTimezoneName { raw: String, location: Location },
 }
 
 impl ErrorExt for Error {
@@ -75,9 +75,9 @@ impl ErrorExt for Error {
         match self {
             Error::ParseDateStr { .. }
             | Error::ParseTimestamp { .. }
-            | Error::InvalidTimeZoneOffset { .. }
+            | Error::InvalidTimezoneOffset { .. }
             | Error::ParseOffsetStr { .. }
-            | Error::ParseTimeZoneName { .. } => StatusCode::InvalidArguments,
+            | Error::ParseTimezoneName { .. } => StatusCode::InvalidArguments,
             Error::TimestampOverflow { .. } => StatusCode::Internal,
             Error::InvalidDateStr { .. } | Error::ArithmeticOverflow { .. } => {
                 StatusCode::InvalidArguments
@@ -96,9 +96,9 @@ impl ErrorExt for Error {
             | Error::TimestampOverflow { location, .. }
             | Error::ArithmeticOverflow { location, .. } => Some(*location),
             Error::ParseDateStr { .. }
-            | Error::InvalidTimeZoneOffset { .. }
+            | Error::InvalidTimezoneOffset { .. }
             | Error::ParseOffsetStr { .. }
-            | Error::ParseTimeZoneName { .. } => None,
+            | Error::ParseTimezoneName { .. } => None,
             Error::InvalidDateStr { location, .. } => Some(*location),
             Error::ParseInterval { location, .. } => Some(*location),
         }
