@@ -14,6 +14,7 @@
 
 #![feature(option_get_or_insert_default)]
 #![feature(let_chains)]
+#![feature(map_try_insert)]
 
 pub mod error;
 pub mod extension_plan;
