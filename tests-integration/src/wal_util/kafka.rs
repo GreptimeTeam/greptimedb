@@ -19,6 +19,8 @@ pub mod runtime;
 #[macro_export]
 macro_rules! start_kafka {
     () => {
-        let _ = $crate::wal_util::kafka::runtime::Runtime::default().start().await;
+        let _ = $crate::wal_util::kafka::runtime::Runtime::default()
+            .start()
+            .await;
     };
 }
