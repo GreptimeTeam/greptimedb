@@ -64,6 +64,7 @@ sqlx = { version = "0.6", features = [
 substrait.workspace = true
 table.workspace = true
 tempfile.workspace = true
+testcontainers = "0.15.0"
 time = "0.3"
 tokio.workspace = true
 tonic.workspace = true
