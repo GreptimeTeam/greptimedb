@@ -15,6 +15,7 @@ selector = "lease_based"
 use_memory_store = false
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
+store_key_prefix = ""
 
 # Log options, see `standalone.example.toml`
 # [logging]

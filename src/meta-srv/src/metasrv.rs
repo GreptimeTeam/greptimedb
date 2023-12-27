@@ -75,7 +75,7 @@ pub struct MetaSrvOptions {
     pub data_home: String,
     pub wal: WalConfig,
     pub export_metrics: ExportMetricsOption,
-    pub store_key_prefix: Option<String>,
+    pub store_key_prefix: String,
 }
 
 impl Default for MetaSrvOptions {
@@ -102,7 +102,7 @@ impl Default for MetaSrvOptions {
             data_home: METASRV_HOME.to_string(),
             wal: WalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
-            store_key_prefix: None,
+            store_key_prefix: "".to_string(),
         }
     }
 }
