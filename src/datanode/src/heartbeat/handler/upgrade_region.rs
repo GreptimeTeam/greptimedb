@@ -14,6 +14,7 @@
 
 use std::time::Duration;
 
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::warn;
 use futures_util::future::BoxFuture;
@@ -32,86 +33,84 @@ impl HandlerContext {
         }: UpgradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
-            if let Some(writable) = self.region_server.writable(region_id) {
-                if writable {
-                    return InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                        ready: true,
-                        exists: true,
-                        error: None,
-                    });
-                }
-
-                let region_server_moved = self.region_server.clone();
-
-                // The catchup task is almost zero cost if the inside region is writable.
-                // Therefore, it always registers a new catchup task.
-                let register_result = self
-                    .catchup_tasks
-                    .try_register(
-                        region_id,
-                        Box::pin(async move {
-                            region_server_moved
-                                .handle_request(
-                                    region_id,
-                                    RegionRequest::Catchup(RegionCatchupRequest {
-                                        set_writable: true,
-                                        entry_id: last_entry_id,
-                                    }),
-                                )
-                                .await?;
-
-                            Ok(())
-                        }),
-                    )
-                    .await;
-
-                if register_result.is_busy() {
-                    warn!("Another catchup task is running for the region: {region_id}");
-                }
-
-                // Returns immediately
-                let Some(wait_for_replay_millis) = wait_for_replay_millis else {
-                    return InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                        ready: false,
-                        exists: true,
-                        error: None,
-                    });
-                };
-
-                // We don't care that it returns a newly registered or running task.
-                let mut watcher = register_result.into_watcher();
-                let result = self
-                    .catchup_tasks
-                    .wait(&mut watcher, Duration::from_millis(wait_for_replay_millis))
-                    .await;
-
-                match result {
-                    WaitResult::Timeout => InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                        ready: false,
-                        exists: true,
-                        error: None,
-                    }),
-                    WaitResult::Finish(Ok(_)) => {
-                        InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                            ready: true,
-                            exists: true,
-                            error: None,
-                        })
-                    }
-                    WaitResult::Finish(Err(err)) => {
-                        InstructionReply::UpgradeRegion(UpgradeRegionReply {
-                            ready: false,
-                            exists: true,
-                            error: Some(err.to_string()),
-                        })
-                    }
-                }
-            } else {
-                InstructionReply::UpgradeRegion(UpgradeRegionReply {
+            let Some(writable) = self.region_server.is_writable(region_id) else {
+                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: false,
                     error: None,
-                })
+                });
+            };
+
+            if writable {
+                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                    ready: true,
+                    exists: true,
+                    error: None,
+                });
+            }
+
+            let region_server_moved = self.region_server.clone();
+
+            // The catchup task is almost zero cost if the inside region is writable.
+            // Therefore, it always registers a new catchup task.
+            let register_result = self
+                .catchup_tasks
+                .try_register(
+                    region_id,
+                    Box::pin(async move {
+                        region_server_moved
+                            .handle_request(
+                                region_id,
+                                RegionRequest::Catchup(RegionCatchupRequest {
+                                    set_writable: true,
+                                    entry_id: last_entry_id,
+                                }),
+                            )
+                            .await?;
+
+                        Ok(())
+                    }),
+                )
+                .await;
+
+            if register_result.is_busy() {
+                warn!("Another catchup task is running for the region: {region_id}");
+            }
+
+            // Returns immediately
+            let Some(wait_for_replay_millis) = wait_for_replay_millis else {
+                return InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                    ready: false,
+                    exists: true,
+                    error: None,
+                });
+            };
+
+            // We don't care that it returns a newly registered or running task.
+            let mut watcher = register_result.into_watcher();
+            let result = self
+                .catchup_tasks
+                .wait(&mut watcher, Duration::from_millis(wait_for_replay_millis))
+                .await;
+
+            match result {
+                WaitResult::Timeout => InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                    ready: false,
+                    exists: true,
+                    error: None,
+                }),
+                WaitResult::Finish(Ok(_)) => InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                    ready: true,
+                    exists: true,
+                    error: None,
+                }),
+                WaitResult::Finish(Err(err)) => {
+                    InstructionReply::UpgradeRegion(UpgradeRegionReply {
+                        ready: false,
+                        exists: true,
+                        error: Some(err.output_msg()),
+                    })
+                }
             }
         })
     }
@@ -357,6 +356,7 @@ mod tests {
             assert!(!reply.ready);
             assert!(reply.exists);
             assert!(reply.error.is_some());
+            assert!(reply.error.unwrap().contains("mock_error"));
         }
     }
 }

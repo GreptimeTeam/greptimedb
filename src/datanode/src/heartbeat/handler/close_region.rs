@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, SimpleReply};
 use common_meta::RegionIdent;
 use common_telemetry::warn;
@@ -45,7 +46,7 @@ impl HandlerContext {
                 }
                 Err(err) => InstructionReply::CloseRegion(SimpleReply {
                     result: false,
-                    error: Some(err.to_string()),
+                    error: Some(err.output_msg()),
                 }),
             }
         })

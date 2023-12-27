@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{DowngradeRegion, DowngradeRegionReply, InstructionReply};
 use futures_util::future::BoxFuture;
 use store_api::region_engine::SetReadonlyResponse;
@@ -42,7 +43,7 @@ impl HandlerContext {
                 Err(err) => InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
                     exists: false,
-                    error: Some(err.to_string()),
+                    error: Some(err.output_msg()),
                 }),
             }
         })

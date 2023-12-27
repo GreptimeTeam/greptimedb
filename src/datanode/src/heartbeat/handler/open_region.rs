@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
 use futures_util::future::BoxFuture;
 use store_api::path_utils::region_dir;
@@ -43,7 +44,7 @@ impl HandlerContext {
             let result = self.region_server.handle_request(region_id, request).await;
 
             let success = result.is_ok();
-            let error = result.as_ref().map_err(|e| e.to_string()).err();
+            let error = result.as_ref().map_err(|e| e.output_msg()).err();
 
             InstructionReply::OpenRegion(SimpleReply {
                 result: success,

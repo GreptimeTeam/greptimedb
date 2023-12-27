@@ -21,7 +21,6 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::watch::{self, Receiver};
 use tokio::sync::RwLock;
-use tokio::{select, time};
 
 use crate::error::{self, Error, Result};
 
@@ -36,7 +35,7 @@ pub(crate) enum TaskState<T: Send + Sync + Clone> {
 
 pub(crate) type TaskWatcher<T> = Receiver<TaskState<T>>;
 
-pub async fn wait<T: Send + Sync + Clone>(watcher: &mut TaskWatcher<T>) -> Result<T> {
+async fn wait<T: Send + Sync + Clone>(watcher: &mut TaskWatcher<T>) -> Result<T> {
     loop {
         watcher
             .changed()
@@ -109,14 +108,13 @@ pub(crate) enum WaitResult<T> {
     Finish(Result<T>),
 }
 
+#[cfg(test)]
 impl<T> WaitResult<T> {
-    #[cfg(test)]
     /// Returns true if it's [WaitResult::Timeout].
     pub(crate) fn is_timeout(&self) -> bool {
         matches!(self, WaitResult::Timeout)
     }
 
-    #[cfg(test)]
     /// Into the [WaitResult::Timeout] if it's.
     pub(crate) fn into_finish(self) -> Option<Result<T>> {
         match self {
@@ -140,15 +138,9 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
         watcher: &mut TaskWatcher<T>,
         timeout: Duration,
     ) -> WaitResult<T> {
-        let sleep = time::sleep(timeout);
-
-        select! {
-            () = sleep =>{
-                WaitResult::Timeout
-            }
-            result = wait(watcher) =>{
-                WaitResult::Finish(result)
-            }
+        match tokio::time::timeout(timeout, wait(watcher)).await {
+            Ok(result) => WaitResult::Finish(result),
+            Err(_) => WaitResult::Timeout,
         }
     }
 
@@ -164,7 +156,6 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
         } else {
             let moved_inner = self.inner.clone();
             let (tx, rx) = watch::channel(TaskState::<T>::Running);
-
             common_runtime::spawn_bg(async move {
                 match fut.await {
                     Ok(result) => {
@@ -174,10 +165,8 @@ impl<T: Send + Sync + Clone + 'static> TaskTracker<T> {
                         let _ = tx.send(TaskState::Error(Arc::new(err)));
                     }
                 };
-
                 moved_inner.write().await.state.remove(&region_id);
             });
-
             inner.state.insert(
                 region_id,
                 Task {
@@ -218,7 +207,6 @@ mod tests {
     async fn test_async_task_tracker_register() {
         let tracker = TaskTracker::<TestResult>::new();
         let region_id = RegionId::new(1024, 1);
-
         let (tx, rx) = oneshot::channel::<()>();
 
         let result = tracker
@@ -239,11 +227,8 @@ mod tests {
                 Box::pin(async move { Ok(TestResult { value: 1023 }) }),
             )
             .await;
-
         assert!(result.is_busy());
-
         let mut watcher = tracker.watcher(region_id).await.unwrap();
-
         // Triggers first future return.
         tx.send(()).unwrap();
 
@@ -251,7 +236,6 @@ mod tests {
             TestResult { value: 1024 },
             wait(&mut watcher).await.unwrap()
         );
-
         let result = tracker
             .try_register(
                 region_id,
@@ -277,22 +261,17 @@ mod tests {
             .await;
 
         let mut watcher = result.into_watcher();
-
         let result = tracker.wait(&mut watcher, Duration::from_millis(100)).await;
-
         assert!(result.is_timeout());
 
         tokio::time::sleep(Duration::from_millis(150)).await;
-
         let result = tracker
             .wait(&mut watcher, Duration::from_millis(100))
             .await
             .into_finish()
             .unwrap()
             .unwrap();
-
         assert_eq!(TestResult { value: 1024 }, result);
-
         assert!(tracker.watcher(region_id).await.is_none());
     }
 }

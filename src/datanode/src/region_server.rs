@@ -139,7 +139,7 @@ impl RegionServer {
             .collect()
     }
 
-    pub fn writable(&self, region_id: RegionId) -> Option<bool> {
+    pub fn is_writable(&self, region_id: RegionId) -> Option<bool> {
         // TODO(weny): Finds a better way.
         self.inner.region_map.get(&region_id).and_then(|engine| {
             engine.role(region_id).map(|role| match role {
