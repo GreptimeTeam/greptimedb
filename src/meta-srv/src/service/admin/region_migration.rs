@@ -119,7 +119,11 @@ impl HttpHandler for SubmitRegionMigrationTaskHandler {
 
         http::Response::builder()
             .status(http::StatusCode::OK)
-            .body(serde_json::to_string(&response).unwrap())
+            .body(serde_json::to_string(&response).with_context(|_| {
+                error::SerializeToJsonSnafu {
+                    input: format!("{response:?}"),
+                }
+            })?)
             .context(error::InvalidHttpBodySnafu)
     }
 }
