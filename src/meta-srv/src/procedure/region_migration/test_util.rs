@@ -29,8 +29,10 @@ use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::{Sequence, SequenceBuilder};
+use common_meta::state_store::KvStateStore;
 use common_meta::DatanodeId;
-use common_procedure::{Context as ProcedureContext, ProcedureId, Status};
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManagerRef, Status};
 use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
 use common_time::util::current_time_millis;
@@ -90,6 +92,7 @@ pub struct TestingEnv {
     mailbox_ctx: MailboxContext,
     opening_region_keeper: MemoryRegionKeeperRef,
     server_addr: String,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl TestingEnv {
@@ -104,11 +107,15 @@ impl TestingEnv {
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+
         Self {
             table_metadata_manager,
             opening_region_keeper,
             mailbox_ctx,
             server_addr: "localhost".to_string(),
+            procedure_manager,
         }
     }
 
@@ -144,6 +151,11 @@ impl TestingEnv {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
         }
+    }
+
+    /// Returns the [ProcedureManagerRef].
+    pub fn procedure_manager(&self) -> &ProcedureManagerRef {
+        &self.procedure_manager
     }
 
     // Creates a table metadata with the physical table route.
