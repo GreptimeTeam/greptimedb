@@ -827,8 +827,10 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::DurationNanosecond(d) => d
                 .map(|x| Value::Duration(Duration::new(x, TimeUnit::Nanosecond)))
                 .unwrap_or(Value::Null),
-            ScalarValue::Decimal128(_, _, _)
-            | ScalarValue::Decimal256(_, _, _)
+            ScalarValue::Decimal128(v, p, s) => v
+                .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Decimal256(_, _, _)
             | ScalarValue::Struct(_, _)
             | ScalarValue::Dictionary(_, _) => {
                 return error::UnsupportedArrowTypeSnafu {
@@ -1474,11 +1476,14 @@ mod tests {
             ScalarValue::DurationNanosecond(None).try_into().unwrap()
         );
 
-        let result: Result<Value> = ScalarValue::Decimal128(Some(1), 0, 0).try_into();
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported arrow data type, type: Decimal128(0, 0)"));
+        assert_eq!(
+            Value::Decimal128(Decimal128::new(1, 38, 10)),
+            ScalarValue::Decimal128(Some(1), 38, 10).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Decimal128(None, 0, 0).try_into().unwrap()
+        );
     }
 
     #[test]
