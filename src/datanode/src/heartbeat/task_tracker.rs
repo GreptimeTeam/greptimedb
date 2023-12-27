@@ -249,12 +249,13 @@ mod tests {
     async fn test_async_task_tracker_wait_timeout() {
         let tracker = TaskTracker::<TestResult>::new();
         let region_id = RegionId::new(1024, 1);
+        let (tx, rx) = oneshot::channel::<()>();
 
         let result = tracker
             .try_register(
                 region_id,
                 Box::pin(async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    let _ = rx.await;
                     Ok(TestResult { value: 1024 })
                 }),
             )
@@ -264,7 +265,8 @@ mod tests {
         let result = tracker.wait(&mut watcher, Duration::from_millis(100)).await;
         assert!(result.is_timeout());
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Triggers first future return.
+        tx.send(()).unwrap();
         let result = tracker
             .wait(&mut watcher, Duration::from_millis(100))
             .await
