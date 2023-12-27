@@ -177,7 +177,7 @@ impl DdlManager {
         &self,
         cluster_id: u64,
         create_table_task: CreateTableTask,
-        region_routes: Vec<RegionRoute>,
+        table_route: TableRouteValue,
         region_wal_options: HashMap<RegionNumber, String>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
@@ -185,7 +185,7 @@ impl DdlManager {
         let procedure = CreateTableProcedure::new(
             cluster_id,
             create_table_task,
-            region_routes,
+            table_route,
             region_wal_options,
             context,
         );
@@ -275,11 +275,10 @@ async fn handle_truncate_table_task(
         table_name: table_ref.to_string(),
     })?;
 
-    let table_route_value = table_route_value.with_context(|| error::TableRouteNotFoundSnafu {
-        table_name: table_ref.to_string(),
-    })?;
+    let table_route_value =
+        table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
 
-    let table_route = table_route_value.into_inner().region_routes;
+    let table_route = table_route_value.into_inner().region_routes().clone();
 
     let id = ddl_manager
         .submit_truncate_table_task(
@@ -356,9 +355,8 @@ async fn handle_drop_table_task(
         table_name: table_ref.to_string(),
     })?;
 
-    let table_route_value = table_route_value.with_context(|| error::TableRouteNotFoundSnafu {
-        table_name: table_ref.to_string(),
-    })?;
+    let table_route_value =
+        table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
 
     let id = ddl_manager
         .submit_drop_table_task(
@@ -392,7 +390,7 @@ async fn handle_create_table_task(
 
     let TableMetadata {
         table_id,
-        region_routes,
+        table_route,
         region_wal_options,
     } = table_meta;
 
@@ -402,7 +400,7 @@ async fn handle_create_table_task(
         .submit_create_table_task(
             cluster_id,
             create_table_task,
-            region_routes,
+            table_route,
             region_wal_options,
         )
         .await?;
