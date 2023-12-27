@@ -35,12 +35,31 @@ use datatypes::arrow::compute;
 use futures::future::BoxFuture;
 use futures::{ready, Stream, StreamExt, TryStreamExt};
 
+/// A special kind of `UNION`(`OR` in PromQL) operator, for PromQL specific use case.
+///
+/// This operator is similar to `UNION` from SQL, but it only accepts two inputs. The
+/// most different part is that it treat left child and right child differently:
+/// - All columns from left child will be outputted.
+/// - Only check collisions (when not distinct) on the columns specified by `compare_keys`.
+/// - When there is a collision:
+///   - If the collision is from right child itself, only the first observed row will be
+///     preserved. All others are discarded.
+///   - If the collision is from left child, the row in right child will be discarded.
+/// - The output order is not maintained. This plan will output left child first, then right child.
+/// - The output schema contains all columns from left or right child plans.
+///
+/// From the implementation perspective, this operator is similar to `HashJoin`, but the
+/// probe side is the right child, and the build side is the left child. Another difference
+/// is that the probe is opting-out.
+///
+/// This plan will exhaust the right child first to build probe hash table, then streaming
+/// on left side, and use the left side to "mask" the hash table.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct UnionDistinctOn {
     left: LogicalPlan,
     right: LogicalPlan,
     /// The columns to compare for equality.
-    /// TIME INDEX is not included.
+    /// TIME INDEX is included.
     compare_keys: Vec<String>,
     ts_col: String,
     output_schema: DFSchemaRef,
@@ -250,6 +269,7 @@ impl DisplayAs for UnionDistinctOnExec {
     }
 }
 
+// TODO(ruihang): some unused fields are for metrics, which will be implemented later.
 #[allow(dead_code)]
 pub struct UnionDistinctOnStream {
     left: SendableRecordBatchStream,
@@ -464,4 +484,93 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
 
     let result = RecordBatch::try_new(schema, arrays).map_err(DataFusionError::ArrowError)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod test {
+    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+    use super::*;
+
+    #[test]
+    fn test_interleave_batches() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]);
+
+        let batch1 = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![4, 5, 6])),
+            ],
+        )
+        .unwrap();
+
+        let batch2 = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![7, 8, 9])),
+                Arc::new(Int32Array::from(vec![10, 11, 12])),
+            ],
+        )
+        .unwrap();
+
+        let batch3 = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![13, 14, 15])),
+                Arc::new(Int32Array::from(vec![16, 17, 18])),
+            ],
+        )
+        .unwrap();
+
+        let batches = vec![batch1, batch2, batch3];
+        let indices = vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)];
+        let result = interleave_batches(batches, indices).unwrap();
+
+        let expected = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 7, 13, 2, 8, 14])),
+                Arc::new(Int32Array::from(vec![4, 10, 16, 5, 11, 17])),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_take_batch() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+        ]);
+
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(Int32Array::from(vec![4, 5, 6])),
+            ],
+        )
+        .unwrap();
+
+        let indices = vec![0, 2];
+        let result = take_batch(&batch, &indices).unwrap();
+
+        let expected = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 3])),
+                Arc::new(Int32Array::from(vec![4, 6])),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(result, expected);
+    }
 }

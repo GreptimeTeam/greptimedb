@@ -445,40 +445,12 @@ impl InstantManipulateStream {
 
 #[cfg(test)]
 mod test {
-    use datafusion::arrow::array::Float64Array;
-    use datafusion::arrow::datatypes::{
-        ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
-    };
-    use datafusion::physical_plan::memory::MemoryExec;
     use datafusion::prelude::SessionContext;
-    use datatypes::arrow::array::TimestampMillisecondArray;
-    use datatypes::arrow_array::StringArray;
 
     use super::*;
-
-    const TIME_INDEX_COLUMN: &str = "timestamp";
-
-    fn prepare_test_data() -> MemoryExec {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
-            Field::new("value", DataType::Float64, true),
-            Field::new("path", DataType::Utf8, true),
-        ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
-            0, 30_000, 60_000, 90_000, 120_000, // every 30s
-            180_000, 240_000, // every 60s
-            241_000, 271_000, 291_000, // others
-        ])) as _;
-        let field_column = Arc::new(Float64Array::from(vec![1.0; 10])) as _;
-        let path_column = Arc::new(StringArray::from(vec!["foo"; 10])) as _;
-        let data = RecordBatch::try_new(
-            schema.clone(),
-            vec![timestamp_column, field_column, path_column],
-        )
-        .unwrap();
-
-        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
-    }
+    use crate::extension_plan::test_util::{
+        prepare_test_data, prepare_test_data_with_nan, TIME_INDEX_COLUMN,
+    };
 
     async fn do_normalize_test(
         start: Millisecond,
@@ -747,22 +719,6 @@ mod test {
             \n+---------------------+-------+------+",
         );
         do_normalize_test(190_000, 300_000, 30_000, 10_000, expected, false).await;
-    }
-
-    fn prepare_test_data_with_nan() -> MemoryExec {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
-            0, 30_000, 60_000, 90_000, 120_000, // every 30s
-        ])) as _;
-        let field_column =
-            Arc::new(Float64Array::from(vec![0.0, f64::NAN, 6.0, f64::NAN, 12.0])) as _;
-        let data =
-            RecordBatch::try_new(schema.clone(), vec![timestamp_column, field_column]).unwrap();
-
-        MemoryExec::try_new(&[vec![data]], schema, None).unwrap()
     }
 
     #[tokio::test]

@@ -19,6 +19,8 @@ mod normalize;
 mod planner;
 mod range_manipulate;
 mod series_divide;
+#[cfg(test)]
+mod test_util;
 mod union_distinct_on;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
