@@ -102,7 +102,7 @@ impl Default for MetaSrvOptions {
             data_home: METASRV_HOME.to_string(),
             wal: WalConfig::default(),
             export_metrics: ExportMetricsOption::default(),
-            store_key_prefix: "".to_string(),
+            store_key_prefix: String::new(),
         }
     }
 }
