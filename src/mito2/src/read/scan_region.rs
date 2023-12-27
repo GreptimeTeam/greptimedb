@@ -14,9 +14,12 @@
 
 //! Scans a region according to the scan request.
 
+use std::sync::Arc;
+
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::debug;
+use common_telemetry::{debug, logging};
 use common_time::range::TimestampRange;
+use index::inverted_index::search::index_apply::IndexApplier;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 
@@ -27,6 +30,8 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
+use crate::sst::index::applier::builder::SstIndexApplierBuilder;
+use crate::sst::index::applier::SstIndexApplier;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -194,6 +199,7 @@ impl ScanRegion {
             total_ssts
         );
 
+        let index_applier = self.build_index_applier();
         let predicate = Predicate::new(self.request.filters.clone());
         // The mapper always computes projected column ids as the schema of SSTs may change.
         let mapper = match &self.request.projection {
@@ -204,6 +210,7 @@ impl ScanRegion {
         let seq_scan = SeqScan::new(self.access_layer.clone(), mapper)
             .with_time_range(Some(time_range))
             .with_predicate(Some(predicate))
+            .with_index_applier(index_applier)
             .with_memtables(memtables)
             .with_files(files)
             .with_cache(self.cache_manager)
@@ -223,6 +230,23 @@ impl ScanRegion {
             .unit();
         TimeRangePredicateBuilder::new(&time_index.column_schema.name, unit, &self.request.filters)
             .build()
+    }
+
+    /// Use the latest schema to build the index applier.
+    ///
+    /// To use this fixed schema to apply to different versions of SSTs, we have to make sure:
+    /// 1. Type of column cannot be changed.
+    /// 2. Column cannot be renamed.
+    fn build_index_applier(&self) -> Option<SstIndexApplier> {
+        SstIndexApplierBuilder::new(
+            self.access_layer.region_dir().to_string(),
+            self.access_layer.object_store().clone(),
+            self.version.metadata.as_ref(),
+        )
+        .build(&self.request.filters)
+        .inspect_err(|e| logging::warn!("Failed to build index applier: {}", e))
+        .ok()
+        .flatten()
     }
 }
 

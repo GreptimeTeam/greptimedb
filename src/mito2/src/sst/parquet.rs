@@ -97,7 +97,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -110,7 +109,13 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer = ParquetWriter::new(file_path, metadata, source, object_store.clone());
+        let mut writer = ParquetWriter::new(
+            FILE_DIR.to_string(),
+            handle.file_id(),
+            metadata,
+            source,
+            object_store.clone(),
+        );
         let info = writer.write_all(&write_opts).await.unwrap().unwrap();
         assert_eq!(200, info.num_rows);
         assert!(info.file_size > 0);
@@ -142,7 +147,6 @@ mod tests {
         let mut env = TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),
@@ -155,8 +159,13 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer =
-            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
+        let mut writer = ParquetWriter::new(
+            FILE_DIR.to_string(),
+            handle.file_id(),
+            metadata.clone(),
+            source,
+            object_store.clone(),
+        );
         writer.write_all(&write_opts).await.unwrap().unwrap();
 
         let cache = Some(Arc::new(CacheManager::new(0, 0, 64 * 1024 * 1024)));

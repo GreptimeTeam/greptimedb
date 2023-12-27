@@ -12,11 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Sorted strings tables.
-
-pub mod file;
-pub mod file_purger;
-pub mod index;
-pub mod location;
-pub mod parquet;
-pub(crate) mod version;
+pub mod applier;
+mod codec;
+pub mod creator;

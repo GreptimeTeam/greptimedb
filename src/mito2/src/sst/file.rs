@@ -57,6 +57,11 @@ impl FileId {
     pub fn as_parquet(&self) -> String {
         format!("{}{}", self, ".parquet")
     }
+
+    /// Append `.puffin` to file id to make a complete file name
+    pub fn as_puffin(&self) -> String {
+        format!("{}{}", self, ".puffin")
+    }
 }
 
 impl fmt::Display for FileId {

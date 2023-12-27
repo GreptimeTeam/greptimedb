@@ -14,6 +14,8 @@
 
 mod predicates_apply;
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 pub use predicates_apply::PredicatesIndexApplier;
 
@@ -25,14 +27,14 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 /// Applier instances are reusable and work with various `InvertedIndexReader` instances,
 /// avoiding repeated compilation of fixed predicates such as regex patterns.
 #[async_trait]
-pub trait IndexApplier {
+pub trait IndexApplier: Send + Sync {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
     async fn apply(
         &self,
         context: SearchContext,
         reader: &mut dyn InvertedIndexReader,
-    ) -> Result<Vec<usize>>;
+    ) -> Result<BTreeSet<usize>>;
 }
 
 /// A context for searching the inverted index.

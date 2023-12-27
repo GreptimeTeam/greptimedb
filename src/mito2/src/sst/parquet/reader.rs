@@ -14,7 +14,7 @@
 
 //! Parquet reader.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,7 @@ use crate::error::{
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
+use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -64,6 +65,8 @@ pub struct ParquetReaderBuilder {
     projection: Option<Vec<ColumnId>>,
     /// Manager that caches SST data.
     cache_manager: Option<CacheManagerRef>,
+
+    index_applier: Option<SstIndexApplier>,
 }
 
 impl ParquetReaderBuilder {
@@ -81,6 +84,7 @@ impl ParquetReaderBuilder {
             time_range: None,
             projection: None,
             cache_manager: None,
+            index_applier: None,
         }
     }
 
@@ -107,6 +111,11 @@ impl ParquetReaderBuilder {
     /// Attaches the cache to the builder.
     pub fn cache(mut self, cache: Option<CacheManagerRef>) -> ParquetReaderBuilder {
         self.cache_manager = cache;
+        self
+    }
+
+    pub fn index_applier(mut self, index_applier: Option<SstIndexApplier>) -> Self {
+        self.index_applier = index_applier;
         self
     }
 
@@ -143,19 +152,28 @@ impl ParquetReaderBuilder {
             });
         let read_format = ReadFormat::new(Arc::new(region_meta));
 
+        let mut row_groups: BTreeSet<_> = (0..parquet_meta.num_row_groups()).collect();
+        if let Some(index_applier) = self.index_applier.as_ref() {
+            match index_applier.apply(self.file_handle.file_id()).await {
+                Ok(rgs) => row_groups = rgs,
+                Err(err) => debug!("Failed to apply index: {err}"),
+            }
+        }
+
         // Prunes row groups by metadata.
-        let row_groups: VecDeque<_> = if let Some(predicate) = &self.predicate {
+        if let Some(predicate) = &self.predicate {
             let stats =
                 RowGroupPruningStats::new(parquet_meta.row_groups(), &read_format, column_ids);
 
-            predicate
+            for (row_group, valid) in predicate
                 .prune_with_stats(&stats, read_format.metadata().schema.arrow_schema())
                 .into_iter()
                 .enumerate()
-                .filter_map(|(idx, valid)| if valid { Some(idx) } else { None })
-                .collect()
-        } else {
-            (0..parquet_meta.num_row_groups()).collect()
+            {
+                if !valid {
+                    row_groups.remove(&row_group);
+                }
+            }
         };
 
         // Computes the projection mask.
@@ -335,7 +353,7 @@ impl RowGroupReaderBuilder {
 /// Parquet batch reader to read our SST format.
 pub struct ParquetReader {
     /// Indices of row groups to read.
-    row_groups: VecDeque<usize>,
+    row_groups: BTreeSet<usize>,
     /// Helper to read record batches.
     ///
     /// Not `None` if [ParquetReader::stream] is not `None`.
@@ -430,7 +448,7 @@ impl ParquetReader {
         }
 
         // No more items in current row group, reads next row group.
-        while let Some(row_group_idx) = self.row_groups.pop_front() {
+        while let Some(row_group_idx) = self.row_groups.pop_first() {
             let mut row_group_reader = self.reader_builder.build(row_group_idx).await?;
             let Some(record_batch) =
                 row_group_reader

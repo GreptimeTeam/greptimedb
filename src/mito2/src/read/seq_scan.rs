@@ -23,6 +23,7 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
+use index::inverted_index::search::index_apply::IndexApplier;
 use snafu::ResultExt;
 use table::predicate::Predicate;
 use tokio::sync::{mpsc, Semaphore};
@@ -39,6 +40,7 @@ use crate::read::projection::ProjectionMapper;
 use crate::read::scan_region::ScanParallism;
 use crate::read::{BatchReader, BoxedBatchReader, BoxedBatchStream, Source};
 use crate::sst::file::FileHandle;
+use crate::sst::index::applier::SstIndexApplier;
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -62,6 +64,8 @@ pub struct SeqScan {
     ignore_file_not_found: bool,
     /// Parallelism to scan data.
     parallelism: ScanParallism,
+
+    index_appiler: Option<SstIndexApplier>,
 }
 
 impl SeqScan {
@@ -73,6 +77,7 @@ impl SeqScan {
             mapper: Arc::new(mapper),
             time_range: None,
             predicate: None,
+            index_appiler: None,
             memtables: Vec::new(),
             files: Vec::new(),
             cache_manager: None,
@@ -92,6 +97,12 @@ impl SeqScan {
     #[must_use]
     pub(crate) fn with_predicate(mut self, predicate: Option<Predicate>) -> Self {
         self.predicate = predicate;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_index_applier(mut self, index_applier: Option<SstIndexApplier>) -> Self {
+        self.index_appiler = index_applier;
         self
     }
 
@@ -210,6 +221,7 @@ impl SeqScan {
                 .access_layer
                 .read_sst(file.clone())
                 .predicate(self.predicate.clone())
+                .index_applier(self.index_appiler.clone())
                 .time_range(self.time_range)
                 .projection(Some(self.mapper.column_ids().to_vec()))
                 .cache(self.cache_manager.clone())

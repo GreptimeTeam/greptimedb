@@ -14,7 +14,7 @@
 
 use fst::map::OpBuilder;
 use fst::{IntoStreamer, Streamer};
-use regex_automata::DenseDFA;
+use regex_automata::dfa::dense::DFA;
 use snafu::{ensure, ResultExt};
 
 use crate::inverted_index::error::{
@@ -24,15 +24,13 @@ use crate::inverted_index::search::fst_apply::FstApplier;
 use crate::inverted_index::search::predicate::{Predicate, Range};
 use crate::inverted_index::FstMap;
 
-type Dfa = DenseDFA<Vec<usize>, usize>;
-
 /// `IntersectionFstApplier` applies intersection operations on an FstMap using specified ranges and regex patterns.
 pub struct IntersectionFstApplier {
     /// A list of `Range` which define inclusive or exclusive ranges for keys to be queried in the FstMap.
     ranges: Vec<Range>,
 
     /// A list of `Dfa` compiled from regular expression patterns.
-    dfas: Vec<Dfa>,
+    dfas: Vec<DFA<Vec<u32>>>,
 }
 
 impl FstApplier for IntersectionFstApplier {
@@ -88,7 +86,7 @@ impl IntersectionFstApplier {
             match predicate {
                 Predicate::Range(range) => ranges.push(range.range),
                 Predicate::RegexMatch(regex) => {
-                    let dfa = DenseDFA::new(&regex.pattern);
+                    let dfa = DFA::new(&regex.pattern);
                     let dfa = dfa.context(ParseDFASnafu)?;
                     dfas.push(dfa);
                 }
@@ -210,47 +208,66 @@ mod tests {
 
     #[test]
     fn test_intersection_fst_applier_with_valid_pattern() {
-        let test_fst = FstMap::from_iter([("aa", 1), ("bb", 2), ("cc", 3)]).unwrap();
+        let test_fst = FstMap::from_iter([("123", 1), ("abc", 2)]).unwrap();
 
-        let applier = create_applier_from_pattern("a.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![1]);
+        let cases = vec![
+            ("1", vec![1]),
+            ("2", vec![1]),
+            ("3", vec![1]),
+            ("^1", vec![1]),
+            ("^2", vec![]),
+            ("^3", vec![]),
+            ("^1.*", vec![1]),
+            ("^.*2", vec![1]),
+            ("^.*3", vec![1]),
+            ("1$", vec![]),
+            ("2$", vec![]),
+            ("3$", vec![1]),
+            ("1.*$", vec![1]),
+            ("2.*$", vec![1]),
+            ("3.*$", vec![1]),
+            ("^1..$", vec![1]),
+            ("^.2.$", vec![1]),
+            ("^..3$", vec![1]),
+            ("^[0-9]", vec![1]),
+            ("^[0-9]+$", vec![1]),
+            ("^[0-9][0-9]$", vec![]),
+            ("^[0-9][0-9][0-9]$", vec![1]),
+            ("^123$", vec![1]),
+            ("a", vec![2]),
+            ("b", vec![2]),
+            ("c", vec![2]),
+            ("^a", vec![2]),
+            ("^b", vec![]),
+            ("^c", vec![]),
+            ("^a.*", vec![2]),
+            ("^.*b", vec![2]),
+            ("^.*c", vec![2]),
+            ("a$", vec![]),
+            ("b$", vec![]),
+            ("c$", vec![2]),
+            ("a.*$", vec![2]),
+            ("b.*$", vec![2]),
+            ("c.*$", vec![2]),
+            ("^.[a-z]", vec![2]),
+            ("^abc$", vec![2]),
+            ("^ab$", vec![]),
+            ("abc$", vec![2]),
+            ("^a.c$", vec![2]),
+            ("^..c$", vec![2]),
+            ("ab", vec![2]),
+            (".*", vec![1, 2]),
+            ("", vec![1, 2]),
+            ("^$", vec![]),
+            ("1|a", vec![1, 2]),
+            ("^123$|^abc$", vec![1, 2]),
+        ];
 
-        let applier = create_applier_from_pattern("b.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![2]);
-
-        let applier = create_applier_from_pattern("c.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![3]);
-
-        let applier = create_applier_from_pattern("a.*").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![1]);
-
-        let applier = create_applier_from_pattern("b.*").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![2]);
-
-        let applier = create_applier_from_pattern("c.*").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![3]);
-
-        let applier = create_applier_from_pattern("d.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert!(results.is_empty());
-
-        let applier = create_applier_from_pattern("a.?|b.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![1, 2]);
-
-        let applier = create_applier_from_pattern("d.?|a.?").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![1]);
-
-        let applier = create_applier_from_pattern(".*").unwrap();
-        let results = applier.apply(&test_fst);
-        assert_eq!(results, vec![1, 2, 3]);
+        for (pattern, expected) in cases {
+            let applier = create_applier_from_pattern(pattern).unwrap();
+            let results = applier.apply(&test_fst);
+            assert_eq!(results, expected);
+        }
     }
 
     #[test]

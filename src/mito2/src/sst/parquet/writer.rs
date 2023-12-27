@@ -14,8 +14,10 @@
 
 //! Parquet writer.
 
+use std::num::NonZeroUsize;
+
 use common_datasource::file_format::parquet::BufferedWriter;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use common_time::Timestamp;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -28,13 +30,18 @@ use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
 
 use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
 use crate::read::{Batch, Source};
+use crate::sst::file::FileId;
+use crate::sst::index::creator::SstIndexCreator;
+use crate::sst::location;
 use crate::sst::parquet::format::WriteFormat;
 use crate::sst::parquet::{SstInfo, WriteOptions, PARQUET_METADATA_KEY};
 
 /// Parquet SST writer.
 pub struct ParquetWriter {
-    /// SST output file path.
-    file_path: String,
+    /// Directory of the region.
+    region_dir: String,
+    /// SST file id.
+    file_id: FileId,
     /// Input data source.
     source: Source,
     /// Region metadata of the source and the target SST.
@@ -45,13 +52,15 @@ pub struct ParquetWriter {
 impl ParquetWriter {
     /// Creates a new parquet SST writer.
     pub fn new(
-        file_path: String,
+        region_dir: String,
+        file_id: FileId,
         metadata: RegionMetadataRef,
         source: Source,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
-            file_path,
+            region_dir,
+            file_id,
             source,
             metadata,
             object_store,
@@ -75,9 +84,10 @@ impl ParquetWriter {
         let props_builder = Self::customize_column_config(props_builder, &self.metadata);
         let writer_props = props_builder.build();
 
+        let file_path = location::sst_file_path(&self.region_dir, &self.file_id);
         let write_format = WriteFormat::new(self.metadata.clone());
         let mut buffered_writer = BufferedWriter::try_new(
-            self.file_path.clone(),
+            file_path.clone(),
             self.object_store.clone(),
             write_format.arrow_schema(),
             Some(writer_props),
@@ -87,6 +97,17 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
+        let mut index_creator = (!self.metadata.primary_key.is_empty()).then(|| {
+            SstIndexCreator::new(
+                self.region_dir.clone(),
+                self.file_id,
+                &self.metadata,
+                self.object_store.clone(),
+                Some(4 * 1024 * 1024),
+                NonZeroUsize::new(opts.row_group_size).unwrap(),
+            )
+        });
+
         while let Some(batch) = self.source.next_batch().await? {
             stats.update(&batch);
             let arrow_batch = write_format.convert_batch(&batch)?;
@@ -95,13 +116,34 @@ impl ParquetWriter {
                 .write(&arrow_batch)
                 .await
                 .context(WriteBufferSnafu)?;
+
+            if let Some(creator) = index_creator.as_mut() {
+                if let Err(err) = creator.update(&batch).await {
+                    debug!("Failed to update index: {}", err);
+
+                    // Skip index creation if failed to update.
+                    index_creator = None;
+                }
+            }
+        }
+
+        if let Some(mut creator) = index_creator {
+            match creator.finish().await {
+                Ok((row_count, byte_count)) => {
+                    debug!(
+                        "Finished index, region_dir: {}, sst_file_id: {}, bytes: {}",
+                        self.region_dir, self.file_id, byte_count
+                    );
+                }
+                Err(err) => {
+                    warn!("Failed to finish index: {}", err);
+                    return Ok(None);
+                }
+            }
         }
 
         if stats.num_rows == 0 {
-            debug!(
-                "No data written, try to stop the writer: {}",
-                self.file_path
-            );
+            debug!("No data written, try to stop the writer: {file_path}");
 
             buffered_writer.close().await.context(WriteBufferSnafu)?;
             return Ok(None);

@@ -14,13 +14,14 @@
 
 use std::sync::Arc;
 
-use object_store::{util, ObjectStore};
+use object_store::{ErrorKind, ObjectStore};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::error::{DeleteSstSnafu, Result};
+use crate::error::{DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
+use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 
@@ -61,11 +62,18 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let sst_path = location::sst_file_path(&self.region_dir, &file_id);
         self.object_store
-            .delete(&path)
+            .delete(&sst_path)
             .await
-            .context(DeleteSstSnafu { file_id })
+            .context(DeleteSstSnafu { file_id })?;
+
+        let index_path = location::index_file_path(&self.region_dir, &file_id);
+        self.object_store
+            .delete(&index_path)
+            .await
+            .context(OpenDalSnafu)
+            .or_else(|e| e.is_object_not_found().then_some(()).ok_or(e))
     }
 
     /// Returns a reader builder for specific `file`.
@@ -81,12 +89,12 @@ impl AccessLayer {
         metadata: RegionMetadataRef,
         source: Source,
     ) -> ParquetWriter {
-        let path = self.sst_file_path(&file_id.as_parquet());
-        ParquetWriter::new(path, metadata, source, self.object_store.clone())
-    }
-
-    /// Returns the `file_path` for the `file_name` in the object store.
-    fn sst_file_path(&self, file_name: &str) -> String {
-        util::join_path(&self.region_dir, file_name)
+        ParquetWriter::new(
+            self.region_dir.clone(),
+            file_id,
+            metadata,
+            source,
+            self.object_store.clone(),
+        )
     }
 }
