@@ -42,7 +42,7 @@ impl HandlerContext {
                 }
                 Err(err) => InstructionReply::DowngradeRegion(DowngradeRegionReply {
                     last_entry_id: None,
-                    exists: false,
+                    exists: true,
                     error: Some(err.output_msg()),
                 }),
             }
