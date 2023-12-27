@@ -130,10 +130,21 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) and ignoring(g, job)
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="production"};
 
-Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
++------------+----------+-----+---------------------+-------+
+| g          | instance | job | ts                  | val   |
++------------+----------+-----+---------------------+-------+
+| canary     | 0        | api | 1970-01-01T00:50:00 | 300.0 |
+| canary     | 0        | app | 1970-01-01T00:50:00 | 700.0 |
+| canary     | 1        | api | 1970-01-01T00:50:00 | 400.0 |
+| canary     | 1        | app | 1970-01-01T00:50:00 | 800.0 |
+| production | 0        | api | 1970-01-01T00:50:00 | 100.0 |
+| production | 0        | app | 1970-01-01T00:50:00 | 500.0 |
+| production | 1        | api | 1970-01-01T00:50:00 | 200.0 |
+| production | 1        | app | 1970-01-01T00:50:00 | 600.0 |
++------------+----------+-----+---------------------+-------+
 
 -- # On overlap the rhs samples must be dropped.
 -- eval instant at 50m (http_requests{group="canary"} + 1) or http_requests{instance="1"}
@@ -143,10 +154,10 @@ Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{instance="1"};
 
-Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
+Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named http_requests.val. Valid fields are http_requests.job, http_requests.instance, http_requests.g, http_requests.ts, "val + Float64(1)".
 
 -- # Matching only on instance excludes everything that has instance=0/1 but includes
 -- # entries without the instance label.
@@ -161,7 +172,7 @@ Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
 -- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or on(instance) (http_requests or cpu_count or vector_matching_a);
 
-Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
+Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named cpu_count.val. Valid fields are cpu_count.ts.
 
 -- eval instant at 50m (http_requests{group="canary"} + 1) or ignoring(l, group, job) (http_requests or cpu_count or vector_matching_a)
 -- 	{group="canary", instance="0", job="api-server"} 301
@@ -174,7 +185,7 @@ Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
 -- NOT SUPPORTED: `or`
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or ignoring(l, g, job) (http_requests or cpu_count or vector_matching_a);
 
-Error: 1004(InvalidArguments), Unsupported expr type: set operation `OR`
+Error: 1004(InvalidArguments), Internal error during building DataFusion plan: No field named cpu_count.val. Valid fields are cpu_count.ts.
 
 -- eval instant at 50m http_requests{group="canary"} unless http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="1", job="api-server"} 400
@@ -265,6 +276,131 @@ drop table cpu_count;
 Affected Rows: 0
 
 drop table vector_matching_a;
+
+Affected Rows: 0
+
+-- the following cases are not from Prometheus.
+create table t1 (ts timestamp time index, job string primary key, val double);
+
+Affected Rows: 0
+
+insert into t1 values (0, "a", 1.0), (500000, "b", 2.0), (1000000, "a", 3.0), (1500000, "c", 4.0);
+
+Affected Rows: 4
+
+create table t2 (ts timestamp time index, val double);
+
+Affected Rows: 0
+
+insert into t2 values (0, 0), (300000, 0), (600000, 0), (900000, 0), (1200000, 0), (1500000, 0), (1800000, 0);
+
+Affected Rows: 7
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or t2;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:00:00 | 0.0 |
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:13:20 | 0.0 |
+|     | 1970-01-01T00:20:00 | 0.0 |
+|     | 1970-01-01T00:26:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
+| a   | 1970-01-01T00:00:00 | 1.0 |
+| a   | 1970-01-01T00:20:00 | 3.0 |
+| b   | 1970-01-01T00:13:20 | 2.0 |
+| c   | 1970-01-01T00:26:40 | 4.0 |
++-----+---------------------+-----+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or on () t2;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
+| a   | 1970-01-01T00:00:00 | 1.0 |
+| a   | 1970-01-01T00:20:00 | 3.0 |
+| b   | 1970-01-01T00:13:20 | 2.0 |
+| c   | 1970-01-01T00:26:40 | 4.0 |
++-----+---------------------+-----+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or on (job) t2;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:00:00 | 0.0 |
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:13:20 | 0.0 |
+|     | 1970-01-01T00:20:00 | 0.0 |
+|     | 1970-01-01T00:26:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
+| a   | 1970-01-01T00:00:00 | 1.0 |
+| a   | 1970-01-01T00:20:00 | 3.0 |
+| b   | 1970-01-01T00:13:20 | 2.0 |
+| c   | 1970-01-01T00:26:40 | 4.0 |
++-----+---------------------+-----+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or t1;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:00:00 | 0.0 |
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:13:20 | 0.0 |
+|     | 1970-01-01T00:20:00 | 0.0 |
+|     | 1970-01-01T00:26:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
+| a   | 1970-01-01T00:00:00 | 1.0 |
+| a   | 1970-01-01T00:20:00 | 3.0 |
+| b   | 1970-01-01T00:13:20 | 2.0 |
+| c   | 1970-01-01T00:26:40 | 4.0 |
++-----+---------------------+-----+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or on () t1;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:00:00 | 0.0 |
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:13:20 | 0.0 |
+|     | 1970-01-01T00:20:00 | 0.0 |
+|     | 1970-01-01T00:26:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
++-----+---------------------+-----+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or on(job) t1;
+
++-----+---------------------+-----+
+| job | ts                  | val |
++-----+---------------------+-----+
+|     | 1970-01-01T00:00:00 | 0.0 |
+|     | 1970-01-01T00:06:40 | 0.0 |
+|     | 1970-01-01T00:13:20 | 0.0 |
+|     | 1970-01-01T00:20:00 | 0.0 |
+|     | 1970-01-01T00:26:40 | 0.0 |
+|     | 1970-01-01T00:33:20 | 0.0 |
+| a   | 1970-01-01T00:00:00 | 1.0 |
+| a   | 1970-01-01T00:20:00 | 3.0 |
+| b   | 1970-01-01T00:13:20 | 2.0 |
+| c   | 1970-01-01T00:26:40 | 4.0 |
++-----+---------------------+-----+
+
+drop table t1;
+
+Affected Rows: 0
+
+drop table t2;
 
 Affected Rows: 0
 
