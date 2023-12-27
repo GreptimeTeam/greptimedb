@@ -13,6 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
+// TODO(weny): remove it.
+#[allow(dead_code)]
+pub(crate) mod manager;
 pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
@@ -123,6 +126,7 @@ pub trait ContextFactory {
 }
 
 /// Default implementation.
+#[derive(Clone)]
 pub struct ContextFactoryImpl {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
