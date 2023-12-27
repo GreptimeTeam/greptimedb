@@ -227,10 +227,9 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer =
-            ParquetWriter::new(file_path, metadata.clone(), source, object_store.clone());
+        let mut writer = ParquetWriter::new(file_path, metadata.clone(), object_store.clone());
         let sst_info = writer
-            .write_all(&write_opts)
+            .write_all(source, &write_opts)
             .await
             .unwrap()
             .expect("write_all should return sst info");
