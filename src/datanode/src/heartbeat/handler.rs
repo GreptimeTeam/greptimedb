@@ -70,8 +70,8 @@ impl RegionHeartbeatResponseHandler {
             Instruction::OpenRegion(open_region) => Ok(Box::new(move |handler_context| {
                 handler_context.handle_open_region_instruction(open_region)
             })),
-            Instruction::CloseRegion(region_ident) => Ok(Box::new(|handler_context| {
-                handler_context.handle_close_region_instruction(region_ident)
+            Instruction::CloseRegion(close_region) => Ok(Box::new(|handler_context| {
+                handler_context.handle_close_region_instruction(close_region)
             })),
             Instruction::DowngradeRegion(downgrade_region) => {
                 Ok(Box::new(move |handler_context| {

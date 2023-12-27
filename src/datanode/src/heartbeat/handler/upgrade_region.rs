@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
+use common_telemetry::warn;
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCatchupRequest, RegionRequest};
 
@@ -63,6 +64,10 @@ impl HandlerContext {
                         }),
                     )
                     .await;
+
+                if register_result.is_busy() {
+                    warn!("Another catchup task is running for the region: {region_id}");
+                }
 
                 // Returns immediately
                 let Some(wait_for_replay_millis) = wait_for_replay_millis else {

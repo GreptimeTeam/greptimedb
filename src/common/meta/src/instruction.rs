@@ -140,7 +140,7 @@ pub struct UpgradeRegion {
     pub region_id: RegionId,
     /// The `last_entry_id` of old leader region.
     pub last_entry_id: Option<u64>,
-    /// The millisecond of waiting for a wal replay.
+    /// The milliseconds of waiting for a wal replay.
     ///
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.

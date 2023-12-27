@@ -91,7 +91,6 @@ impl<T: Send + Sync + Clone> RegisterResult<T> {
         }
     }
 
-    #[cfg(test)]
     /// Returns true if it's [RegisterResult::Busy].
     pub(crate) fn is_busy(&self) -> bool {
         matches!(self, RegisterResult::Busy(_))
