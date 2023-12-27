@@ -89,7 +89,7 @@ impl UpgradeCandidateRegion {
         Instruction::UpgradeRegion(UpgradeRegion {
             region_id,
             last_entry_id,
-            wait_for_replay_millis: Some(self.replay_timeout.as_secs()),
+            wait_for_replay_timeout: Some(self.replay_timeout),
         })
     }
 

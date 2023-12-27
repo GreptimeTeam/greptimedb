@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
 use common_telemetry::warn;
@@ -29,7 +27,7 @@ impl HandlerContext {
         UpgradeRegion {
             region_id,
             last_entry_id,
-            wait_for_replay_millis,
+            wait_for_replay_timeout,
         }: UpgradeRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
@@ -78,7 +76,7 @@ impl HandlerContext {
             }
 
             // Returns immediately
-            let Some(wait_for_replay_millis) = wait_for_replay_millis else {
+            let Some(wait_for_replay_timeout) = wait_for_replay_timeout else {
                 return InstructionReply::UpgradeRegion(UpgradeRegionReply {
                     ready: false,
                     exists: true,
@@ -90,7 +88,7 @@ impl HandlerContext {
             let mut watcher = register_result.into_watcher();
             let result = self
                 .catchup_tasks
-                .wait(&mut watcher, Duration::from_millis(wait_for_replay_millis))
+                .wait(&mut watcher, wait_for_replay_timeout)
                 .await;
 
             match result {
@@ -143,15 +141,15 @@ mod tests {
         };
 
         let region_id = RegionId::new(1024, 1);
-        let waits = vec![None, Some(100u64)];
+        let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_millis in waits {
+        for wait_for_replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_millis,
+                    wait_for_replay_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -182,15 +180,15 @@ mod tests {
             catchup_tasks: TaskTracker::new(),
         };
 
-        let waits = vec![None, Some(100u64)];
+        let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_millis in waits {
+        for wait_for_replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_millis,
+                    wait_for_replay_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -222,15 +220,15 @@ mod tests {
             catchup_tasks: TaskTracker::new(),
         };
 
-        let waits = vec![None, Some(100u64)];
+        let waits = vec![None, Some(Duration::from_millis(100u64))];
 
-        for wait_for_replay_millis in waits {
+        for wait_for_replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_millis,
+                    wait_for_replay_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -257,20 +255,23 @@ mod tests {
         });
         mock_region_server.register_test_region(region_id, mock_engine);
 
-        let waits = vec![Some(100u64), Some(100)];
+        let waits = vec![
+            Some(Duration::from_millis(100u64)),
+            Some(Duration::from_millis(100u64)),
+        ];
 
         let handler_context = HandlerContext {
             region_server: mock_region_server,
             catchup_tasks: TaskTracker::new(),
         };
 
-        for wait_for_replay_millis in waits {
+        for wait_for_replay_timeout in waits {
             let reply = handler_context
                 .clone()
                 .handle_upgrade_region_instruction(UpgradeRegion {
                     region_id,
                     last_entry_id: None,
-                    wait_for_replay_millis,
+                    wait_for_replay_timeout,
                 })
                 .await;
             assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -287,7 +288,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_millis: Some(500),
+                wait_for_replay_timeout: Some(Duration::from_millis(500)),
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -330,7 +331,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_millis: None,
+                wait_for_replay_timeout: None,
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));
@@ -347,7 +348,7 @@ mod tests {
             .handle_upgrade_region_instruction(UpgradeRegion {
                 region_id,
                 last_entry_id: None,
-                wait_for_replay_millis: Some(200),
+                wait_for_replay_timeout: Some(Duration::from_millis(200)),
             })
             .await;
         assert_matches!(reply, InstructionReply::UpgradeRegion(_));

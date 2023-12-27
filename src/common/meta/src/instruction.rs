@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
@@ -140,11 +141,12 @@ pub struct UpgradeRegion {
     pub region_id: RegionId,
     /// The `last_entry_id` of old leader region.
     pub last_entry_id: Option<u64>,
-    /// The milliseconds of waiting for a wal replay.
+    /// The timeout of waiting for a wal replay.
     ///
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
-    pub wait_for_replay_millis: Option<u64>,
+    #[serde(with = "humantime_serde")]
+    pub wait_for_replay_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display)]
