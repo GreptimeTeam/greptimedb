@@ -16,7 +16,10 @@ mod health;
 mod heartbeat;
 mod leader;
 mod meta;
+// TODO(weny): removes it.
 mod node_lease;
+#[allow(dead_code)]
+mod region_migration;
 mod route;
 mod util;
 
