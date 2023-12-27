@@ -32,7 +32,7 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display("Another migration procedure is running for region: {}", region_id,))]
+    #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         location: Location,
         region_id: RegionId,

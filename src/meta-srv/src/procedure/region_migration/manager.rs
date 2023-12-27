@@ -164,7 +164,7 @@ impl RegionMigrationManager {
     }
 
     /// Verifies the type of region migration table route.
-    async fn verify_table_route(
+    fn verify_table_route(
         &self,
         table_route: &TableRouteValue,
         task: &RegionMigrationProcedureTask,
@@ -182,7 +182,7 @@ impl RegionMigrationManager {
     }
 
     /// Returns true if the region has been migrated.
-    async fn has_migrated(
+    fn has_migrated(
         &self,
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
@@ -194,15 +194,11 @@ impl RegionMigrationManager {
                 violated: "Region route leader peer is not found",
             })?;
 
-        if leader_peer.id == task.to_peer.id {
-            return Ok(true);
-        }
-
-        Ok(false)
+        Ok(leader_peer.id == task.to_peer.id)
     }
 
     /// Throws an error if `leader_peer` is not the `from_peer`.
-    async fn verify_region_leader_peer(
+    fn verify_region_leader_peer(
         &self,
         region_route: &RegionRoute,
         task: &RegionMigrationProcedureTask,
@@ -238,19 +234,19 @@ impl RegionMigrationManager {
         let region_id = task.region_id;
 
         let table_route = self.retrieve_table_route(region_id).await?;
-        self.verify_table_route(&table_route, &task).await?;
+        self.verify_table_route(&table_route, &task)?;
 
         // Safety: checked before.
         let region_route = table_route
             .region_route(region_id)
             .context(error::RegionRouteNotFoundSnafu { region_id })?;
 
-        if self.has_migrated(&region_route, &task).await? {
+        if self.has_migrated(&region_route, &task)? {
             info!("Skipping region migration task: {task}");
             return Ok(());
         }
 
-        self.verify_region_leader_peer(&region_route, &task).await?;
+        self.verify_region_leader_peer(&region_route, &task)?;
 
         let procedure =
             RegionMigrationProcedure::new(task.clone().into(), self.context_factory.clone());
@@ -449,7 +445,6 @@ mod test {
 
         let err = manager
             .verify_table_route(&TableRouteValue::Logical(LogicalTableRouteValue {}), &task)
-            .await
             .unwrap_err();
 
         assert_matches!(err, error::Error::Unexpected { .. });
