@@ -250,6 +250,7 @@ impl DisplayAs for UnionDistinctOnExec {
     }
 }
 
+#[allow(dead_code)]
 pub struct UnionDistinctOnStream {
     left: SendableRecordBatchStream,
     right: HashedDataFut,
@@ -285,7 +286,6 @@ impl UnionDistinctOnStream {
             }
             Some(Err(e)) => Poll::Ready(Some(Err(e))),
             None => {
-                common_telemetry::info!("[DEBUG] left stream is end");
                 // left stream is exhausted, so we can send the right part
                 let right = std::mem::replace(&mut self.right, HashedDataFut::Empty);
                 let HashedDataFut::Ready(data) = right else {
@@ -342,7 +342,7 @@ impl HashedData {
     ) -> DataFusionResult<Self> {
         // Collect all batches from the input stream
         let initial = (Vec::new(), 0);
-        let (batches, num_rows) = input
+        let (batches, _num_rows) = input
             .try_fold(initial, |mut acc, batch| async {
                 // Update rowcount
                 acc.1 += batch.num_rows();
@@ -381,15 +381,6 @@ impl HashedData {
         // Finilize the hash map
         let batch = interleave_batches(batches, interleave_indices)?;
 
-        common_telemetry::info!(
-            "[DEBUG] right batch: {}",
-            datatypes::arrow::util::pretty::pretty_format_batches(&[batch.clone()])
-                .unwrap()
-                .to_string()
-        );
-
-        common_telemetry::info!("[DEBUG] initial hash map: {hash_map:?}");
-
         Ok(Self {
             hash_map,
             batch,
@@ -401,13 +392,6 @@ impl HashedData {
     /// Remove rows that hash value present in the input
     /// record batch from the hash map.
     pub fn update_map(&mut self, input: &RecordBatch) -> DataFusionResult<()> {
-        common_telemetry::info!(
-            "[DEBUG] incoming left batch: {}",
-            datatypes::arrow::util::pretty::pretty_format_batches(&[input.clone()])
-                .unwrap()
-                .to_string()
-        );
-
         // get columns for hashing
         let mut hashes_buffer = Vec::new();
         let arrays = self
@@ -421,8 +405,6 @@ impl HashedData {
         let hash_values =
             hash_utils::create_hashes(&arrays, &self.random_state, &mut hashes_buffer)?;
 
-        common_telemetry::info!("[DEBUG] hashes to remove: {hash_values:?}");
-
         // remove those hashes
         for hash in hash_values {
             self.hash_map.remove(hash);
@@ -434,12 +416,6 @@ impl HashedData {
     pub fn finish(self) -> DataFusionResult<RecordBatch> {
         let valid_indices = self.hash_map.values().copied().collect::<Vec<_>>();
         let result = take_batch(&self.batch, &valid_indices)?;
-        common_telemetry::info!(
-            "[DEBUG] right batch: {}",
-            datatypes::arrow::util::pretty::pretty_format_batches(&[result.clone()])
-                .unwrap()
-                .to_string()
-        );
         Ok(result)
     }
 }
@@ -466,8 +442,7 @@ fn interleave_batches(
     }
 
     // assemble new record batch
-    RecordBatch::try_new(schema.clone(), interleaved_arrays)
-        .map_err(|e| DataFusionError::ArrowError(e))
+    RecordBatch::try_new(schema.clone(), interleaved_arrays).map_err(DataFusionError::ArrowError)
 }
 
 /// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
@@ -485,7 +460,7 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| DataFusionError::ArrowError(e))?;
+        .map_err(DataFusionError::ArrowError)?;
 
     let result = RecordBatch::try_new(schema, arrays).map_err(DataFusionError::ArrowError)?;
     Ok(result)
