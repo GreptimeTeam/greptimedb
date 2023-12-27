@@ -36,7 +36,7 @@ pub struct SubmitRegionMigrationTaskHandler {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SubmitRegionMigrationTaskParams {
+struct SubmitRegionMigrationTaskRequest {
     cluster_id: ClusterId,
     region_id: RegionId,
     from_peer_id: u64,
@@ -68,7 +68,7 @@ where
     Ok(parse_result)
 }
 
-impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskParams {
+impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskRequest {
     type Error = Error;
 
     fn try_from(params: &HashMap<String, String>) -> Result<Self> {
@@ -86,7 +86,7 @@ impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskParams {
             error::MissingRequiredParameterSnafu { param: key }.fail()
         })?;
 
-        Ok(SubmitRegionMigrationTaskParams {
+        Ok(SubmitRegionMigrationTaskRequest {
             cluster_id,
             region_id: RegionId::from_u64(region_id),
             from_peer_id,
@@ -99,7 +99,7 @@ impl SubmitRegionMigrationTaskHandler {
     /// Submits a region migration task, returns the procedure id.
     async fn handle_submit(
         &self,
-        _task: SubmitRegionMigrationTaskParams,
+        _task: SubmitRegionMigrationTaskRequest,
     ) -> Result<SubmitRegionMigrationTaskResponse> {
         // TODO(weny): waits for https://github.com/GreptimeTeam/greptimedb/pull/3014
         todo!()
@@ -113,9 +113,9 @@ impl HttpHandler for SubmitRegionMigrationTaskHandler {
         _: &str,
         params: &HashMap<String, String>,
     ) -> Result<http::Response<String>> {
-        let params = SubmitRegionMigrationTaskParams::try_from(params)?;
+        let request = SubmitRegionMigrationTaskRequest::try_from(params)?;
 
-        let response = self.handle_submit(params).await?;
+        let response = self.handle_submit(request).await?;
 
         http::Response::builder()
             .status(http::StatusCode::OK)
@@ -136,10 +136,10 @@ mod tests {
     use crate::error;
 
     #[test]
-    fn test_parse_migration_task_params() {
+    fn test_parse_migration_task_req() {
         use store_api::storage::RegionId;
 
-        use crate::service::admin::region_migration::SubmitRegionMigrationTaskParams;
+        use crate::service::admin::region_migration::SubmitRegionMigrationTaskRequest;
 
         let params = HashMap::from([
             ("cluster_id".to_string(), "10".to_string()),
@@ -151,16 +151,16 @@ mod tests {
             ("to_peer_id".to_string(), "2".to_string()),
         ]);
 
-        let task_params = SubmitRegionMigrationTaskParams::try_from(&params).unwrap();
+        let task_req = SubmitRegionMigrationTaskRequest::try_from(&params).unwrap();
 
         assert_eq!(
-            SubmitRegionMigrationTaskParams {
+            SubmitRegionMigrationTaskRequest {
                 cluster_id: 10,
                 region_id: RegionId::new(1024, 1),
                 from_peer_id: 1,
                 to_peer_id: 2,
             },
-            task_params
+            task_req
         );
 
         let params = HashMap::from([
@@ -172,16 +172,16 @@ mod tests {
             ("to_peer_id".to_string(), "2".to_string()),
         ]);
 
-        let task_params = SubmitRegionMigrationTaskParams::try_from(&params).unwrap();
+        let task_req = SubmitRegionMigrationTaskRequest::try_from(&params).unwrap();
 
         assert_eq!(
-            SubmitRegionMigrationTaskParams {
+            SubmitRegionMigrationTaskRequest {
                 cluster_id: 0,
                 region_id: RegionId::new(1024, 1),
                 from_peer_id: 1,
                 to_peer_id: 2,
             },
-            task_params
+            task_req
         );
 
         let required_fields = [
@@ -199,7 +199,7 @@ mod tests {
                 .cloned()
                 .collect::<HashMap<_, _>>();
 
-            let err = SubmitRegionMigrationTaskParams::try_from(&params).unwrap_err();
+            let err = SubmitRegionMigrationTaskRequest::try_from(&params).unwrap_err();
             assert_matches!(err, error::Error::MissingRequiredParameter { .. });
             assert!(err.to_string().contains(&required_fields[i].0));
         }
