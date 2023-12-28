@@ -96,9 +96,9 @@ impl FileCache {
         }
     }
 
-    /// Puts a file into the cache.
+    /// Puts a file into the cache index.
     ///
-    /// Callers should ensure the file is in the correct path.
+    /// The `WriteCache` should ensure the file is in the correct path.
     pub(crate) async fn put(&self, key: IndexKey, value: IndexValue) {
         CACHE_BYTES
             .with_label_values(&[FILE_TYPE])
