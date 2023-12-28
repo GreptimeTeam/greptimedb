@@ -135,6 +135,24 @@ pub struct ContextFactoryImpl {
     server_addr: String,
 }
 
+impl ContextFactoryImpl {
+    /// Returns an [ContextFactoryImpl].
+    pub fn new(
+        table_metadata_manager: TableMetadataManagerRef,
+        opening_region_keeper: MemoryRegionKeeperRef,
+        mailbox: MailboxRef,
+        server_addr: String,
+    ) -> Self {
+        Self {
+            volatile_ctx: VolatileContext::default(),
+            table_metadata_manager,
+            opening_region_keeper,
+            mailbox,
+            server_addr,
+        }
+    }
+}
+
 impl ContextFactory for ContextFactoryImpl {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {

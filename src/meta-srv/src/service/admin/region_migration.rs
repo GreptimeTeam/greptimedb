@@ -25,14 +25,11 @@ use tonic::codegen::http;
 
 use super::HttpHandler;
 use crate::error::{self, Error, Result};
-
-pub trait PeerLookup: Send + Sync {
-    fn peer(&self, peer_id: u64) -> Option<Peer>;
-}
+use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 
 /// The handler of submitting migration task.
 pub struct SubmitRegionMigrationTaskHandler {
-    // TODO(weny): waits for https://github.com/GreptimeTeam/greptimedb/pull/3014
+    pub region_migration_manager: RegionMigrationManagerRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

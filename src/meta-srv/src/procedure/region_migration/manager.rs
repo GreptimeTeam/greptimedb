@@ -31,8 +31,10 @@ use crate::procedure::region_migration::{
     ContextFactoryImpl, PersistentContext, RegionMigrationProcedure,
 };
 
+pub type RegionMigrationManagerRef = Arc<RegionMigrationManager>;
+
 /// Manager of region migration procedure.
-pub(crate) struct RegionMigrationManager {
+pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
     context_factory: ContextFactoryImpl,

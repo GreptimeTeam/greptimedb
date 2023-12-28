@@ -93,6 +93,11 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
         .route("/route", handler.clone())
         .route("/route/help", handler);
 
+    let handler = region_migration::SubmitRegionMigrationTaskHandler {
+        region_migration_manager: meta_srv.region_migration_manager().clone(),
+    };
+    let router = router.route("/region-migration", handler);
+
     let router = Router::nest("/admin", router);
 
     Admin::new(router)

@@ -57,6 +57,8 @@ use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
+use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::region_migration::ContextFactoryImpl;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
@@ -236,6 +238,17 @@ impl MetaSrvBuilder {
             &opening_region_keeper,
         )?;
 
+        let region_migration_manager = Arc::new(RegionMigrationManager::new(
+            procedure_manager.clone(),
+            ContextFactoryImpl::new(
+                table_metadata_manager.clone(),
+                opening_region_keeper.clone(),
+                mailbox.clone(),
+                options.server_addr.clone(),
+            ),
+        ));
+        region_migration_manager.try_start()?;
+
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
             None => {
@@ -323,6 +336,7 @@ impl MetaSrvBuilder {
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper: opening_region_keeper,
+            region_migration_manager,
         })
     }
 }
