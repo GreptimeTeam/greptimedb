@@ -207,7 +207,7 @@ fn cache_file_path(cache_file_dir: &str, key: IndexKey) -> String {
 
 /// Parse index key from the file name.
 fn parse_index_key(name: &str) -> Option<IndexKey> {
-    let mut splited = name.split('.');
+    let mut splited = name.splitn(2, '.');
     let region_id = splited.next().and_then(|s| {
         let id = s.parse::<u64>().ok()?;
         Some(RegionId::from_u64(id))
@@ -360,5 +360,38 @@ mod tests {
             reader.read_to_string(&mut buf).await.unwrap();
             assert_eq!(i.to_string(), buf);
         }
+    }
+
+    #[test]
+    fn test_cache_file_path() {
+        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
+        assert_eq!(
+            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095",
+            cache_file_path("test_dir", (RegionId::new(1234, 5), file_id))
+        );
+        assert_eq!(
+            "test_dir/5299989643269.3368731b-a556-42b8-a5df-9c31ce155095",
+            cache_file_path("test_dir/", (RegionId::new(1234, 5), file_id))
+        );
+    }
+
+    #[test]
+    fn test_parse_file_name() {
+        let file_id = FileId::parse_str("3368731b-a556-42b8-a5df-9c31ce155095").unwrap();
+        let region_id = RegionId::new(1234, 5);
+        assert_eq!(
+            (region_id, file_id),
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095").unwrap()
+        );
+        assert!(parse_index_key("").is_none());
+        assert!(parse_index_key(".").is_none());
+        assert!(parse_index_key("5299989643269").is_none());
+        assert!(parse_index_key("5299989643269.").is_none());
+        assert!(parse_index_key(".5299989643269").is_none());
+        assert!(parse_index_key("5299989643269.").is_none());
+        assert!(parse_index_key("5299989643269.3368731b-a556-42b8-a5df").is_none());
+        assert!(
+            parse_index_key("5299989643269.3368731b-a556-42b8-a5df-9c31ce155095.parquet").is_none()
+        );
     }
 }
