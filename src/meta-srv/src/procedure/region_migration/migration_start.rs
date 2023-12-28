@@ -19,6 +19,7 @@ use common_meta::rpc::router::RegionRoute;
 use common_procedure::Status;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use super::migration_end::RegionMigrationEnd;
@@ -85,6 +86,9 @@ impl RegionMigrationStart {
 
         let region_route = table_route
             .region_routes()
+            .context(error::UnexpectedTableRouteTypeSnafu { 
+                err_msg: "{self:?} is a non-physical TableRouteValue.", 
+            })?
             .iter()
             .find(|route| route.region.id == region_id)
             .cloned()

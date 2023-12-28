@@ -278,7 +278,7 @@ async fn handle_truncate_table_task(
     let table_route_value =
         table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
 
-    let table_route = table_route_value.into_inner().region_routes().clone();
+    let table_route = table_route_value.into_inner().region_routes()?.clone();
 
     let id = ddl_manager
         .submit_truncate_table_task(

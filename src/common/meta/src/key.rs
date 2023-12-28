@@ -483,7 +483,7 @@ impl TableMetadataManager {
             .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(table_route_value.region_routes())?;
+        let distribution = region_distribution(table_route_value.region_routes()?)?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -608,7 +608,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
-            region_distribution(current_table_route_value.region_routes())?;
+            region_distribution(current_table_route_value.region_routes()?)?;
         let new_region_distribution = region_distribution(&new_region_routes)?;
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
@@ -621,7 +621,7 @@ impl TableMetadataManager {
         )?;
 
         // Updates the table_route.
-        let new_table_route_value = current_table_route_value.update(new_region_routes);
+        let new_table_route_value = current_table_route_value.update(new_region_routes)?;
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
@@ -656,7 +656,7 @@ impl TableMetadataManager {
     where
         F: Fn(&RegionRoute) -> Option<Option<RegionStatus>>,
     {
-        let mut new_region_routes = current_table_route_value.region_routes().clone();
+        let mut new_region_routes = current_table_route_value.region_routes()?.clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
@@ -673,7 +673,7 @@ impl TableMetadataManager {
         }
 
         // Updates the table_route.
-        let new_table_route_value = current_table_route_value.update(new_region_routes);
+        let new_table_route_value = current_table_route_value.update(new_region_routes)?;
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
