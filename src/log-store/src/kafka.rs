@@ -41,7 +41,7 @@ impl Namespace for NamespaceImpl {
 
 impl Display for NamespaceImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.topic, self.region_id)
+        write!(f, "[topic: {}, region: {}]", self.topic, self.region_id)
     }
 }
 

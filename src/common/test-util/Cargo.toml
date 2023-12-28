@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+log-store.workspace = true
 once_cell.workspace = true
 rand.workspace = true
 tempfile.workspace = true
+store-api.workspace = true

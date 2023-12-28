@@ -51,8 +51,11 @@ pub struct Image {
 }
 
 impl Image {
-    #[allow(unused)]
-    pub fn new(config: Config) -> Self {
+    pub fn with_exposed_port(port: u16) -> Self {
+        let config = Config {
+            exposed_port: port,
+            ..Default::default()
+        };
         Self { config }
     }
 }
@@ -107,16 +110,15 @@ mod tests {
     use rskafka::record::Record;
     use testcontainers::clients::Cli as DockerCli;
 
-    use crate::wal_util::kafka::config::{Config, KAFKA_ADVERTISED_LISTENER_PORT};
+    use crate::wal_util::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT;
     use crate::wal_util::kafka::image::Image;
 
     #[tokio::test]
     async fn test_image() {
         // Starts a Kafka container.
         let port = KAFKA_ADVERTISED_LISTENER_PORT;
-        let config = Config::with_exposed_port(port);
         let docker = DockerCli::default();
-        let container = docker.run(Image::new(config));
+        let container = docker.run(Image::with_exposed_port(port));
 
         // Creates a Kafka client.
         let bootstrap_brokers = vec![format!("127.0.0.1:{}", container.get_host_port_ipv4(port))];

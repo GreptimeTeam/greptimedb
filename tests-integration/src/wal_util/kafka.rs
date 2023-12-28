@@ -13,4 +13,4 @@
 // limitations under the License.
 
 pub mod config;
-mod image;
+pub mod image;

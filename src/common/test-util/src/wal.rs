@@ -13,8 +13,3 @@
 // limitations under the License.
 
 pub mod kafka;
-
-pub use testcontainers::clients::Cli as DockerCli;
-
-pub use crate::wal_util::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT as DEFAULT_EXPOSED_PORT;
-pub use crate::wal_util::kafka::image::Image as KafkaImage;

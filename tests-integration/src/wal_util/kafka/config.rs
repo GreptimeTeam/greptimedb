@@ -45,15 +45,6 @@ pub struct Config {
     pub env_vars: HashMap<String, String>,
 }
 
-impl Config {
-    pub fn with_exposed_port(port: u16) -> Self {
-        Self {
-            exposed_port: port,
-            ..Default::default()
-        }
-    }
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
