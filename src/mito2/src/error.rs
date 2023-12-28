@@ -423,6 +423,16 @@ pub enum Error {
         #[snafu(source)]
         error: parquet::errors::ParquetError,
     },
+
+    #[snafu(display("Column not found, column: {column}"))]
+    ColumnNotFound { column: String, location: Location },
+
+    #[snafu(display("Failed to build index applier"))]
+    BuildIndexApplier {
+        #[snafu(source)]
+        error: index::inverted_index::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -468,6 +478,8 @@ impl ErrorExt for Error {
             | InvalidRequest { .. }
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
+            | ColumnNotFound { .. }
+            | BuildIndexApplier { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. }
             | Join { .. }

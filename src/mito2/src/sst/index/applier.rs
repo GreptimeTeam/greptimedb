@@ -12,10 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Sorted strings tables.
+pub mod builder;
 
-pub mod file;
-pub mod file_purger;
-mod index;
-pub mod parquet;
-pub(crate) mod version;
+use std::sync::Arc;
+
+use index::inverted_index::search::index_apply::IndexApplier;
+use object_store::ObjectStore;
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct SstIndexApplier {
+    region_dir: String,
+    object_store: ObjectStore,
+    index_applier: Arc<dyn IndexApplier>,
+}
+
+impl SstIndexApplier {
+    pub fn new(
+        region_dir: String,
+        object_store: ObjectStore,
+        index_applier: Arc<dyn IndexApplier>,
+    ) -> Self {
+        Self {
+            region_dir,
+            object_store,
+            index_applier,
+        }
+    }
+}
