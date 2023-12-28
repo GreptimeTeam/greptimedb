@@ -15,7 +15,9 @@
 //! Cache for the engine.
 
 mod cache_size;
-mod file_cache;
+// TODO(yingwen): Remove this after the write cache is ready.
+#[allow(unused)]
+pub(crate) mod file_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 
