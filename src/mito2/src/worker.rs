@@ -289,7 +289,7 @@ impl<S: LogStore> WorkerStarter<S> {
             compaction_scheduler: CompactionScheduler::new(
                 self.scheduler,
                 sender.clone(),
-                Some(self.cache_manager.clone()),
+                self.cache_manager.clone(),
             ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,

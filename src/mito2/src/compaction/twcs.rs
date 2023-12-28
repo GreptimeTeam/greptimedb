@@ -248,7 +248,7 @@ pub(crate) struct TwcsCompactionTask {
     pub waiters: Vec<OutputTx>,
     /// Start time of compaction task
     pub start_time: Instant,
-    pub(crate) cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: CacheManagerRef,
     /// Target storage of the region.
     pub(crate) storage: Option<String>,
 }

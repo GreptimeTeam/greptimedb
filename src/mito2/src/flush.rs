@@ -202,7 +202,7 @@ pub(crate) struct RegionFlushTask {
     pub(crate) listener: WorkerListener,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) row_group_size: Option<usize>,
-    pub(crate) cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: CacheManagerRef,
 }
 
 impl RegionFlushTask {
@@ -679,6 +679,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
 
@@ -755,7 +756,7 @@ mod tests {
             listener: WorkerListener::default(),
             engine_config: Arc::new(MitoConfig::default()),
             row_group_size: None,
-            cache_manager: None,
+            cache_manager: Arc::new(CacheManager::new(0, 0, 0)),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler

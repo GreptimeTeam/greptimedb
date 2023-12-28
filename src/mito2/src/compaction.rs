@@ -55,7 +55,7 @@ pub struct CompactionRequest {
     pub(crate) start_time: Instant,
     /// Buffering threshold while writing SST files.
     pub(crate) sst_write_buffer_size: ReadableSize,
-    pub(crate) cache_manager: Option<CacheManagerRef>,
+    pub(crate) cache_manager: CacheManagerRef,
 }
 
 impl CompactionRequest {
@@ -89,14 +89,14 @@ pub(crate) struct CompactionScheduler {
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
     request_sender: Sender<WorkerRequest>,
-    cache_manager: Option<CacheManagerRef>,
+    cache_manager: CacheManagerRef,
 }
 
 impl CompactionScheduler {
     pub(crate) fn new(
         scheduler: SchedulerRef,
         request_sender: Sender<WorkerRequest>,
-        cache_manager: Option<CacheManagerRef>,
+        cache_manager: CacheManagerRef,
     ) -> Self {
         Self {
             scheduler,
@@ -326,7 +326,7 @@ impl CompactionStatus {
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
-        cache_manager: Option<CacheManagerRef>,
+        cache_manager: CacheManagerRef,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();

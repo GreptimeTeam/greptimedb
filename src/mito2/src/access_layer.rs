@@ -78,7 +78,7 @@ impl AccessLayer {
     pub(crate) fn upload_part_writer(
         &self,
         metadata: RegionMetadataRef,
-        _cache_manager: &Option<CacheManagerRef>,
+        _cache_manager: &CacheManagerRef,
     ) -> UploadPartWriter {
         // TODO(yingwen): Use local store in the cache manager once the cache is ready.
         UploadPartWriter::new(self.object_store.clone(), metadata)
