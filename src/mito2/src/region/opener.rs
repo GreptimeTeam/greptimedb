@@ -380,7 +380,9 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     // data in the WAL.
     let mut last_entry_id = flushed_entry_id;
     let mut region_write_ctx = RegionWriteCtx::new(region_id, version_control, wal_options.clone());
-    let mut wal_stream = wal.scan(region_id, flushed_entry_id, wal_options)?;
+
+    let replay_from_entry_id = flushed_entry_id + 1;
+    let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
         last_entry_id = last_entry_id.max(entry_id);
