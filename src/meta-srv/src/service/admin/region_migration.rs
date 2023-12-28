@@ -15,21 +15,25 @@
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use common_meta::peer::Peer;
 use common_meta::ClusterId;
 use serde::Serialize;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tonic::codegen::http;
 
 use super::HttpHandler;
 use crate::error::{self, Error, Result};
-use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::peer::PeerLookup;
+use crate::procedure::region_migration::manager::{
+    RegionMigrationManagerRef, RegionMigrationProcedureTask,
+};
 
 /// The handler of submitting migration task.
 pub struct SubmitRegionMigrationTaskHandler {
     pub region_migration_manager: RegionMigrationManagerRef,
+    pub peer_lookup: Arc<dyn PeerLookup>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +46,8 @@ struct SubmitRegionMigrationTaskRequest {
 
 #[derive(Debug, Serialize)]
 struct SubmitRegionMigrationTaskResponse {
-    procedure_id: String,
+    /// The `None` stands region has been migrated.
+    procedure_id: Option<String>,
 }
 
 fn parse_num_parameter_with_default<T, F>(
@@ -96,10 +101,41 @@ impl SubmitRegionMigrationTaskHandler {
     /// Submits a region migration task, returns the procedure id.
     async fn handle_submit(
         &self,
-        _task: SubmitRegionMigrationTaskRequest,
+        task: SubmitRegionMigrationTaskRequest,
     ) -> Result<SubmitRegionMigrationTaskResponse> {
-        // TODO(weny): waits for https://github.com/GreptimeTeam/greptimedb/pull/3014
-        todo!()
+        let SubmitRegionMigrationTaskRequest {
+            cluster_id,
+            region_id,
+            from_peer_id,
+            to_peer_id,
+        } = task;
+
+        let from_peer = self.peer_lookup.peer(cluster_id, from_peer_id).context(
+            error::PeerUnavailableSnafu {
+                peer_id: from_peer_id,
+            },
+        )?;
+
+        let to_peer =
+            self.peer_lookup
+                .peer(cluster_id, to_peer_id)
+                .context(error::PeerUnavailableSnafu {
+                    peer_id: to_peer_id,
+                })?;
+
+        let procedure_id = self
+            .region_migration_manager
+            .submit_procedure(RegionMigrationProcedureTask {
+                cluster_id,
+                region_id,
+                from_peer,
+                to_peer,
+            })
+            .await?;
+
+        Ok(SubmitRegionMigrationTaskResponse {
+            procedure_id: procedure_id.map(|id| id.to_string()),
+        })
     }
 }
 

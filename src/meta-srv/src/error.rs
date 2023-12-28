@@ -32,6 +32,9 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
+    PeerUnavailable { location: Location, peer_id: u64 },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         location: Location,
@@ -650,7 +653,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::Unsupported { .. } => StatusCode::Internal,
+            | Error::Unsupported { .. }
+            | Error::PeerUnavailable { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }

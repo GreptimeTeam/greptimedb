@@ -95,6 +95,7 @@ pub fn make_admin_service(meta_srv: MetaSrv) -> Admin {
 
     let handler = region_migration::SubmitRegionMigrationTaskHandler {
         region_migration_manager: meta_srv.region_migration_manager().clone(),
+        peer_lookup: Arc::new(meta_srv.datanode_peer_registry().clone()),
     };
     let router = router.route("/region-migration", handler);
 

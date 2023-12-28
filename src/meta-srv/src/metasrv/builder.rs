@@ -56,6 +56,7 @@ use crate::lock::DistLockRef;
 use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
+use crate::peer::NaivePeerRegistry;
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::region_migration::ContextFactoryImpl;
@@ -337,6 +338,7 @@ impl MetaSrvBuilder {
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper: opening_region_keeper,
             region_migration_manager,
+            datanode_peer_registry: NaivePeerRegistry::default(),
         })
     }
 }

@@ -44,9 +44,11 @@ impl heartbeat_server::Heartbeat for MetaSrv {
         let mut in_stream = req.into_inner();
         let (tx, rx) = mpsc::channel(128);
         let handler_group = self.handler_group().clone();
+        let datanode_peer_registry = self.datanode_peer_registry().clone();
         let ctx = self.new_ctx();
         let _handle = common_runtime::spawn_bg(async move {
             let mut pusher_key = None;
+            let mut datanode_peer_ident = None;
             while let Some(msg) = in_stream.next().await {
                 let mut is_not_leader = false;
                 match msg {
@@ -65,7 +67,15 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
                         if pusher_key.is_none() {
                             let node_id = get_node_id(header);
-                            let role = header.role() as i32;
+                            let role = header.role();
+                            if let Some(peer) = req.peer.as_ref() {
+                                if matches!(role, Role::Datanode) {
+                                    datanode_peer_registry
+                                        .register(header.cluster_id, peer.clone().into());
+                                    datanode_peer_ident = Some((header.cluster_id, peer.id));
+                                }
+                            }
+                            let role = role as i32;
                             let key = format!("{}-{}", role, node_id);
                             let pusher = Pusher::new(tx.clone(), header);
                             handler_group.register(&key, pusher).await;
@@ -114,6 +124,9 @@ impl heartbeat_server::Heartbeat for MetaSrv {
 
             if let Some(key) = pusher_key {
                 let _ = handler_group.unregister(&key).await;
+            }
+            if let Some((cluster_id, peer_id)) = datanode_peer_ident {
+                datanode_peer_registry.deregister(cluster_id, peer_id);
             }
         });
 

@@ -21,7 +21,7 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::ClusterId;
-use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -57,10 +57,10 @@ impl Drop for RegionMigrationProcedureGuard {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegionMigrationProcedureTask {
-    cluster_id: ClusterId,
-    region_id: RegionId,
-    from_peer: Peer,
-    to_peer: Peer,
+    pub(crate) cluster_id: ClusterId,
+    pub(crate) region_id: RegionId,
+    pub(crate) from_peer: Peer,
+    pub(crate) to_peer: Peer,
 }
 
 impl Display for RegionMigrationProcedureTask {
@@ -223,7 +223,10 @@ impl RegionMigrationManager {
     }
 
     /// Submits a new region migration procedure.
-    pub(crate) async fn submit_procedure(&self, task: RegionMigrationProcedureTask) -> Result<()> {
+    pub(crate) async fn submit_procedure(
+        &self,
+        task: RegionMigrationProcedureTask,
+    ) -> Result<Option<ProcedureId>> {
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
                 region_id: task.region_id,
@@ -245,7 +248,7 @@ impl RegionMigrationManager {
 
         if self.has_migrated(&region_route, &task)? {
             info!("Skipping region migration task: {task}");
-            return Ok(());
+            return Ok(None);
         }
 
         self.verify_region_leader_peer(&region_route, &task)?;
@@ -276,7 +279,7 @@ impl RegionMigrationManager {
             info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
         });
 
-        Ok(())
+        Ok(Some(procedure_id))
     }
 }
 
