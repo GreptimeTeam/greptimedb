@@ -287,8 +287,7 @@ impl TwcsCompactionTask {
         let mut part_writer = self
             .sst_layer
             .upload_part_writer(self.metadata.clone(), &self.cache_manager)
-            .with_storage(self.storage.clone())
-            .with_request_sender(Some(self.request_sender.clone()));
+            .with_storage(self.storage.clone());
         for output in self.outputs.drain(..) {
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 

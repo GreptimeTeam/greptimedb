@@ -81,12 +81,6 @@ pub(crate) struct UploadPart {
     pub(crate) file_metas: Vec<FileMeta>,
     /// Target storage of SSTs.
     storage: Option<String>,
-    /// Sender to send notify.
-    request_sender: Option<Sender<WorkerRequest>>,
-    /// The last entry id has been flushed.
-    flushed_entry_id: Option<EntryId>,
-    /// The last sequence has been flushed.
-    flushed_sequence: Option<SequenceNumber>,
 }
 
 /// Writer to build a upload part.
@@ -101,12 +95,6 @@ pub(crate) struct UploadPartWriter {
     file_metas: Vec<FileMeta>,
     /// Target storage of SSTs.
     storage: Option<String>,
-    /// Sender to send notify.
-    request_sender: Option<Sender<WorkerRequest>>,
-    /// The last entry id has been flushed.
-    flushed_entry_id: Option<EntryId>,
-    /// The last sequence has been flushed.
-    flushed_sequence: Option<SequenceNumber>,
 }
 
 impl UploadPartWriter {
@@ -118,9 +106,6 @@ impl UploadPartWriter {
             region_dir: String::new(),
             file_metas: Vec::new(),
             storage: None,
-            request_sender: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
         }
     }
 
@@ -135,27 +120,6 @@ impl UploadPartWriter {
     #[must_use]
     pub(crate) fn with_storage(mut self, storage: Option<String>) -> Self {
         self.storage = storage;
-        self
-    }
-
-    /// Sets request sender for the part.
-    #[must_use]
-    pub(crate) fn with_request_sender(mut self, sender: Option<Sender<WorkerRequest>>) -> Self {
-        self.request_sender = sender;
-        self
-    }
-
-    /// Sets flushed entry id.
-    #[must_use]
-    pub(crate) fn with_flushed_entry_id(mut self, entry_id: Option<EntryId>) -> Self {
-        self.flushed_entry_id = entry_id;
-        self
-    }
-
-    /// Sets flushed sequence.
-    #[must_use]
-    pub(crate) fn with_flushed_sequence(mut self, sequence: Option<SequenceNumber>) -> Self {
-        self.flushed_sequence = sequence;
         self
     }
 
@@ -192,9 +156,6 @@ impl UploadPartWriter {
             region_dir: self.region_dir,
             file_metas: self.file_metas,
             storage: self.storage,
-            request_sender: self.request_sender,
-            flushed_entry_id: self.flushed_entry_id,
-            flushed_sequence: self.flushed_sequence,
         }
     }
 }

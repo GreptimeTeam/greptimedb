@@ -252,10 +252,7 @@ impl RegionFlushTask {
         let mut writer = self
             .access_layer
             .upload_part_writer(version.metadata.clone(), &self.cache_manager)
-            .with_storage(version.options.storage.clone())
-            .with_request_sender(Some(self.request_sender.clone()))
-            .with_flushed_entry_id(Some(version_data.last_entry_id))
-            .with_flushed_sequence(Some(version_data.committed_sequence));
+            .with_storage(version.options.storage.clone());
 
         let worker_request = match self
             .flush_memtables(&version_data.version, &mut writer)
