@@ -139,6 +139,16 @@ impl RegionServer {
             .collect()
     }
 
+    pub fn is_writable(&self, region_id: RegionId) -> Option<bool> {
+        // TODO(weny): Finds a better way.
+        self.inner.region_map.get(&region_id).and_then(|engine| {
+            engine.role(region_id).map(|role| match role {
+                RegionRole::Follower => false,
+                RegionRole::Leader => true,
+            })
+        })
+    }
+
     pub fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<()> {
         let engine = self
             .inner
@@ -177,6 +187,14 @@ impl RegionServer {
     /// Stop the region server.
     pub async fn stop(&self) -> Result<()> {
         self.inner.stop().await
+    }
+
+    #[cfg(test)]
+    /// Registers a region for test purpose.
+    pub(crate) fn register_test_region(&self, region_id: RegionId, engine: RegionEngineRef) {
+        self.inner
+            .region_map
+            .insert(region_id, RegionEngineWithStatus::Ready(engine));
     }
 }
 
