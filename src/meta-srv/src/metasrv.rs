@@ -18,13 +18,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Peer;
 use common_base::Plugins;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager;
 use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackend, ResettableKvBackendRef};
+use common_meta::peer::Peer;
 use common_meta::region_keeper::MemoryRegionKeeperRef;
 use common_meta::wal::options_allocator::WalOptionsAllocatorRef;
 use common_meta::wal::WalConfig;

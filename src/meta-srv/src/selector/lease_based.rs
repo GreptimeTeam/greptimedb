@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::Peer;
+use common_meta::peer::Peer;
 
 use crate::error::Result;
 use crate::lease;
