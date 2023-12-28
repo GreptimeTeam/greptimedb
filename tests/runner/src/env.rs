@@ -187,6 +187,7 @@ impl Env {
             .create(true)
             .write(true)
             .truncate(truncate_log)
+            .append(!truncate_log)
             .open(log_file_name)
             .unwrap();
 
