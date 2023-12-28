@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
@@ -27,6 +28,19 @@ use table::error::Error as TableError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to execute async task"))]
+    AsyncTaskExecute {
+        location: Location,
+        source: Arc<Error>,
+    },
+
+    #[snafu(display("Failed to watch change"))]
+    WatchAsyncTaskChange {
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::watch::error::RecvError,
+    },
+
     #[snafu(display("Failed to handle heartbeat response"))]
     HandleHeartbeatResponse {
         location: Location,
@@ -292,7 +306,11 @@ impl ErrorExt for Error {
             | MissingWalDirConfig { .. }
             | MissingKvBackend { .. } => StatusCode::InvalidArguments,
 
-            PayloadNotExist { .. } | Unexpected { .. } => StatusCode::Unexpected,
+            PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
+                StatusCode::Unexpected
+            }
+
+            AsyncTaskExecute { source, .. } => source.status_code(),
 
             // TODO(yingwen): Further categorize http error.
             ParseAddr { .. }
