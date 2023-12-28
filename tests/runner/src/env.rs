@@ -223,6 +223,8 @@ impl Env {
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:5002".to_string(),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (args, METASRV_ADDR.to_string())
             }
