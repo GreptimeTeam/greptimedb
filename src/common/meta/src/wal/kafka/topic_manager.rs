@@ -135,7 +135,7 @@ impl TopicManager {
             .iter()
             .map(|i| async {
                 self.try_create_topic(&topics[*i], &control_client).await?;
-                self.try_create_noop_record(&topics[*i], &client).await?;
+                self.try_append_noop_record(&topics[*i], &client).await?;
                 Ok(())
             })
             .collect::<Vec<_>>();
@@ -154,7 +154,7 @@ impl TopicManager {
             .collect()
     }
 
-    async fn try_create_noop_record(&self, topic: &Topic, client: &Client) -> Result<()> {
+    async fn try_append_noop_record(&self, topic: &Topic, client: &Client) -> Result<()> {
         let partition_client = client
             .partition_client(topic, DEFAULT_PARTITION, UnknownTopicHandling::Retry)
             .await
