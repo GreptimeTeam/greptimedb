@@ -16,15 +16,15 @@ use std::collections::HashMap;
 
 use testcontainers::core::WaitFor;
 
-/// Through which port the Zookeeper node listens for external traffics, i.e. traffics from the Kafka node.
+/// Through which port the Zookeeper node listens for external traffics, e.g. traffics from the Kafka node.
 pub const ZOOKEEPER_PORT: u16 = 2181;
 /// Through which port the Kafka node listens for internal traffics, i.e. traffics between Kafka nodes in the same Kafka cluster.
-pub const KAFAK_LISTENER_PORT: u16 = 19092;
+pub const KAFKA_LISTENER_PORT: u16 = 19092;
 /// Through which port the Kafka node listens for external traffics, e.g. traffics from Kafka clients.
 pub const KAFKA_ADVERTISED_LISTENER_PORT: u16 = 9092;
 
 /// Configurations for a Kafka runtime.
-/// Since the runtime corresponds to a cluster with a single Kafka node and a single Zookeeper node, the ports are all singletons.
+#[derive(Debug, Clone)]
 pub struct Config {
     /// The name of the Kafka image hosted in the docker hub.
     pub image_name: String,
@@ -32,7 +32,10 @@ pub struct Config {
     /// Warning: please use a tag with long-term support. Do not use `latest` or any other tags that
     /// the underlying image may suddenly change.
     pub image_tag: String,
-    /// Through which port clients could connect with the runtime.
+    /// The runtime is running in a docker container and has its own network. In order to be used by the host machine,
+    /// the runtime must expose an internal port. For e.g. assume the runtime has an internal port 9092,
+    /// and the `exposed_port` is set to 9092, then the host machine can get a mapped external port with
+    /// `container.get_host_port_ipv4(exposed_port)`. With the mapped port, the host machine could connect with the runtime.
     pub exposed_port: u16,
     /// The runtime is regarded ready to be used if all ready conditions are met.
     /// Warning: be sure to update the conditions when necessary if the image is altered.
@@ -40,6 +43,15 @@ pub struct Config {
     /// The environment variables required to run the runtime.
     /// Warning: be sure to update the environment variables when necessary if the image is altered.
     pub env_vars: HashMap<String, String>,
+}
+
+impl Config {
+    pub fn with_exposed_port(port: u16) -> Self {
+        Self {
+            exposed_port: port,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for Config {
@@ -54,7 +66,7 @@ impl Default for Config {
             )],
             env_vars: build_env_vars(
                 ZOOKEEPER_PORT,
-                KAFAK_LISTENER_PORT,
+                KAFKA_LISTENER_PORT,
                 KAFKA_ADVERTISED_LISTENER_PORT,
             ),
         }
@@ -73,11 +85,15 @@ fn build_env_vars(
         ),
         (
             "KAFKA_LISTENERS".to_string(),
-            format!("PLAINTEXT://0.0.0.0:{kafka_advertised_listener_port},PLAINTEXT://0.0.0.0:{kafka_listener_port}"),
+            format!("PLAINTEXT://0.0.0.0:{kafka_advertised_listener_port},BROKER://0.0.0.0:{kafka_listener_port}"),
         ),
         (
             "KAFKA_ADVERTISED_LISTENERS".to_string(),
-            format!("PLAINTEXT://localhost:{kafka_advertised_listener_port},PLAINTEXT://localhost:{kafka_listener_port}",),
+            format!("PLAINTEXT://localhost:{kafka_advertised_listener_port},BROKER://localhost:{kafka_listener_port}",),
+        ),
+        (
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_string(),
+            "BROKER:PLAINTEXT,PLAINTEXT:PLAINTEXT".to_string(),
         ),
         (
             "KAFKA_INTER_BROKER_LISTENER_NAME".to_string(),
