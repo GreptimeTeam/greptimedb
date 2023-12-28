@@ -7,7 +7,7 @@ create table http_requests (
     job string,
     instance string,
     g string, -- for `group`
-    val double,
+    greptime_value double,
     primary key (job, instance, g)
 );
 
@@ -27,7 +27,7 @@ create table cpu_count(ts timestamp time index);
 create table vector_matching_a(
     ts timestamp time index,
     l string primary key,
-    val double,
+    greptime_value double,
 );
 
 insert into vector_matching_a values
@@ -176,11 +176,11 @@ drop table vector_matching_a;
 
 -- the following cases are not from Prometheus.
 
-create table t1 (ts timestamp time index, job string primary key, val double);
+create table t1 (ts timestamp time index, job string primary key, greptime_value double);
 
 insert into t1 values (0, "a", 1.0), (500000, "b", 2.0), (1000000, "a", 3.0), (1500000, "c", 4.0);
 
-create table t2 (ts timestamp time index, val double);
+create table t2 (ts timestamp time index, greptime_value double);
 
 insert into t2 values (0, 0), (300000, 0), (600000, 0), (900000, 0), (1200000, 0), (1500000, 0), (1800000, 0);
 
