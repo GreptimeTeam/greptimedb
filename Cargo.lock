@@ -4986,7 +4986,6 @@ dependencies = [
  "object-store",
  "parquet",
  "paste",
- "pin-project",
  "prometheus",
  "prost 0.12.3",
  "puffin",

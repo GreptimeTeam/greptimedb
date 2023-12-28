@@ -14,7 +14,7 @@
 
 //! Parquet reader.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -138,43 +138,7 @@ impl ParquetReaderBuilder {
         // Decodes region metadata.
         let key_value_meta = parquet_meta.file_metadata().key_value_metadata();
         let region_meta = Self::get_region_metadata(&file_path, key_value_meta)?;
-        // Computes column ids to read.
-        let column_ids: HashSet<_> = self
-            .projection
-            .as_ref()
-            .map(|p| p.iter().cloned().collect())
-            .unwrap_or_else(|| {
-                region_meta
-                    .column_metadatas
-                    .iter()
-                    .map(|c| c.column_id)
-                    .collect()
-            });
         let read_format = ReadFormat::new(Arc::new(region_meta));
-
-        let mut row_groups: BTreeSet<_> = (0..parquet_meta.num_row_groups()).collect();
-        if let Some(index_applier) = self.index_applier.as_ref() {
-            match index_applier.apply(self.file_handle.file_id()).await {
-                Ok(rgs) => row_groups = rgs,
-                Err(err) => debug!("Failed to apply index: {err}"),
-            }
-        }
-
-        // Prunes row groups by metadata.
-        if let Some(predicate) = &self.predicate {
-            let stats =
-                RowGroupPruningStats::new(parquet_meta.row_groups(), &read_format, column_ids);
-
-            for (row_group, valid) in predicate
-                .prune_with_stats(&stats, read_format.metadata().schema.arrow_schema())
-                .into_iter()
-                .enumerate()
-            {
-                if !valid {
-                    row_groups.remove(&row_group);
-                }
-            }
-        };
 
         // Computes the projection mask.
         let parquet_schema_desc = parquet_meta.file_metadata().schema_descr();
@@ -191,6 +155,9 @@ impl ParquetReaderBuilder {
         let field_levels =
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
+
+        // Computes row groups to read.
+        let row_groups = self.row_groups_to_read(&read_format, &parquet_meta).await;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -273,6 +240,55 @@ impl ParquetReaderBuilder {
         }
 
         Ok(metadata)
+    }
+
+    /// Computes row groups to read.
+    async fn row_groups_to_read(
+        &self,
+        read_format: &ReadFormat,
+        parquet_meta: &ParquetMetaData,
+    ) -> BTreeSet<usize> {
+        let mut row_group_ids = (0..parquet_meta.num_row_groups()).collect();
+
+        // Applies index to prune row groups.
+        if let Some(index_applier) = &self.index_applier {
+            match index_applier.apply(self.file_handle.file_id()).await {
+                Ok(row_groups) => row_group_ids = row_groups,
+                Err(err) => {
+                    if !err.is_object_not_found() {
+                        debug!("Failed to apply index: {err}");
+                    }
+                    // Ignores the error since it won't affect correctness.
+                }
+            }
+        }
+
+        // Prunes row groups by metadata.
+        if let Some(predicate) = &self.predicate {
+            let region_meta = read_format.metadata();
+            let column_ids = match &self.projection {
+                Some(ids) => ids.iter().cloned().collect(),
+                None => region_meta
+                    .column_metadatas
+                    .iter()
+                    .map(|c| c.column_id)
+                    .collect(),
+            };
+
+            let row_groups = parquet_meta.row_groups();
+            let stats = RowGroupPruningStats::new(row_groups, read_format, column_ids);
+            let row_groups_to_prune = predicate
+                .prune_with_stats(&stats, region_meta.schema.arrow_schema())
+                .into_iter()
+                .enumerate()
+                .filter_map(|(id, remain)| (!remain).then_some(id));
+
+            for row_group_id in row_groups_to_prune {
+                row_group_ids.remove(&row_group_id);
+            }
+        };
+
+        row_group_ids
     }
 }
 

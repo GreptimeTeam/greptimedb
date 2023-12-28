@@ -12,15 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::iter;
-use std::pin::{pin, Pin};
-
-use datatypes::data_type::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
-use futures::Future;
-use index::inverted_index::BytesRef;
 use memcomparable::Serializer;
-use pin_project::pin_project;
 use store_api::metadata::ColumnMetadata;
 
 use crate::error::Result;
@@ -38,7 +31,6 @@ impl IndexValueCodec {
     }
 }
 
-#[pin_project]
 pub struct IndexValuesCodec {
     column_names: Vec<ColumnName>,
     fields: Vec<SortField>,

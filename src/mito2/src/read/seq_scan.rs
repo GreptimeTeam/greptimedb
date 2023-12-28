@@ -23,7 +23,6 @@ use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::{debug, error};
 use common_time::range::TimestampRange;
-use index::inverted_index::search::index_apply::IndexApplier;
 use snafu::ResultExt;
 use table::predicate::Predicate;
 use tokio::sync::{mpsc, Semaphore};

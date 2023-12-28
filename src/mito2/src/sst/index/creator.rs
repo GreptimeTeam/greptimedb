@@ -17,26 +17,31 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_telemetry::logging;
+use common_error::ext::BoxedError;
+use common_telemetry::warn;
 use futures::{AsyncRead, AsyncWrite};
 use index::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::create::InvertedIndexCreator;
+use index::inverted_index::error as index_error;
 use index::inverted_index::error::Result as IndexResult;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
-use object_store::{util, ObjectStore};
+use object_store::ObjectStore;
 use puffin::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::error::{PushIndexValueSnafu, Result};
+use crate::error::{OpenDalSnafu, PushIndexValueSnafu, Result};
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
-use crate::sst::location;
+use crate::sst::index::{
+    INDEX_BLOB_TYPE, MIN_MEMORY_USAGE_THRESHOLD, PIPE_BUFFER_SIZE_FOR_SENDING_BLOB,
+};
+use crate::sst::location::{self, IntermediateLocation};
 
 type ByteCount = usize;
 type RowCount = usize;
@@ -65,11 +70,12 @@ impl SstIndexCreator {
         row_group_size: NonZeroUsize,
     ) -> Self {
         let temp_file_provider = Arc::new(TempFileProvider {
-            temp_file_dir: location::index_creation_temp_dir(&region_dir, &sst_file_id),
+            location: IntermediateLocation::new(&region_dir, &sst_file_id),
             object_store: object_store.clone(),
         });
-        let memory_usage_threshold = memory_usage_threshold
-            .map(|threshold| (threshold / metadata.primary_key.len()).max(1024));
+        let memory_usage_threshold = memory_usage_threshold.map(|threshold| {
+            (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
+        });
         let sorter =
             ExternalSorter::factory(temp_file_provider.clone() as _, memory_usage_threshold);
         let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
@@ -93,11 +99,11 @@ impl SstIndexCreator {
         }
 
         if let Err(err) = self.do_update(batch).await {
-            if let Err(err) = self.cleanup().await {
-                logging::warn!(
-                    "Failed to clean up index creator, region_dir: {}, sst_file_id: {}, error: {err}",
-                    self.region_dir, self.sst_file_id
-                );
+            // clean up garbage if failed to update
+            if let Err(err) = self.do_cleanup().await {
+                let region_dir = &self.region_dir;
+                let sst_file_id = &self.sst_file_id;
+                warn!("Failed to clean up index creator, region_dir: {region_dir}, sst_file_id: {sst_file_id}, error: {err}");
             }
             return Err(err);
         }
@@ -107,20 +113,21 @@ impl SstIndexCreator {
 
     pub async fn finish(&mut self) -> Result<(RowCount, ByteCount)> {
         if self.row_count == 0 {
+            // Everything is clean, no IO is performed.
             return Ok((0, 0));
         }
 
-        let res = self.do_finish().await;
+        let finish_res = self.do_finish().await;
+        // clean up garbage no matter finish success or not
+        let cleanup_res = self.do_cleanup().await;
 
-        if let Err(err) = self.cleanup().await {
-            logging::warn!(
-                "Failed to clean up index creator, region_dir: {}, sst_file_id: {}, error: {err}",
-                self.region_dir,
-                self.sst_file_id
-            );
+        if let Err(err) = cleanup_res {
+            let region_dir = &self.region_dir;
+            let sst_file_id = &self.sst_file_id;
+            warn!("Failed to clean up index creator, region_dir: {region_dir}, sst_file_id: {sst_file_id}, error: {err}");
         }
 
-        res.map(|bytes| (self.row_count, bytes))
+        finish_res.map(|bytes| (self.row_count, bytes))
     }
 
     async fn do_update(&mut self, batch: &Batch) -> Result<()> {
@@ -144,13 +151,17 @@ impl SstIndexCreator {
 
     async fn do_finish(&mut self) -> Result<ByteCount> {
         let file_path = location::index_file_path(&self.region_dir, &self.sst_file_id);
-        let writer = self.object_store.writer(&file_path).await.unwrap();
+        let writer = self
+            .object_store
+            .writer(&file_path)
+            .await
+            .context(OpenDalSnafu)?;
         let mut puffin_writer = PuffinFileWriter::new(writer);
 
-        let (tx, rx) = duplex(8 * 1024);
+        let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
         let blob = Blob {
-            blob_type: "greptime-inverted-index-v1".to_string(),
+            blob_type: INDEX_BLOB_TYPE.to_string(),
             data: rx.compat(),
             properties: HashMap::default(),
         };
@@ -167,13 +178,13 @@ impl SstIndexCreator {
         Ok(puffin_writer.finish().await.unwrap())
     }
 
-    async fn cleanup(&mut self) -> Result<()> {
+    async fn do_cleanup(&mut self) -> Result<()> {
         self.temp_file_provider.cleanup().await
     }
 }
 
 struct TempFileProvider {
-    temp_file_dir: String,
+    location: IntermediateLocation,
     object_store: ObjectStore,
 }
 
@@ -181,26 +192,43 @@ struct TempFileProvider {
 impl ExternalTempFileProvider for TempFileProvider {
     async fn create(
         &self,
-        index_name: &str,
-        tmp_file_id: &str,
+        column_name: &str,
+        file_id: &str,
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
-        let child = format!("{index_name}/{tmp_file_id}.im");
-        let path = util::join_path(&self.temp_file_dir, &child);
-        Ok(Box::new(self.object_store.writer(&path).await.unwrap()))
+        let path = self.location.file_path(column_name, file_id);
+        let writer = self
+            .object_store
+            .writer(&path)
+            .await
+            .context(OpenDalSnafu)
+            .map_err(BoxedError::new)
+            .context(index_error::ExternalSnafu)?;
+        Ok(Box::new(writer))
     }
 
     async fn read_all(
         &self,
-        index_name: &str,
+        column_name: &str,
     ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
-        let dir = util::join_dir(&self.temp_file_dir, index_name);
-
-        let entries = self.object_store.list(&dir).await.unwrap();
+        let dir = self.location.column_dir(column_name);
+        let entries = self
+            .object_store
+            .list(&dir)
+            .await
+            .context(OpenDalSnafu)
+            .map_err(BoxedError::new)
+            .context(index_error::ExternalSnafu)?;
         let mut readers = Vec::with_capacity(entries.len());
 
         for entry in entries {
-            let path = entry.path();
-            readers.push(Box::new(self.object_store.reader(path).await.unwrap()) as _);
+            let reader = self
+                .object_store
+                .reader(entry.path())
+                .await
+                .context(OpenDalSnafu)
+                .map_err(BoxedError::new)
+                .context(index_error::ExternalSnafu)?;
+            readers.push(Box::new(reader) as _);
         }
 
         Ok(readers)
@@ -210,9 +238,8 @@ impl ExternalTempFileProvider for TempFileProvider {
 impl TempFileProvider {
     async fn cleanup(&self) -> Result<()> {
         self.object_store
-            .remove_all(&self.temp_file_dir)
+            .remove_all(&self.location.root_dir())
             .await
-            .unwrap();
-        Ok(())
+            .context(OpenDalSnafu)
     }
 }

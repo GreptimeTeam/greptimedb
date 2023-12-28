@@ -215,7 +215,6 @@ mod tests {
         let mut env = crate::test_util::TestEnv::new();
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 1000);
-        let file_path = handle.file_path(FILE_DIR);
         let metadata = Arc::new(sst_region_metadata());
         let source = new_source(&[
             new_batch_by_range(&["a", "d"], 0, 60),

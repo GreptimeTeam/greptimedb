@@ -14,12 +14,10 @@
 
 //! Scans a region according to the scan request.
 
-use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, logging};
 use common_time::range::TimestampRange;
-use index::inverted_index::search::index_apply::IndexApplier;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
 

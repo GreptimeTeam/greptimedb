@@ -15,3 +15,10 @@
 pub mod applier;
 mod codec;
 pub mod creator;
+
+const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
+
+// TODO(zhongzc): how to determine this value?
+const MIN_MEMORY_USAGE_THRESHOLD: usize = 8192;
+
+const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;

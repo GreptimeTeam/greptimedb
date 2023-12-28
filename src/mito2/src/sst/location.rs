@@ -30,10 +30,31 @@ pub fn index_file_path(region_dir: &str, sst_file_id: &FileId) -> String {
     util::join_path(&dir, &sst_file_id.as_puffin())
 }
 
-/// Returns the path of the index creation temp directory in the object store:
-/// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/`
-pub fn index_creation_temp_dir(region_dir: &str, sst_file_id: &FileId) -> String {
-    let uuid = Uuid::new_v4();
-    let child = format!("index/__intermediate/{sst_file_id}/{uuid}");
-    util::join_dir(region_dir, &child)
+pub struct IntermediateLocation {
+    root_dir: String,
+}
+
+impl IntermediateLocation {
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/`
+    pub fn new(region_dir: &str, sst_file_id: &FileId) -> Self {
+        let uuid = Uuid::new_v4();
+        let child = format!("index/__intermediate/{sst_file_id}/{uuid}");
+        Self {
+            root_dir: util::join_dir(region_dir, &child),
+        }
+    }
+
+    pub fn root_dir(&self) -> &str {
+        &self.root_dir
+    }
+
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/`
+    pub fn column_dir(&self, column_name: &str) -> String {
+        util::join_dir(&self.root_dir, column_name)
+    }
+
+    /// `{region_dir}/index/__intermediate/{sst_file_id}/{uuid}/{column_name}/{im_file_id}.im`
+    pub fn file_path(&self, column_name: &str, im_file_id: &str) -> String {
+        util::join_path(&self.column_dir(column_name), &format!("{im_file_id}.im"))
+    }
 }

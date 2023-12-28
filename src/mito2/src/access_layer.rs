@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use object_store::{ErrorKind, ObjectStore};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
@@ -73,6 +73,7 @@ impl AccessLayer {
             .delete(&index_path)
             .await
             .context(OpenDalSnafu)
+            // ignore error if index file not found for compatibility
             .or_else(|e| e.is_object_not_found().then_some(()).ok_or(e))
     }
 

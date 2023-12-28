@@ -63,7 +63,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-pin-project.workspace = true
 puffin.workspace = true
 
 [dev-dependencies]

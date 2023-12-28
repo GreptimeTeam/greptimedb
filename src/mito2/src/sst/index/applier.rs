@@ -25,6 +25,7 @@ use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use snafu::ResultExt;
 
+use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::sst::file::FileId;
 use crate::sst::location;
@@ -51,11 +52,11 @@ impl SstIndexApplier {
     }
 
     pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
-        let file_name = location::index_file_path(&self.region_dir, &file_id);
+        let file_path = location::index_file_path(&self.region_dir, &file_id);
 
         let file_reader = self
             .object_store
-            .reader(&file_name)
+            .reader(&file_path)
             .await
             .context(OpenDalSnafu)?;
         let mut puffin_reader = PuffinFileReader::new(file_reader);
@@ -64,7 +65,7 @@ impl SstIndexApplier {
         let blob_meta = file_meta
             .blobs
             .iter()
-            .find(|blob| blob.blob_type == "greptime-inverted-index-v1".to_string())
+            .find(|blob| blob.blob_type == INDEX_BLOB_TYPE.to_string())
             .unwrap();
 
         let blob_reader = puffin_reader.blob_reader(blob_meta).unwrap();

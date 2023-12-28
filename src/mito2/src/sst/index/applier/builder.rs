@@ -25,13 +25,12 @@ use common_query::logical_plan::Expr;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::Schema;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
 use index::inverted_index::search::predicate::Predicate;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::{ColumnMetadata, RegionMetadata};
+use store_api::metadata::RegionMetadata;
 
 use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, Result};
 use crate::row_converter::SortField;
