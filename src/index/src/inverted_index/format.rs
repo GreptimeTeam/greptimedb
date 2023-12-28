@@ -48,7 +48,7 @@
 //! More detailed information regarding the encoding of the inverted indices can be found in the [RFC].
 //!
 //! [`InvertedIndexMetas`]: https://github.com/GreptimeTeam/greptime-proto/blob/2aaee38de81047537dfa42af9df63bcfb866e06c/proto/greptime/v1/index/inverted_index.proto#L32-L64
-//! [RFC]: https://github.com/GreptimeTeam/greptimedb/blob/develop/docs/rfcs/2023-11-03-inverted-index.md
+//! [RFC]: https://github.com/GreptimeTeam/greptimedb/blob/main/docs/rfcs/2023-11-03-inverted-index.md
 
 pub mod reader;
 pub mod writer;

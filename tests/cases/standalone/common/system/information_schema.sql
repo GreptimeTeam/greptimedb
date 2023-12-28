@@ -60,4 +60,14 @@ desc table COLUMN_STATISTICS;
 
 select * from COLUMN_STATISTICS;
 
+select * from CHARACTER_SETS;
+
+select * from COLLATIONS;
+
+select * from COLLATION_CHARACTER_SET_APPLICABILITY;
+
+desc table CHECK_CONSTRAINTS;
+
+select * from CHECK_CONSTRAINTS;
+
 use public;

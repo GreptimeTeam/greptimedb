@@ -51,6 +51,11 @@ lazy_static! {
         COLUMN_PRIVILEGES,
         COLUMN_STATISTICS,
         BUILD_INFO,
+        CHARACTER_SETS,
+        COLLATIONS,
+        COLLATION_CHARACTER_SET_APPLICABILITY,
+        CHECK_CONSTRAINTS,
+        EVENTS,
     ];
 }
 
@@ -125,7 +130,7 @@ impl InformationSchemaProvider {
 
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
-            tables.insert((*name).to_string(), self.build_table(name).unwrap());
+            tables.insert((*name).to_string(), self.build_table(name).expect(name));
         }
 
         self.tables = tables;
@@ -156,6 +161,13 @@ impl InformationSchemaProvider {
             COLUMN_PRIVILEGES => setup_memory_table!(COLUMN_PRIVILEGES),
             COLUMN_STATISTICS => setup_memory_table!(COLUMN_STATISTICS),
             BUILD_INFO => setup_memory_table!(BUILD_INFO),
+            CHARACTER_SETS => setup_memory_table!(CHARACTER_SETS),
+            COLLATIONS => setup_memory_table!(COLLATIONS),
+            COLLATION_CHARACTER_SET_APPLICABILITY => {
+                setup_memory_table!(COLLATION_CHARACTER_SET_APPLICABILITY)
+            }
+            CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
+            EVENTS => setup_memory_table!(EVENTS),
             _ => None,
         }
     }

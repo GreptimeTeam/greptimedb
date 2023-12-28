@@ -17,7 +17,7 @@ use std::sync::Arc;
 use common_catalog::consts::MITO_ENGINE;
 use datatypes::prelude::{ConcreteDataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::vectors::StringVector;
+use datatypes::vectors::{Int64Vector, StringVector};
 
 use crate::information_schema::table_names::*;
 
@@ -97,6 +97,92 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             ],
         ),
 
+        CHARACTER_SETS => (
+            vec![
+                string_column("CHARACTER_SET_NAME"),
+                string_column("DEFAULT_COLLATE_NAME"),
+                string_column("DESCRIPTION"),
+                bigint_column("MAXLEN"),
+            ],
+            vec![
+                Arc::new(StringVector::from(vec!["utf8"])),
+                Arc::new(StringVector::from(vec!["utf8_bin"])),
+                Arc::new(StringVector::from(vec!["UTF-8 Unicode"])),
+                Arc::new(Int64Vector::from_slice([4])),
+            ],
+        ),
+
+        COLLATIONS => (
+            vec![
+                string_column("COLLATION_NAME"),
+                string_column("CHARACTER_SET_NAME"),
+                bigint_column("ID"),
+                string_column("IS_DEFAULT"),
+                string_column("IS_COMPILED"),
+                bigint_column("SORTLEN"),
+            ],
+            vec![
+                Arc::new(StringVector::from(vec!["utf8_bin"])),
+                Arc::new(StringVector::from(vec!["utf8"])),
+                Arc::new(Int64Vector::from_slice([1])),
+                Arc::new(StringVector::from(vec!["Yes"])),
+                Arc::new(StringVector::from(vec!["Yes"])),
+                Arc::new(Int64Vector::from_slice([1])),
+            ],
+        ),
+
+        COLLATION_CHARACTER_SET_APPLICABILITY => (
+            vec![
+                string_column("COLLATION_NAME"),
+                string_column("CHARACTER_SET_NAME"),
+            ],
+            vec![
+                Arc::new(StringVector::from(vec!["utf8_bin"])),
+                Arc::new(StringVector::from(vec!["utf8"])),
+            ],
+        ),
+
+        CHECK_CONSTRAINTS => (
+            string_columns(&[
+                "CONSTRAINT_CATALOG",
+                "CONSTRAINT_SCHEMA",
+                "CONSTRAINT_NAME",
+                "CHECK_CLAUSE",
+            ]),
+            // Not support check constraints yet
+            vec![],
+        ),
+
+        EVENTS => (
+            vec![
+                string_column("EVENT_CATALOG"),
+                string_column("EVENT_SCHEMA"),
+                string_column("EVENT_NAME"),
+                string_column("DEFINER"),
+                string_column("TIME_ZONE"),
+                string_column("EVENT_BODY"),
+                string_column("EVENT_DEFINITION"),
+                string_column("EVENT_TYPE"),
+                datetime_column("EXECUTE_AT"),
+                bigint_column("INTERVAL_VALUE"),
+                string_column("INTERVAL_FIELD"),
+                string_column("SQL_MODE"),
+                datetime_column("STARTS"),
+                datetime_column("ENDS"),
+                string_column("STATUS"),
+                string_column("ON_COMPLETION"),
+                datetime_column("CREATED"),
+                datetime_column("LAST_ALTERED"),
+                datetime_column("LAST_EXECUTED"),
+                string_column("EVENT_COMMENT"),
+                bigint_column("ORIGINATOR"),
+                string_column("CHARACTER_SET_CLIENT"),
+                string_column("COLLATION_CONNECTION"),
+                string_column("DATABASE_COLLATION"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
@@ -111,6 +197,22 @@ fn string_column(name: &str) -> ColumnSchema {
     ColumnSchema::new(
         str::to_lowercase(name),
         ConcreteDataType::string_datatype(),
+        false,
+    )
+}
+
+fn bigint_column(name: &str) -> ColumnSchema {
+    ColumnSchema::new(
+        str::to_lowercase(name),
+        ConcreteDataType::int64_datatype(),
+        false,
+    )
+}
+
+fn datetime_column(name: &str) -> ColumnSchema {
+    ColumnSchema::new(
+        str::to_lowercase(name),
+        ConcreteDataType::datetime_datatype(),
         false,
     )
 }
