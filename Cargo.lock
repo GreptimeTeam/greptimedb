@@ -8858,6 +8858,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "serde",
+ "serde_json",
  "sqlness",
  "tinytemplate",
  "tokio",
