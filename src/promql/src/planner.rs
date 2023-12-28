@@ -1624,7 +1624,7 @@ impl PromPlanner {
             .map(|r| r.to_string())
             .unwrap_or_default();
 
-        // step 0: fild all columns in output schema
+        // step 0: fill all columns in output schema
         let all_columns_set = left
             .schema()
             .fields()
