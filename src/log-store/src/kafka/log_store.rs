@@ -193,8 +193,6 @@ impl LogStore for KafkaLogStore {
                     && entry.ns.region_id == region_id
                 {
                     yield Ok(entries);
-                } else {
-                    yield Ok(vec![]);
                 }
 
                 // Terminates the stream if the entry with the end offset was read.
