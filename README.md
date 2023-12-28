@@ -14,7 +14,7 @@
 <p align="center">
     <a href="https://codecov.io/gh/GrepTimeTeam/greptimedb"><img src="https://codecov.io/gh/GrepTimeTeam/greptimedb/branch/main/graph/badge.svg?token=FITFDI3J3C"></img></a>
     &nbsp;
-    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/main.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/main.yml/badge.svg" alt="CI"></img></a>
+    <a href="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml"><img src="https://github.com/GreptimeTeam/greptimedb/actions/workflows/develop.yml/badge.svg" alt="CI"></img></a>
     &nbsp;
     <a href="https://github.com/greptimeTeam/greptimedb/blob/main/LICENSE"><img src="https://img.shields.io/github/license/greptimeTeam/greptimedb"></a>
 </p>
