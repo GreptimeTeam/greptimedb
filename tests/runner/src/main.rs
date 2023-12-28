@@ -85,7 +85,7 @@ async fn main() {
             broker_endpoints: args
                 .kafka_wal_broker_endpoints
                 .split(',')
-                .map(|s| s.to_string())
+                .map(|s| s.trim().to_string())
                 .collect(),
         },
     };
