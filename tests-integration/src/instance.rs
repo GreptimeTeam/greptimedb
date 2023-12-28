@@ -216,11 +216,15 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        let region_to_dn_map = region_distribution(table_route_value.region_routes())
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (v[0], *k))
-            .collect::<HashMap<u32, u64>>();
+        let region_to_dn_map = region_distribution(
+            table_route_value
+                .region_routes()
+                .expect("region routes should be physical"),
+        )
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (v[0], *k))
+        .collect::<HashMap<u32, u64>>();
         assert!(region_to_dn_map.len() <= instance.datanodes().len());
 
         let stmt = QueryLanguageParser::parse_sql("SELECT ts, host FROM demo ORDER BY ts").unwrap();

@@ -735,7 +735,7 @@ mod tests {
             .unwrap()
             .version();
         // Should be unchanged.
-        assert_eq!(table_routes_version, 0);
+        assert_eq!(table_routes_version.unwrap(), 0);
     }
 
     #[tokio::test]

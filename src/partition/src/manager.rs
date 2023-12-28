@@ -75,10 +75,12 @@ impl PartitionRuleManager {
             .context(error::TableRouteManagerSnafu)?
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
-        let region_routes = route.region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu { 
-                err_msg: "{self:?} is a non-physical TableRouteValue.", 
-            })?;
+        let region_routes =
+            route
+                .region_routes()
+                .context(error::UnexpectedTableRouteTypeSnafu {
+                    err_msg: "{self:?} is a non-physical TableRouteValue.",
+                })?;
         Ok(RegionRoutes(region_routes.clone()))
     }
 
@@ -90,10 +92,12 @@ impl PartitionRuleManager {
             .context(error::TableRouteManagerSnafu)?
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
-        let region_routes = route.region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu { 
-                err_msg: "{self:?} is a non-physical TableRouteValue.", 
-            })?;
+        let region_routes =
+            route
+                .region_routes()
+                .context(error::UnexpectedTableRouteTypeSnafu {
+                    err_msg: "{self:?} is a non-physical TableRouteValue.",
+                })?;
 
         ensure!(
             !region_routes.is_empty(),

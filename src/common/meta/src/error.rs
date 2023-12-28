@@ -332,10 +332,7 @@ pub enum Error {
     EmptyTopicPool { location: Location },
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
-    UnexpectedTableRouteType {
-        location: Location,
-        err_msg: String,
-    },
+    UnexpectedTableRouteType { location: Location, err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -33,9 +33,10 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let mut region_routes = table_route_value.region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu { 
-                err_msg: "{self:?} is a non-physical TableRouteValue.", 
+        let mut region_routes = table_route_value
+            .region_routes()
+            .context(error::UnexpectedTableRouteTypeSnafu {
+                err_msg: "{self:?} is a non-physical TableRouteValue.",
             })?
             .clone();
         let region_route = region_routes
@@ -85,9 +86,10 @@ impl UpdateMetadata {
         let region_id = ctx.region_id();
         let table_route_value = ctx.get_table_route_value().await?.clone();
 
-        let region_routes = table_route_value.region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu { 
-                err_msg: "{self:?} is a non-physical TableRouteValue.", 
+        let region_routes = table_route_value
+            .region_routes()
+            .context(error::UnexpectedTableRouteTypeSnafu {
+                err_msg: "{self:?} is a non-physical TableRouteValue.",
             })?
             .clone();
         let region_route = region_routes
@@ -473,7 +475,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        let region_routes = table_route.region_routes();
+        let region_routes = table_route
+            .region_routes()
+            .expect("expected physical table route");
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());

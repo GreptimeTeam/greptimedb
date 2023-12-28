@@ -143,10 +143,14 @@ async fn get_leader_peer_ids(
         .context(error::TableMetadataManagerSnafu)
         .map(|route| {
             route.map_or_else(Vec::new, |route| {
-                find_leaders(route.region_routes().expect("expected physical table route"))
-                    .into_iter()
-                    .map(|peer| peer.id)
-                    .collect()
+                find_leaders(
+                    route
+                        .region_routes()
+                        .expect("expected physical table route"),
+                )
+                .into_iter()
+                .map(|peer| peer.id)
+                .collect()
             })
         })
 }

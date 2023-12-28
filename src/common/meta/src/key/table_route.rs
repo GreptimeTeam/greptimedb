@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, ensure};
+use snafu::{ensure, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
@@ -62,7 +62,7 @@ impl TableRouteValue {
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
-    /// 
+    ///
     /// # Panics
     /// The route type is not the [TableRouteValue::Physical].
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Result<Self> {
@@ -82,7 +82,7 @@ impl TableRouteValue {
     /// Returns the version.
     ///
     /// For test purpose.
-    /// 
+    ///
     /// # Panics
     /// The route type is not the [TableRouteValue::Physical].
     #[cfg(any(test, feature = "testing"))]
@@ -97,7 +97,7 @@ impl TableRouteValue {
     }
 
     /// Returns the corresponding [RegionRoute].
-    /// 
+    ///
     /// # Panics
     /// The route type is not the [TableRouteValue::Physical].
     pub fn region_route(&self, region_id: RegionId) -> Result<Option<RegionRoute>> {
@@ -107,7 +107,8 @@ impl TableRouteValue {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             }
         );
-        Ok(self.physical_table_route()
+        Ok(self
+            .physical_table_route()
             .region_routes
             .iter()
             .find(|route| route.region.id == region_id)

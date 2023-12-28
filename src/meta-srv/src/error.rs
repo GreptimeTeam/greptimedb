@@ -720,7 +720,7 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. } 
+            | Error::GetFullTableInfo { source, .. }
             | Error::UnexpectedTableRouteType { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {

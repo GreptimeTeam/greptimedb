@@ -208,6 +208,7 @@ mod tests {
 
         let should_downgraded = table_route_value
             .region_routes()
+            .unwrap()
             .iter()
             .find(|route| route.region.id.region_number() == failed_region.region_number)
             .unwrap();
