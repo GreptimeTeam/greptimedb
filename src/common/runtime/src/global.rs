@@ -23,7 +23,7 @@ use paste::paste;
 use crate::{Builder, JoinHandle, Runtime};
 
 const READ_WORKERS: usize = 8;
-const WRITE_WORKERS: usize = 8;
+const WRITE_WORKERS: usize = 16;
 const BG_WORKERS: usize = 8;
 
 pub fn create_runtime(runtime_name: &str, thread_name: &str, worker_threads: usize) -> Runtime {

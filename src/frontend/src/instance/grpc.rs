@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Instant;
+
 use api::v1::ddl_request::{Expr as DdlExpr, Expr};
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
@@ -20,6 +22,7 @@ use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_meta::table_name::TableName;
 use common_query::Output;
+use common_telemetry::info;
 use query::parser::PromQuery;
 use servers::interceptor::{GrpcQueryInterceptor, GrpcQueryInterceptorRef};
 use servers::query_handler::grpc::GrpcQueryHandler;
@@ -189,6 +192,8 @@ impl Instance {
         requests: RowInsertRequests,
         ctx: QueryContextRef,
     ) -> Result<Output> {
+        self.proxy_sender.as_ref().map(|s|s.send(requests.clone()));
+        
         self.inserter
             .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
             .await

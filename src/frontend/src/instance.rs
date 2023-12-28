@@ -24,6 +24,7 @@ pub mod standalone;
 
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
 use api::v1::meta::Role;
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
@@ -75,6 +76,7 @@ use sql::statements::copy::CopyTable;
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
 pub use standalone::StandaloneDatanodeManager;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, ParseSqlSnafu,
@@ -119,6 +121,7 @@ pub struct Instance {
     inserter: InserterRef,
     deleter: DeleterRef,
     export_metrics_task: Option<ExportMetricsTask>,
+    proxy_sender: Option<UnboundedSender<RowInsertRequests>>
 }
 
 impl Instance {

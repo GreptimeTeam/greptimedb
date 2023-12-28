@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
+use api::v1::GreptimeRequest;
 use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
@@ -27,6 +29,7 @@ use operator::statement::StatementExecutor;
 use operator::table::TableMutationOperator;
 use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
+use tokio::sync::mpsc::unbounded_channel;
 
 use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
@@ -134,6 +137,20 @@ impl FrontendBuilder {
 
         plugins.insert::<StatementExecutorRef>(statement_executor.clone());
 
+        let addr = std::env::var("FLOW_ADDR").unwrap_or("http://[::1]:14514".to_string());
+        let (send, mut recv) = unbounded_channel();
+        tokio::spawn(async move {
+            let conn = tonic::transport::Endpoint::new(addr)
+                .unwrap()
+                .connect_lazy();
+            let mut client = GreptimeDatabaseClient::new(conn);
+            let mut outer_request = GreptimeRequest::default();
+            while let Some(request) = recv.recv().await {
+                outer_request.request =
+                    Some(api::v1::greptime_request::Request::RowInserts(request));
+                let _response = client.handle(outer_request.clone()).await.unwrap();
+            }
+        });
         Ok(Instance {
             catalog_manager,
             script_executor,
@@ -145,6 +162,7 @@ impl FrontendBuilder {
             inserter,
             deleter,
             export_metrics_task: None,
+            proxy_sender: Some(send),
         })
     }
 }
