@@ -14,7 +14,7 @@
 
 mod between;
 
-// TODO(zhongzc): This PR is too large. The following modules are comming soon.
+// TODO(zhongzc): This PR is too large. The following modules are coming soon.
 
 // mod comparison;
 // mod eq_list;
@@ -99,7 +99,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         match expr {
             DfExpr::Between(between) => self.collect_between(between),
 
-            // TODO(zhongzc): This PR is too large. The following arms are comming soon.
+            // TODO(zhongzc): This PR is too large. The following arms are coming soon.
 
             // DfExpr::InList(in_list) => self.collect_inlist(in_list),
             // DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
@@ -145,7 +145,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             .then(|| column.column_schema.data_type.clone()))
     }
 
-    /// Helper funtion to get a non-null literal.
+    /// Helper function to get a non-null literal.
     fn nonnull_lit(expr: &DfExpr) -> Option<&ScalarValue> {
         match expr {
             DfExpr::Literal(lit) if !lit.is_null() => Some(lit),

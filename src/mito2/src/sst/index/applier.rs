@@ -28,7 +28,7 @@ pub struct SstIndexApplier {
     /// Object store responsible for accessing SST files.
     object_store: ObjectStore,
 
-    /// Predifined index applier used to apply predicates to index files
+    /// Predefined index applier used to apply predicates to index files
     /// and return the relevant row group ids for further scan.
     index_applier: Arc<dyn IndexApplier>,
 }
