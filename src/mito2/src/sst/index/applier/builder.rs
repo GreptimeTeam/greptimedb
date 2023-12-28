@@ -60,7 +60,6 @@ pub struct SstIndexApplierBuilder<'a> {
 
 impl<'a> SstIndexApplierBuilder<'a> {
     /// Creates a new [`SstIndexApplierBuilder`].
-    #[allow(dead_code)]
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
@@ -76,7 +75,6 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
     /// Consumes the builder to construct an [`SstIndexApplier`], optionally returned based on
     /// the expressions provided. If no predicates match, returns `None`.
-    #[allow(dead_code)]
     pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
         for expr in exprs {
             self.traverse_and_collect(expr.df_expr())?;
