@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion_expr::{Between, Expr as DfExpr};
+use datafusion_expr::Between;
 use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePredicate};
 
 use crate::error::Result;
@@ -27,38 +27,33 @@ impl<'a> SstIndexApplierBuilder<'a> {
             return Ok(());
         }
 
-        let DfExpr::Column(c) = between.expr.as_ref() else {
+        let Some(column_name) = Self::column_name(&between.expr) else {
             return Ok(());
         };
-        let low = match between.low.as_ref() {
-            DfExpr::Literal(lit) if !lit.is_null() => lit,
-            _ => return Ok(()),
-        };
-        let high = match between.high.as_ref() {
-            DfExpr::Literal(lit) if !lit.is_null() => lit,
-            _ => return Ok(()),
-        };
-
-        let Some(data_type) = self.tag_column_type(&c.name)? else {
+        let Some(data_type) = self.tag_column_type(column_name)? else {
             return Ok(());
         };
-        let low = Self::encode_lit(low, data_type.clone())?;
-        let high = Self::encode_lit(high, data_type)?;
+        let Some(low) = Self::lit_not_null(&between.low) else {
+            return Ok(());
+        };
+        let Some(high) = Self::lit_not_null(&between.high) else {
+            return Ok(());
+        };
 
         let predicate = Predicate::Range(RangePredicate {
             range: Range {
                 lower: Some(Bound {
                     inclusive: true,
-                    value: low,
+                    value: Self::encode_lit(low, data_type.clone())?,
                 }),
                 upper: Some(Bound {
                     inclusive: true,
-                    value: high,
+                    value: Self::encode_lit(high, data_type)?,
                 }),
             },
         });
 
-        self.add_predicate(&c.name, predicate);
+        self.add_predicate(column_name, predicate);
         Ok(())
     }
 }

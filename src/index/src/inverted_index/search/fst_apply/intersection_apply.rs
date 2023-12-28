@@ -87,7 +87,7 @@ impl IntersectionFstApplier {
                 Predicate::Range(range) => ranges.push(range.range),
                 Predicate::RegexMatch(regex) => {
                     let dfa = DFA::new(&regex.pattern);
-                    let dfa = dfa.context(ParseDFASnafu)?;
+                    let dfa = dfa.map_err(Box::new).context(ParseDFASnafu)?;
                     dfas.push(dfa);
                 }
                 // Rejection of `InList` predicates is enforced here.

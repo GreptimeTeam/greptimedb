@@ -87,6 +87,11 @@ impl TableRouteValue {
             .cloned()
     }
 
+    /// Returns true if it's [TableRouteValue::Physical].
+    pub fn is_physical(&self) -> bool {
+        matches!(self, TableRouteValue::Physical(_))
+    }
+
     /// Gets the [RegionRoute]s of this [TableRouteValue::Physical].
     ///
     /// # Panics

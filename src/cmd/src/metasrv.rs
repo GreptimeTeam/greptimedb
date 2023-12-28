@@ -119,8 +119,8 @@ struct StartCommand {
     data_home: Option<String>,
 
     /// If it's not empty, the metasrv will store all data with this key prefix.
-    #[clap(long)]
-    store_key_prefix: Option<String>,
+    #[clap(long, default_value = "")]
+    store_key_prefix: String,
 }
 
 impl StartCommand {
@@ -177,7 +177,9 @@ impl StartCommand {
             opts.data_home = data_home.clone();
         }
 
-        opts.store_key_prefix = self.store_key_prefix.clone();
+        if !self.store_key_prefix.is_empty() {
+            opts.store_key_prefix = self.store_key_prefix.clone()
+        }
 
         // Disable dashboard in metasrv.
         opts.http.disable_dashboard = true;

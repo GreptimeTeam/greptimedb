@@ -35,14 +35,14 @@ pub struct EtcdElection {
     is_leader: AtomicBool,
     infancy: AtomicBool,
     leader_watcher: broadcast::Sender<LeaderChangeMessage>,
-    store_key_prefix: Option<String>,
+    store_key_prefix: String,
 }
 
 impl EtcdElection {
     pub async fn with_endpoints<E, S>(
         leader_value: E,
         endpoints: S,
-        store_key_prefix: Option<String>,
+        store_key_prefix: String,
     ) -> Result<ElectionRef>
     where
         E: AsRef<str>,
@@ -58,7 +58,7 @@ impl EtcdElection {
     pub async fn with_etcd_client<E>(
         leader_value: E,
         client: Client,
-        store_key_prefix: Option<String>,
+        store_key_prefix: String,
     ) -> Result<ElectionRef>
     where
         E: AsRef<str>,
@@ -105,9 +105,10 @@ impl EtcdElection {
     }
 
     fn election_key(&self) -> String {
-        match &self.store_key_prefix {
-            Some(prefix) => format!("{}{}", prefix, ELECTION_KEY),
-            None => ELECTION_KEY.to_string(),
+        if self.store_key_prefix.is_empty() {
+            ELECTION_KEY.to_string()
+        } else {
+            format!("{}{}", self.store_key_prefix, ELECTION_KEY)
         }
     }
 }

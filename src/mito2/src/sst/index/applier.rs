@@ -25,9 +25,9 @@ use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use snafu::ResultExt;
 
-use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::error::{OpenDalSnafu, Result};
 use crate::sst::file::FileId;
+use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
 #[derive(Clone)]
@@ -65,7 +65,7 @@ impl SstIndexApplier {
         let blob_meta = file_meta
             .blobs
             .iter()
-            .find(|blob| blob.blob_type == INDEX_BLOB_TYPE.to_string())
+            .find(|blob| blob.blob_type == INDEX_BLOB_TYPE)
             .unwrap();
 
         let blob_reader = puffin_reader.blob_reader(blob_meta).unwrap();

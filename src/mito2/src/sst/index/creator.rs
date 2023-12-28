@@ -139,9 +139,9 @@ impl SstIndexCreator {
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
             }
 
-            let v = value.is_some().then(|| self.value_buf.as_slice());
+            let v = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
-                .push_with_name_n(&column_name, v, n)
+                .push_with_name_n(column_name, v, n)
                 .await
                 .context(PushIndexValueSnafu)?;
         }
@@ -238,7 +238,7 @@ impl ExternalTempFileProvider for TempFileProvider {
 impl TempFileProvider {
     async fn cleanup(&self) -> Result<()> {
         self.object_store
-            .remove_all(&self.location.root_dir())
+            .remove_all(self.location.root_dir())
             .await
             .context(OpenDalSnafu)
     }

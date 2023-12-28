@@ -14,8 +14,8 @@
 
 mod between;
 mod comparison;
+mod eq_list;
 mod in_list;
-mod or_eq_list;
 mod regex_match;
 
 use std::collections::HashMap;
@@ -69,13 +69,12 @@ impl<'a> SstIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        let predicates = self.output.into_iter().collect::<Vec<_>>();
-        let applier =
-            PredicatesIndexApplier::try_from(predicates).context(BuildIndexApplierSnafu)?;
+        let predicates = self.output.into_iter().collect();
+        let applier = PredicatesIndexApplier::try_from(predicates);
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
             self.object_store,
-            Arc::new(applier),
+            Arc::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }
 
@@ -83,35 +82,19 @@ impl<'a> SstIndexApplierBuilder<'a> {
         match expr {
             DfExpr::Between(between) => self.collect_between(between),
             DfExpr::InList(in_list) => self.collect_inlist(in_list),
-
-            DfExpr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::And,
-                right,
-            }) => {
-                self.traverse_and_collect(left)?;
-                self.traverse_and_collect(right)
-            }
-
-            DfExpr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::Or,
-                right,
-            }) => self.collect_or_eq_list(left, right),
-
-            DfExpr::BinaryExpr(BinaryExpr {
-                left,
-                op: Operator::RegexMatch,
-                right,
-            }) => self.collect_regex_match(left, right),
-
-            DfExpr::BinaryExpr(
-                b @ BinaryExpr {
-                    left,
-                    op: Operator::Eq | Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq,
-                    right,
-                },
-            ) => self.collect_comparison_expr(left, &b.op, right),
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+                Operator::And => {
+                    self.traverse_and_collect(left)?;
+                    self.traverse_and_collect(right)
+                }
+                Operator::Or => self.collect_or_eq_list(left, right),
+                Operator::Eq => self.collect_eq(left, right),
+                Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => {
+                    self.collect_comparison_expr(left, op, right)
+                }
+                Operator::RegexMatch => self.collect_regex_match(left, right),
+                _ => Ok(()),
+            },
 
             // TODO(zhongzc): support more expressions, e.g. IsNull, IsNotNull, ...
             _ => Ok(()),
@@ -137,7 +120,21 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
         Ok(column
             .is_tag()
-            .then_some(column.column_schema.data_type.clone()))
+            .then(|| column.column_schema.data_type.clone()))
+    }
+
+    fn lit_not_null(expr: &DfExpr) -> Option<&ScalarValue> {
+        match expr {
+            DfExpr::Literal(lit) if !lit.is_null() => Some(lit),
+            _ => None,
+        }
+    }
+
+    fn column_name(expr: &DfExpr) -> Option<&str> {
+        match expr {
+            DfExpr::Column(column) => Some(&column.name),
+            _ => None,
+        }
     }
 
     fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Vec<u8>> {

@@ -12,12 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::iter;
-
 use datafusion_expr::{Expr as DfExpr, Operator};
-use index::inverted_index::search::predicate::{
-    Bound, InListPredicate, Predicate, Range, RangePredicate,
-};
+use index::inverted_index::search::predicate::{Bound, Predicate, Range, RangePredicate};
 use index::inverted_index::Bytes;
 
 use crate::error::Result;
@@ -31,7 +27,6 @@ impl<'a> SstIndexApplierBuilder<'a> {
         right: &DfExpr,
     ) -> Result<()> {
         match op {
-            Operator::Eq => self.collect_eq(left, right),
             Operator::Lt => {
                 if matches!(right, DfExpr::Column(_)) {
                     self.collect_gt(right, left)
@@ -62,30 +57,6 @@ impl<'a> SstIndexApplierBuilder<'a> {
             }
             _ => Ok(()),
         }
-    }
-
-    /// ```sql
-    /// column_name <> literal
-    /// # or
-    /// literal <> column_name
-    /// ```
-    fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        let (column, lit) = match (left, right) {
-            (DfExpr::Column(c), DfExpr::Literal(lit)) if !lit.is_null() => (c, lit),
-            (DfExpr::Literal(lit), DfExpr::Column(c)) if !lit.is_null() => (c, lit),
-            _ => return Ok(()),
-        };
-
-        let Some(data_type) = self.tag_column_type(&column.name)? else {
-            return Ok(());
-        };
-        let bytes = Self::encode_lit(lit, data_type)?;
-
-        let predicate = Predicate::InList(InListPredicate {
-            list: iter::once(bytes).collect(),
-        });
-        self.add_predicate(&column.name, predicate);
-        Ok(())
     }
 
     /// ```sql
@@ -142,27 +113,25 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
     fn collect_cmp(
         &mut self,
-        left: &DfExpr,
-        right: &DfExpr,
-        range: impl FnOnce(Bytes) -> Range,
+        column: &DfExpr,
+        literal: &DfExpr,
+        range_builder: impl FnOnce(Bytes) -> Range,
     ) -> Result<()> {
-        let DfExpr::Column(c) = left else {
+        let Some(column_name) = Self::column_name(column) else {
             return Ok(());
         };
-        let lit = match right {
-            DfExpr::Literal(lit) if !lit.is_null() => lit,
-            _ => return Ok(()),
-        };
-
-        let Some(data_type) = self.tag_column_type(&c.name)? else {
+        let Some(lit) = Self::lit_not_null(literal) else {
             return Ok(());
         };
-        let bytes = Self::encode_lit(lit, data_type)?;
+        let Some(data_type) = self.tag_column_type(column_name)? else {
+            return Ok(());
+        };
 
         let predicate = Predicate::Range(RangePredicate {
-            range: range(bytes),
+            range: range_builder(Self::encode_lit(lit, data_type)?),
         });
-        self.add_predicate(&c.name, predicate);
+
+        self.add_predicate(column_name, predicate);
         Ok(())
     }
 }

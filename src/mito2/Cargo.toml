@@ -50,6 +50,7 @@ parquet = { workspace = true, features = ["async"] }
 paste.workspace = true
 prometheus.workspace = true
 prost.workspace = true
+puffin.workspace = true
 regex = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true
@@ -63,7 +64,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-puffin.workspace = true
 
 [dev-dependencies]
 common-procedure-test.workspace = true

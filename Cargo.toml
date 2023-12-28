@@ -170,7 +170,6 @@ datatypes = { path = "src/datatypes" }
 file-engine = { path = "src/file-engine" }
 frontend = { path = "src/frontend" }
 index = { path = "src/index" }
-puffin = { path = "src/puffin" }
 log-store = { path = "src/log-store" }
 meta-client = { path = "src/meta-client" }
 meta-srv = { path = "src/meta-srv" }
@@ -181,6 +180,7 @@ operator = { path = "src/operator" }
 partition = { path = "src/partition" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
+puffin = { path = "src/puffin" }
 query = { path = "src/query" }
 script = { path = "src/script" }
 servers = { path = "src/servers" }

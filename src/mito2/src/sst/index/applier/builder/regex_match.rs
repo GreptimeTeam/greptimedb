@@ -20,16 +20,14 @@ use crate::error::Result;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 
 impl<'a> SstIndexApplierBuilder<'a> {
-    /// ```sql
-    /// column_name REGEXP literal
-    /// ```
-    pub(crate) fn collect_regex_match(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        let (column, pattern) = match (left, right) {
-            (DfExpr::Column(c), DfExpr::Literal(ScalarValue::Utf8(Some(pattern)))) => (c, pattern),
-            _ => return Ok(()),
+    pub(crate) fn collect_regex_match(&mut self, column: &DfExpr, pattern: &DfExpr) -> Result<()> {
+        let Some(column_name) = Self::column_name(column) else {
+            return Ok(());
         };
-
-        let Some(data_type) = self.tag_column_type(&column.name)? else {
+        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = pattern else {
+            return Ok(());
+        };
+        let Some(data_type) = self.tag_column_type(column_name)? else {
             return Ok(());
         };
         if !data_type.is_string() {
@@ -39,7 +37,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let predicate = Predicate::RegexMatch(RegexMatchPredicate {
             pattern: pattern.clone(),
         });
-        self.add_predicate(&column.name, predicate);
+        self.add_predicate(column_name, predicate);
         Ok(())
     }
 }

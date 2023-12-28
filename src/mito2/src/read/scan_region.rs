@@ -14,7 +14,6 @@
 
 //! Scans a region according to the scan request.
 
-
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, logging};
 use common_time::range::TimestampRange;

@@ -32,6 +32,12 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Another migration procedure is running for region: {}", region_id))]
+    MigrationRunning {
+        location: Location,
+        region_id: RegionId,
+    },
+
     #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
     MigrationAbort { location: Location, reason: String },
 
@@ -675,7 +681,8 @@ impl ErrorExt for Error {
             | Error::TableIdChanged { .. }
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
-            | Error::MigrationAbort { .. } => StatusCode::Unexpected,
+            | Error::MigrationAbort { .. }
+            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),

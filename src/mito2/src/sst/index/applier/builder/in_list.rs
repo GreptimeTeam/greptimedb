@@ -15,7 +15,6 @@
 use std::collections::HashSet;
 
 use datafusion_expr::expr::InList;
-use datafusion_expr::Expr as DfExpr;
 use index::inverted_index::search::predicate::{InListPredicate, Predicate};
 
 use crate::error::Result;
@@ -29,29 +28,27 @@ impl<'a> SstIndexApplierBuilder<'a> {
         if inlist.negated {
             return Ok(());
         }
-
-        let DfExpr::Column(c) = inlist.expr.as_ref() else {
+        let Some(column_name) = Self::column_name(&inlist.expr) else {
+            return Ok(());
+        };
+        let Some(data_type) = self.tag_column_type(column_name)? else {
             return Ok(());
         };
 
         let mut predicate = InListPredicate {
             list: HashSet::with_capacity(inlist.list.len()),
         };
-
-        let Some(data_type) = self.tag_column_type(&c.name)? else {
-            return Ok(());
-        };
         for lit in &inlist.list {
-            let lit = match lit {
-                DfExpr::Literal(lit) if !lit.is_null() => lit,
-                _ => return Ok(()),
+            let Some(lit) = Self::lit_not_null(lit) else {
+                return Ok(());
             };
 
-            let bytes = Self::encode_lit(lit, data_type.clone())?;
-            predicate.list.insert(bytes);
+            predicate
+                .list
+                .insert(Self::encode_lit(lit, data_type.clone())?);
         }
 
-        self.add_predicate(&c.name, Predicate::InList(predicate));
+        self.add_predicate(column_name, Predicate::InList(predicate));
         Ok(())
     }
 }
