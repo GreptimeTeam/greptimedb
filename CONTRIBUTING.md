@@ -10,7 +10,7 @@ Follow our [README](https://github.com/GreptimeTeam/greptimedb#readme) to get th
 
 It can feel intimidating to contribute to a complex project, but it can also be exciting and fun. These general notes will help everyone participate in this communal activity.
 
-- Follow the [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/develop/CODE_OF_CONDUCT.md)
+- Follow the [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/main/CODE_OF_CONDUCT.md)
 - Small changes make huge differences. We will happily accept a PR making a single character change if it helps move forward. Don't wait to have everything working.
 - Check the closed issues before opening your issue.
 - Try to follow the existing style of the code.
@@ -26,7 +26,7 @@ Pull requests are great, but we accept all kinds of other help if you like. Such
 
 ## Code of Conduct
 
-Also, there are things that we are not looking for because they don't match the goals of the product or benefit the community. Please read [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/develop/CODE_OF_CONDUCT.md); we hope everyone can keep good manners and become an honored member.
+Also, there are things that we are not looking for because they don't match the goals of the product or benefit the community. Please read [Code of Conduct](https://github.com/GreptimeTeam/greptimedb/blob/main/CODE_OF_CONDUCT.md); we hope everyone can keep good manners and become an honored member.
 
 ## License
 
