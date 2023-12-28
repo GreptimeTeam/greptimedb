@@ -79,7 +79,7 @@ tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) and ignoring(g, job)
 -- 	http_requests{group="production", instance="0", job="app-server"} 500
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="production"};
 
 -- # On overlap the rhs samples must be dropped.
@@ -90,7 +90,7 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="produc
 -- 	{group="canary", instance="1", job="app-server"} 801
 -- 	http_requests{group="production", instance="1", job="api-server"} 200
 -- 	http_requests{group="production", instance="1", job="app-server"} 600
--- NOT SUPPORTED: `or`
+-- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') (http_requests{g="canary"} + 1) or http_requests{instance="1"};
 
 
@@ -173,3 +173,35 @@ drop table http_requests;
 drop table cpu_count;
 
 drop table vector_matching_a;
+
+-- the following cases are not from Prometheus.
+
+create table t1 (ts timestamp time index, job string primary key, val double);
+
+insert into t1 values (0, "a", 1.0), (500000, "b", 2.0), (1000000, "a", 3.0), (1500000, "c", 4.0);
+
+create table t2 (ts timestamp time index, val double);
+
+insert into t2 values (0, 0), (300000, 0), (600000, 0), (900000, 0), (1200000, 0), (1500000, 0), (1800000, 0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or t2;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or on () t2;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t1 or on (job) t2;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or t1;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or on () t1;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 2000, '400') t2 or on(job) t1;
+
+drop table t1;
+
+drop table t2;
