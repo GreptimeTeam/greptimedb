@@ -44,6 +44,12 @@ drop schema my_db;
 
 use information_schema;
 
+-- schemata --
+
+desc table schemata;
+
+select * from schemata where catalog_name = 'greptime' and schema_name != 'public' order by catalog_name, schema_name;
+
 -- test engines
 select * from engines;
 
