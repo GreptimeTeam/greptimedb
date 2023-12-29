@@ -23,6 +23,8 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 
 use crate::error::{OpenDalSnafu, Result};
+use crate::metrics::{INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL};
+use crate::sst::index::io_stats::{InstrumentedAsyncRead, InstrumentedAsyncWrite};
 use crate::sst::location::IntermediateLocation;
 
 pub(crate) struct TempFileProvider {
@@ -45,6 +47,7 @@ impl ExternalTempFileProvider for TempFileProvider {
             .context(OpenDalSnafu)
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
+        let writer = InstrumentedAsyncWrite::new(writer, &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL);
         Ok(Box::new(writer))
     }
 
@@ -75,6 +78,7 @@ impl ExternalTempFileProvider for TempFileProvider {
                 .context(OpenDalSnafu)
                 .map_err(BoxedError::new)
                 .context(index_error::ExternalSnafu)?;
+            let reader = InstrumentedAsyncRead::new(reader, &INDEX_INTERMEDIATE_READ_BYTES_TOTAL);
             readers.push(Box::new(reader) as _);
         }
 

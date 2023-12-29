@@ -31,6 +31,9 @@ pub struct IntersectionFstApplier {
 
     /// A list of `Dfa` compiled from regular expression patterns.
     dfas: Vec<DFA<Vec<u32>>>,
+
+    /// The memory usage of the `IntersectionFstApplier`.
+    memory_usage: usize,
 }
 
 impl FstApplier for IntersectionFstApplier {
@@ -68,6 +71,10 @@ impl FstApplier for IntersectionFstApplier {
         }
         values
     }
+
+    fn memory_usage(&self) -> usize {
+        self.memory_usage
+    }
 }
 
 impl IntersectionFstApplier {
@@ -82,12 +89,17 @@ impl IntersectionFstApplier {
         let mut dfas = Vec::with_capacity(predicates.len());
         let mut ranges = Vec::with_capacity(predicates.len());
 
+        let mut memory_usage = 0;
         for predicate in predicates {
             match predicate {
-                Predicate::Range(range) => ranges.push(range.range),
+                Predicate::Range(range) => {
+                    memory_usage += Self::range_memory_usage(&range.range);
+                    ranges.push(range.range)
+                }
                 Predicate::RegexMatch(regex) => {
                     let dfa = DFA::new(&regex.pattern);
                     let dfa = dfa.map_err(Box::new).context(ParseDFASnafu)?;
+                    memory_usage += dfa.memory_usage();
                     dfas.push(dfa);
                 }
                 // Rejection of `InList` predicates is enforced here.
@@ -97,7 +109,25 @@ impl IntersectionFstApplier {
             }
         }
 
-        Ok(Self { dfas, ranges })
+        Ok(Self {
+            dfas,
+            ranges,
+            memory_usage,
+        })
+    }
+
+    fn range_memory_usage(range: &Range) -> usize {
+        let mut memory_usage = std::mem::size_of::<Range>();
+
+        if let Some(lower) = &range.lower {
+            memory_usage += lower.value.len();
+        }
+
+        if let Some(upper) = &range.upper {
+            memory_usage += upper.value.len();
+        }
+
+        memory_usage
     }
 }
 

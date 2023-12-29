@@ -21,6 +21,8 @@ pub const STAGE_LABEL: &str = "stage";
 pub const TYPE_LABEL: &str = "type";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
+/// File type label.
+pub const FILE_TYPE_LABEL: &str = "file_type";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -152,6 +154,12 @@ lazy_static! {
         "index apply cost time",
     )
     .unwrap();
+    /// Gauge of index apply memory usage.
+    pub static ref INDEX_APPLY_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "index_apply_memory_usage",
+        "index apply memory usage",
+    )
+    .unwrap();
     /// Timer of index creation.
     pub static ref INDEX_CREATE_COST_TIME: HistogramVec = register_histogram_vec!(
         "index_create_cost_time",
@@ -161,16 +169,26 @@ lazy_static! {
     .unwrap();
     /// Counter of rows indexed.
     pub static ref INDEX_CREATE_ROWS_TOTAL: IntCounter = register_int_counter!(
-        "index_rows_total",
-        "index rows total",
+        "index_create_rows_total",
+        "index create rows total",
     )
     .unwrap();
     /// Counter of created index bytes.
     pub static ref INDEX_CREATE_BYTES_TOTAL: IntCounter = register_int_counter!(
-        "index_bytes_total",
-        "index bytes total",
+        "index_create_bytes_total",
+        "index create bytes total",
     )
     .unwrap();
-
+    /// Counter of r/w bytes on index related IO operations.
+    pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "index_io_bytes_total",
+        "index io bytes total",
+        &[TYPE_LABEL, FILE_TYPE_LABEL]
+    )
+    .unwrap();
+    pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "intermediate"]);
+    pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "intermediate"]);
+    pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "puffin"]);
+    pub static ref INDEX_PUFFIN_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "puffin"]);
     // ------- End of index metrics.
 }

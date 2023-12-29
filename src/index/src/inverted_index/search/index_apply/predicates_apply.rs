@@ -82,6 +82,14 @@ impl IndexApplier for PredicatesIndexApplier {
 
         Ok(bitmap.iter_ones().collect())
     }
+
+    /// Returns the memory usage of the applier.
+    fn memory_usage(&self) -> usize {
+        self.fst_appliers
+            .iter()
+            .map(|(n, fst_applier)| n.as_bytes().len() + fst_applier.memory_usage())
+            .sum()
+    }
 }
 
 impl PredicatesIndexApplier {

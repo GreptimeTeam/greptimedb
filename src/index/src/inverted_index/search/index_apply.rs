@@ -35,6 +35,9 @@ pub trait IndexApplier: Send + Sync {
         context: SearchContext,
         reader: &mut dyn InvertedIndexReader,
     ) -> Result<BTreeSet<usize>>;
+
+    /// Returns the memory usage of the applier.
+    fn memory_usage(&self) -> usize;
 }
 
 /// A context for searching the inverted index.

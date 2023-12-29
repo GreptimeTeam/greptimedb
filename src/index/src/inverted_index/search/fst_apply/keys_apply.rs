@@ -29,11 +29,18 @@ use crate::inverted_index::{Bytes, FstMap};
 pub struct KeysFstApplier {
     /// A list of keys to be fetched directly from the FstMap.
     keys: Vec<Bytes>,
+
+    /// The memory usage of the applier.
+    memory_usage: usize,
 }
 
 impl FstApplier for KeysFstApplier {
     fn apply(&self, fst: &FstMap) -> Vec<u64> {
         self.keys.iter().filter_map(|k| fst.get(k)).collect()
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.memory_usage
     }
 }
 
@@ -56,6 +63,7 @@ impl KeysFstApplier {
         let regex_matched_keys = Self::filter_by_regexes(range_matched_keys, regexes)?;
 
         Ok(Self {
+            memory_usage: regex_matched_keys.iter().map(|k| k.len()).sum(),
             keys: regex_matched_keys,
         })
     }
@@ -192,6 +200,7 @@ mod tests {
         let test_fst = create_fst_map(&[(b"foo", 1), (b"bar", 2), (b"baz", 3)]);
         let applier = KeysFstApplier {
             keys: vec![b("foo"), b("baz")],
+            memory_usage: 6,
         };
 
         let results = applier.apply(&test_fst);
@@ -201,7 +210,10 @@ mod tests {
     #[test]
     fn test_keys_fst_applier_with_empty_keys() {
         let test_fst = create_fst_map(&[(b"foo", 1), (b"bar", 2), (b"baz", 3)]);
-        let applier = KeysFstApplier { keys: vec![] };
+        let applier = KeysFstApplier {
+            keys: vec![],
+            memory_usage: 0,
+        };
 
         let results = applier.apply(&test_fst);
         assert!(results.is_empty());
@@ -212,6 +224,7 @@ mod tests {
         let test_fst = create_fst_map(&[(b"foo", 1), (b"bar", 2), (b"baz", 3)]);
         let applier = KeysFstApplier {
             keys: vec![b("qux"), b("quux")],
+            memory_usage: 7,
         };
 
         let results = applier.apply(&test_fst);

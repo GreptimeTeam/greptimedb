@@ -31,7 +31,9 @@ use store_api::metadata::RegionMetadataRef;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use super::io_stats::InstrumentedAsyncWrite;
 use crate::error::{OpenDalSnafu, PushIndexValueSnafu, Result};
+use crate::metrics::INDEX_PUFFIN_WRITE_BYTES_TOTAL;
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
@@ -154,12 +156,13 @@ impl SstIndexCreator {
         let mut guard = self.stats.record_finish();
 
         let file_path = location::index_file_path(&self.region_dir, &self.sst_file_id);
-        let writer = self
+        let file_writer = self
             .object_store
             .writer(&file_path)
             .await
             .context(OpenDalSnafu)?;
-        let mut puffin_writer = PuffinFileWriter::new(writer);
+        let file_writer = InstrumentedAsyncWrite::new(file_writer, &INDEX_PUFFIN_WRITE_BYTES_TOTAL);
+        let mut puffin_writer = PuffinFileWriter::new(file_writer);
 
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
