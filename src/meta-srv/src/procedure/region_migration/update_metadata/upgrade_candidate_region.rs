@@ -477,7 +477,7 @@ mod tests {
             .into_inner();
         let region_routes = table_route
             .region_routes()
-            .expect("expected physical table route");
+            .unwrap();
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());
