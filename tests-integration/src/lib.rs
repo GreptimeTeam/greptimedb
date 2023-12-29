@@ -20,7 +20,6 @@ mod opentsdb;
 mod otlp;
 mod prom_store;
 pub mod test_util;
-pub mod wal_util;
 
 mod standalone;
 #[cfg(test)]

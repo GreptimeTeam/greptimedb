@@ -14,7 +14,7 @@
 
 use testcontainers::core::{ContainerState, ExecCommand, WaitFor};
 
-use crate::wal_util::kafka::config::{
+use crate::wal::kafka::config::{
     Config, KAFKA_ADVERTISED_LISTENER_PORT, KAFKA_LISTENER_PORT, ZOOKEEPER_PORT,
 };
 
@@ -103,15 +103,14 @@ impl testcontainers::Image for Image {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-    use rskafka::chrono::Utc;
+    use rskafka::chrono::{TimeZone, Utc};
     use rskafka::client::partition::UnknownTopicHandling;
     use rskafka::client::ClientBuilder;
     use rskafka::record::Record;
     use testcontainers::clients::Cli as DockerCli;
 
-    use crate::wal_util::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT;
-    use crate::wal_util::kafka::image::Image;
+    use crate::wal::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT;
+    use crate::wal::kafka::image::Image;
 
     #[tokio::test]
     async fn test_image() {

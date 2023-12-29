@@ -1983,11 +1983,12 @@ dependencies = [
 name = "common-test-util"
 version = "0.5.0"
 dependencies = [
- "log-store",
  "once_cell",
  "rand",
- "store-api",
+ "rskafka",
  "tempfile",
+ "testcontainers",
+ "tokio",
 ]
 
 [[package]]
@@ -4542,6 +4543,7 @@ dependencies = [
  "async-trait",
  "byteorder",
  "bytes",
+ "chrono",
  "common-base",
  "common-config",
  "common-error",
@@ -4550,7 +4552,6 @@ dependencies = [
  "common-runtime",
  "common-telemetry",
  "common-test-util",
- "dashmap",
  "futures",
  "futures-util",
  "protobuf",

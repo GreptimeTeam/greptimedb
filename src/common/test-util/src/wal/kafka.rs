@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod entry_builder;
+pub mod config;
+pub mod image;
 
-pub use crate::wal::kafka::entry_builder::EntryBuilder;
+pub const BROKER_ENDPOINTS_KEY: &str = "GT_KAFKA_ENDPOINTS";

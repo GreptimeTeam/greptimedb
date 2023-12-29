@@ -12,9 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod kafka;
+pub mod entry_builder;
+pub mod topic_builder;
 
-pub use testcontainers::clients::Cli as DockerCli;
+use common_config::wal::KafkaWalTopic as Topic;
 
-pub use crate::wal_util::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT as DEFAULT_EXPOSED_PORT;
-pub use crate::wal_util::kafka::image::Image as KafkaImage;
+pub use crate::test_util::kafka::entry_builder::EntryBuilder;
+pub use crate::test_util::kafka::topic_builder::TopicBuilder;
+
+/// Creates `num_topiocs` number of topics with the given TopicBuilder.
+/// Requests for creating these topics on the Kafka cluster if the `broker_endpoints` is not empty.
+pub fn create_topics(num_topics: usize, builder: TopicBuilder, broker_endpoints: Vec<String>) -> Vec<Topic> {
+    
+}

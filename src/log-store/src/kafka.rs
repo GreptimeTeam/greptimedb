@@ -77,7 +77,7 @@ impl Display for EntryImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Entry (ns: {}, id: {}, data_len: {})",
+            "Entry [ns: {}, id: {}, data_len: {}]",
             self.ns,
             self.id,
             self.data.len()

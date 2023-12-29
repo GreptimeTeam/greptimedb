@@ -15,11 +15,12 @@
 use std::sync::atomic::{AtomicU64 as AtomicEntryId, Ordering};
 use std::sync::Mutex;
 
-use log_store::kafka::{EntryImpl, NamespaceImpl};
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
 use store_api::logstore::EntryId;
+
+use crate::kafka::{EntryImpl, NamespaceImpl};
 
 const DEFAULT_DATA: &[u8; 10] = b"[greptime]";
 
@@ -108,3 +109,5 @@ impl EntryBuilder {
             .collect()
     }
 }
+
+// TODO(niebayes): add tests for EntryBuilder.
