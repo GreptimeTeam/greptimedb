@@ -150,9 +150,7 @@ impl TableMetadataAllocator {
         task: &CreateTableTask,
     ) -> Result<TableMetadata> {
         let table_id = self.allocate_table_id(task).await?;
-
         let table_route = self.create_table_route(ctx, table_id, task).await?;
-
         let region_wal_options = self.create_wal_options(&table_route)?;
 
         debug!(
