@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::Peer;
 use common_meta::key::TableMetadataManager;
+use common_meta::peer::Peer;
 use common_meta::rpc::router::find_leaders;
 use common_telemetry::{debug, info};
 use parking_lot::RwLock;

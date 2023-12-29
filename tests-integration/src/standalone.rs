@@ -19,6 +19,7 @@ use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::KvBackendConfig;
 use common_meta::cache_invalidator::DummyCacheInvalidator;
+use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -30,7 +31,6 @@ use datanode::config::DatanodeOptions;
 use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
@@ -123,10 +123,8 @@ impl GreptimeDbStandaloneBuilder {
             wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
-            table_id_sequence,
-            wal_options_allocator.clone(),
-        ));
+        let table_meta_allocator =
+            TableMetadataAllocator::new(table_id_sequence, wal_options_allocator.clone());
 
         let ddl_task_executor = Arc::new(
             DdlManager::try_new(

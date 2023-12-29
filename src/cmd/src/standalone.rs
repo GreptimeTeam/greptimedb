@@ -22,7 +22,8 @@ use common_config::wal::StandaloneWalConfig;
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
+use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -38,7 +39,6 @@ use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
@@ -406,10 +406,8 @@ impl StartCommand {
             opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
-            table_id_sequence,
-            wal_options_allocator.clone(),
-        ));
+        let table_meta_allocator =
+            TableMetadataAllocator::new(table_id_sequence, wal_options_allocator.clone());
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
@@ -446,7 +444,7 @@ impl StartCommand {
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
+        table_meta_allocator: TableMetadataAllocator,
     ) -> Result<DdlTaskExecutorRef> {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;
