@@ -101,12 +101,10 @@ impl LogStore for KafkaLogStore {
         }
 
         // Builds a record from entries belong to a region and produces them to kafka server.
-        let region_ids = producers.keys().cloned().collect::<Vec<_>>();
-
-        let tasks = producers
-            .into_values()
-            .map(|producer| producer.produce(&self.client_manager))
-            .collect::<Vec<_>>();
+        let (region_ids, tasks): (Vec<_>, Vec<_>) = producers
+            .into_iter()
+            .map(|(id, producer)| (id, producer.produce(&self.client_manager)))
+            .unzip();
         // Each produce operation returns a kafka offset of the produced record.
         // The offsets are then converted to entry ids.
         let entry_ids = futures::future::try_join_all(tasks)
@@ -114,11 +112,19 @@ impl LogStore for KafkaLogStore {
             .into_iter()
             .map(TryInto::try_into)
             .collect::<Result<Vec<_>>>()?;
-        debug!("The entries are appended at offsets {:?}", entry_ids);
+        let last_entry_ids = region_ids
+            .into_iter()
+            .zip(entry_ids)
+            .collect::<HashMap<_, _>>();
 
-        Ok(AppendBatchResponse {
-            last_entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
-        })
+        #[cfg(debug)]
+        {
+            for (region_id, offset) in last_entry_ids.iter() {
+                debug!("Entries for region {region_id} are appended at the start offset {offset}");
+            }
+        }
+
+        Ok(AppendBatchResponse { last_entry_ids })
     }
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
@@ -186,7 +192,7 @@ impl LogStore for KafkaLogStore {
                     record_offset, ns_clone, high_watermark
                 );
 
-                // Ignores the noop record.
+                // Ignores noop records.
                 if record.record.value.is_none() {
                     continue;
                 }

@@ -12,17 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
-use dashmap::mapref::entry::Entry as DashMapEntry;
-use dashmap::DashMap;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 
@@ -67,7 +68,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: DashMap<Topic, Client>,
+    client_pool: TokioMutex<HashMap<Topic, Client>>,
 }
 
 impl ClientManager {
@@ -91,20 +92,18 @@ impl ClientManager {
         Ok(Self {
             config: config.clone(),
             client_factory: client,
-            client_pool: DashMap::new(),
+            client_pool: TokioMutex::new(HashMap::new()),
         })
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
-        match self.client_pool.entry(topic.to_string()) {
-            DashMapEntry::Occupied(entry) => Ok(entry.get().clone()),
-            DashMapEntry::Vacant(entry) => {
-                let topic_client = self.try_create_client(topic).await?;
-                Ok(entry.insert(topic_client).clone())
-            }
+        let mut client_pool = self.client_pool.lock().await;
+        if let Entry::Vacant(entry) = client_pool.entry(topic.to_string()) {
+            entry.insert(self.try_create_client(topic).await?);
         }
+        Ok(client_pool[topic].clone())
     }
 
     async fn try_create_client(&self, topic: &Topic) -> Result<Client> {
