@@ -26,6 +26,7 @@ use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use snafu::ResultExt;
 
 use crate::error::{OpenDalSnafu, Result};
+use crate::metrics::INDEX_APPLY_COST_TIME;
 use crate::sst::file::FileId;
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
@@ -52,6 +53,8 @@ impl SstIndexApplier {
     }
 
     pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
+        let _timer = INDEX_APPLY_COST_TIME.start_timer();
+
         let file_path = location::index_file_path(&self.region_dir, &file_id);
 
         let file_reader = self

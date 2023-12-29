@@ -143,4 +143,34 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    // ------- End of cache metrics.
+
+    // Index metrics.
+    /// Timer of index application.
+    pub static ref INDEX_APPLY_COST_TIME: Histogram = register_histogram!(
+        "index_apply_cost_time",
+        "index apply cost time",
+    )
+    .unwrap();
+    /// Timer of index creation.
+    pub static ref INDEX_CREATE_COST_TIME: HistogramVec = register_histogram_vec!(
+        "index_create_cost_time",
+        "index create cost time",
+        &[STAGE_LABEL]
+    )
+    .unwrap();
+    /// Counter of rows indexed.
+    pub static ref INDEX_CREATE_ROWS_TOTAL: IntCounter = register_int_counter!(
+        "index_rows_total",
+        "index rows total",
+    )
+    .unwrap();
+    /// Counter of created index bytes.
+    pub static ref INDEX_CREATE_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "index_bytes_total",
+        "index bytes total",
+    )
+    .unwrap();
+
+    // ------- End of index metrics.
 }
