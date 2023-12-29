@@ -601,7 +601,7 @@ pub enum Error {
     NotSetWeightArray { location: Location },
 
     #[snafu(display("Unexpected table route type: {}", err_msg))]
-    UnexpectedTableRouteType {
+    UnexpectedLogicalRouteTable {
         location: Location,
         err_msg: String,
         source: common_meta::error::Error,
@@ -721,7 +721,7 @@ impl ErrorExt for Error {
             | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
             | Error::GetFullTableInfo { source, .. }
-            | Error::UnexpectedTableRouteType { source, .. } => source.status_code(),
+            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

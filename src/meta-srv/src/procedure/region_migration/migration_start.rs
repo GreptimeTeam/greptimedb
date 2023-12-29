@@ -85,7 +85,7 @@ impl RegionMigrationStart {
 
         let region_route = table_route
             .region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu {
+            .context(error::UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             })?
             .iter()

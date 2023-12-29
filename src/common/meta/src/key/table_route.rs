@@ -21,7 +21,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use super::{DeserializedValueWithBytes, TableMetaValue};
-use crate::error::{Result, SerdeJsonSnafu, UnexpectedTableRouteTypeSnafu};
+use crate::error::{Result, SerdeJsonSnafu, UnexpectedLogicalRouteTableSnafu};
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
@@ -68,7 +68,7 @@ impl TableRouteValue {
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Result<Self> {
         ensure!(
             self.is_physical(),
-            UnexpectedTableRouteTypeSnafu {
+            UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             }
         );
@@ -89,7 +89,7 @@ impl TableRouteValue {
     pub fn version(&self) -> Result<u64> {
         ensure!(
             self.is_physical(),
-            UnexpectedTableRouteTypeSnafu {
+            UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             }
         );
@@ -103,7 +103,7 @@ impl TableRouteValue {
     pub fn region_route(&self, region_id: RegionId) -> Result<Option<RegionRoute>> {
         ensure!(
             self.is_physical(),
-            UnexpectedTableRouteTypeSnafu {
+            UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             }
         );
@@ -127,7 +127,7 @@ impl TableRouteValue {
     pub fn region_routes(&self) -> Result<&Vec<RegionRoute>> {
         ensure!(
             self.is_physical(),
-            UnexpectedTableRouteTypeSnafu {
+            UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             }
         );

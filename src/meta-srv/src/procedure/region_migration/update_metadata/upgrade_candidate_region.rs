@@ -35,7 +35,7 @@ impl UpdateMetadata {
 
         let mut region_routes = table_route_value
             .region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu {
+            .context(error::UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             })?
             .clone();
@@ -88,7 +88,7 @@ impl UpdateMetadata {
 
         let region_routes = table_route_value
             .region_routes()
-            .context(error::UnexpectedTableRouteTypeSnafu {
+            .context(error::UnexpectedLogicalRouteTableSnafu {
                 err_msg: "{self:?} is a non-physical TableRouteValue.",
             })?
             .clone();
