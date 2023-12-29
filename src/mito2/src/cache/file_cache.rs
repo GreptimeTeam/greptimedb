@@ -255,7 +255,7 @@ mod tests {
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = (region_id, file_id);
-        let file_path = cache_file_path(&cache.file_dir, key);
+        let file_path = cache.cache_file_path(key);
 
         // Get an empty file.
         assert!(cache.reader(key).await.is_none());
@@ -301,7 +301,7 @@ mod tests {
         let region_id = RegionId::new(2000, 0);
         let file_id = FileId::random();
         let key = (region_id, file_id);
-        let file_path = cache_file_path(&cache.file_dir, key);
+        let file_path = cache.cache_file_path(key);
 
         // Write a file.
         local_store
@@ -338,7 +338,7 @@ mod tests {
         let file_ids: Vec<_> = (0..10).map(|_| FileId::random()).collect();
         for (i, file_id) in file_ids.iter().enumerate() {
             let key = (region_id, *file_id);
-            let file_path = cache_file_path(&cache.file_dir, key);
+            let file_path = cache.cache_file_path(key);
             let bytes = i.to_string().into_bytes();
             local_store.write(&file_path, bytes.clone()).await.unwrap();
 
