@@ -23,7 +23,7 @@ use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::Mutex;
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 
@@ -68,7 +68,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: TokioMutex<HashMap<Topic, Client>>,
+    client_pool: Mutex<HashMap<Topic, Client>>,
 }
 
 impl ClientManager {
@@ -92,7 +92,7 @@ impl ClientManager {
         Ok(Self {
             config: config.clone(),
             client_factory: client,
-            client_pool: TokioMutex::new(HashMap::new()),
+            client_pool: Mutex::new(HashMap::new()),
         })
     }
 
