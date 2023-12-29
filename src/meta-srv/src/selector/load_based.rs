@@ -147,7 +147,7 @@ async fn get_leader_peer_ids(
                 |route| {
                     let region_routes = route
                         .region_routes()
-                        .context(error::UnexpectedTableRouteTypeSnafu { err_msg: "" })?;
+                        .context(error::UnexpectedLogicalRouteTableSnafu { err_msg: "" })?;
                     Ok(find_leaders(region_routes)
                         .into_iter()
                         .map(|peer| peer.id)
