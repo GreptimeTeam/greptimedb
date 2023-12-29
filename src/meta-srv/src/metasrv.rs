@@ -48,7 +48,6 @@ use crate::error::{
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::handler::HeartbeatHandlerGroup;
 use crate::lock::DistLockRef;
-use crate::peer::NaivePeerRegistry;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::pubsub::{PublishRef, SubscribeManagerRef};
 use crate::selector::{Selector, SelectorType};
@@ -252,7 +251,6 @@ pub struct MetaSrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
-    datanode_peer_registry: NaivePeerRegistry,
 
     plugins: Plugins,
 }
@@ -417,10 +415,6 @@ impl MetaSrv {
 
     pub fn region_migration_manager(&self) -> &RegionMigrationManagerRef {
         &self.region_migration_manager
-    }
-
-    pub fn datanode_peer_registry(&self) -> &NaivePeerRegistry {
-        &self.datanode_peer_registry
     }
 
     pub fn publish(&self) -> Option<PublishRef> {

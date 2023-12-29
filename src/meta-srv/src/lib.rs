@@ -32,7 +32,6 @@ pub mod metasrv;
 mod metrics;
 #[cfg(feature = "mock")]
 pub mod mocks;
-pub mod peer;
 pub mod procedure;
 pub mod pubsub;
 pub mod region;

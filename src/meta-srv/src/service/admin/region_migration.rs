@@ -15,17 +15,18 @@
 use std::collections::HashMap;
 use std::num::ParseIntError;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use common_meta::ClusterId;
+use common_meta::peer::Peer;
+use common_meta::{distributed_time_constants, ClusterId};
 use serde::Serialize;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tonic::codegen::http;
 
 use super::HttpHandler;
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Error, Result};
-use crate::peer::PeerLookup;
+use crate::lease::lookup_alive_datanode_peer;
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask,
 };
@@ -33,7 +34,7 @@ use crate::procedure::region_migration::manager::{
 /// The handler of submitting migration task.
 pub struct SubmitRegionMigrationTaskHandler {
     pub region_migration_manager: RegionMigrationManagerRef,
-    pub peer_lookup: Arc<dyn PeerLookup>,
+    pub meta_peer_client: MetaPeerClientRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,11 +99,33 @@ impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskRequest {
 }
 
 impl SubmitRegionMigrationTaskHandler {
+    fn is_leader(&self) -> bool {
+        self.meta_peer_client.is_leader()
+    }
+
+    /// Checks the peer is available.
+    async fn lookup_peer(&self, cluster_id: ClusterId, peer_id: u64) -> Result<Option<Peer>> {
+        lookup_alive_datanode_peer(
+            cluster_id,
+            peer_id,
+            &self.meta_peer_client,
+            distributed_time_constants::DATANODE_LEASE_SECS,
+        )
+        .await
+    }
+
     /// Submits a region migration task, returns the procedure id.
     async fn handle_submit(
         &self,
         task: SubmitRegionMigrationTaskRequest,
     ) -> Result<SubmitRegionMigrationTaskResponse> {
+        ensure!(
+            self.is_leader(),
+            error::UnexpectedSnafu {
+                violated: "Trying to submit a region migration procedure to non-leader meta server"
+            }
+        );
+
         let SubmitRegionMigrationTaskRequest {
             cluster_id,
             region_id,
@@ -110,19 +133,16 @@ impl SubmitRegionMigrationTaskHandler {
             to_peer_id,
         } = task;
 
-        let from_peer = self.peer_lookup.peer(cluster_id, from_peer_id).context(
+        let from_peer = self.lookup_peer(cluster_id, from_peer_id).await?.context(
             error::PeerUnavailableSnafu {
                 peer_id: from_peer_id,
             },
         )?;
-
-        let to_peer =
-            self.peer_lookup
-                .peer(cluster_id, to_peer_id)
-                .context(error::PeerUnavailableSnafu {
-                    peer_id: to_peer_id,
-                })?;
-
+        let to_peer = self.lookup_peer(cluster_id, to_peer_id).await?.context(
+            error::PeerUnavailableSnafu {
+                peer_id: to_peer_id,
+            },
+        )?;
         let procedure_id = self
             .region_migration_manager
             .submit_procedure(RegionMigrationProcedureTask {

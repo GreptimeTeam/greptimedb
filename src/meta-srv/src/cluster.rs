@@ -79,6 +79,17 @@ impl MetaPeerClient {
         to_stat_kv_map(kvs)
     }
 
+    // Get kv information from the leader's in_mem kv store.
+    pub async fn get(&self, key: Vec<u8>) -> Result<Option<KeyValue>> {
+        let mut kvs = self.range(key, vec![], false).await?;
+        Ok(if kvs.is_empty() {
+            None
+        } else {
+            debug_assert_eq!(kvs.len(), 1);
+            Some(kvs.remove(0))
+        })
+    }
+
     // Range kv information from the leader's in_mem kv store
     pub async fn range(
         &self,
@@ -228,7 +239,7 @@ impl MetaPeerClient {
 
     // Check if the meta node is a leader node.
     // Note: when self.election is None, we also consider the meta node is leader
-    fn is_leader(&self) -> bool {
+    pub(crate) fn is_leader(&self) -> bool {
         self.election
             .as_ref()
             .map(|election| election.is_leader())
