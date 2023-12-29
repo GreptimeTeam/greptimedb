@@ -28,85 +28,89 @@ order by table_schema, table_name;
 
 select * from information_schema.columns order by table_schema, table_name;
 
-+---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+
-| table_catalog | table_schema       | table_name                            | column_name          | data_type | semantic_type |
-+---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+
-| greptime      | information_schema | build_info                            | git_branch           | String    | FIELD         |
-| greptime      | information_schema | build_info                            | git_commit           | String    | FIELD         |
-| greptime      | information_schema | build_info                            | git_commit_short     | String    | FIELD         |
-| greptime      | information_schema | build_info                            | git_dirty            | String    | FIELD         |
-| greptime      | information_schema | build_info                            | pkg_version          | String    | FIELD         |
-| greptime      | information_schema | character_sets                        | maxlen               | Int64     | FIELD         |
-| greptime      | information_schema | character_sets                        | character_set_name   | String    | FIELD         |
-| greptime      | information_schema | character_sets                        | default_collate_name | String    | FIELD         |
-| greptime      | information_schema | character_sets                        | description          | String    | FIELD         |
-| greptime      | information_schema | check_constraints                     | check_clause         | String    | FIELD         |
-| greptime      | information_schema | check_constraints                     | constraint_name      | String    | FIELD         |
-| greptime      | information_schema | check_constraints                     | constraint_schema    | String    | FIELD         |
-| greptime      | information_schema | check_constraints                     | constraint_catalog   | String    | FIELD         |
-| greptime      | information_schema | collation_character_set_applicability | character_set_name   | String    | FIELD         |
-| greptime      | information_schema | collation_character_set_applicability | collation_name       | String    | FIELD         |
-| greptime      | information_schema | collations                            | collation_name       | String    | FIELD         |
-| greptime      | information_schema | collations                            | character_set_name   | String    | FIELD         |
-| greptime      | information_schema | collations                            | id                   | Int64     | FIELD         |
-| greptime      | information_schema | collations                            | is_default           | String    | FIELD         |
-| greptime      | information_schema | collations                            | is_compiled          | String    | FIELD         |
-| greptime      | information_schema | collations                            | sortlen              | Int64     | FIELD         |
-| greptime      | information_schema | column_privileges                     | table_catalog        | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | grantee              | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | privilege_type       | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | is_grantable         | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | column_name          | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | table_name           | String    | FIELD         |
-| greptime      | information_schema | column_privileges                     | table_schema         | String    | FIELD         |
-| greptime      | information_schema | column_statistics                     | schema_name          | String    | FIELD         |
-| greptime      | information_schema | column_statistics                     | table_name           | String    | FIELD         |
-| greptime      | information_schema | column_statistics                     | column_name          | String    | FIELD         |
-| greptime      | information_schema | column_statistics                     | histogram            | String    | FIELD         |
-| greptime      | information_schema | columns                               | table_catalog        | String    | FIELD         |
-| greptime      | information_schema | columns                               | table_schema         | String    | FIELD         |
-| greptime      | information_schema | columns                               | semantic_type        | String    | FIELD         |
-| greptime      | information_schema | columns                               | data_type            | String    | FIELD         |
-| greptime      | information_schema | columns                               | column_name          | String    | FIELD         |
-| greptime      | information_schema | columns                               | table_name           | String    | FIELD         |
-| greptime      | information_schema | engines                               | savepoints           | String    | FIELD         |
-| greptime      | information_schema | engines                               | xa                   | String    | FIELD         |
-| greptime      | information_schema | engines                               | transactions         | String    | FIELD         |
-| greptime      | information_schema | engines                               | comment              | String    | FIELD         |
-| greptime      | information_schema | engines                               | support              | String    | FIELD         |
-| greptime      | information_schema | engines                               | engine               | String    | FIELD         |
-| greptime      | information_schema | events                                | sql_mode             | String    | FIELD         |
-| greptime      | information_schema | events                                | interval_value       | Int64     | FIELD         |
-| greptime      | information_schema | events                                | database_collation   | String    | FIELD         |
-| greptime      | information_schema | events                                | collation_connection | String    | FIELD         |
-| greptime      | information_schema | events                                | character_set_client | String    | FIELD         |
-| greptime      | information_schema | events                                | originator           | Int64     | FIELD         |
-| greptime      | information_schema | events                                | event_catalog        | String    | FIELD         |
-| greptime      | information_schema | events                                | event_schema         | String    | FIELD         |
-| greptime      | information_schema | events                                | event_name           | String    | FIELD         |
-| greptime      | information_schema | events                                | definer              | String    | FIELD         |
-| greptime      | information_schema | events                                | time_zone            | String    | FIELD         |
-| greptime      | information_schema | events                                | event_body           | String    | FIELD         |
-| greptime      | information_schema | events                                | event_definition     | String    | FIELD         |
-| greptime      | information_schema | events                                | event_type           | String    | FIELD         |
-| greptime      | information_schema | events                                | execute_at           | DateTime  | FIELD         |
-| greptime      | information_schema | events                                | event_comment        | String    | FIELD         |
-| greptime      | information_schema | events                                | interval_field       | String    | FIELD         |
-| greptime      | information_schema | events                                | last_executed        | DateTime  | FIELD         |
-| greptime      | information_schema | events                                | starts               | DateTime  | FIELD         |
-| greptime      | information_schema | events                                | ends                 | DateTime  | FIELD         |
-| greptime      | information_schema | events                                | status               | String    | FIELD         |
-| greptime      | information_schema | events                                | on_completion        | String    | FIELD         |
-| greptime      | information_schema | events                                | created              | DateTime  | FIELD         |
-| greptime      | information_schema | events                                | last_altered         | DateTime  | FIELD         |
-| greptime      | information_schema | tables                                | table_catalog        | String    | FIELD         |
-| greptime      | information_schema | tables                                | table_schema         | String    | FIELD         |
-| greptime      | information_schema | tables                                | table_name           | String    | FIELD         |
-| greptime      | information_schema | tables                                | table_type           | String    | FIELD         |
-| greptime      | information_schema | tables                                | table_id             | UInt32    | FIELD         |
-| greptime      | information_schema | tables                                | engine               | String    | FIELD         |
-| greptime      | public             | numbers                               | number               | UInt32    | TAG           |
-+---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+
++---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+----------------+-------------+-------------+----------------+
+| table_catalog | table_schema       | table_name                            | column_name          | data_type | semantic_type | column_default | is_nullable | column_type | column_comment |
++---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+----------------+-------------+-------------+----------------+
+| greptime      | information_schema | build_info                            | pkg_version          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | build_info                            | git_branch           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | build_info                            | git_commit           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | build_info                            | git_commit_short     | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | build_info                            | git_dirty            | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | character_sets                        | description          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | character_sets                        | maxlen               | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | character_sets                        | default_collate_name | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | character_sets                        | character_set_name   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | check_constraints                     | constraint_schema    | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | check_constraints                     | check_clause         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | check_constraints                     | constraint_name      | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | check_constraints                     | constraint_catalog   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collation_character_set_applicability | collation_name       | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collation_character_set_applicability | character_set_name   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collations                            | collation_name       | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collations                            | sortlen              | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | collations                            | is_compiled          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collations                            | is_default           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | collations                            | id                   | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | collations                            | character_set_name   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | is_grantable         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | grantee              | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | table_catalog        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | table_schema         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | table_name           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | column_name          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_privileges                     | privilege_type       | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_statistics                     | table_name           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_statistics                     | schema_name          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_statistics                     | column_name          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | column_statistics                     | histogram            | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | table_catalog        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | column_comment       | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | columns                               | column_type          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | is_nullable          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | column_default       | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | information_schema | columns                               | semantic_type        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | data_type            | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | column_name          | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | table_name           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | columns                               | table_schema         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | transactions         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | support              | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | savepoints           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | xa                   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | engine               | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | engines                               | comment              | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | created              | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | events                                | interval_value       | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | events                                | database_collation   | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | collation_connection | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | character_set_client | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | originator           | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | events                                | event_catalog        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | event_schema         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | event_name           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | definer              | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | time_zone            | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | event_body           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | event_definition     | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | event_type           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | execute_at           | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | events                                | event_comment        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | interval_field       | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | sql_mode             | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | starts               | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | events                                | ends                 | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | events                                | status               | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | on_completion        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | events                                | last_executed        | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | events                                | last_altered         | DateTime  | FIELD         |                | No          | DateTime    |                |
+| greptime      | information_schema | tables                                | table_schema         | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | tables                                | table_catalog        | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | tables                                | table_name           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | tables                                | table_type           | String    | FIELD         |                | No          | String      |                |
+| greptime      | information_schema | tables                                | table_id             | UInt32    | FIELD         |                | Yes         | UInt32      |                |
+| greptime      | information_schema | tables                                | engine               | String    | FIELD         |                | Yes         | String      |                |
+| greptime      | public             | numbers                               | number               | UInt32    | TAG           |                | No          | UInt32      |                |
++---------------+--------------------+---------------------------------------+----------------------+-----------+---------------+----------------+-------------+-------------+----------------+
 
 create
 database my_db;

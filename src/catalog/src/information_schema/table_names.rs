@@ -25,3 +25,4 @@ pub const COLLATIONS: &str = "collations";
 pub const COLLATION_CHARACTER_SET_APPLICABILITY: &str = "collation_character_set_applicability";
 pub const CHECK_CONSTRAINTS: &str = "check_constraints";
 pub const EVENTS: &str = "events";
+pub const SCHEMATA: &str = "schemata";
