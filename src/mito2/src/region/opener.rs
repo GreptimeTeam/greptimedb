@@ -257,8 +257,9 @@ impl RegionOpener {
         let version_control = Arc::new(VersionControl::new(version));
         if !self.skip_wal_replay {
             info!(
-                "Start replaying memtable at flushed_entry_id {} for region {}",
-                flushed_entry_id, region_id
+                "Start replaying memtable at flushed_entry_id + 1 {} for region {}",
+                flushed_entry_id + 1,
+                region_id
             );
             replay_memtable(
                 wal,
@@ -385,6 +386,7 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
+        debug_assert!(entry_id > flushed_entry_id);
         last_entry_id = last_entry_id.max(entry_id);
         for mutation in entry.mutations {
             rows_replayed += mutation

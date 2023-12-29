@@ -44,6 +44,16 @@ pub const INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID: u32 = 6;
 pub const INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID: u32 = 7;
 /// id for information_schema.build_info
 pub const INFORMATION_SCHEMA_BUILD_INFO_TABLE_ID: u32 = 8;
+/// id for information_schema.CHARACTER_SETS
+pub const INFORMATION_SCHEMA_CHARACTER_SETS_TABLE_ID: u32 = 9;
+/// id for information_schema.COLLATIONS
+pub const INFORMATION_SCHEMA_COLLATIONS_TABLE_ID: u32 = 10;
+/// id for information_schema.COLLATIONS
+pub const INFORMATION_SCHEMA_COLLATION_CHARACTER_SET_APPLICABILITY_TABLE_ID: u32 = 11;
+/// id for information_schema.CHECK_CONSTRAINTS
+pub const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_TABLE_ID: u32 = 12;
+/// id for information_schema.EVENTS
+pub const INFORMATION_SCHEMA_EVENTS_TABLE_ID: u32 = 13;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";
