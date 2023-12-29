@@ -186,9 +186,13 @@ lazy_static! {
         &[TYPE_LABEL, FILE_TYPE_LABEL]
     )
     .unwrap();
+    /// Counter of read bytes on intermediate files.
     pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "intermediate"]);
+    /// Counter of write bytes on intermediate files.
     pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "intermediate"]);
+    /// Counter of read bytes on puffin files.
     pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "puffin"]);
+    /// Counter of write bytes on puffin files.
     pub static ref INDEX_PUFFIN_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "puffin"]);
     // ------- End of index metrics.
 }
