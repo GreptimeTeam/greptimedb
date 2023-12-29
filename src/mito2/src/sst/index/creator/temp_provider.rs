@@ -19,17 +19,16 @@ use futures::{AsyncRead, AsyncWrite};
 use index::inverted_index::create::sort::external_provider::ExternalTempFileProvider;
 use index::inverted_index::error as index_error;
 use index::inverted_index::error::Result as IndexResult;
-use object_store::ObjectStore;
 use snafu::ResultExt;
 
-use crate::error::{OpenDalSnafu, Result};
+use crate::error::Result;
 use crate::metrics::{INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL};
-use crate::sst::index::io_stats::{InstrumentedAsyncRead, InstrumentedAsyncWrite};
+use crate::sst::index::object_store::InstrumentedObjectStore;
 use crate::sst::location::IntermediateLocation;
 
 pub(crate) struct TempFileProvider {
     location: IntermediateLocation,
-    object_store: ObjectStore,
+    object_store: InstrumentedObjectStore,
 }
 
 #[async_trait]
@@ -42,12 +41,10 @@ impl ExternalTempFileProvider for TempFileProvider {
         let path = self.location.file_path(column_name, file_id);
         let writer = self
             .object_store
-            .writer(&path)
+            .writer(&path, &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL)
             .await
-            .context(OpenDalSnafu)
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
-        let writer = InstrumentedAsyncWrite::new(writer, &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL);
         Ok(Box::new(writer))
     }
 
@@ -60,7 +57,6 @@ impl ExternalTempFileProvider for TempFileProvider {
             .object_store
             .list(&dir)
             .await
-            .context(OpenDalSnafu)
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
         let mut readers = Vec::with_capacity(entries.len());
@@ -73,12 +69,10 @@ impl ExternalTempFileProvider for TempFileProvider {
 
             let reader = self
                 .object_store
-                .reader(entry.path())
+                .reader(entry.path(), &INDEX_INTERMEDIATE_READ_BYTES_TOTAL)
                 .await
-                .context(OpenDalSnafu)
                 .map_err(BoxedError::new)
                 .context(index_error::ExternalSnafu)?;
-            let reader = InstrumentedAsyncRead::new(reader, &INDEX_INTERMEDIATE_READ_BYTES_TOTAL);
             readers.push(Box::new(reader) as _);
         }
 
@@ -87,7 +81,7 @@ impl ExternalTempFileProvider for TempFileProvider {
 }
 
 impl TempFileProvider {
-    pub fn new(location: IntermediateLocation, object_store: ObjectStore) -> Self {
+    pub fn new(location: IntermediateLocation, object_store: InstrumentedObjectStore) -> Self {
         Self {
             location,
             object_store,
@@ -95,9 +89,6 @@ impl TempFileProvider {
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        self.object_store
-            .remove_all(self.location.root_dir())
-            .await
-            .context(OpenDalSnafu)
+        self.object_store.remove_all(self.location.root_dir()).await
     }
 }

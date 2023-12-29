@@ -17,29 +17,51 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use futures::{AsyncRead, AsyncSeek, AsyncWrite};
+use object_store::ObjectStore;
 use pin_project::pin_project;
 use prometheus::IntCounter;
+use snafu::ResultExt;
 
-struct BytesRecorder {
-    bytes: usize,
-    recorder: &'static IntCounter,
+use crate::error::{OpenDalSnafu, Result};
+
+#[derive(Clone)]
+pub(crate) struct InstrumentedObjectStore {
+    object_store: ObjectStore,
 }
 
-impl BytesRecorder {
-    fn new(recorder: &'static IntCounter) -> Self {
-        Self { bytes: 0, recorder }
+impl InstrumentedObjectStore {
+    pub(crate) fn new(object_store: ObjectStore) -> Self {
+        Self { object_store }
     }
 
-    fn inc_by(&mut self, bytes: usize) {
-        self.bytes += bytes;
+    pub(crate) async fn reader(
+        &self,
+        path: &str,
+        recoder: &'static IntCounter,
+    ) -> Result<InstrumentedAsyncRead<object_store::Reader>> {
+        let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
+        Ok(InstrumentedAsyncRead::new(reader, recoder))
     }
-}
 
-impl Drop for BytesRecorder {
-    fn drop(&mut self) {
-        if self.bytes > 0 {
-            self.recorder.inc_by(self.bytes as _);
-        }
+    pub(crate) async fn writer(
+        &self,
+        path: &str,
+        recoder: &'static IntCounter,
+    ) -> Result<InstrumentedAsyncWrite<object_store::Writer>> {
+        let writer = self.object_store.writer(path).await.context(OpenDalSnafu)?;
+        Ok(InstrumentedAsyncWrite::new(writer, recoder))
+    }
+
+    pub(crate) async fn list(&self, path: &str) -> Result<Vec<object_store::Entry>> {
+        let list = self.object_store.list(path).await.context(OpenDalSnafu)?;
+        Ok(list)
+    }
+
+    pub(crate) async fn remove_all(&self, path: &str) -> Result<()> {
+        self.object_store
+            .remove_all(path)
+            .await
+            .context(OpenDalSnafu)
     }
 }
 
@@ -51,7 +73,7 @@ pub(crate) struct InstrumentedAsyncRead<R> {
 }
 
 impl<R> InstrumentedAsyncRead<R> {
-    pub(crate) fn new(inner: R, recorder: &'static IntCounter) -> Self {
+    fn new(inner: R, recorder: &'static IntCounter) -> Self {
         Self {
             inner,
             recorder: BytesRecorder::new(recorder),
@@ -91,7 +113,7 @@ pub(crate) struct InstrumentedAsyncWrite<W> {
 }
 
 impl<W> InstrumentedAsyncWrite<W> {
-    pub(crate) fn new(inner: W, recorder: &'static IntCounter) -> Self {
+    fn new(inner: W, recorder: &'static IntCounter) -> Self {
         Self {
             inner,
             recorder: BytesRecorder::new(recorder),
@@ -118,5 +140,28 @@ impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<W> {
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.project().inner.poll_close(cx)
+    }
+}
+
+struct BytesRecorder {
+    bytes: usize,
+    recorder: &'static IntCounter,
+}
+
+impl BytesRecorder {
+    fn new(recorder: &'static IntCounter) -> Self {
+        Self { bytes: 0, recorder }
+    }
+
+    fn inc_by(&mut self, bytes: usize) {
+        self.bytes += bytes;
+    }
+}
+
+impl Drop for BytesRecorder {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.recorder.inc_by(self.bytes as _);
+        }
     }
 }

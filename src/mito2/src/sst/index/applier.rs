@@ -21,31 +21,29 @@ use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
-use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
-use snafu::ResultExt;
 
-use super::io_stats::InstrumentedAsyncRead;
-use crate::error::{OpenDalSnafu, Result};
+use crate::error::Result;
 use crate::metrics::{
     INDEX_APPLY_COST_TIME, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
 };
 use crate::sst::file::FileId;
+use crate::sst::index::object_store::InstrumentedObjectStore;
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
 #[derive(Clone)]
 pub struct SstIndexApplier {
     region_dir: String,
-    object_store: ObjectStore,
+    object_store: InstrumentedObjectStore,
 
     index_applier: Arc<dyn IndexApplier>,
 }
 
 impl SstIndexApplier {
-    pub fn new(
+    pub(crate) fn new(
         region_dir: String,
-        object_store: ObjectStore,
+        object_store: InstrumentedObjectStore,
         index_applier: Arc<dyn IndexApplier>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
@@ -64,11 +62,8 @@ impl SstIndexApplier {
 
         let file_reader = self
             .object_store
-            .reader(&file_path)
-            .await
-            .context(OpenDalSnafu)?;
-        let file_reader = InstrumentedAsyncRead::new(file_reader, &INDEX_PUFFIN_READ_BYTES_TOTAL);
-
+            .reader(&file_path, &INDEX_PUFFIN_READ_BYTES_TOTAL)
+            .await?;
         let mut puffin_reader = PuffinFileReader::new(file_reader);
 
         let file_meta = puffin_reader.metadata().await.unwrap();
