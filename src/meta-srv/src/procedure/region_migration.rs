@@ -127,7 +127,7 @@ pub trait ContextFactory {
 
 /// Default implementation.
 #[derive(Clone)]
-pub struct ContextFactoryImpl {
+pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
@@ -135,7 +135,7 @@ pub struct ContextFactoryImpl {
     server_addr: String,
 }
 
-impl ContextFactoryImpl {
+impl DefaultContextFactory {
     /// Returns an [ContextFactoryImpl].
     pub fn new(
         table_metadata_manager: TableMetadataManagerRef,
@@ -153,7 +153,7 @@ impl ContextFactoryImpl {
     }
 }
 
-impl ContextFactory for ContextFactoryImpl {
+impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
             persistent_ctx,

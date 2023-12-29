@@ -59,7 +59,7 @@ use crate::metasrv::{
 use crate::peer::NaivePeerRegistry;
 use crate::procedure::region_failover::RegionFailoverManager;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
-use crate::procedure::region_migration::ContextFactoryImpl;
+use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
@@ -241,7 +241,7 @@ impl MetaSrvBuilder {
 
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             procedure_manager.clone(),
-            ContextFactoryImpl::new(
+            DefaultContextFactory::new(
                 table_metadata_manager.clone(),
                 opening_region_keeper.clone(),
                 mailbox.clone(),

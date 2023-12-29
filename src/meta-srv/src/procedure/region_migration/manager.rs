@@ -28,7 +28,7 @@ use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::procedure::region_migration::{
-    ContextFactoryImpl, PersistentContext, RegionMigrationProcedure,
+    DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
 };
 
 pub type RegionMigrationManagerRef = Arc<RegionMigrationManager>;
@@ -37,7 +37,7 @@ pub type RegionMigrationManagerRef = Arc<RegionMigrationManager>;
 pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
-    context_factory: ContextFactoryImpl,
+    context_factory: DefaultContextFactory,
 }
 
 /// The guard of running [RegionMigrationProcedureTask].
@@ -95,7 +95,7 @@ impl RegionMigrationManager {
     /// Returns new [RegionMigrationManager]
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
-        context_factory: ContextFactoryImpl,
+        context_factory: DefaultContextFactory,
     ) -> Self {
         Self {
             procedure_manager,
