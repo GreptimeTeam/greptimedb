@@ -123,7 +123,7 @@ impl heartbeat_server::Heartbeat for MetaSrv {
             );
 
             if let Some(key) = pusher_key {
-                let _ = handler_group.unregister(&key).await;
+                let _ = handler_group.deregister(&key).await;
             }
             if let Some((cluster_id, peer_id)) = datanode_peer_ident {
                 datanode_peer_registry.deregister(cluster_id, peer_id);
