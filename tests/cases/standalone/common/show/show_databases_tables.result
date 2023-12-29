@@ -30,6 +30,7 @@ show tables;
 | columns                               |
 | engines                               |
 | events                                |
+| schemata                              |
 | tables                                |
 +---------------------------------------+
 

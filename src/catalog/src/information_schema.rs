@@ -14,6 +14,7 @@
 
 mod columns;
 mod memory_table;
+mod schemata;
 mod table_names;
 mod tables;
 
@@ -41,6 +42,7 @@ pub use table_names::*;
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
+use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
 use crate::CatalogManager;
 
@@ -126,6 +128,7 @@ impl InformationSchemaProvider {
     fn build_tables(&mut self) {
         let mut tables = HashMap::new();
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
+        tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
 
         // Add memory tables
@@ -168,6 +171,10 @@ impl InformationSchemaProvider {
             }
             CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
             EVENTS => setup_memory_table!(EVENTS),
+            SCHEMATA => Some(Arc::new(InformationSchemaSchemata::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
