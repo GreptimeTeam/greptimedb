@@ -62,9 +62,6 @@ impl TableRouteValue {
     }
 
     /// Returns a new version [TableRouteValue] with `region_routes`.
-    ///
-    /// # Panics
-    /// The route type is not the [TableRouteValue::Physical].
     pub fn update(&self, region_routes: Vec<RegionRoute>) -> Result<Self> {
         ensure!(
             self.is_physical(),
@@ -82,9 +79,6 @@ impl TableRouteValue {
     /// Returns the version.
     ///
     /// For test purpose.
-    ///
-    /// # Panics
-    /// The route type is not the [TableRouteValue::Physical].
     #[cfg(any(test, feature = "testing"))]
     pub fn version(&self) -> Result<u64> {
         ensure!(
@@ -97,9 +91,6 @@ impl TableRouteValue {
     }
 
     /// Returns the corresponding [RegionRoute].
-    ///
-    /// # Panics
-    /// The route type is not the [TableRouteValue::Physical].
     pub fn region_route(&self, region_id: RegionId) -> Result<Option<RegionRoute>> {
         ensure!(
             self.is_physical(),
@@ -121,9 +112,6 @@ impl TableRouteValue {
     }
 
     /// Gets the [RegionRoute]s of this [TableRouteValue::Physical].
-    ///
-    /// # Panics
-    /// The route type is not the [TableRouteValue::Physical].
     pub fn region_routes(&self) -> Result<&Vec<RegionRoute>> {
         ensure!(
             self.is_physical(),
