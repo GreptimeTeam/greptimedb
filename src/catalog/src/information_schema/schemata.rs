@@ -113,9 +113,9 @@ impl InformationTable for InformationSchemaSchemata {
     }
 }
 
-/// Builds the `information_schema.TABLE` table row by row
+/// Builds the `information_schema.schemata` table row by row
 ///
-/// Columns are based on <https://www.postgresql.org/docs/current/infoschema-columns.html>
+/// Columns are based on <https://docs.pingcap.com/tidb/stable/information-schema-schemata>
 struct InformationSchemaSchemataBuilder {
     schema: SchemaRef,
     catalog_name: String,
