@@ -45,7 +45,8 @@ use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
-use servers::grpc::{GrpcServer, GrpcServerConfig};
+use servers::grpc::builder::GrpcServerBuilder;
+use servers::grpc::GrpcServerConfig;
 use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
@@ -328,15 +329,13 @@ impl DatanodeBuilder {
             max_send_message_size: opts.rpc_max_send_message_size.as_bytes() as usize,
         };
 
-        let server = Box::new(GrpcServer::new(
-            Some(config),
-            None,
-            None,
-            Some(Arc::new(region_server.clone()) as _),
-            Some(Arc::new(region_server.clone()) as _),
-            None,
-            region_server.runtime(),
-        ));
+        let server = Box::new(
+            GrpcServerBuilder::new(region_server.runtime())
+                .config(config)
+                .flight_handler(Arc::new(region_server.clone()))
+                .region_server_handler(Arc::new(region_server.clone()))
+                .build(),
+        );
 
         let addr: SocketAddr = opts.rpc_addr.parse().context(ParseAddrSnafu {
             addr: &opts.rpc_addr,

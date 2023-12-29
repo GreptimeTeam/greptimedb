@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod authorize;
+pub mod builder;
 mod database;
 pub mod flight;
 pub mod greptime_handler;
+mod otlp;
 pub mod prom_query_gateway;
 pub mod region_server;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use api::v1::greptime_database_server::GreptimeDatabaseServer;
 use api::v1::health_check_server::{HealthCheck, HealthCheckServer};
@@ -36,10 +38,11 @@ use auth::UserProviderRef;
 use common_grpc::channel_manager::{
     DEFAULT_MAX_GRPC_RECV_MESSAGE_SIZE, DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE,
 };
-use common_runtime::Runtime;
 use common_telemetry::logging::info;
 use common_telemetry::{error, warn};
 use futures::FutureExt;
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_server::MetricsServiceServer;
+use opentelemetry_proto::tonic::collector::trace::v1::trace_service_server::TraceServiceServer;
 use snafu::{ensure, OptionExt, ResultExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -47,17 +50,20 @@ use tokio::sync::Mutex;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::{ServerReflection, ServerReflectionServer};
+use tower::ServiceBuilder;
 
+use self::authorize::AuthMiddlewareLayer;
 use self::flight::{FlightCraftRef, FlightCraftWrapper};
+use self::otlp::OtlpService;
 use self::prom_query_gateway::PrometheusGatewayService;
-use self::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
+use self::region_server::RegionServerRequestHandler;
 use crate::error::{
     AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu, TcpIncomingSnafu,
 };
 use crate::grpc::database::DatabaseService;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
 use crate::prometheus_handler::PrometheusHandlerRef;
-use crate::query_handler::grpc::ServerGrpcQueryHandlerRef;
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::server::Server;
 
 type TonicResult<T> = std::result::Result<T, Status>;
@@ -66,12 +72,10 @@ pub struct GrpcServer {
     config: GrpcServerConfig,
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
-    user_provider: Option<UserProviderRef>,
-
     /// gRPC serving state receiver. Only present if the gRPC server is started.
     /// Used to wait for the server to stop, performing the old blocking fashion.
     serve_state: Mutex<Option<Receiver<Result<()>>>>,
-
+    user_provider: Option<UserProviderRef>,
     // handlers
     /// Handler for [DatabaseService] service.
     database_handler: Option<GreptimeRequestHandler>,
@@ -81,6 +85,8 @@ pub struct GrpcServer {
     flight_handler: Option<FlightCraftRef>,
     /// Handler for [RegionServer].
     region_server_handler: Option<RegionServerRequestHandler>,
+    /// Handler for OpenTelemetry Protocol (OTLP) requests.
+    otlp_handler: Option<OpenTelemetryProtocolHandlerRef>,
 }
 
 /// Grpc Server configuration
@@ -102,32 +108,6 @@ impl Default for GrpcServerConfig {
 }
 
 impl GrpcServer {
-    pub fn new(
-        config: Option<GrpcServerConfig>,
-        query_handler: Option<ServerGrpcQueryHandlerRef>,
-        prometheus_handler: Option<PrometheusHandlerRef>,
-        flight_handler: Option<FlightCraftRef>,
-        region_server_handler: Option<RegionServerHandlerRef>,
-        user_provider: Option<UserProviderRef>,
-        runtime: Arc<Runtime>,
-    ) -> Self {
-        let database_handler = query_handler.map(|handler| {
-            GreptimeRequestHandler::new(handler, user_provider.clone(), runtime.clone())
-        });
-        let region_server_handler = region_server_handler
-            .map(|handler| RegionServerRequestHandler::new(handler, runtime.clone()));
-        Self {
-            config: config.unwrap_or_default(),
-            shutdown_tx: Mutex::new(None),
-            user_provider,
-            serve_state: Mutex::new(None),
-            database_handler,
-            prometheus_handler,
-            flight_handler,
-            region_server_handler,
-        }
-    }
-
     #[cfg(feature = "testing")]
     pub fn create_flight_service(&self) -> FlightServiceServer<impl FlightService> {
         FlightServiceServer::new(FlightCraftWrapper(self.flight_handler.clone().unwrap()))
@@ -245,6 +225,24 @@ impl Server for GrpcServer {
             builder = builder
                 .add_service(self.create_prom_query_gateway_service(prometheus_handler.clone()))
         }
+
+        if let Some(otlp_handler) = &self.otlp_handler {
+            let trace_server = ServiceBuilder::new()
+                .layer(AuthMiddlewareLayer::with(self.user_provider.clone()))
+                .service(TraceServiceServer::new(OtlpService::new(
+                    otlp_handler.clone(),
+                )));
+            builder = builder.add_service(trace_server);
+
+            let metrics_server = ServiceBuilder::new()
+                .layer(AuthMiddlewareLayer::with(self.user_provider.clone()))
+                .service(MetricsServiceServer::new(OtlpService::new(
+                    otlp_handler.clone(),
+                )));
+
+            builder = builder.add_service(metrics_server);
+        }
+
         if let Some(flight_handler) = &self.flight_handler {
             builder = builder.add_service(
                 FlightServiceServer::new(FlightCraftWrapper(flight_handler.clone()))

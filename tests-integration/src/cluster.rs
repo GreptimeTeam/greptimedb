@@ -45,7 +45,7 @@ use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
 use meta_srv::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
-use servers::grpc::GrpcServer;
+use servers::grpc::builder::GrpcServerBuilder;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
 use tempfile::TempDir;
@@ -373,17 +373,11 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
             .unwrap(),
     );
 
-    let flight_handler = Some(Arc::new(datanode.region_server()) as _);
-    let region_server_handler = Some(Arc::new(datanode.region_server()) as _);
-    let grpc_server = GrpcServer::new(
-        None,
-        None,
-        None,
-        flight_handler,
-        region_server_handler,
-        None,
-        runtime,
-    );
+    let grpc_server = GrpcServerBuilder::new(runtime)
+        .flight_handler(Arc::new(datanode.region_server()))
+        .region_server_handler(Arc::new(datanode.region_server()))
+        .build();
+
     let _handle = tokio::spawn(async move {
         Server::builder()
             .add_service(grpc_server.create_flight_service())

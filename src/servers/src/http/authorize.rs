@@ -126,7 +126,7 @@ fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
     (StatusCode::UNAUTHORIZED, ErrorResponse::from_error(ty, err))
 }
 
-fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
+pub fn extract_catalog_and_schema<B>(request: &Request<B>) -> (&str, &str) {
     // parse database from header
     let dbname = request
         .headers()
@@ -183,7 +183,7 @@ fn get_influxdb_credentials<B>(request: &Request<B>) -> Result<Option<(Username,
     }
 }
 
-fn extract_username_and_password<B>(
+pub fn extract_username_and_password<B>(
     is_influxdb: bool,
     request: &Request<B>,
 ) -> Result<(Username, Password)> {
