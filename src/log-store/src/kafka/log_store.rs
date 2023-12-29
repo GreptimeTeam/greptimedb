@@ -186,6 +186,10 @@ impl LogStore for KafkaLogStore {
                     record_offset, ns_clone, high_watermark
                 );
 
+                // Ignores the noop record.
+                if record.record.value.is_none() {
+                    continue;
+                }
                 let entries = decode_from_record(record.record)?;
 
                 // Filters entries by region id.

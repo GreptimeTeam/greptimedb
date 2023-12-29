@@ -321,6 +321,27 @@ pub enum Error {
         error: rskafka::client::error::Error,
     },
 
+    #[snafu(display(
+        "Failed to build a Kafka partition client, topic: {}, partition: {}",
+        topic,
+        partition
+    ))]
+    BuildKafkaPartitionClient {
+        topic: String,
+        partition: i32,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
+    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
+    ProduceRecord {
+        topic: String,
+        location: Location,
+        #[snafu(source)]
+        error: rskafka::client::error::Error,
+    },
+
     #[snafu(display("Failed to create a Kafka wal topic"))]
     CreateKafkaWalTopic {
         location: Location,
@@ -368,6 +389,8 @@ impl ErrorExt for Error {
             | EncodeWalOptions { .. }
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
+            | BuildKafkaPartitionClient { .. }
+            | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
             | EmptyTopicPool { .. } => StatusCode::Unexpected,
 
