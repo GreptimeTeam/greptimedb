@@ -54,8 +54,10 @@ pub const INFORMATION_SCHEMA_COLLATION_CHARACTER_SET_APPLICABILITY_TABLE_ID: u32
 pub const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_TABLE_ID: u32 = 12;
 /// id for information_schema.EVENTS
 pub const INFORMATION_SCHEMA_EVENTS_TABLE_ID: u32 = 13;
+/// id for information_schema.FILES
+pub const INFORMATION_SCHEMA_FILES_TABLE_ID: u32 = 14;
 /// id for information_schema.SCHEMATA
-pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 14;
+pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 15;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";
