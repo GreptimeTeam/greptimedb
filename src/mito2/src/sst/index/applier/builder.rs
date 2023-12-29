@@ -122,7 +122,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         };
 
         if let Err(err) = res {
-            warn!("Failed to collect predicates, ignore it. error: {err}, expr: {expr}");
+            warn!(err; "Failed to collect predicates, ignore it. expr: {expr}");
         }
     }
 
