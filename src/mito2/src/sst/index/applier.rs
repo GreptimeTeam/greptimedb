@@ -22,8 +22,12 @@ use index::inverted_index::search::index_apply::{
     IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
+use snafu::{OptionExt, ResultExt};
 
-use crate::error::Result;
+use crate::error::{
+    ApplyIndexSnafu, PuffinBlobTypeNotFoundSnafu, PuffinReadBlobSnafu, PuffinReadMetadataSnafu,
+    Result,
+};
 use crate::metrics::{
     INDEX_APPLY_COST_TIME, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
 };
@@ -66,14 +70,21 @@ impl SstIndexApplier {
             .await?;
         let mut puffin_reader = PuffinFileReader::new(file_reader);
 
-        let file_meta = puffin_reader.metadata().await.unwrap();
+        let file_meta = puffin_reader
+            .metadata()
+            .await
+            .context(PuffinReadMetadataSnafu)?;
         let blob_meta = file_meta
             .blobs
             .iter()
             .find(|blob| blob.blob_type == INDEX_BLOB_TYPE)
-            .unwrap();
+            .context(PuffinBlobTypeNotFoundSnafu {
+                blob_type: INDEX_BLOB_TYPE,
+            })?;
 
-        let blob_reader = puffin_reader.blob_reader(blob_meta).unwrap();
+        let blob_reader = puffin_reader
+            .blob_reader(blob_meta)
+            .context(PuffinReadBlobSnafu)?;
         let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
 
         let context = SearchContext {
@@ -83,7 +94,7 @@ impl SstIndexApplier {
             .index_applier
             .apply(context, &mut index_reader)
             .await
-            .unwrap();
+            .context(ApplyIndexSnafu)?;
 
         Ok(res)
     }

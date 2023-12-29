@@ -423,14 +423,69 @@ pub enum Error {
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
         #[snafu(source)]
-        error: index::inverted_index::error::Error,
+        source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         #[snafu(source)]
-        error: index::inverted_index::error::Error,
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to apply index"))]
+    ApplyIndex {
+        #[snafu(source)]
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write index completely"))]
+    IndexFinish {
+        #[snafu(source)]
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin metadata"))]
+    PuffinReadMetadata {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin blob"))]
+    PuffinReadBlob {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
+    PuffinBlobTypeNotFound {
+        blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write puffin completely"))]
+    PuffinFinish {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to add blob to puffin file"))]
+    PuffinAddBlob {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value"))]
+    ConvertValue {
+        #[snafu(source)]
+        source: datatypes::error::Error,
         location: Location,
     },
 
@@ -477,6 +532,7 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
+            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -486,15 +542,13 @@ impl ErrorExt for Error {
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
-            | BuildIndexApplier { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
             | EncodeWal { .. }
-            | DecodeWal { .. }
-            | PushIndexValue { .. } => StatusCode::Internal,
+            | DecodeWal { .. } => StatusCode::Internal,
             WriteBuffer { source, .. } => source.status_code(),
             WriteGroup { source, .. } => source.status_code(),
             FieldTypeMismatch { source, .. } => source.status_code(),
@@ -524,6 +578,15 @@ impl ErrorExt for Error {
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
+            ConvertValue { source, .. } => source.status_code(),
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyIndex { source, .. }
+            | IndexFinish { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. }
+            | PuffinReadBlob { source, .. }
+            | PuffinFinish { source, .. }
+            | PuffinAddBlob { source, .. } => source.status_code(),
         }
     }
 

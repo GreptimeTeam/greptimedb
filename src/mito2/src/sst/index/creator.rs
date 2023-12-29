@@ -31,7 +31,9 @@ use store_api::metadata::RegionMetadataRef;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-use crate::error::{PushIndexValueSnafu, Result};
+use crate::error::{
+    IndexFinishSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu, PushIndexValueSnafu, Result,
+};
 use crate::metrics::INDEX_PUFFIN_WRITE_BYTES_TOTAL;
 use crate::read::Batch;
 use crate::sst::file::FileId;
@@ -104,9 +106,10 @@ impl SstIndexCreator {
         if let Err(err) = self.do_update(batch).await {
             // clean up garbage if failed to update
             if let Err(err) = self.do_cleanup().await {
-                let region_dir = &self.region_dir;
-                let sst_file_id = &self.sst_file_id;
-                warn!(err; "Failed to clean up index creator, region_dir: {region_dir}, sst_file_id: {sst_file_id}");
+                warn!(
+                    err; "Failed to clean up index creator, region_dir: {}, sst_file_id: {}",
+                    self.region_dir, self.sst_file_id,
+                );
             }
             return Err(err);
         }
@@ -121,13 +124,13 @@ impl SstIndexCreator {
         }
 
         let finish_res = self.do_finish().await;
-        // clean up garbage no matter finish success or not
-        let cleanup_res = self.do_cleanup().await;
 
-        if let Err(err) = cleanup_res {
-            let region_dir = &self.region_dir;
-            let sst_file_id = &self.sst_file_id;
-            warn!(err; "Failed to clean up index creator, region_dir: {region_dir}, sst_file_id: {sst_file_id}");
+        // clean up garbage no matter finish success or not
+        if let Err(err) = self.do_cleanup().await {
+            warn!(
+                err; "Failed to clean up index creator, region_dir: {}, sst_file_id: {}",
+                self.region_dir, self.sst_file_id,
+            );
         }
 
         finish_res.map(|_| (self.stats.row_count(), self.stats.byte_count()))
@@ -144,6 +147,7 @@ impl SstIndexCreator {
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
             }
 
+            // null value -> None
             let v = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
                 .push_with_name_n(column_name, v, n)
@@ -173,21 +177,22 @@ impl SstIndexCreator {
         };
 
         let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
-        let (source, sink) = futures::join!(
+        let (index_finish, puffin_add_blob) = futures::join!(
             self.index_creator.finish(&mut index_writer),
             puffin_writer.add_blob(blob)
         );
 
-        source.unwrap();
-        sink.unwrap();
+        index_finish.context(IndexFinishSnafu)?;
+        puffin_add_blob.context(PuffinAddBlobSnafu)?;
 
-        let byte_count = puffin_writer.finish().await.unwrap();
+        let byte_count = puffin_writer.finish().await.context(PuffinFinishSnafu)?;
         guard.inc_byte_count(byte_count);
         Ok(())
     }
 
     async fn do_cleanup(&mut self) -> Result<()> {
         let _guard = self.stats.record_cleanup();
+
         self.temp_file_provider.cleanup().await
     }
 }

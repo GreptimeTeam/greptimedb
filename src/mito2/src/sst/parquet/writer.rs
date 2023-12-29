@@ -98,16 +98,34 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        let mut index_creator = (!self.metadata.primary_key.is_empty()).then(|| {
-            SstIndexCreator::new(
+
+        let mut index_creator = match (
+            self.metadata.primary_key.is_empty(),
+            NonZeroUsize::new(opts.row_group_size),
+        ) {
+            (no_tags, _) if no_tags => {
+                debug!(
+                    "No tag columns, skip creating index, region_id: {}, file_id: {}",
+                    self.metadata.region_id, self.file_id,
+                );
+                None
+            }
+            (_, None) => {
+                warn!(
+                    "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
+                    self.metadata.region_id, self.file_id,
+                );
+                None
+            }
+            (_, Some(row_group_size)) => Some(SstIndexCreator::new(
                 self.region_dir.clone(),
                 self.file_id,
                 &self.metadata,
                 self.object_store.clone(),
                 Some(4 * 1024 * 1024),
-                NonZeroUsize::new(opts.row_group_size).unwrap(),
-            )
-        });
+                row_group_size,
+            )),
+        };
 
         while let Some(batch) = self.source.next_batch().await? {
             stats.update(&batch);
@@ -120,9 +138,10 @@ impl ParquetWriter {
 
             if let Some(creator) = index_creator.as_mut() {
                 if let Err(err) = creator.update(&batch).await {
-                    let region_id = &self.metadata.region_id;
-                    let file_id = &self.file_id;
-                    warn!("Failed to update index, error: {err}, region_id: {region_id}, file_id: {file_id}");
+                    warn!(
+                        err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
+                        self.metadata.region_id, self.file_id,
+                    );
 
                     // Skip index creation if error occurs.
                     index_creator = None;
@@ -131,14 +150,18 @@ impl ParquetWriter {
         }
 
         if let Some(mut creator) = index_creator {
-            let region_id = &self.metadata.region_id;
-            let file_id = &self.file_id;
             match creator.finish().await {
                 Ok((row_count, byte_count)) => {
-                    debug!("Create index successfully, region_id: {region_id}, file_id: {file_id}, bytes: {byte_count}, rows: {row_count}");
+                    debug!(
+                        "Create index successfully, region_id: {}, file_id: {}, bytes: {byte_count}, rows: {row_count}",
+                        self.metadata.region_id, self.file_id,
+                    );
                 }
                 Err(err) => {
-                    warn!("Failed to create index, error: {err}, region_id: {region_id}, file_id: {file_id}");
+                    warn!(
+                        err; "Failed to create index, region_id: {}, file_id: {}",
+                        self.metadata.region_id, self.file_id,
+                    );
                     return Ok(None);
                 }
             }

@@ -32,7 +32,7 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 
-use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, Result};
+use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
@@ -139,7 +139,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
     }
 
     fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Vec<u8>> {
-        let value = Value::try_from(lit.clone()).unwrap();
+        let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
         let mut bytes = vec![];
         let field = SortField::new(data_type);
         IndexValueCodec::encode_value(value.as_value_ref(), &field, &mut bytes)?;

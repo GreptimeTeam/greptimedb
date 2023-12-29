@@ -34,20 +34,20 @@ impl InstrumentedStore {
         Self { object_store }
     }
 
-    pub async fn reader(
+    pub async fn reader<'a>(
         &self,
         path: &str,
-        recoder: &'static IntCounter,
-    ) -> Result<InstrumentedAsyncRead<object_store::Reader>> {
+        recoder: &'a IntCounter,
+    ) -> Result<InstrumentedAsyncRead<'a, object_store::Reader>> {
         let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
         Ok(InstrumentedAsyncRead::new(reader, recoder))
     }
 
-    pub async fn writer(
+    pub async fn writer<'a>(
         &self,
         path: &str,
-        recoder: &'static IntCounter,
-    ) -> Result<InstrumentedAsyncWrite<object_store::Writer>> {
+        recoder: &'a IntCounter,
+    ) -> Result<InstrumentedAsyncWrite<'a, object_store::Writer>> {
         let writer = self.object_store.writer(path).await.context(OpenDalSnafu)?;
         Ok(InstrumentedAsyncWrite::new(writer, recoder))
     }
@@ -66,14 +66,14 @@ impl InstrumentedStore {
 }
 
 #[pin_project]
-pub(crate) struct InstrumentedAsyncRead<R> {
+pub(crate) struct InstrumentedAsyncRead<'a, R> {
     #[pin]
     inner: R,
-    recorder: BytesRecorder,
+    recorder: BytesRecorder<'a>,
 }
 
-impl<R> InstrumentedAsyncRead<R> {
-    fn new(inner: R, recorder: &'static IntCounter) -> Self {
+impl<'a, R> InstrumentedAsyncRead<'a, R> {
+    fn new(inner: R, recorder: &'a IntCounter) -> Self {
         Self {
             inner,
             recorder: BytesRecorder::new(recorder),
@@ -81,7 +81,7 @@ impl<R> InstrumentedAsyncRead<R> {
     }
 }
 
-impl<R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<R> {
+impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -95,7 +95,7 @@ impl<R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<R> {
     }
 }
 
-impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<R> {
+impl<'a, R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'a, R> {
     fn poll_seek(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -106,14 +106,14 @@ impl<R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<R> {
 }
 
 #[pin_project]
-pub(crate) struct InstrumentedAsyncWrite<W> {
+pub(crate) struct InstrumentedAsyncWrite<'a, W> {
     #[pin]
     inner: W,
-    recorder: BytesRecorder,
+    recorder: BytesRecorder<'a>,
 }
 
-impl<W> InstrumentedAsyncWrite<W> {
-    fn new(inner: W, recorder: &'static IntCounter) -> Self {
+impl<'a, W> InstrumentedAsyncWrite<'a, W> {
+    fn new(inner: W, recorder: &'a IntCounter) -> Self {
         Self {
             inner,
             recorder: BytesRecorder::new(recorder),
@@ -121,7 +121,7 @@ impl<W> InstrumentedAsyncWrite<W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<W> {
+impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a, W> {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -143,13 +143,13 @@ impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<W> {
     }
 }
 
-struct BytesRecorder {
+struct BytesRecorder<'a> {
     bytes: usize,
-    recorder: &'static IntCounter,
+    recorder: &'a IntCounter,
 }
 
-impl BytesRecorder {
-    fn new(recorder: &'static IntCounter) -> Self {
+impl<'a> BytesRecorder<'a> {
+    fn new(recorder: &'a IntCounter) -> Self {
         Self { bytes: 0, recorder }
     }
 
@@ -158,7 +158,7 @@ impl BytesRecorder {
     }
 }
 
-impl Drop for BytesRecorder {
+impl<'a> Drop for BytesRecorder<'a> {
     fn drop(&mut self) {
         if self.bytes > 0 {
             self.recorder.inc_by(self.bytes as _);
