@@ -756,7 +756,7 @@ tcp_nodelay = true
 
 [frontend.export_metrics]
 enable = false
-db = ""
+db = "information_schema"
 write_interval = "30s"
 
 [frontend.export_metrics.headers]
@@ -820,7 +820,7 @@ append_stdout = true
 
 [datanode.export_metrics]
 enable = false
-db = ""
+db = "information_schema"
 write_interval = "30s"
 
 [datanode.export_metrics.headers]
