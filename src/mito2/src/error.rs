@@ -433,6 +433,13 @@ pub enum Error {
         error: index::inverted_index::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to convert value"))]
+    ConvertValue {
+        #[snafu(source)]
+        source: datatypes::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -516,6 +523,7 @@ impl ErrorExt for Error {
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
+            ConvertValue { source, .. } => source.status_code(),
         }
     }
 
