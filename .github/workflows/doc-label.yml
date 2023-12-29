@@ -19,8 +19,8 @@ jobs:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         sync-labels: 1
     - name: create an issue in doc repo
-      if: contains(github.event.pull_request.labels.*.name, 'doc update required')
       uses: dacbd/create-issue-action@main
+      if: ${{ contains(github.event.pull_request.body, '- [ ]  This PR does not require documentation updates.') }}
       with:
         owner: GreptimeTeam
         repo: docs
