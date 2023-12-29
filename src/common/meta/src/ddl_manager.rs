@@ -495,8 +495,9 @@ mod tests {
             Arc::new(DummyCacheInvalidator),
             table_metadata_manager,
             TableMetadataAllocator::new(
-                Arc::new(SequenceBuilder::new("test", kv_backend).build()),
+                Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
                 Arc::new(WalOptionsAllocator::default()),
+                Arc::new(TableMetadataManager::new(kv_backend)),
             ),
             Arc::new(MemoryRegionKeeper::default()),
         );

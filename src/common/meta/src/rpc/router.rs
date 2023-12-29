@@ -123,11 +123,12 @@ pub fn convert_to_region_leader_status_map(
 pub fn find_region_leader(
     region_routes: &[RegionRoute],
     region_number: RegionNumber,
-) -> Option<&Peer> {
+) -> Option<Peer> {
     region_routes
         .iter()
         .find(|x| x.region.id.region_number() == region_number)
         .and_then(|r| r.leader_peer.as_ref())
+        .cloned()
 }
 
 pub fn find_leader_regions(region_routes: &[RegionRoute], datanode: &Peer) -> Vec<RegionNumber> {

@@ -39,6 +39,7 @@ use tokio::sync::RwLock;
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
 use crate::metadata_region::MetadataRegion;
+use crate::utils;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// # Metric Engine
@@ -168,12 +169,18 @@ impl RegionEngine for MetricEngine {
 
     fn set_writable(&self, region_id: RegionId, writable: bool) -> Result<(), BoxedError> {
         // ignore the region not found error
-        let result = self.inner.mito.set_writable(region_id, writable);
-
-        match result {
-            Err(e) if e.status_code() == StatusCode::RegionNotFound => Ok(()),
-            _ => result,
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+            region_id,
+        ] {
+            if let Err(e) = self.inner.mito.set_writable(x, writable)
+                && e.status_code() != StatusCode::RegionNotFound
+            {
+                return Err(e);
+            }
         }
+        Ok(())
     }
 
     async fn set_readonly_gracefully(

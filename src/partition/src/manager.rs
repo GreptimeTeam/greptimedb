@@ -16,10 +16,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
-use common_meta::key::table_route::TableRouteManager;
+use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::RegionRoutes;
+use common_meta::rpc::router;
+use common_meta::rpc::router::RegionRoute;
 use common_query::prelude::Expr;
 use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::prelude::Value;
@@ -28,8 +29,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::columns::RangeColumnsPartitionRule;
-use crate::error::{FindLeaderSnafu, Result};
-use crate::metrics::METRIC_TABLE_ROUTE_GET;
+use crate::error::{FindLeaderSnafu, InvalidTableRouteDataSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::splitter::RowSplitter;
@@ -66,8 +66,7 @@ impl PartitionRuleManager {
     }
 
     /// Find table route of given table name.
-    pub async fn find_table_route(&self, table_id: TableId) -> Result<RegionRoutes> {
-        let _timer = METRIC_TABLE_ROUTE_GET.start_timer();
+    async fn find_table_route(&self, table_id: TableId) -> Result<TableRouteValue> {
         let route = self
             .table_route_manager
             .get(table_id)
@@ -75,30 +74,33 @@ impl PartitionRuleManager {
             .context(error::TableRouteManagerSnafu)?
             .context(error::FindTableRoutesSnafu { table_id })?
             .into_inner();
-        let region_routes =
-            route
-                .region_routes()
-                .context(error::UnexpectedLogicalRouteTableSnafu {
-                    err_msg: format!("{route:?} is a non-physical TableRouteValue."),
-                })?;
-        Ok(RegionRoutes(region_routes.clone()))
+        Ok(route)
+    }
+
+    async fn find_region_routes(&self, table_id: TableId) -> Result<Vec<RegionRoute>> {
+        let table_route = self.find_table_route(table_id).await?;
+
+        let region_routes = match table_route {
+            TableRouteValue::Physical(x) => x.region_routes,
+
+            TableRouteValue::Logical(x) => {
+                let TableRouteValue::Physical(physical_table_route) =
+                    self.find_table_route(x.physical_table_id()).await?
+                else {
+                    return InvalidTableRouteDataSnafu {
+                        table_id: x.physical_table_id(),
+                        err_msg: "expected to be a physical table route",
+                    }
+                    .fail();
+                };
+                physical_table_route.region_routes
+            }
+        };
+        Ok(region_routes)
     }
 
     pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
-        let route = self
-            .table_route_manager
-            .get(table_id)
-            .await
-            .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?
-            .into_inner();
-        let region_routes =
-            route
-                .region_routes()
-                .context(error::UnexpectedLogicalRouteTableSnafu {
-                    err_msg: format!("{route:?} is a non-physical TableRouteValue."),
-                })?;
-
+        let region_routes = self.find_region_routes(table_id).await?;
         ensure!(
             !region_routes.is_empty(),
             error::FindTableRoutesSnafu { table_id }
@@ -217,14 +219,14 @@ impl PartitionRuleManager {
     }
 
     pub async fn find_region_leader(&self, region_id: RegionId) -> Result<Peer> {
-        let table_route = self.find_table_route(region_id.table_id()).await?;
-        let peer = table_route
-            .find_region_leader(region_id.region_number())
-            .with_context(|| FindLeaderSnafu {
+        let region_routes = self.find_region_routes(region_id.table_id()).await?;
+
+        router::find_region_leader(&region_routes, region_id.region_number()).context(
+            FindLeaderSnafu {
                 region_id,
                 table_id: region_id.table_id(),
-            })?;
-        Ok(peer.clone())
+            },
+        )
     }
 
     pub async fn split_rows(
