@@ -51,38 +51,38 @@ INSERT INTO bigtable SELECT a, to_unixtime(ts) * 51 FROM bigtable;
 
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 53 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 53 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 57 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 57 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 61 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 61 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 63 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 63 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 67 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 67 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 71 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 71 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 73 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 73 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
--- INSERT INTO bigtable SELECT a, to_unixtime(ts) * 79 FROM bigtable;
+INSERT INTO bigtable SELECT a, to_unixtime(ts) * 79 FROM bigtable;
 
--- SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
 
 DROP TABLE test;
