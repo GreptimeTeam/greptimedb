@@ -100,29 +100,22 @@ impl LogStore for KafkaLogStore {
                 .push(entry);
         }
 
-        // Builds a record from entries belong to a region and produces them to kafka server.
-        let (region_ids, tasks): (Vec<_>, Vec<_>) = producers
-            .into_iter()
-            .map(|(id, producer)| (id, producer.produce(&self.client_manager)))
-            .unzip();
-        // Each produce operation returns a kafka offset of the produced record.
-        // The offsets are then converted to entry ids.
-        let entry_ids = futures::future::try_join_all(tasks)
-            .await?
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<Vec<_>>>()?;
-        let last_entry_ids = region_ids
-            .into_iter()
-            .zip(entry_ids)
-            .collect::<HashMap<_, _>>();
+        // Produces entries for each region and gets the offset those entries written to.
+        // The returned offset is then converted into an entry id.
+        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
+            |(region_id, producer)| async move {
+                let entry_id = producer
+                    .produce(&self.client_manager)
+                    .await
+                    .map(TryInto::try_into)??;
+                Ok((region_id, entry_id))
+            },
+        ))
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
-        #[cfg(debug)]
-        {
-            for (region_id, offset) in last_entry_ids.iter() {
-                debug!("Entries for region {region_id} are appended at the start offset {offset}");
-            }
-        }
+        debug!("Append batch result: {:?}", last_entry_ids);
 
         Ok(AppendBatchResponse { last_entry_ids })
     }

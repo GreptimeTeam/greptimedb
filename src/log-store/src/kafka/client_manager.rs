@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -100,10 +99,14 @@ impl ClientManager {
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
         let mut client_pool = self.client_pool.lock().await;
-        if let Entry::Vacant(entry) = client_pool.entry(topic.to_string()) {
-            entry.insert(self.try_create_client(topic).await?);
+        match client_pool.get(topic) {
+            Some(client) => Ok(client.clone()),
+            None => {
+                let client = self.try_create_client(topic).await?;
+                client_pool.insert(topic.to_string(), client.clone());
+                Ok(client)
+            }
         }
-        Ok(client_pool[topic].clone())
     }
 
     async fn try_create_client(&self, topic: &Topic) -> Result<Client> {
