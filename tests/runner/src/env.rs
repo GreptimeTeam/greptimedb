@@ -42,9 +42,16 @@ const SERVER_ADDR: &str = "127.0.0.1:4001";
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
 #[derive(Clone)]
+pub enum WalConfig {
+    RaftEngine,
+    Kafka { broker_endpoints: Vec<String> },
+}
+
+#[derive(Clone)]
 pub struct Env {
     data_home: PathBuf,
     server_addr: Option<String>,
+    wal: WalConfig,
 }
 
 #[allow(clippy::print_stdout)]
@@ -68,10 +75,11 @@ impl EnvController for Env {
 
 #[allow(clippy::print_stdout)]
 impl Env {
-    pub fn new(data_home: PathBuf, server_addr: Option<String>) -> Self {
+    pub fn new(data_home: PathBuf, server_addr: Option<String>, wal: WalConfig) -> Self {
         Self {
             data_home,
             server_addr,
+            wal,
         }
     }
 
@@ -81,7 +89,7 @@ impl Env {
         } else {
             Self::build_db().await;
 
-            let db_ctx = GreptimeDBContext::new();
+            let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
             let server_process = self.start_server("standalone", &db_ctx, true).await;
 
@@ -106,7 +114,7 @@ impl Env {
         } else {
             Self::build_db().await;
 
-            let db_ctx = GreptimeDBContext::new();
+            let db_ctx = GreptimeDBContext::new(self.wal.clone());
 
             // start a distributed GreptimeDB
             let meta_server = self.start_server("metasrv", &db_ctx, true).await;
@@ -145,6 +153,7 @@ impl Env {
             ctx: GreptimeDBContext {
                 time: 0,
                 datanode_id: Default::default(),
+                wal: self.wal.clone(),
             },
             is_standalone: false,
             env: self.clone(),
@@ -178,6 +187,7 @@ impl Env {
             .create(true)
             .write(true)
             .truncate(truncate_log)
+            .append(!truncate_log)
             .open(log_file_name)
             .unwrap();
 
@@ -214,6 +224,8 @@ impl Env {
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
                     "--http-addr=127.0.0.1:5002".to_string(),
+                    "-c".to_string(),
+                    self.generate_config_file(subcommand, db_ctx),
                 ];
                 (args, METASRV_ADDR.to_string())
             }
@@ -321,6 +333,8 @@ impl Env {
             wal_dir: String,
             data_home: String,
             procedure_dir: String,
+            is_raft_engine: bool,
+            kafka_wal_broker_endpoints: String,
         }
 
         let data_home = self
@@ -334,6 +348,8 @@ impl Env {
             wal_dir,
             data_home: data_home.display().to_string(),
             procedure_dir,
+            is_raft_engine: db_ctx.is_raft_engine(),
+            kafka_wal_broker_endpoints: db_ctx.kafka_wal_broker_endpoints(),
         };
         let rendered = tt.render(subcommand, &ctx).unwrap();
 
@@ -447,13 +463,28 @@ struct GreptimeDBContext {
     /// Start time in millisecond
     time: i64,
     datanode_id: AtomicU32,
+    wal: WalConfig,
 }
 
 impl GreptimeDBContext {
-    pub fn new() -> Self {
+    pub fn new(wal: WalConfig) -> Self {
         Self {
             time: common_time::util::current_time_millis(),
             datanode_id: AtomicU32::new(0),
+            wal,
+        }
+    }
+
+    fn is_raft_engine(&self) -> bool {
+        matches!(self.wal, WalConfig::RaftEngine)
+    }
+
+    fn kafka_wal_broker_endpoints(&self) -> String {
+        match &self.wal {
+            WalConfig::RaftEngine => String::new(),
+            WalConfig::Kafka { broker_endpoints } => {
+                serde_json::to_string(&broker_endpoints).unwrap()
+            }
         }
     }
 

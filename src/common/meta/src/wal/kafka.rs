@@ -27,6 +27,7 @@ pub use crate::wal::kafka::topic_manager::TopicManager;
 
 /// Configurations for kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,

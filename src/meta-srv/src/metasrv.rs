@@ -330,6 +330,9 @@ impl MetaSrv {
                 info!("MetaSrv stopped");
             });
         } else {
+            if let Err(e) = self.wal_options_allocator.start().await {
+                error!(e; "Failed to start wal options allocator");
+            }
             // Always load kv into cached kv store.
             self.leader_cached_kv_backend
                 .load()

@@ -1,0 +1,10 @@
+[wal]
+{{ if is_raft_engine }}
+provider = "raft_engine"
+{{ else }}
+provider = "kafka"
+broker_endpoints = {kafka_wal_broker_endpoints | unescaped}
+num_topics = 64
+selector_type = "round_robin"
+topic_name_prefix = "distributed_test_greptimedb_wal_topic"
+{{ endif }}

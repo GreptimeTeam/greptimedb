@@ -3,12 +3,18 @@ enable_memory_catalog = false
 require_lease_before_startup = true
 
 [wal]
+{{ if is_raft_engine }}
 provider = "raft_engine"
 file_size = '1GB'
 purge_interval = '10m'
 purge_threshold = '10GB'
 read_batch_size = 128
 sync_write = false
+{{ else }}
+provider = "kafka"
+broker_endpoints = {kafka_wal_broker_endpoints | unescaped}
+linger = "5ms"
+{{ endif }}
 
 [storage]
 type = 'File'
