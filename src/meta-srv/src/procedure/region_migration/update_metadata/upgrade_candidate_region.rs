@@ -475,9 +475,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        let region_routes = table_route
-            .region_routes()
-            .unwrap();
+        let region_routes = table_route.region_routes().unwrap();
 
         assert!(ctx.volatile_ctx.table_route.is_none());
         assert!(ctx.volatile_ctx.opening_region_guard.is_none());
