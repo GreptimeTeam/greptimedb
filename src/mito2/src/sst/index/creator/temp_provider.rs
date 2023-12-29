@@ -23,12 +23,12 @@ use snafu::ResultExt;
 
 use crate::error::Result;
 use crate::metrics::{INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL};
-use crate::sst::index::object_store::InstrumentedObjectStore;
+use crate::sst::index::store::InstrumentedStore;
 use crate::sst::location::IntermediateLocation;
 
 pub(crate) struct TempFileProvider {
     location: IntermediateLocation,
-    object_store: InstrumentedObjectStore,
+    store: InstrumentedStore,
 }
 
 #[async_trait]
@@ -40,7 +40,7 @@ impl ExternalTempFileProvider for TempFileProvider {
     ) -> IndexResult<Box<dyn AsyncWrite + Unpin + Send>> {
         let path = self.location.file_path(column_name, file_id);
         let writer = self
-            .object_store
+            .store
             .writer(&path, &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL)
             .await
             .map_err(BoxedError::new)
@@ -54,7 +54,7 @@ impl ExternalTempFileProvider for TempFileProvider {
     ) -> IndexResult<Vec<Box<dyn AsyncRead + Unpin + Send>>> {
         let dir = self.location.column_dir(column_name);
         let entries = self
-            .object_store
+            .store
             .list(&dir)
             .await
             .map_err(BoxedError::new)
@@ -68,7 +68,7 @@ impl ExternalTempFileProvider for TempFileProvider {
             }
 
             let reader = self
-                .object_store
+                .store
                 .reader(entry.path(), &INDEX_INTERMEDIATE_READ_BYTES_TOTAL)
                 .await
                 .map_err(BoxedError::new)
@@ -81,14 +81,11 @@ impl ExternalTempFileProvider for TempFileProvider {
 }
 
 impl TempFileProvider {
-    pub fn new(location: IntermediateLocation, object_store: InstrumentedObjectStore) -> Self {
-        Self {
-            location,
-            object_store,
-        }
+    pub fn new(location: IntermediateLocation, store: InstrumentedStore) -> Self {
+        Self { location, store }
     }
 
     pub async fn cleanup(&self) -> Result<()> {
-        self.object_store.remove_all(self.location.root_dir()).await
+        self.store.remove_all(self.location.root_dir()).await
     }
 }

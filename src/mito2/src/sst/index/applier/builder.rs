@@ -36,7 +36,7 @@ use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
-use crate::sst::index::object_store::InstrumentedObjectStore;
+use crate::sst::index::store::InstrumentedStore;
 
 type ColumnName = String;
 
@@ -74,7 +74,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let applier = PredicatesIndexApplier::try_from(predicates);
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
-            InstrumentedObjectStore::new(self.object_store),
+            InstrumentedStore::new(self.object_store),
             Arc::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }

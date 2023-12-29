@@ -25,16 +25,16 @@ use snafu::ResultExt;
 use crate::error::{OpenDalSnafu, Result};
 
 #[derive(Clone)]
-pub(crate) struct InstrumentedObjectStore {
+pub(crate) struct InstrumentedStore {
     object_store: ObjectStore,
 }
 
-impl InstrumentedObjectStore {
-    pub(crate) fn new(object_store: ObjectStore) -> Self {
+impl InstrumentedStore {
+    pub fn new(object_store: ObjectStore) -> Self {
         Self { object_store }
     }
 
-    pub(crate) async fn reader(
+    pub async fn reader(
         &self,
         path: &str,
         recoder: &'static IntCounter,
@@ -43,7 +43,7 @@ impl InstrumentedObjectStore {
         Ok(InstrumentedAsyncRead::new(reader, recoder))
     }
 
-    pub(crate) async fn writer(
+    pub async fn writer(
         &self,
         path: &str,
         recoder: &'static IntCounter,
@@ -52,12 +52,12 @@ impl InstrumentedObjectStore {
         Ok(InstrumentedAsyncWrite::new(writer, recoder))
     }
 
-    pub(crate) async fn list(&self, path: &str) -> Result<Vec<object_store::Entry>> {
+    pub async fn list(&self, path: &str) -> Result<Vec<object_store::Entry>> {
         let list = self.object_store.list(path).await.context(OpenDalSnafu)?;
         Ok(list)
     }
 
-    pub(crate) async fn remove_all(&self, path: &str) -> Result<()> {
+    pub async fn remove_all(&self, path: &str) -> Result<()> {
         self.object_store
             .remove_all(path)
             .await

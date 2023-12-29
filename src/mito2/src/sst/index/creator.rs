@@ -38,7 +38,7 @@ use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
 use crate::sst::index::creator::statistics::Statistics;
 use crate::sst::index::creator::temp_provider::TempFileProvider;
-use crate::sst::index::object_store::InstrumentedObjectStore;
+use crate::sst::index::store::InstrumentedStore;
 use crate::sst::index::{
     INDEX_BLOB_TYPE, MIN_MEMORY_USAGE_THRESHOLD, PIPE_BUFFER_SIZE_FOR_SENDING_BLOB,
 };
@@ -50,7 +50,7 @@ type RowCount = usize;
 pub struct SstIndexCreator {
     region_dir: String,
     sst_file_id: FileId,
-    object_store: InstrumentedObjectStore,
+    store: InstrumentedStore,
 
     codec: IndexValuesCodec,
     index_creator: Box<dyn InvertedIndexCreator>,
@@ -70,11 +70,11 @@ impl SstIndexCreator {
         memory_usage_threshold: Option<usize>,
         row_group_size: NonZeroUsize,
     ) -> Self {
-        let object_store = InstrumentedObjectStore::new(object_store);
+        let store = InstrumentedStore::new(object_store);
 
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&region_dir, &sst_file_id),
-            object_store.clone(),
+            store.clone(),
         ));
         let memory_usage_threshold = memory_usage_threshold.map(|threshold| {
             (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
@@ -87,7 +87,7 @@ impl SstIndexCreator {
         Self {
             region_dir,
             sst_file_id,
-            object_store,
+            store,
             codec,
             index_creator,
             temp_file_provider,
@@ -159,7 +159,7 @@ impl SstIndexCreator {
 
         let file_path = location::index_file_path(&self.region_dir, &self.sst_file_id);
         let file_writer = self
-            .object_store
+            .store
             .writer(&file_path, &INDEX_PUFFIN_WRITE_BYTES_TOTAL)
             .await?;
         let mut puffin_writer = PuffinFileWriter::new(file_writer);

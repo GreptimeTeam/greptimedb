@@ -15,7 +15,7 @@
 pub mod applier;
 mod codec;
 pub mod creator;
-mod object_store;
+mod store;
 
 const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
 

@@ -28,14 +28,14 @@ use crate::metrics::{
     INDEX_APPLY_COST_TIME, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
 };
 use crate::sst::file::FileId;
-use crate::sst::index::object_store::InstrumentedObjectStore;
+use crate::sst::index::store::InstrumentedStore;
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
 #[derive(Clone)]
 pub struct SstIndexApplier {
     region_dir: String,
-    object_store: InstrumentedObjectStore,
+    store: InstrumentedStore,
 
     index_applier: Arc<dyn IndexApplier>,
 }
@@ -43,14 +43,14 @@ pub struct SstIndexApplier {
 impl SstIndexApplier {
     pub(crate) fn new(
         region_dir: String,
-        object_store: InstrumentedObjectStore,
+        store: InstrumentedStore,
         index_applier: Arc<dyn IndexApplier>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
         Self {
             region_dir,
-            object_store,
+            store,
             index_applier,
         }
     }
@@ -61,7 +61,7 @@ impl SstIndexApplier {
         let file_path = location::index_file_path(&self.region_dir, &file_id);
 
         let file_reader = self
-            .object_store
+            .store
             .reader(&file_path, &INDEX_PUFFIN_READ_BYTES_TOTAL)
             .await?;
         let mut puffin_reader = PuffinFileReader::new(file_reader);
