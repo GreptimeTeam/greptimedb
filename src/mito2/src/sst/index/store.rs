@@ -37,19 +37,19 @@ impl InstrumentedStore {
     pub async fn reader<'a>(
         &self,
         path: &str,
-        recoder: &'a IntCounter,
+        recorder: &'a IntCounter,
     ) -> Result<InstrumentedAsyncRead<'a, object_store::Reader>> {
         let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
-        Ok(InstrumentedAsyncRead::new(reader, recoder))
+        Ok(InstrumentedAsyncRead::new(reader, recorder))
     }
 
     pub async fn writer<'a>(
         &self,
         path: &str,
-        recoder: &'a IntCounter,
+        recorder: &'a IntCounter,
     ) -> Result<InstrumentedAsyncWrite<'a, object_store::Writer>> {
         let writer = self.object_store.writer(path).await.context(OpenDalSnafu)?;
-        Ok(InstrumentedAsyncWrite::new(writer, recoder))
+        Ok(InstrumentedAsyncWrite::new(writer, recorder))
     }
 
     pub async fn list(&self, path: &str) -> Result<Vec<object_store::Entry>> {
