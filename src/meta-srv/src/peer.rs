@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -34,12 +35,21 @@ impl NaivePeerRegistry {
     /// Registers a [Peer].
     pub fn register(&self, cluster_id: ClusterId, peer: Peer) {
         let mut inner = self.0.write().unwrap();
-        if let Some(previous) = inner.insert((cluster_id, peer.id), peer) {
-            warn!(
-                "Registered a peer, it overwritten the previous peer: {:?}",
-                previous
-            )
-        }
+        match inner.entry((cluster_id, peer.id)) {
+            Entry::Occupied(mut entry) => {
+                let previous = entry.get();
+                if previous != &peer {
+                    warn!(
+                        "Registered a new peer: {}, it overwritten the previous peer: {:?}",
+                        peer, previous
+                    )
+                }
+                entry.insert(peer);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(peer);
+            }
+        };
     }
 
     /// Deregisters a [Peer].
@@ -69,8 +79,17 @@ mod tests {
 
     #[test]
     fn test_naive_peer_registry() {
+        common_telemetry::init_default_ut_logging();
+
         let lookup = NaivePeerRegistry::default();
         lookup.register(0, Peer::empty(1024));
+        lookup.register(
+            0,
+            Peer {
+                id: 1024,
+                addr: "test".to_string(),
+            },
+        );
 
         assert!(lookup.peer(0, 1024).is_some());
         assert!(lookup.peer(0, 1025).is_none());
