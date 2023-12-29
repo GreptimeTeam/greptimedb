@@ -14,8 +14,6 @@
 
 pub mod builder;
 
-use std::sync::Arc;
-
 use index::inverted_index::search::index_apply::IndexApplier;
 use object_store::ObjectStore;
 
@@ -30,7 +28,7 @@ pub struct SstIndexApplier {
 
     /// Predefined index applier used to apply predicates to index files
     /// and return the relevant row group ids for further scan.
-    index_applier: Arc<dyn IndexApplier>,
+    index_applier: Box<dyn IndexApplier>,
 }
 
 impl SstIndexApplier {
@@ -38,7 +36,7 @@ impl SstIndexApplier {
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
-        index_applier: Arc<dyn IndexApplier>,
+        index_applier: Box<dyn IndexApplier>,
     ) -> Self {
         Self {
             region_dir,

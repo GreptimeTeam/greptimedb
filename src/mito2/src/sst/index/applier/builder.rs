@@ -22,10 +22,10 @@ mod between;
 // mod regex_match;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_query::logical_plan::Expr;
+use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr as DfExpr;
 use datatypes::data_type::ConcreteDataType;
@@ -77,7 +77,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
     /// the expressions provided. If no predicates match, returns `None`.
     pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
         for expr in exprs {
-            self.traverse_and_collect(expr.df_expr())?;
+            self.traverse_and_collect(expr.df_expr());
         }
 
         if self.output.is_empty() {
@@ -89,14 +89,14 @@ impl<'a> SstIndexApplierBuilder<'a> {
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
             self.object_store,
-            Arc::new(applier.context(BuildIndexApplierSnafu)?),
+            Box::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }
 
     /// Recursively traverses expressions to collect predicates.
     /// Results are stored in `self.output`.
-    fn traverse_and_collect(&mut self, expr: &DfExpr) -> Result<()> {
-        match expr {
+    fn traverse_and_collect(&mut self, expr: &DfExpr) {
+        let res = match expr {
             DfExpr::Between(between) => self.collect_between(between),
 
             // TODO(zhongzc): This PR is too large. The following arms are coming soon.
@@ -104,8 +104,9 @@ impl<'a> SstIndexApplierBuilder<'a> {
             // DfExpr::InList(in_list) => self.collect_inlist(in_list),
             // DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
             //     Operator::And => {
-            //         self.traverse_and_collect(left)?;
-            //         self.traverse_and_collect(right)
+            //         self.traverse_and_collect(left);
+            //         self.traverse_and_collect(right);
+            //         Ok(())
             //     }
             //     Operator::Or => self.collect_or_eq_list(left, right),
             //     Operator::Eq => self.collect_eq(left, right),
@@ -118,6 +119,10 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
             // TODO(zhongzc): support more expressions, e.g. IsNull, IsNotNull, ...
             _ => Ok(()),
+        };
+
+        if let Err(err) = res {
+            warn!("Failed to collect predicates, ignore it. error: {err}, expr: {expr}");
         }
     }
 
