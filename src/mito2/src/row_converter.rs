@@ -84,7 +84,11 @@ impl SortField {
 }
 
 impl SortField {
-    fn serialize(&self, serializer: &mut Serializer<&mut Vec<u8>>, value: &ValueRef) -> Result<()> {
+    pub(crate) fn serialize(
+        &self,
+        serializer: &mut Serializer<&mut Vec<u8>>,
+        value: &ValueRef,
+    ) -> Result<()> {
         macro_rules! cast_value_and_serialize {
             (
                 $self: ident;

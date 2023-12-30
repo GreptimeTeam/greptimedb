@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Sorted strings tables.
+#![allow(dead_code)]
 
-pub mod file;
-pub mod file_purger;
-mod index;
-pub mod parquet;
-pub(crate) mod version;
+pub mod applier;
+mod codec;

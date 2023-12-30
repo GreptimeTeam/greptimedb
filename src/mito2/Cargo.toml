@@ -39,6 +39,7 @@ datafusion.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 humantime-serde.workspace = true
+index.workspace = true
 lazy_static = "1.4"
 log-store = { workspace = true, optional = true }
 memcomparable = "0.2"
