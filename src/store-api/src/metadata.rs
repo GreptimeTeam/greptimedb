@@ -95,10 +95,6 @@ impl ColumnMetadata {
             column_id,
         })
     }
-
-    pub fn is_tag(&self) -> bool {
-        self.semantic_type == SemanticType::Tag
-    }
 }
 
 #[cfg_attr(doc, aquamarine::aquamarine)]

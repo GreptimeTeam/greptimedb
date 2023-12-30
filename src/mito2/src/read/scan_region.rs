@@ -14,6 +14,8 @@
 
 //! Scans a region according to the scan request.
 
+use std::sync::Arc;
+
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, logging};
 use common_time::range::TimestampRange;
@@ -28,7 +30,7 @@ use crate::read::seq_scan::SeqScan;
 use crate::region::version::VersionRef;
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
-use crate::sst::index::applier::SstIndexApplier;
+use crate::sst::index::applier::SstIndexApplierRef;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -234,7 +236,7 @@ impl ScanRegion {
     /// To use this fixed schema to apply to different versions of SSTs, we have to make sure:
     /// 1. Type of column cannot be changed.
     /// 2. Column cannot be renamed.
-    fn build_index_applier(&self) -> Option<SstIndexApplier> {
+    fn build_index_applier(&self) -> Option<SstIndexApplierRef> {
         SstIndexApplierBuilder::new(
             self.access_layer.region_dir().to_string(),
             self.access_layer.object_store().clone(),
@@ -244,6 +246,7 @@ impl ScanRegion {
         .inspect_err(|e| logging::warn!("Failed to build index applier: {}", e))
         .ok()
         .flatten()
+        .map(Arc::new)
     }
 }
 

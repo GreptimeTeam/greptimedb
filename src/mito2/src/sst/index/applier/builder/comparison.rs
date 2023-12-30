@@ -120,7 +120,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(column) else {
             return Ok(());
         };
-        let Some(lit) = Self::lit_not_null(literal) else {
+        let Some(lit) = Self::nonnull_lit(literal) else {
             return Ok(());
         };
         let Some(data_type) = self.tag_column_type(column_name)? else {

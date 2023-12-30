@@ -19,9 +19,7 @@ use crate::error::Result;
 use crate::sst::index::applier::builder::SstIndexApplierBuilder;
 
 impl<'a> SstIndexApplierBuilder<'a> {
-    /// ```sql
-    /// column_name BETWEEN literal1 AND literal2
-    /// ```
+    /// Collects a `BETWEEN` expression in the form of `column BETWEEN lit AND lit`.
     pub(crate) fn collect_between(&mut self, between: &Between) -> Result<()> {
         if between.negated {
             return Ok(());
@@ -33,10 +31,10 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(data_type) = self.tag_column_type(column_name)? else {
             return Ok(());
         };
-        let Some(low) = Self::lit_not_null(&between.low) else {
+        let Some(low) = Self::nonnull_lit(&between.low) else {
             return Ok(());
         };
-        let Some(high) = Self::lit_not_null(&between.high) else {
+        let Some(high) = Self::nonnull_lit(&between.high) else {
             return Ok(());
         };
 
@@ -55,5 +53,119 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
         self.add_predicate(column_name, predicate);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::sst::index::applier::builder::tests::{
+        encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
+        test_object_store, test_region_metadata,
+    };
+
+    #[test]
+    fn test_collect_between_basic() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let between = Between {
+            negated: false,
+            expr: Box::new(tag_column()),
+            low: Box::new(string_lit("abc")),
+            high: Box::new(string_lit("def")),
+        };
+
+        builder.collect_between(&between).unwrap();
+
+        let predicates = builder.output.get("a").unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::Range(RangePredicate {
+                range: Range {
+                    lower: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("abc"),
+                    }),
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("def"),
+                    }),
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn test_collect_between_negated() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let between = Between {
+            negated: true,
+            expr: Box::new(tag_column()),
+            low: Box::new(string_lit("abc")),
+            high: Box::new(string_lit("def")),
+        };
+
+        builder.collect_between(&between).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_between_field_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let between = Between {
+            negated: false,
+            expr: Box::new(field_column()),
+            low: Box::new(string_lit("abc")),
+            high: Box::new(string_lit("def")),
+        };
+
+        builder.collect_between(&between).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_between_type_mismatch() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let between = Between {
+            negated: false,
+            expr: Box::new(tag_column()),
+            low: Box::new(int64_lit(123)),
+            high: Box::new(int64_lit(456)),
+        };
+
+        let res = builder.collect_between(&between);
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_between_nonexistent_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let between = Between {
+            negated: false,
+            expr: Box::new(nonexistent_column()),
+            low: Box::new(string_lit("abc")),
+            high: Box::new(string_lit("def")),
+        };
+
+        let res = builder.collect_between(&between);
+        assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
+        assert!(builder.output.is_empty());
     }
 }

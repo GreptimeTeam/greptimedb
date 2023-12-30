@@ -417,6 +417,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid file metadata"))]
+    ConvertMetaData {
+        location: Location,
+        #[snafu(source)]
+        error: parquet::errors::ParquetError,
+    },
+
     #[snafu(display("Column not found, column: {column}"))]
     ColumnNotFound { column: String, location: Location },
 
@@ -424,6 +431,13 @@ pub enum Error {
     BuildIndexApplier {
         #[snafu(source)]
         source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value"))]
+    ConvertValue {
+        #[snafu(source)]
+        source: datatypes::error::Error,
         location: Location,
     },
 
@@ -480,20 +494,6 @@ pub enum Error {
         #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
-    },
-
-    #[snafu(display("Failed to convert value"))]
-    ConvertValue {
-        #[snafu(source)]
-        source: datatypes::error::Error,
-        location: Location,
-    },
-
-    #[snafu(display("Invalid file metadata"))]
-    ConvertMetaData {
-        location: Location,
-        #[snafu(source)]
-        error: parquet::errors::ParquetError,
     },
 }
 

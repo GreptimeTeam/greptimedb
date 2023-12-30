@@ -39,7 +39,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             list: HashSet::with_capacity(inlist.list.len()),
         };
         for lit in &inlist.list {
-            let Some(lit) = Self::lit_not_null(lit) else {
+            let Some(lit) = Self::nonnull_lit(lit) else {
                 return Ok(());
             };
 

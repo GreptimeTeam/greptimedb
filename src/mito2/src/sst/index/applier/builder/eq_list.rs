@@ -27,7 +27,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
             return Ok(());
         };
-        let Some(lit) = Self::lit_not_null(right).or_else(|| Self::lit_not_null(left)) else {
+        let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
         let Some(data_type) = self.tag_column_type(column_name)? else {
@@ -57,7 +57,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
             return Ok(());
         };
-        let Some(lit) = Self::lit_not_null(right).or_else(|| Self::lit_not_null(left)) else {
+        let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
             return Ok(());
         };
         let Some(data_type) = self.tag_column_type(column_name)? else {
@@ -105,7 +105,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             if column_name != name {
                 return Ok(false);
             }
-            let Some(lit) = Self::lit_not_null(right).or_else(|| Self::lit_not_null(left)) else {
+            let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
                 return Ok(false);
             };
 

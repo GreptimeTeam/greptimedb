@@ -42,7 +42,7 @@ use crate::error::{
 use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
-use crate::sst::index::applier::SstIndexApplier;
+use crate::sst::index::applier::SstIndexApplierRef;
 use crate::sst::parquet::format::ReadFormat;
 use crate::sst::parquet::row_group::InMemoryRowGroup;
 use crate::sst::parquet::stats::RowGroupPruningStats;
@@ -66,7 +66,7 @@ pub struct ParquetReaderBuilder {
     /// Manager that caches SST data.
     cache_manager: Option<CacheManagerRef>,
 
-    index_applier: Option<SstIndexApplier>,
+    index_applier: Option<SstIndexApplierRef>,
 }
 
 impl ParquetReaderBuilder {
@@ -114,7 +114,7 @@ impl ParquetReaderBuilder {
         self
     }
 
-    pub fn index_applier(mut self, index_applier: Option<SstIndexApplier>) -> Self {
+    pub fn index_applier(mut self, index_applier: Option<SstIndexApplierRef>) -> Self {
         self.index_applier = index_applier;
         self
     }

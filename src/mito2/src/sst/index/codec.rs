@@ -21,9 +21,17 @@ use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 
 type ColumnName = String;
 
+/// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
 
 impl IndexValueCodec {
+    /// Serializes a `ValueRef` using the data type defined in `SortField` and writes
+    /// the result into a buffer.
+    ///
+    /// # Arguments
+    /// * `value` - The value to be encoded.
+    /// * `field` - Contains data type to guide serialization.
+    /// * `buffer` - Destination buffer for the serialized value.
     pub fn encode_value(value: ValueRef, field: &SortField, buffer: &mut Vec<u8>) -> Result<()> {
         buffer.reserve(field.estimated_size());
         let mut serializer = Serializer::new(buffer);
@@ -75,5 +83,33 @@ impl IndexValuesCodec {
             });
 
         Ok(iter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::data_type::ConcreteDataType;
+
+    use super::*;
+    use crate::error::Error;
+
+    #[test]
+    fn test_encode_value_basic() {
+        let value = ValueRef::from("hello");
+        let field = SortField::new(ConcreteDataType::string_datatype());
+
+        let mut buffer = Vec::new();
+        IndexValueCodec::encode_value(value, &field, &mut buffer).unwrap();
+        assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn test_encode_value_type_mismatch() {
+        let value = ValueRef::from("hello");
+        let field = SortField::new(ConcreteDataType::int64_datatype());
+
+        let mut buffer = Vec::new();
+        let res = IndexValueCodec::encode_value(value, &field, &mut buffer);
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
     }
 }

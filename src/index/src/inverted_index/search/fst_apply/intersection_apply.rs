@@ -99,6 +99,7 @@ impl IntersectionFstApplier {
                 Predicate::RegexMatch(regex) => {
                     let dfa = DFA::new(&regex.pattern);
                     let dfa = dfa.map_err(Box::new).context(ParseDFASnafu)?;
+
                     memory_usage += dfa.memory_usage();
                     dfas.push(dfa);
                 }
@@ -291,6 +292,7 @@ mod tests {
             ("^$", vec![]),
             ("1|a", vec![1, 2]),
             ("^123$|^abc$", vec![1, 2]),
+            ("^123$|d", vec![1]),
         ];
 
         for (pattern, expected) in cases {

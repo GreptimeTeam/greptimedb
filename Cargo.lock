@@ -6544,6 +6544,7 @@ dependencies = [
 name = "promql"
 version = "0.5.0"
 dependencies = [
+ "ahash 0.8.6",
  "async-recursion",
  "async-trait",
  "bytemuck",

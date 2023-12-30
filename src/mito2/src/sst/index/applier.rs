@@ -21,6 +21,7 @@ use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     IndexApplier, IndexNotFoundStrategy, SearchContext,
 };
+use object_store::ObjectStore;
 use puffin::file_format::reader::{PuffinAsyncReader, PuffinFileReader};
 use snafu::{OptionExt, ResultExt};
 
@@ -36,25 +37,34 @@ use crate::sst::index::store::InstrumentedStore;
 use crate::sst::index::INDEX_BLOB_TYPE;
 use crate::sst::location;
 
-#[derive(Clone)]
+/// The [`SstIndexApplier`] is responsible for applying predicates to the provided SST files
+/// and returning the relevant row group ids for further scan.
 pub struct SstIndexApplier {
+    /// The root directory of the region.
     region_dir: String,
+
+    /// Object store responsible for accessing SST files.
     store: InstrumentedStore,
 
-    index_applier: Arc<dyn IndexApplier>,
+    /// Predefined index applier used to apply predicates to index files
+    /// and return the relevant row group ids for further scan.
+    index_applier: Box<dyn IndexApplier>,
 }
 
+pub type SstIndexApplierRef = Arc<SstIndexApplier>;
+
 impl SstIndexApplier {
-    pub(crate) fn new(
+    /// Creates a new [`SstIndexApplier`].
+    pub fn new(
         region_dir: String,
-        store: InstrumentedStore,
-        index_applier: Arc<dyn IndexApplier>,
+        store: ObjectStore,
+        index_applier: Box<dyn IndexApplier>,
     ) -> Self {
         INDEX_APPLY_MEMORY_USAGE.add(index_applier.memory_usage() as i64);
 
         Self {
             region_dir,
-            store,
+            store: InstrumentedStore::new(store),
             index_applier,
         }
     }
