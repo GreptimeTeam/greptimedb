@@ -70,7 +70,7 @@ impl TopicBuilder {
     }
 
     /// Builds a topic by inserting a prefix and a suffix into the given topic.
-    pub fn build(&mut self, body: &Topic) -> Topic {
+    pub fn build(&mut self, body: &str) -> Topic {
         const ITERS: usize = 24;
         for _ in 0..ITERS {
             let topic = format!(

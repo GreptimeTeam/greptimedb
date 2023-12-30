@@ -26,7 +26,7 @@ pub use crate::test_util::kafka::topic_builder::TopicBuilder;
 macro_rules! get_broker_endpoints_from_env {
     ($key:expr) => {{
         let broker_endpoints = std::env::var($key)
-            .unwrap()
+            .unwrap_or("localhost:9092".to_string())
             .split(',')
             .map(ToString::to_string)
             .collect::<Vec<_>>();
@@ -36,7 +36,7 @@ macro_rules! get_broker_endpoints_from_env {
 }
 
 /// Creates `num_topiocs` number of topics with the given TopicBuilder.
-/// Requests for creating these topics on the Kafka cluster.
+/// Requests for creating these topics on the Kafka cluster specified with the `broker_endpoints`.
 pub async fn create_topics(
     num_topics: usize,
     mut builder: TopicBuilder,

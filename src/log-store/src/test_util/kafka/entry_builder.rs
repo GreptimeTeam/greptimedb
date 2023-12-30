@@ -27,7 +27,7 @@ const DEFAULT_DATA: &[u8; 10] = b"[greptime]";
 /// A builder for building entries for a namespace.
 pub struct EntryBuilder {
     /// The namespace of the entries.
-    ns: NamespaceImpl,
+    pub ns: NamespaceImpl,
     /// The next entry id to allocate. It starts from 0 by default.
     next_entry_id: AtomicEntryId,
     /// A generator for supporting random data generation.
@@ -78,12 +78,24 @@ impl EntryBuilder {
     }
 
     /// Builds an entry with the default data.
+    // TODO(niebayes): may be remove this method since it's not used.
     pub fn with_default_data(&self) -> EntryImpl {
         EntryImpl {
             data: DEFAULT_DATA.to_vec(),
             id: self.alloc_entry_id(),
             ns: self.ns.clone(),
         }
+    }
+
+    /// Builds a batch of entries each with random data.
+    pub fn with_random_data_batch(&self, batch_size: usize) -> Vec<EntryImpl> {
+        (0..batch_size)
+            .map(|_| EntryImpl {
+                data: self.make_random_data(),
+                id: self.alloc_entry_id(),
+                ns: self.ns.clone(),
+            })
+            .collect()
     }
 
     /// Builds an entry with random data.
@@ -105,7 +117,7 @@ impl EntryBuilder {
         let amount = rng.gen_range(0..self.data_pool.len());
         self.data_pool
             .choose_multiple(&mut rng, amount)
-            .map(|x| *x)
+            .copied()
             .collect()
     }
 }

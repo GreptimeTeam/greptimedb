@@ -148,7 +148,7 @@ mod tests {
     async fn ensure_topics_exist(topics: &[Topic], client_manager: &ClientManager) {
         let client_pool = client_manager.client_pool.read().await;
         let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
-        assert_eq!(all_exist, true);
+        assert!(all_exist);
     }
 
     async fn test_which(test_name: &str) {

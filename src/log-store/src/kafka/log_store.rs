@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::{KafkaConfig, WalOptions};
+use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic, WalOptions};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
@@ -46,6 +46,26 @@ impl KafkaLogStore {
             client_manager: Arc::new(ClientManager::try_new(config).await?),
             config: config.clone(),
         })
+    }
+
+    /// Gets the end offset of the last record in a Kafka topic.
+    /// Warning: this method is intended to be used only in testing.
+    // TODO(niebayes): use this to test that the initial offset is 1 for a Kafka log store in that
+    // a no-op record is successfully appended into each topic.
+    #[allow(unused)]
+    pub async fn get_offset(&self, topic: &Topic) -> EntryId {
+        let client = self
+            .client_manager
+            .get_or_insert(topic)
+            .await
+            .unwrap()
+            .raw_client;
+        client
+            .get_offset(OffsetAt::Latest)
+            .await
+            .map(TryInto::try_into)
+            .unwrap()
+            .unwrap()
     }
 }
 
@@ -266,4 +286,114 @@ impl LogStore for KafkaLogStore {
     async fn stop(&self) -> Result<()> {
         Ok(())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
+
+    use super::*;
+    use crate::get_broker_endpoints_from_env;
+    use crate::test_util::kafka::topic_builder::Affix;
+    use crate::test_util::kafka::{create_topics, EntryBuilder, TopicBuilder};
+
+    fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
+        NamespaceImpl {
+            region_id,
+            topic: topic.to_string(),
+        }
+    }
+
+    // TODO(niebayes): change `expected` to &[EntryImpl].
+    async fn check_entries(
+        ns: &NamespaceImpl,
+        start_offset: EntryId,
+        expected: Vec<EntryImpl>,
+        logstore: &KafkaLogStore,
+    ) {
+        let stream = logstore.read(ns, start_offset).await.unwrap();
+        let got = stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flat_map(|x| x.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(expected, got);
+    }
+
+    /// Appends entries for one region and checks all entries can be read successfully.
+    #[tokio::test]
+    async fn test_one_region() {
+        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
+        let topic_builder = TopicBuilder::default()
+            .with_prefix(Affix::Fixed("test_one_region".to_string()))
+            .with_suffix(Affix::TimeNow);
+        let topic = create_topics(1, topic_builder, &broker_endpoints).await[0].clone();
+
+        let config = KafkaConfig {
+            broker_endpoints,
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+
+        let ns = new_namespace(&topic, 0);
+        let entry_builder = EntryBuilder::new(ns.clone());
+        let entry = entry_builder.with_random_data();
+
+        let last_entry_id = logstore.append(entry.clone()).await.unwrap().last_entry_id;
+        check_entries(&ns, last_entry_id, vec![entry], &logstore).await;
+
+        let entries = (0..10)
+            .map(|_| entry_builder.with_random_data())
+            .collect::<Vec<_>>();
+        let last_entry_id = logstore
+            .append_batch(entries.clone())
+            .await
+            .unwrap()
+            .last_entry_ids[&ns.region_id];
+        check_entries(&ns, last_entry_id, entries, &logstore).await;
+    }
+
+    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
+    /// A topic is assigned only a single region.
+    #[tokio::test]
+    async fn test_multi_regions_disjoint() {
+        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
+        let topic_builder = TopicBuilder::default()
+            .with_prefix(Affix::Fixed("test_multi_regions_disjoint".to_string()))
+            .with_suffix(Affix::TimeNow);
+        let topics = create_topics(10, topic_builder, &broker_endpoints).await;
+
+        let config = KafkaConfig {
+            broker_endpoints,
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+
+        let (region_namespaces, mut entry_builders): (Vec<_>, Vec<_>) = topics
+            .iter()
+            .enumerate()
+            .map(|(i, topic)| {
+                let ns = new_namespace(topic, i as u64);
+                let entry_builder = EntryBuilder::new(ns.clone());
+                (ns, entry_builder)
+            })
+            .unzip();
+        let region_entries = entry_builders
+            .iter_mut()
+            .map(|builder| builder.with_random_data_batch(5))
+            .collect::<Vec<_>>();
+        let entries = region_entries.iter().flatten().cloned().collect::<Vec<_>>();
+        let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
+
+        for (i, ns) in region_namespaces.iter().enumerate() {
+            let expected = region_entries[i].clone();
+            check_entries(ns, last_entry_ids[&ns.region_id], expected, &logstore).await;
+        }
+    }
+
+    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
+    /// A topic may be assigned multiple regions.
+    #[tokio::test]
+    async fn test_multi_regions_overlapped() {}
 }
