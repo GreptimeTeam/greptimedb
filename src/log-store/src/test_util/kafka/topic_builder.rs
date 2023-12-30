@@ -32,7 +32,7 @@ impl ToString for Affix {
     fn to_string(&self) -> String {
         match self {
             Affix::Fixed(s) => s.to_string(),
-            Affix::TimeNow => chrono::Local::now().to_string(),
+            Affix::TimeNow => chrono::Local::now().timestamp_millis().to_string(),
             Affix::Nothing => String::default(),
         }
     }
@@ -70,13 +70,13 @@ impl TopicBuilder {
     }
 
     /// Builds a topic by inserting a prefix and a suffix into the given topic.
-    pub fn build(&mut self, topic: &Topic) -> Topic {
+    pub fn build(&mut self, body: &Topic) -> Topic {
         const ITERS: usize = 24;
         for _ in 0..ITERS {
             let topic = format!(
                 "{}_{}_{}",
                 self.prefix.to_string(),
-                topic,
+                body,
                 self.suffix.to_string()
             );
             if !self.created.contains(&topic) {

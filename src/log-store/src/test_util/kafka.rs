@@ -16,12 +16,48 @@ pub mod entry_builder;
 pub mod topic_builder;
 
 use common_config::wal::KafkaWalTopic as Topic;
+use rskafka::client::ClientBuilder;
 
 pub use crate::test_util::kafka::entry_builder::EntryBuilder;
 pub use crate::test_util::kafka::topic_builder::TopicBuilder;
 
+/// Gets broker endpoints from environment variables with the given key.
+#[macro_export]
+macro_rules! get_broker_endpoints_from_env {
+    ($key:expr) => {{
+        let broker_endpoints = std::env::var($key)
+            .unwrap()
+            .split(',')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(!broker_endpoints.is_empty());
+        broker_endpoints
+    }};
+}
+
 /// Creates `num_topiocs` number of topics with the given TopicBuilder.
-/// Requests for creating these topics on the Kafka cluster if the `broker_endpoints` is not empty.
-pub fn create_topics(num_topics: usize, builder: TopicBuilder, broker_endpoints: Vec<String>) -> Vec<Topic> {
-    
+/// Requests for creating these topics on the Kafka cluster.
+pub async fn create_topics(
+    num_topics: usize,
+    mut builder: TopicBuilder,
+    broker_endpoints: &[String],
+) -> Vec<Topic> {
+    assert!(!broker_endpoints.is_empty());
+
+    let client = ClientBuilder::new(broker_endpoints.to_vec())
+        .build()
+        .await
+        .unwrap();
+    let ctrl_client = client.controller_client().unwrap();
+
+    let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
+        .map(|i| {
+            let topic = builder.build(&format!("topic_{i}"));
+            let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
+            (topic, task)
+        })
+        .unzip();
+    futures::future::try_join_all(tasks).await.unwrap();
+
+    topics
 }

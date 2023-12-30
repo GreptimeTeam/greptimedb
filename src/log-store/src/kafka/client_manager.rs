@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
-use common_telemetry::debug;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
-use tokio::sync::{Mutex as TokioMutex, RwLock as TokioRwLock};
+use tokio::sync::RwLock;
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 
@@ -69,7 +67,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: TokioMutex<HashMap<Topic, Client>>,
+    client_pool: RwLock<HashMap<Topic, Client>>,
 }
 
 impl ClientManager {
@@ -90,28 +88,36 @@ impl ClientManager {
                 broker_endpoints: config.broker_endpoints.clone(),
             })?;
 
-        debug!("Created a ClientManager");
-
         Ok(Self {
             config: config.clone(),
             client_factory: client,
-            client_pool: TokioMutex::new(HashMap::new()),
+            client_pool: RwLock::new(HashMap::new()),
         })
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
-        let mut client_pool = self.client_pool.lock().await;
-        if let Entry::Vacant(entry) = client_pool.entry(topic.to_string()) {
-            entry.insert(self.try_create_client(topic).await?);
+        let client_pool = self.client_pool.read().await;
+        if let Some(client) = client_pool.get(topic) {
+            return Ok(client.clone());
         }
-        Ok(client_pool[topic].clone())
+        // Manullay releases the read lock.
+        drop(client_pool);
+
+        // Acquires the write lock.
+        let mut client_pool = self.client_pool.write().await;
+        match client_pool.get(topic) {
+            Some(client) => Ok(client.clone()),
+            None => {
+                let client = self.try_create_client(topic).await?;
+                client_pool.insert(topic.clone(), client.clone());
+                Ok(client)
+            }
+        }
     }
 
     async fn try_create_client(&self, topic: &Topic) -> Result<Client> {
-        debug!("Try to create client for topic {}", topic);
-
         // Sets to Retry to retry connecting if the kafka cluter replies with an UnknownTopic error.
         // That's because the topic is believed to exist as the metasrv is expected to create required topics upon start.
         // The reconnecting won't stop until succeed or a different error returns.
@@ -125,8 +131,6 @@ impl ClientManager {
             })
             .map(Arc::new)?;
 
-        debug!("Created a client for topic {}", topic);
-
         Ok(Client::new(raw_client, &self.config))
     }
 }
@@ -136,37 +140,24 @@ mod tests {
     use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
 
     use super::*;
+    use crate::get_broker_endpoints_from_env;
+    use crate::test_util::kafka::create_topics;
     use crate::test_util::kafka::topic_builder::{Affix, TopicBuilder};
 
     /// Checks clients for the given topics are created.
     async fn ensure_topics_exist(topics: &[Topic], client_manager: &ClientManager) {
-        let client_pool = client_manager.client_pool.lock().await;
+        let client_pool = client_manager.client_pool.read().await;
         let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
         assert_eq!(all_exist, true);
     }
 
-    /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
-    #[tokio::test]
-    async fn test_sequential() {
-        let broker_endpoints = std::env::var(BROKER_ENDPOINTS_KEY)
-            .unwrap()
-            .split(',')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        if broker_endpoints.is_empty() {
-            return;
-        }
-
-        let client = ClientBuilder::new(broker_endpoints.clone())
-            .build()
-            .await
-            .unwrap();
-        let ctrl_client = client.controller_client().unwrap();
-
+    async fn test_which(test_name: &str) {
+        // Creates a collection of topics in Kafka.
+        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
         let topic_builder = TopicBuilder::default()
-            .with_prefix(Affix::Fixed("test_sequential".to_string()))
+            .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);
-
+        let topics = create_topics(256, topic_builder, &broker_endpoints).await;
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -174,36 +165,36 @@ mod tests {
         };
         let manager = ClientManager::try_new(&config).await.unwrap();
 
-        // Constructs a collection of mock topics.
-        let num_topics = 256;
-        let topics = (0..num_topics)
-            .map(|i| format!("topic_{i}"))
-            .collect::<Vec<_>>();
-
-        // Gets all clients sequentially.
-        for topic in topics.iter() {
-            manager.get_or_insert(topic).await.unwrap();
+        match test_name {
+            "test_sequential" => {
+                // Gets all clients sequentially.
+                for topic in topics.iter() {
+                    manager.get_or_insert(topic).await.unwrap();
+                }
+            }
+            "test_parallel" => {
+                // Gets all clients in parallel.
+                let tasks = topics
+                    .iter()
+                    .map(|topic| manager.get_or_insert(topic))
+                    .collect::<Vec<_>>();
+                futures::future::try_join_all(tasks).await.unwrap();
+            }
+            _ => unreachable!(),
         }
+
         ensure_topics_exist(&topics, &manager).await;
+    }
+
+    /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
+    #[tokio::test]
+    async fn test_sequential() {
+        test_which("test_sequential").await;
     }
 
     /// Sends `get_or_insert` requests in parallel to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
     async fn test_parallel() {
-        let manager = ClientManager::try_new(&config).await.unwrap();
-
-        // Constructs a collection of mock topics.
-        let num_topics = 256;
-        let topics = (0..num_topics)
-            .map(|i| format!("topic_{i}"))
-            .collect::<Vec<_>>();
-
-        // Gets all clients in parallel.
-        let tasks = topics
-            .iter()
-            .map(|topic| manager.get_or_insert(topic))
-            .collect::<Vec<_>>();
-        futures::future::try_join_all(tasks).await.unwrap();
-        ensure_topics_exist(&topics, &manager).await;
+        test_which("test_parallel").await;
     }
 }
