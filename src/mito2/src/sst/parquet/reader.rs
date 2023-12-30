@@ -39,7 +39,7 @@ use crate::error::{
     ArrowReaderSnafu, InvalidMetadataSnafu, InvalidParquetSnafu, OpenDalSnafu, ReadParquetSnafu,
     Result,
 };
-use crate::metrics::{READ_ROWS_TOTAL, READ_STAGE_ELAPSED};
+use crate::metrics::{READ_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_STAGE_ELAPSED};
 use crate::read::{Batch, BatchReader};
 use crate::sst::file::FileHandle;
 use crate::sst::index::applier::SstIndexApplierRef;
@@ -156,8 +156,12 @@ impl ParquetReaderBuilder {
             parquet_to_arrow_field_levels(parquet_schema_desc, projection_mask.clone(), hint)
                 .context(ReadParquetSnafu { path: &file_path })?;
 
+        let mut metrics = Metrics::default();
+
         // Computes row groups to read.
-        let row_groups = self.row_groups_to_read(&read_format, &parquet_meta).await;
+        let row_groups = self
+            .row_groups_to_read(&read_format, &parquet_meta, &mut metrics)
+            .await;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -169,12 +173,7 @@ impl ParquetReaderBuilder {
             cache_manager: self.cache_manager.clone(),
         };
 
-        let metrics = Metrics {
-            read_row_groups: row_groups.len(),
-            build_cost: start.elapsed(),
-            ..Default::default()
-        };
-
+        metrics.build_cost = start.elapsed();
         Ok(ParquetReader {
             row_groups,
             read_format,
@@ -247,8 +246,10 @@ impl ParquetReaderBuilder {
         &self,
         read_format: &ReadFormat,
         parquet_meta: &ParquetMetaData,
+        metrics: &mut Metrics,
     ) -> BTreeSet<usize> {
-        let mut row_group_ids = (0..parquet_meta.num_row_groups()).collect();
+        let mut row_group_ids: BTreeSet<_> = (0..parquet_meta.num_row_groups()).collect();
+        metrics.num_unfiltered_row_groups += row_group_ids.len();
 
         // Applies index to prune row groups.
         if let Some(index_applier) = &self.index_applier {
@@ -262,6 +263,7 @@ impl ParquetReaderBuilder {
                 }
             }
         }
+        metrics.num_inverted_index_filtered_row_groups += row_group_ids.len();
 
         // Prunes row groups by metadata.
         if let Some(predicate) = &self.predicate {
@@ -287,6 +289,7 @@ impl ParquetReaderBuilder {
                 row_group_ids.remove(&row_group_id);
             }
         };
+        metrics.num_min_max_filtered_row_groups += row_group_ids.len();
 
         row_group_ids
     }
@@ -295,8 +298,12 @@ impl ParquetReaderBuilder {
 /// Parquet reader metrics.
 #[derive(Debug, Default)]
 struct Metrics {
-    /// Number of row groups to read.
-    read_row_groups: usize,
+    /// Number of unfiltered row groups.
+    num_unfiltered_row_groups: usize,
+    /// Number of row groups to read after filtering by inverted index.
+    num_inverted_index_filtered_row_groups: usize,
+    /// Number of row groups to read after filtering by min-max index.
+    num_min_max_filtered_row_groups: usize,
     /// Duration to build the parquet reader.
     build_cost: Duration,
     /// Duration to scan the reader.
@@ -424,8 +431,8 @@ impl Drop for ParquetReader {
             self.reader_builder.file_handle.region_id(),
             self.reader_builder.file_handle.file_id(),
             self.reader_builder.file_handle.time_range(),
-            self.metrics.read_row_groups,
-            self.reader_builder.parquet_meta.num_row_groups(),
+            self.metrics.num_min_max_filtered_row_groups,
+            self.metrics.num_unfiltered_row_groups,
             self.metrics
         );
 
@@ -439,6 +446,15 @@ impl Drop for ParquetReader {
         READ_ROWS_TOTAL
             .with_label_values(&["parquet"])
             .inc_by(self.metrics.num_rows as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["unfiltered"])
+            .inc_by(self.metrics.num_unfiltered_row_groups as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["inverted_index_filtered"])
+            .inc_by(self.metrics.num_inverted_index_filtered_row_groups as u64);
+        READ_ROW_GROUPS_TOTAL
+            .with_label_values(&["min_max_filtered"])
+            .inc_by(self.metrics.num_min_max_filtered_row_groups as u64);
     }
 }
 
