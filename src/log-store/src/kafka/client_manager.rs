@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic};
-use dashmap::mapref::entry::Entry as DashMapEntry;
-use dashmap::DashMap;
 use rskafka::client::partition::{PartitionClient, UnknownTopicHandling};
 use rskafka::client::producer::aggregator::RecordAggregator;
 use rskafka::client::producer::{BatchProducer, BatchProducerBuilder};
 use rskafka::client::{Client as RsKafkaClient, ClientBuilder};
 use rskafka::BackoffConfig;
 use snafu::ResultExt;
+use tokio::sync::RwLock;
 
 use crate::error::{BuildClientSnafu, BuildPartitionClientSnafu, Result};
 
@@ -67,7 +67,7 @@ pub(crate) struct ClientManager {
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.
     /// Key: a topic. Value: the associated client of the topic.
-    client_pool: DashMap<Topic, Client>,
+    client_pool: RwLock<HashMap<Topic, Client>>,
 }
 
 impl ClientManager {
@@ -91,18 +91,28 @@ impl ClientManager {
         Ok(Self {
             config: config.clone(),
             client_factory: client,
-            client_pool: DashMap::new(),
+            client_pool: RwLock::new(HashMap::new()),
         })
     }
 
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
-        match self.client_pool.entry(topic.to_string()) {
-            DashMapEntry::Occupied(entry) => Ok(entry.get().clone()),
-            DashMapEntry::Vacant(entry) => {
-                let topic_client = self.try_create_client(topic).await?;
-                Ok(entry.insert(topic_client).clone())
+        let client_pool = self.client_pool.read().await;
+        if let Some(client) = client_pool.get(topic) {
+            return Ok(client.clone());
+        }
+        // Manullay releases the read lock.
+        drop(client_pool);
+
+        // Acquires the write lock.
+        let mut client_pool = self.client_pool.write().await;
+        match client_pool.get(topic) {
+            Some(client) => Ok(client.clone()),
+            None => {
+                let client = self.try_create_client(topic).await?;
+                client_pool.insert(topic.clone(), client.clone());
+                Ok(client)
             }
         }
     }
