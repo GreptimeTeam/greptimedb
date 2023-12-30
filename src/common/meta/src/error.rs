@@ -351,6 +351,9 @@ pub enum Error {
 
     #[snafu(display("The topic pool is empty"))]
     EmptyTopicPool { location: Location },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable { location: Location, err_msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -392,7 +395,8 @@ impl ErrorExt for Error {
             | BuildKafkaPartitionClient { .. }
             | ProduceRecord { .. }
             | CreateKafkaWalTopic { .. }
-            | EmptyTopicPool { .. } => StatusCode::Unexpected,
+            | EmptyTopicPool { .. }
+            | UnexpectedLogicalRouteTable { .. } => StatusCode::Unexpected,
 
             SendMessage { .. }
             | GetKvCache { .. }
