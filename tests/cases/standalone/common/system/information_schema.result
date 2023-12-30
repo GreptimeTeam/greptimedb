@@ -107,7 +107,7 @@ select * from information_schema.columns order by table_schema, table_name;
 | greptime      | information_schema | events                                | last_altered               | DateTime  | FIELD         |                | No          | DateTime    |                |
 | greptime      | information_schema | files                                 | logfile_group_name         | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | files                                 | data_free                  | Int64     | FIELD         |                | No          | Int64       |                |
-| greptime      | information_schema | files                                 | extra                      | Int64     | FIELD         |                | No          | Int64       |                |
+| greptime      | information_schema | files                                 | extra                      | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | files                                 | status                     | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | files                                 | checksum                   | String    | FIELD         |                | No          | String      |                |
 | greptime      | information_schema | files                                 | check_time                 | DateTime  | FIELD         |                | No          | DateTime    |                |

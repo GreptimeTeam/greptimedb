@@ -222,7 +222,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
                 datetime_column("CHECK_TIME"),
                 string_column("CHECKSUM"),
                 string_column("STATUS"),
-                bigint_column("EXTRA"),
+                string_column("EXTRA"),
             ],
             vec![],
         ),
