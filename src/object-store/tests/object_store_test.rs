@@ -334,9 +334,9 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_cache_files(
         &cache_store,
         &[
-            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
-            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-",
-            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-14",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-14",
         ],
         &["Hello, object1!", "object2!", "Hello, object2!"],
     )
@@ -344,9 +344,9 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_lru_cache(
         &cache_layer,
         &[
-            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
-            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-",
-            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=7-14",
+            "ecfe0dce85de452eb0a325158e7bfb75.cache-bytes=0-14",
         ],
     )
     .await;
@@ -357,13 +357,13 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_eq!(cache_layer.read_cache_stat().await, (1, 15));
     assert_cache_files(
         &cache_store,
-        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
+        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14"],
         &["Hello, object1!"],
     )
     .await?;
     assert_lru_cache(
         &cache_layer,
-        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-"],
+        &["6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14"],
     )
     .await;
 
@@ -375,14 +375,22 @@ async fn test_object_store_cache_policy() -> Result<()> {
     // Try to read p3
     let _ = store.read(p3).await.unwrap();
     let _ = store.read_with(p3).range(0..5).await.unwrap();
+    // Read the deleted file without a deterministic range size requires an extra `stat.`
+    // Therefore, it won't go into the cache.
+    assert_eq!(cache_layer.read_cache_stat().await, (3, 35));
 
+    // However, The real open file happens after the reader is created.
+    // The reader will throw an error during the reading
+    // instead of returning `NotFound` during the reader creation.
     // The entry count is 4, because we have the p2 `NotFound` cache.
+    assert!(store.read_with(p2).range(0..4).await.is_err());
     assert_eq!(cache_layer.read_cache_stat().await, (4, 35));
+
     assert_cache_files(
         &cache_store,
         &[
-            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
-            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
         &["Hello, object1!", "Hello, object3!", "Hello"],
@@ -391,8 +399,8 @@ async fn test_object_store_cache_policy() -> Result<()> {
     assert_lru_cache(
         &cache_layer,
         &[
-            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-",
-            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=0-14",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
     )
@@ -409,7 +417,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &cache_store,
         &[
             "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
-            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
         &["ello, object1!", "Hello, object3!", "Hello"],
@@ -419,7 +427,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &cache_layer,
         &[
             "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
-            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
     )
@@ -440,7 +448,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
         &cache_layer,
         &[
             "6d29752bdc6e4d5ba5483b96615d6c48.cache-bytes=1-14",
-            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-",
+            "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-14",
             "a8b1dc21e24bb55974e3e68acc77ed52.cache-bytes=0-4",
         ],
     )

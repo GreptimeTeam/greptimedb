@@ -236,24 +236,24 @@ impl<C: Accessor + Clone> ReadCache<C> {
     {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        let inner_result = inner.read(path, args).await;
+        // The real read will happen after `read_to_end` is invoked.
+        let (_, mut reader) = inner.read(path, args).await?;
+        let mut buf = Vec::new();
+        let result = reader.read_to_end(&mut buf).await;
 
-        match inner_result {
-            Ok((_, mut reader)) => {
+        match result {
+            Ok(read_bytes) => {
                 let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
 
-                let mut buf = Vec::new();
-                reader.read_to_end(&mut buf).await?;
                 let bytes = Bytes::from(buf);
                 writer.write(&bytes).await?;
                 // Call `close` to ensure data is written.
                 writer.close().await?;
 
-                let read_bytes = bytes.len() as u32;
                 OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
                 OBJECT_STORE_LRU_CACHE_BYTES.add(read_bytes as i64);
 
-                Ok(ReadResult::Success(read_bytes))
+                Ok(ReadResult::Success(read_bytes as u32))
             }
 
             Err(e) if e.kind() == ErrorKind::NotFound => {
