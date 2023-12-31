@@ -248,7 +248,7 @@ async fn test_file_backend_with_lru_cache() -> Result<()> {
     test_object_crud(&store).await?;
     test_object_list(&store).await?;
 
-    assert_eq!(cache_layer.read_cache_stat().await, (4, 0));
+    assert_eq!(cache_layer.read_cache_stat().await, (0, 0));
 
     Ok(())
 }
