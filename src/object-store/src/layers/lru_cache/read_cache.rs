@@ -14,11 +14,12 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use common_telemetry::logging::debug;
 use futures::FutureExt;
 use moka::future::Cache;
 use moka::notification::ListenerFuture;
-use opendal::raw::oio::{Page, Read, ReadExt, Reader, WriteExt};
+use opendal::raw::oio::{ListExt, Read, ReadExt, Reader, WriteExt};
 use opendal::raw::{Accessor, OpDelete, OpList, OpRead, OpStat, OpWrite, RpRead};
 use opendal::{Error as OpendalError, ErrorKind, Result};
 
@@ -135,24 +136,22 @@ impl<C: Accessor + Clone> ReadCache<C> {
     pub(crate) async fn recover_cache(&self) -> Result<(u64, u64)> {
         let (_, mut pager) = self.file_cache.list("/", OpList::default()).await?;
 
-        while let Some(entries) = pager.next().await? {
-            for entry in entries {
-                let read_key = entry.path();
+        while let Some(entry) = pager.next().await? {
+            let read_key = entry.path();
 
-                // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
-                // because it's private field.
-                let size = {
-                    let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
+            // We can't retrieve the metadata from `[opendal::raw::oio::Entry]` directly,
+            // because it's private field.
+            let size = {
+                let stat = self.file_cache.stat(read_key, OpStat::default()).await?;
 
-                    stat.into_metadata().content_length()
-                };
+                stat.into_metadata().content_length()
+            };
 
-                OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
-                OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
-                self.mem_cache
-                    .insert(read_key.to_string(), ReadResult::Success(size as u32))
-                    .await;
-            }
+            OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
+            OBJECT_STORE_LRU_CACHE_BYTES.add(size as i64);
+            self.mem_cache
+                .insert(read_key.to_string(), ReadResult::Success(size as u32))
+                .await;
         }
 
         Ok(self.stat().await)
@@ -240,17 +239,17 @@ impl<C: Accessor + Clone> ReadCache<C> {
         let inner_result = inner.read(path, args).await;
 
         match inner_result {
-            Ok((rp, mut reader)) => {
+            Ok((_, mut reader)) => {
                 let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
 
-                while let Some(bytes) = reader.next().await {
-                    writer.write(&bytes?).await?;
-                }
-
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf).await?;
+                let bytes = Bytes::from(buf);
+                writer.write(&bytes).await?;
                 // Call `close` to ensure data is written.
                 writer.close().await?;
 
-                let read_bytes = rp.metadata().content_length() as u32;
+                let read_bytes = bytes.len() as u32;
                 OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
                 OBJECT_STORE_LRU_CACHE_BYTES.add(read_bytes as i64);
 
