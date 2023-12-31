@@ -72,6 +72,8 @@ pub const INFORMATION_SCHEMA_REFERENTIAL_CONSTRAINTS_TABLE_ID: u32 = 20;
 pub const INFORMATION_SCHEMA_ROUTINES_TABLE_ID: u32 = 21;
 /// id for information_schema.SCHEMA_PRIVILEGES
 pub const INFORMATION_SCHEMA_SCHEMA_PRIVILEGES_TABLE_ID: u32 = 22;
+/// id for information_schema.TABLE_PRIVILEGES
+pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

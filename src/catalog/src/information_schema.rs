@@ -67,6 +67,7 @@ lazy_static! {
         REFERENTIAL_CONSTRAINTS,
         ROUTINES,
         SCHEMA_PRIVILEGES,
+        TABLE_PRIVILEGES,
     ];
 }
 
@@ -191,6 +192,7 @@ impl InformationSchemaProvider {
             REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
             ROUTINES => setup_memory_table!(ROUTINES),
             SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
+            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
