@@ -14,6 +14,9 @@
 
 mod lock;
 mod runner;
+//TODO(weny): Remove it.
+#[allow(unused)]
+mod rwlock;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
