@@ -364,6 +364,34 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        TRIGGERS => (
+            vec![
+                string_column("TRIGGER_CATALOG"),
+                string_column("TRIGGER_SCHEMA"),
+                string_column("TRIGGER_NAME"),
+                string_column("EVENT_MANIPULATION"),
+                string_column("EVENT_OBJECT_CATALOG"),
+                string_column("EVENT_OBJECT_SCHEMA"),
+                string_column("EVENT_OBJECT_TABLE"),
+                bigint_column("ACTION_ORDER"),
+                string_column("ACTION_CONDITION"),
+                string_column("ACTION_STATEMENT"),
+                string_column("ACTION_ORIENTATION"),
+                string_column("ACTION_TIMING"),
+                string_column("ACTION_REFERENCE_OLD_TABLE"),
+                string_column("ACTION_REFERENCE_NEW_TABLE"),
+                string_column("ACTION_REFERENCE_OLD_ROW"),
+                string_column("ACTION_REFERENCE_NEW_ROW"),
+                datetime_column("CREATED"),
+                string_column("SQL_MODE"),
+                string_column("DEFINER"),
+                string_column("CHARACTER_SET_CLIENT"),
+                string_column("COLLATION_CONNECTION"),
+                string_column("DATABASE_COLLATION"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 

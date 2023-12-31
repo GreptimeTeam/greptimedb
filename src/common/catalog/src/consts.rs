@@ -74,6 +74,8 @@ pub const INFORMATION_SCHEMA_ROUTINES_TABLE_ID: u32 = 21;
 pub const INFORMATION_SCHEMA_SCHEMA_PRIVILEGES_TABLE_ID: u32 = 22;
 /// id for information_schema.TABLE_PRIVILEGES
 pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
+/// id for information_schema.TRIGGERS
+pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";
