@@ -263,6 +263,30 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        PROFILING => (
+            vec![
+                bigint_column("QUERY_ID"),
+                bigint_column("SEQ"),
+                string_column("STATE"),
+                bigint_column("DURATION"),
+                bigint_column("CPU_USER"),
+                bigint_column("CPU_SYSTEM"),
+                bigint_column("CONTEXT_VOLUNTARY"),
+                bigint_column("CONTEXT_INVOLUNTARY"),
+                bigint_column("BLOCK_OPS_IN"),
+                bigint_column("BLOCK_OPS_OUT"),
+                bigint_column("MESSAGES_SENT"),
+                bigint_column("MESSAGES_RECEIVED"),
+                bigint_column("PAGE_FAULTS_MAJOR"),
+                bigint_column("PAGE_FAULTS_MINOR"),
+                bigint_column("SWAPS"),
+                string_column("SOURCE_FUNCTION"),
+                string_column("SOURCE_FILE"),
+                bigint_column("SOURCE_LINE"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
