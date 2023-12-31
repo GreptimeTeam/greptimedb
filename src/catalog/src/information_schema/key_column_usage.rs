@@ -36,6 +36,7 @@ use crate::error::{
 use crate::information_schema::InformationTable;
 use crate::CatalogManager;
 
+/// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
     catalog_name: String,
@@ -198,6 +199,9 @@ impl InformationSchemaKeyColumnUsageBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
+        let mut time_index_constaints = vec![];
+        let mut primary_constraints = vec![];
+
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             if !catalog_manager
                 .schema_exists(&catalog_name, &schema_name)
@@ -218,29 +222,21 @@ impl InformationSchemaKeyColumnUsageBuilder {
                     let schema = table.schema();
 
                     for (idx, column) in schema.column_schemas().iter().enumerate() {
-                        let constraint_name = if column.is_time_index() {
-                            "TIME INDEX"
-                        } else if keys.contains(&idx) {
-                            "PRIMARY"
-                        } else {
-                            // TODO: foreign constraint
-                            continue;
-                        };
-
-                        self.add_key_column_usage(
-                            "def",
-                            &schema_name,
-                            constraint_name,
-                            "def",
-                            &schema_name,
-                            &table_name,
-                            &column.name,
-                            idx as u32 + 1,
-                            None,
-                            None,
-                            None,
-                            None,
-                        );
+                        if column.is_time_index() {
+                            time_index_constaints.push((
+                                schema_name.clone(),
+                                table_name.clone(),
+                                column.name.clone(),
+                            ));
+                        }
+                        if keys.contains(&idx) {
+                            primary_constraints.push((
+                                schema_name.clone(),
+                                table_name.clone(),
+                                column.name.clone(),
+                            ));
+                        }
+                        // TODO(dimbtp): foreign key constraint not supported yet
                     }
                 } else {
                     unreachable!();
@@ -248,38 +244,57 @@ impl InformationSchemaKeyColumnUsageBuilder {
             }
         }
 
+        for (i, (schema_name, table_name, column_name)) in
+            time_index_constaints.into_iter().enumerate()
+        {
+            self.add_key_column_usage(
+                &schema_name,
+                "TIME INDEX",
+                &schema_name,
+                &table_name,
+                &column_name,
+                i as u32 + 1,
+            );
+        }
+        for (i, (schema_name, table_name, column_name)) in
+            primary_constraints.into_iter().enumerate()
+        {
+            self.add_key_column_usage(
+                &schema_name,
+                "PRIMARY",
+                &schema_name,
+                &table_name,
+                &column_name,
+                i as u32 + 1,
+            );
+        }
+
         self.finish()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    // TODO(dimbtp): Foreign key constraint has not `None` value for last 4
+    // fields, but it is not supported yet.
     fn add_key_column_usage(
         &mut self,
-        constraint_catalog: &str,
         constraint_schema: &str,
         constraint_name: &str,
-        table_catalog: &str,
         table_schema: &str,
         table_name: &str,
         column_name: &str,
         ordinal_position: u32,
-        position_in_unique_constraint: Option<u32>,
-        referenced_table_schema: Option<&str>,
-        referenced_table_name: Option<&str>,
-        referenced_column_name: Option<&str>,
     ) {
-        self.constraint_catalog.push(Some(constraint_catalog));
+        self.constraint_catalog.push(Some("def"));
         self.constraint_schema.push(Some(constraint_schema));
         self.constraint_name.push(Some(constraint_name));
-        self.table_catalog.push(Some(table_catalog));
+        self.table_catalog.push(Some("def"));
         self.table_schema.push(Some(table_schema));
         self.table_name.push(Some(table_name));
         self.column_name.push(Some(column_name));
         self.ordinal_position.push(Some(ordinal_position));
-        self.position_in_unique_constraint
-            .push(position_in_unique_constraint);
-        self.referenced_table_schema.push(referenced_table_schema);
-        self.referenced_table_name.push(referenced_table_name);
-        self.referenced_column_name.push(referenced_column_name);
+        self.position_in_unique_constraint.push(None);
+        self.referenced_table_schema.push(None);
+        self.referenced_table_name.push(None);
+        self.referenced_column_name.push(None);
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
