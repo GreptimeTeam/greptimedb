@@ -81,7 +81,7 @@ impl Procedure for TruncateTableProcedure {
             table_ref.table,
         );
 
-        LockKey::single(key)
+        LockKey::single_exclusive(key)
     }
 }
 

@@ -22,6 +22,7 @@ use tokio::time;
 use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
+use crate::procedure::StringKey;
 use crate::store::ProcedureStore;
 use crate::ProcedureState::Retrying;
 use crate::{BoxedProcedure, Context, Error, ProcedureId, ProcedureState, ProcedureWithId, Status};
@@ -131,9 +132,14 @@ impl Runner {
         // recursive locking by adding a root procedure id to the meta.
         for key in self.meta.lock_key.keys_to_lock() {
             // Acquire lock for each key.
-            guard
-                .key_guards
-                .push(self.manager_ctx.key_lock.write(key.clone()).await.into());
+            let key_guard = match key {
+                StringKey::Share(key) => self.manager_ctx.key_lock.read(key.clone()).await.into(),
+                StringKey::Exclusive(key) => {
+                    self.manager_ctx.key_lock.write(key.clone()).await.into()
+                }
+            };
+
+            guard.key_guards.push(key_guard);
         }
 
         // Execute the procedure. We need to release the lock whenever the the execution
@@ -601,7 +607,7 @@ mod tests {
         };
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -662,7 +668,7 @@ mod tests {
         };
         let suspend = ProcedureAdapter {
             data: "suspend".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -694,7 +700,7 @@ mod tests {
         };
         let child = ProcedureAdapter {
             data: "child".to_string(),
-            lock_key: LockKey::new(keys.iter().map(|k| k.to_string())),
+            lock_key: LockKey::new_exclusive(keys.iter().map(|k| k.to_string())),
             exec_fn,
         };
 
@@ -762,7 +768,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -807,7 +813,7 @@ mod tests {
         let exec_fn = move |_| async move { Ok(Status::Executing { persist: true }) }.boxed();
         let normal = ProcedureAdapter {
             data: "normal".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -848,7 +854,7 @@ mod tests {
             |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let normal = ProcedureAdapter {
             data: "fail".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -872,7 +878,7 @@ mod tests {
             |_| async { Err(Error::external(MockError::new(StatusCode::Unexpected))) }.boxed();
         let fail = ProcedureAdapter {
             data: "fail".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -914,7 +920,7 @@ mod tests {
 
         let retry_later = ProcedureAdapter {
             data: "retry_later".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -949,7 +955,7 @@ mod tests {
 
         let exceed_max_retry_later = ProcedureAdapter {
             data: "exceed_max_retry_later".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 
@@ -990,7 +996,7 @@ mod tests {
                     };
                     let fail = ProcedureAdapter {
                         data: "fail".to_string(),
-                        lock_key: LockKey::single("catalog.schema.table.region-0"),
+                        lock_key: LockKey::single_exclusive("catalog.schema.table.region-0"),
                         exec_fn,
                     };
 
@@ -1024,7 +1030,7 @@ mod tests {
         };
         let parent = ProcedureAdapter {
             data: "parent".to_string(),
-            lock_key: LockKey::single("catalog.schema.table"),
+            lock_key: LockKey::single_exclusive("catalog.schema.table"),
             exec_fn,
         };
 

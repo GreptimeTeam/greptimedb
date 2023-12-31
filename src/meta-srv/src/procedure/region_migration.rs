@@ -379,7 +379,7 @@ impl Procedure for RegionMigrationProcedure {
 
     fn lock_key(&self) -> LockKey {
         let key = self.context.persistent_ctx.lock_key();
-        LockKey::single(key)
+        LockKey::single_exclusive(key)
     }
 }
 
@@ -415,7 +415,11 @@ mod tests {
         let procedure = RegionMigrationProcedure::new(persistent_context, context);
 
         let key = procedure.lock_key();
-        let keys = key.keys_to_lock().cloned().collect::<Vec<_>>();
+        let keys = key
+            .keys_to_lock()
+            .cloned()
+            .map(|s| s.into_string())
+            .collect::<Vec<_>>();
 
         assert!(keys.contains(&expected_key));
     }

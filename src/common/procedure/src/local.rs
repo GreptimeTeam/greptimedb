@@ -855,7 +855,7 @@ mod tests {
         assert!(manager.procedure_watcher(procedure_id).is_none());
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         assert!(manager
             .submit(ProcedureWithId {
                 id: procedure_id,
@@ -923,7 +923,7 @@ mod tests {
             }
 
             fn lock_key(&self) -> LockKey {
-                LockKey::single("test.submit")
+                LockKey::single_exclusive("test.submit")
             }
         }
 
@@ -960,7 +960,7 @@ mod tests {
         let manager = LocalManager::new(config, state_store);
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert_matches!(
             manager
@@ -991,7 +991,7 @@ mod tests {
         manager.start().await.unwrap();
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {
@@ -1023,7 +1023,7 @@ mod tests {
         manager.manager_ctx.set_running();
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {
@@ -1046,7 +1046,7 @@ mod tests {
         // The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
         manager.stop().await.unwrap();
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
 
         manager.manager_ctx.set_running();
@@ -1068,7 +1068,7 @@ mod tests {
 
         // After restart
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {

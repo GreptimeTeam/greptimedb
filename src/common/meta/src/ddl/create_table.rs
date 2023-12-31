@@ -349,7 +349,7 @@ impl Procedure for CreateTableProcedure {
             table_ref.table,
         );
 
-        LockKey::single(key)
+        LockKey::single_exclusive(key)
     }
 }
 
