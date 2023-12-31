@@ -441,52 +441,6 @@ impl From<InfluxdbV1Response> for JsonResponse {
     }
 }
 
-impl JsonResponse {
-    pub fn with_error(error: impl ErrorExt, response_format: ResponseFormat) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::with_error(error).into(),
-            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::with_error(error).into(),
-        }
-    }
-
-    pub fn with_error_message(
-        err_msg: String,
-        error_code: StatusCode,
-        response_format: ResponseFormat,
-    ) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => {
-                GreptimedbV1Response::with_error_message(err_msg, error_code).into()
-            }
-            ResponseFormat::InfluxdbV1 => InfluxdbV1Response::with_error_message(err_msg).into(),
-        }
-    }
-    pub async fn from_output(
-        outputs: Vec<Result<Output>>,
-        response_format: ResponseFormat,
-        epoch: Option<Epoch>,
-    ) -> Self {
-        match response_format {
-            ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await.into(),
-            ResponseFormat::InfluxdbV1 => {
-                InfluxdbV1Response::from_output(outputs, epoch).await.into()
-            }
-        }
-    }
-
-    fn with_execution_time(mut self, execution_time: u128) -> Self {
-        match &mut self {
-            JsonResponse::GreptimedbV1(resp) => {
-                resp.with_execution_time(execution_time as u64);
-            }
-            JsonResponse::InfluxdbV1(resp) => {
-                resp.with_execution_time(execution_time as u64);
-            }
-        }
-        self
-    }
-}
-
 async fn serve_api(Extension(api): Extension<OpenApi>) -> impl IntoApiResponse {
     Json(api)
 }
@@ -905,10 +859,11 @@ impl Server for HttpServer {
 async fn handle_error(err: BoxError) -> Json<JsonResponse> {
     error!(err; "Unhandled internal error");
 
-    Json(JsonResponse::with_error_message(
-        format!("Unhandled internal error: {err}"),
-        StatusCode::Unexpected,
-        ResponseFormat::GreptimedbV1,
+    Json(JsonResponse::GreptimedbV1(
+        GreptimedbV1Response::with_error_message(
+            format!("Unhandled internal error: {err}"),
+            StatusCode::Unexpected,
+        ),
     ))
 }
 
@@ -1056,12 +1011,16 @@ mod test {
         for format in [ResponseFormat::GreptimedbV1, ResponseFormat::InfluxdbV1] {
             let recordbatches =
                 RecordBatches::try_new(schema.clone(), vec![recordbatch.clone()]).unwrap();
-            let json_resp = JsonResponse::from_output(
-                vec![Ok(Output::RecordBatches(recordbatches))],
-                format,
-                None,
-            )
-            .await;
+            let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
+            let json_resp = match format {
+                ResponseFormat::Csv => unreachable!(),
+                ResponseFormat::GreptimedbV1 => {
+                    JsonResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
+                }
+                ResponseFormat::InfluxdbV1 => {
+                    JsonResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
+                }
+            };
 
             match json_resp {
                 JsonResponse::GreptimedbV1(json_resp) => {

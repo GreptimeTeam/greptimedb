@@ -25,18 +25,18 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 
 use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
-use crate::http::{ApiState, GreptimedbV1Response, JsonResponse, ResponseFormat};
+use crate::http::{ApiState, GreptimedbV1Response, JsonResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return Json(JsonResponse::with_error($e, ResponseFormat::GreptimedbV1));
+        return Json(JsonResponse::GreptimedbV1(
+            GreptimedbV1Response::with_error($e),
+        ));
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(JsonResponse::with_error_message(
-            $msg.to_string(),
-            $code,
-            ResponseFormat::GreptimedbV1,
+        return Json(JsonResponse::GreptimedbV1(
+            GreptimedbV1Response::with_error_message($msg.to_string(), $code),
         ));
     }};
 }
@@ -137,10 +137,9 @@ pub async fn run_script(
         let output = script_handler
             .execute_script(query_ctx, name.unwrap(), params.params)
             .await;
-        let resp =
-            JsonResponse::from_output(vec![output], ResponseFormat::GreptimedbV1, None).await;
-
-        Json(resp.with_execution_time(start.elapsed().as_millis()))
+        let mut resp = GreptimedbV1Response::from_output(vec![output]).await;
+        resp.with_execution_time(start.elapsed().as_millis() as u64);
+        Json(JsonResponse::GreptimedbV1(resp))
     } else {
         json_err!(
             "Script execution not supported, missing script handler",

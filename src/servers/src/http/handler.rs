@@ -27,7 +27,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
-use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, JsonResponse, ResponseFormat};
+use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::{
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonResponse, ResponseFormat,
+};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -80,19 +83,44 @@ pub async fn sql(
 
     let resp = if let Some(sql) = &sql {
         if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
-            return Json(JsonResponse::with_error_message(msg, status, format));
+            Err((status, msg))
+        } else {
+            Ok(sql_handler.do_query(sql, query_ctx).await)
         }
-
-        JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await, format, epoch).await
     } else {
-        JsonResponse::with_error_message(
-            "sql parameter is required.".to_string(),
+        Err((
             StatusCode::InvalidArguments,
-            format,
-        )
+            "sql parameter is required.".to_string(),
+        ))
     };
 
-    Json(resp.with_execution_time(start.elapsed().as_millis()))
+    match resp {
+        Ok(outputs) => match format {
+            ResponseFormat::Csv => todo!(),
+            ResponseFormat::GreptimedbV1 => {
+                let mut resp = GreptimedbV1Response::from_output(outputs).await;
+                resp.with_execution_time(start.elapsed().as_millis() as u64);
+                Json(JsonResponse::GreptimedbV1(resp))
+            }
+            ResponseFormat::InfluxdbV1 => {
+                let mut resp = InfluxdbV1Response::from_output(outputs, epoch).await;
+                resp.with_execution_time(start.elapsed().as_millis() as u64);
+                Json(JsonResponse::InfluxdbV1(resp))
+            }
+        },
+        Err((status, msg)) => match format {
+            ResponseFormat::Csv | ResponseFormat::GreptimedbV1 => {
+                let mut resp = GreptimedbV1Response::with_error_message(msg, status);
+                resp.with_execution_time(start.elapsed().as_millis() as u64);
+                Json(JsonResponse::GreptimedbV1(resp))
+            }
+            ResponseFormat::InfluxdbV1 => {
+                let mut resp = InfluxdbV1Response::with_error_message(msg);
+                resp.with_execution_time(start.elapsed().as_millis() as u64);
+                Json(JsonResponse::InfluxdbV1(resp))
+            }
+        },
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -130,22 +158,18 @@ pub async fn promql(
         .start_timer();
 
     if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
-        return Json(JsonResponse::with_error_message(
-            msg,
-            status,
-            ResponseFormat::GreptimedbV1,
+        return Json(JsonResponse::GreptimedbV1(
+            GreptimedbV1Response::with_error_message(msg, status),
         ));
     }
 
     let prom_query = params.into();
-    let resp = JsonResponse::from_output(
+    let mut resp = GreptimedbV1Response::from_output(
         sql_handler.do_promql_query(&prom_query, query_ctx).await,
-        ResponseFormat::GreptimedbV1,
-        None,
     )
     .await;
-
-    Json(resp.with_execution_time(exec_start.elapsed().as_millis()))
+    resp.with_execution_time(exec_start.elapsed().as_millis() as u64);
+    Json(JsonResponse::GreptimedbV1(resp))
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
