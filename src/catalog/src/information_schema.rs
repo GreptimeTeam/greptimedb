@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod columns;
+mod key_column_usage;
 mod memory_table;
 mod schemata;
 mod table_names;
@@ -41,6 +42,7 @@ pub use table_names::*;
 
 use self::columns::InformationSchemaColumns;
 use crate::error::Result;
+use crate::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::information_schema::memory_table::{get_schema_columns, MemoryTable};
 use crate::information_schema::schemata::InformationSchemaSchemata;
 use crate::information_schema::tables::InformationSchemaTables;
@@ -131,6 +133,10 @@ impl InformationSchemaProvider {
         tables.insert(TABLES.to_string(), self.build_table(TABLES).unwrap());
         tables.insert(SCHEMATA.to_string(), self.build_table(SCHEMATA).unwrap());
         tables.insert(COLUMNS.to_string(), self.build_table(COLUMNS).unwrap());
+        tables.insert(
+            KEY_COLUMN_USAGE.to_string(),
+            self.build_table(KEY_COLUMN_USAGE).unwrap(),
+        );
 
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
@@ -173,6 +179,10 @@ impl InformationSchemaProvider {
             CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
             EVENTS => setup_memory_table!(EVENTS),
             FILES => setup_memory_table!(FILES),
+            KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             SCHEMATA => Some(Arc::new(InformationSchemaSchemata::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),

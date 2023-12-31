@@ -31,6 +31,7 @@ show tables;
 | engines                               |
 | events                                |
 | files                                 |
+| key_column_usage                      |
 | schemata                              |
 | tables                                |
 +---------------------------------------+

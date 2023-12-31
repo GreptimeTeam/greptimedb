@@ -58,6 +58,8 @@ pub const INFORMATION_SCHEMA_EVENTS_TABLE_ID: u32 = 13;
 pub const INFORMATION_SCHEMA_FILES_TABLE_ID: u32 = 14;
 /// id for information_schema.SCHEMATA
 pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 15;
+/// id for information_schema.KEY_COLUMN_USAGE
+pub const INFORMATION_SCHEMA_KEY_COLUMN_USAGE_TABLE_ID: u32 = 16;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";
