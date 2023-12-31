@@ -64,6 +64,7 @@ lazy_static! {
         OPTIMIZER_TRACE,
         PARAMETERS,
         PROFILING,
+        REFERENTIAL_CONSTRAINTS,
     ];
 }
 
@@ -185,6 +186,7 @@ impl InformationSchemaProvider {
             OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
             PARAMETERS => setup_memory_table!(PARAMETERS),
             PROFILING => setup_memory_table!(PROFILING),
+            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),

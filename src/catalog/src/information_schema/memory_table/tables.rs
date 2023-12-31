@@ -287,6 +287,23 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        REFERENTIAL_CONSTRAINTS => (
+            vec![
+                string_column("CONSTRAINT_CATALOG"),
+                string_column("CONSTRAINT_SCHEMA"),
+                string_column("CONSTRAINT_NAME"),
+                string_column("UNIQUE_CONSTRAINT_CATALOG"),
+                string_column("UNIQUE_CONSTRAINT_SCHEMA"),
+                string_column("UNIQUE_CONSTRAINT_NAME"),
+                string_column("MATCH_OPTION"),
+                string_column("UPDATE_RULE"),
+                string_column("DELETE_RULE"),
+                string_column("TABLE_NAME"),
+                string_column("REFERENCED_TABLE_NAME"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
