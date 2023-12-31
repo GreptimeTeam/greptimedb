@@ -29,8 +29,9 @@ show tables;
 | column_statistics                     |
 | columns                               |
 | engines                               |
-| key_column_usage                      |
+| events                                |
 | files                                 |
+| key_column_usage                      |
 | schemata                              |
 | tables                                |
 +---------------------------------------+
