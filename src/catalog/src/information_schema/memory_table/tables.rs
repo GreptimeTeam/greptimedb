@@ -227,6 +227,16 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        OPTIMIZER_TRACE => (
+            vec![
+                string_column("QUERY"),
+                string_column("TRACE"),
+                bigint_column("MISSING_BYTES_BEYOND_MAX_MEM_SIZE"),
+                bigint_column("INSUFFICIENT_PRIVILEGES"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 

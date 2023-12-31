@@ -60,6 +60,8 @@ pub const INFORMATION_SCHEMA_FILES_TABLE_ID: u32 = 14;
 pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 15;
 /// id for information_schema.KEY_COLUMN_USAGE
 pub const INFORMATION_SCHEMA_KEY_COLUMN_USAGE_TABLE_ID: u32 = 16;
+/// id for information_schema.OPTIMIZER_TRACE
+pub const INFORMATION_SCHEMA_OPTIMIZER_TRACE_TABLE_ID: u32 = 17;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

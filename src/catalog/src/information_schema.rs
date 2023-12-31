@@ -61,6 +61,7 @@ lazy_static! {
         CHECK_CONSTRAINTS,
         EVENTS,
         FILES,
+        OPTIMIZER_TRACE,
     ];
 }
 
@@ -179,6 +180,7 @@ impl InformationSchemaProvider {
             CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
             EVENTS => setup_memory_table!(EVENTS),
             FILES => setup_memory_table!(FILES),
+            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
