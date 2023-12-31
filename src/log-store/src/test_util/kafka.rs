@@ -13,13 +13,14 @@
 // limitations under the License.
 
 pub mod entry_builder;
-pub mod topic_builder;
+pub mod topic_decorator;
 
 use common_config::wal::KafkaWalTopic as Topic;
 use rskafka::client::ClientBuilder;
 
+use crate::kafka::EntryImpl;
 pub use crate::test_util::kafka::entry_builder::EntryBuilder;
-pub use crate::test_util::kafka::topic_builder::TopicBuilder;
+pub use crate::test_util::kafka::topic_decorator::{Affix, TopicDecorator};
 
 /// Gets broker endpoints from environment variables with the given key.
 #[macro_export]
@@ -35,12 +36,12 @@ macro_rules! get_broker_endpoints_from_env {
     }};
 }
 
-/// Creates `num_topiocs` number of topics with the given TopicBuilder.
-/// Requests for creating these topics on the Kafka cluster specified with the `broker_endpoints`.
+/// Creates `num_topiocs` number of topics from the seed topic which are going to be decorated with the given TopicDecorator.
 pub async fn create_topics(
     num_topics: usize,
-    mut builder: TopicBuilder,
+    mut decorator: TopicDecorator,
     broker_endpoints: &[String],
+    seed: Option<&str>,
 ) -> Vec<Topic> {
     assert!(!broker_endpoints.is_empty());
 
@@ -50,9 +51,10 @@ pub async fn create_topics(
         .unwrap();
     let ctrl_client = client.controller_client().unwrap();
 
+    let seed = seed.unwrap_or("topic");
     let (topics, tasks): (Vec<_>, Vec<_>) = (0..num_topics)
         .map(|i| {
-            let topic = builder.build(&format!("topic_{i}"));
+            let topic = decorator.decorate(&format!("{seed}_{i}"));
             let task = ctrl_client.create_topic(topic.clone(), 1, 1, 500);
             (topic, task)
         })
@@ -60,4 +62,11 @@ pub async fn create_topics(
     futures::future::try_join_all(tasks).await.unwrap();
 
     topics
+}
+
+/// Builds a batch of entries each with random data.
+pub fn entries_with_random_data(batch_size: usize, builder: &EntryBuilder) -> Vec<EntryImpl> {
+    (0..batch_size)
+        .map(|_| builder.with_random_data())
+        .collect()
 }

@@ -294,8 +294,9 @@ mod tests {
 
     use super::*;
     use crate::get_broker_endpoints_from_env;
-    use crate::test_util::kafka::topic_builder::Affix;
-    use crate::test_util::kafka::{create_topics, EntryBuilder, TopicBuilder};
+    use crate::test_util::kafka::{
+        create_topics, entries_with_random_data, Affix, EntryBuilder, TopicDecorator,
+    };
 
     fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
         NamespaceImpl {
@@ -325,10 +326,10 @@ mod tests {
     #[tokio::test]
     async fn test_one_region() {
         let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
-        let topic_builder = TopicBuilder::default()
+        let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed("test_one_region".to_string()))
             .with_suffix(Affix::TimeNow);
-        let topic = create_topics(1, topic_builder, &broker_endpoints).await[0].clone();
+        let topic = create_topics(1, decorator, &broker_endpoints, None).await[0].clone();
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -359,10 +360,10 @@ mod tests {
     #[tokio::test]
     async fn test_multi_regions_disjoint() {
         let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
-        let topic_builder = TopicBuilder::default()
+        let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed("test_multi_regions_disjoint".to_string()))
             .with_suffix(Affix::TimeNow);
-        let topics = create_topics(10, topic_builder, &broker_endpoints).await;
+        let topics = create_topics(10, decorator, &broker_endpoints, None).await;
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -370,7 +371,7 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
 
-        let (region_namespaces, mut entry_builders): (Vec<_>, Vec<_>) = topics
+        let (region_namespaces, entry_builders): (Vec<_>, Vec<_>) = topics
             .iter()
             .enumerate()
             .map(|(i, topic)| {
@@ -380,8 +381,8 @@ mod tests {
             })
             .unzip();
         let region_entries = entry_builders
-            .iter_mut()
-            .map(|builder| builder.with_random_data_batch(5))
+            .iter()
+            .map(|builder| entries_with_random_data(25, builder))
             .collect::<Vec<_>>();
         let entries = region_entries.iter().flatten().cloned().collect::<Vec<_>>();
         let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;

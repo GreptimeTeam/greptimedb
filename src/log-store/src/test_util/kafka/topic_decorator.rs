@@ -38,8 +38,8 @@ impl ToString for Affix {
     }
 }
 
-/// A builder for building topics on demand.
-pub struct TopicBuilder {
+/// Decorates a topic with the given prefix and suffix.
+pub struct TopicDecorator {
     /// A prefix to be inserted at the front of each topic.
     prefix: Affix,
     /// A suffix to be inserted at the back of each topic.
@@ -48,7 +48,7 @@ pub struct TopicBuilder {
     created: HashSet<Topic>,
 }
 
-impl Default for TopicBuilder {
+impl Default for TopicDecorator {
     fn default() -> Self {
         Self {
             prefix: Affix::Nothing,
@@ -58,7 +58,7 @@ impl Default for TopicBuilder {
     }
 }
 
-impl TopicBuilder {
+impl TopicDecorator {
     /// Overrides the current prefix with the given prefix.
     pub fn with_prefix(self, prefix: Affix) -> Self {
         Self { prefix, ..self }
@@ -70,18 +70,18 @@ impl TopicBuilder {
     }
 
     /// Builds a topic by inserting a prefix and a suffix into the given topic.
-    pub fn build(&mut self, body: &str) -> Topic {
+    pub fn decorate(&mut self, topic: &str) -> Topic {
         const ITERS: usize = 24;
         for _ in 0..ITERS {
-            let topic = format!(
+            let decorated = format!(
                 "{}_{}_{}",
                 self.prefix.to_string(),
-                body,
+                topic,
                 self.suffix.to_string()
             );
-            if !self.created.contains(&topic) {
-                self.created.insert(topic.clone());
-                return topic;
+            if !self.created.contains(&decorated) {
+                self.created.insert(decorated.clone());
+                return decorated;
             }
         }
         unreachable!(
@@ -90,5 +90,3 @@ impl TopicBuilder {
         )
     }
 }
-
-// TODO(niebayes): add tests for TopicBuilder.

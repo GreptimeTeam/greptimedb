@@ -141,8 +141,7 @@ mod tests {
 
     use super::*;
     use crate::get_broker_endpoints_from_env;
-    use crate::test_util::kafka::create_topics;
-    use crate::test_util::kafka::topic_builder::{Affix, TopicBuilder};
+    use crate::test_util::kafka::{create_topics, Affix, TopicDecorator};
 
     /// Checks clients for the given topics are created.
     async fn ensure_topics_exist(topics: &[Topic], client_manager: &ClientManager) {
@@ -154,10 +153,10 @@ mod tests {
     async fn test_which(test_name: &str) {
         // Creates a collection of topics in Kafka.
         let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
-        let topic_builder = TopicBuilder::default()
+        let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);
-        let topics = create_topics(256, topic_builder, &broker_endpoints).await;
+        let topics = create_topics(256, decorator, &broker_endpoints, None).await;
 
         let config = KafkaConfig {
             broker_endpoints,

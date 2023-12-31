@@ -22,12 +22,10 @@ use store_api::logstore::EntryId;
 
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
-const DEFAULT_DATA: &[u8; 10] = b"[greptime]";
-
 /// A builder for building entries for a namespace.
 pub struct EntryBuilder {
     /// The namespace of the entries.
-    pub ns: NamespaceImpl,
+    ns: NamespaceImpl,
     /// The next entry id to allocate. It starts from 0 by default.
     next_entry_id: AtomicEntryId,
     /// A generator for supporting random data generation.
@@ -77,27 +75,6 @@ impl EntryBuilder {
         }
     }
 
-    /// Builds an entry with the default data.
-    // TODO(niebayes): may be remove this method since it's not used.
-    pub fn with_default_data(&self) -> EntryImpl {
-        EntryImpl {
-            data: DEFAULT_DATA.to_vec(),
-            id: self.alloc_entry_id(),
-            ns: self.ns.clone(),
-        }
-    }
-
-    /// Builds a batch of entries each with random data.
-    pub fn with_random_data_batch(&self, batch_size: usize) -> Vec<EntryImpl> {
-        (0..batch_size)
-            .map(|_| EntryImpl {
-                data: self.make_random_data(),
-                id: self.alloc_entry_id(),
-                ns: self.ns.clone(),
-            })
-            .collect()
-    }
-
     /// Builds an entry with random data.
     pub fn with_random_data(&self) -> EntryImpl {
         EntryImpl {
@@ -121,5 +98,3 @@ impl EntryBuilder {
             .collect()
     }
 }
-
-// TODO(niebayes): add tests for EntryBuilder.
