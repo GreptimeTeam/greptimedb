@@ -199,7 +199,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
 
-        let mut time_index_constaints = vec![];
+        let mut time_index_constraints = vec![];
         let mut primary_constraints = vec![];
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
@@ -223,7 +223,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
 
                     for (idx, column) in schema.column_schemas().iter().enumerate() {
                         if column.is_time_index() {
-                            time_index_constaints.push((
+                            time_index_constraints.push((
                                 schema_name.clone(),
                                 table_name.clone(),
                                 column.name.clone(),
@@ -245,7 +245,7 @@ impl InformationSchemaKeyColumnUsageBuilder {
         }
 
         for (i, (schema_name, table_name, column_name)) in
-            time_index_constaints.into_iter().enumerate()
+            time_index_constraints.into_iter().enumerate()
         {
             self.add_key_column_usage(
                 &schema_name,
