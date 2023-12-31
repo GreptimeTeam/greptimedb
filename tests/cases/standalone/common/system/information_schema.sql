@@ -57,6 +57,10 @@ desc table build_info;
 
 select count(*) from build_info;
 
+desc table key_column_usage;
+
+select * from key_column_usage;
+
 -- tables not implemented
 desc table COLUMN_PRIVILEGES;
 

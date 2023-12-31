@@ -251,6 +251,34 @@ select count(*) from build_info;
 | 1        |
 +----------+
 
+desc table key_column_usage;
+
++-------------------------------+--------+-----+------+---------+---------------+
+| Column                        | Type   | Key | Null | Default | Semantic Type |
++-------------------------------+--------+-----+------+---------+---------------+
+| constraint_catalog            | String |     | NO   |         | FIELD         |
+| constraint_schema             | String |     | NO   |         | FIELD         |
+| constraint_name               | String |     | NO   |         | FIELD         |
+| table_catalog                 | String |     | NO   |         | FIELD         |
+| table_schema                  | String |     | NO   |         | FIELD         |
+| table_name                    | String |     | NO   |         | FIELD         |
+| column_name                   | String |     | NO   |         | FIELD         |
+| ordinal_position              | UInt32 |     | NO   |         | FIELD         |
+| position_in_unique_constraint | UInt32 |     | YES  |         | FIELD         |
+| referenced_table_schema       | String |     | YES  |         | FIELD         |
+| referenced_table_name         | String |     | YES  |         | FIELD         |
+| referenced_column_name        | String |     | YES  |         | FIELD         |
++-------------------------------+--------+-----+------+---------+---------------+
+
+select * from key_column_usage;
+
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | my_db             | TIME INDEX      | def           | my_db        | foo        | ts          | 1                |                               |                         |                       |                        |
+| def                | public            | PRIMARY         | def           | public       | numbers    | number      | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+
 -- tables not implemented
 desc table COLUMN_PRIVILEGES;
 
