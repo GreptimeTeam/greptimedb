@@ -62,6 +62,7 @@ lazy_static! {
         EVENTS,
         FILES,
         OPTIMIZER_TRACE,
+        PARAMETERS,
     ];
 }
 
@@ -181,6 +182,7 @@ impl InformationSchemaProvider {
             EVENTS => setup_memory_table!(EVENTS),
             FILES => setup_memory_table!(FILES),
             OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
+            PARAMETERS => setup_memory_table!(PARAMETERS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),

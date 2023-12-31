@@ -237,6 +237,32 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        // MySQL(https://dev.mysql.com/doc/refman/8.2/en/information-schema-parameters-table.html)
+        // has the spec that is different from
+        // PostgreSQL(https://www.postgresql.org/docs/current/infoschema-parameters.html).
+        // Follow `MySQL` spec here.
+        PARAMETERS => (
+            vec![
+                string_column("SPECIFIC_CATALOG"),
+                string_column("SPECIFIC_SCHEMA"),
+                string_column("SPECIFIC_NAME"),
+                bigint_column("ORDINAL_POSITION"),
+                string_column("PARAMETER_MODE"),
+                string_column("PARAMETER_NAME"),
+                string_column("DATA_TYPE"),
+                bigint_column("CHARACTER_MAXIMUM_LENGTH"),
+                bigint_column("CHARACTER_OCTET_LENGTH"),
+                bigint_column("NUMERIC_PRECISION"),
+                bigint_column("NUMERIC_SCALE"),
+                datetime_column("DATETIME_PRECISION"),
+                string_column("CHARACTER_SET_NAME"),
+                string_column("COLLATION_NAME"),
+                string_column("DTD_IDENTIFIER"),
+                string_column("ROUTINE_TYPE"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
