@@ -69,6 +69,7 @@ lazy_static! {
         SCHEMA_PRIVILEGES,
         TABLE_PRIVILEGES,
         TRIGGERS,
+        GLOBAL_STATUS,
     ];
 }
 
@@ -195,6 +196,7 @@ impl InformationSchemaProvider {
             SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
             TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
             TRIGGERS => setup_memory_table!(TRIGGERS),
+            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
