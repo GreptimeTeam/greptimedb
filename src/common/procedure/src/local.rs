@@ -12,12 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//TODO(weny): Remove it.
-#[allow(unused)]
-mod lock;
 mod runner;
-//TODO(weny): Remove it.
-#[allow(unused)]
+// TODO(weny): Remove it.
+#[allow(dead_code)]
 mod rwlock;
 
 use std::collections::{HashMap, VecDeque};
@@ -62,8 +59,6 @@ const META_TTL: Duration = Duration::from_secs(60 * 10);
 pub(crate) struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
-    /// Notify to wait for a lock.
-    lock_notify: Notify,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
     /// Notify to wait for subprocedures.
@@ -83,7 +78,6 @@ impl ProcedureMeta {
         let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
         ProcedureMeta {
             id,
-            lock_notify: Notify::new(),
             parent_id,
             child_notify: Notify::new(),
             lock_key,
