@@ -341,6 +341,17 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        SCHEMA_PRIVILEGES => (
+            vec![
+                string_column("GRANTEE"),
+                string_column("TABLE_CATALOG"),
+                string_column("TABLE_SCHEMA"),
+                string_column("PRIVILEGE_TYPE"),
+                string_column("IS_GRANTABLE"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 

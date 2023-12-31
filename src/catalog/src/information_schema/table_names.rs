@@ -31,5 +31,6 @@ pub const PARAMETERS: &str = "parameters";
 pub const PROFILING: &str = "profiling";
 pub const REFERENTIAL_CONSTRAINTS: &str = "referential_constraints";
 pub const ROUTINES: &str = "routines";
+pub const SCHEMA_PRIVILEGES: &str = "schema_privileges";
 pub const SCHEMATA: &str = "schemata";
 pub const KEY_COLUMN_USAGE: &str = "key_column_usage";
