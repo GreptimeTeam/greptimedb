@@ -362,6 +362,7 @@ impl GreptimedbV1Response {
 /// Currently, `greptimedb_v1` and `influxdb_v1` are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseFormat {
+    Csv,
     GreptimedbV1,
     InfluxdbV1,
 }
@@ -369,6 +370,7 @@ pub enum ResponseFormat {
 impl ResponseFormat {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "csv" => Some(ResponseFormat::Csv),
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
             _ => None,
