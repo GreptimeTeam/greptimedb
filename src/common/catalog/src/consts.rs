@@ -78,6 +78,8 @@ pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
 pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
 /// id for information_schema.GLOBAL_STATUS
 pub const INFORMATION_SCHEMA_GLOBAL_STATUS_TABLE_ID: u32 = 25;
+/// id for information_schema.SESSION_STATUS
+pub const INFORMATION_SCHEMA_SESSION_STATUS_TABLE_ID: u32 = 26;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

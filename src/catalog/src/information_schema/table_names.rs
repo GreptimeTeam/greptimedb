@@ -35,5 +35,6 @@ pub const REFERENTIAL_CONSTRAINTS: &str = "referential_constraints";
 pub const ROUTINES: &str = "routines";
 pub const SCHEMA_PRIVILEGES: &str = "schema_privileges";
 pub const TABLE_PRIVILEGES: &str = "table_privileges";
-pub const GLOBAL_STATUS: &str = "global_status";
 pub const TRIGGERS: &str = "triggers";
+pub const GLOBAL_STATUS: &str = "global_status";
+pub const SESSION_STATUS: &str = "session_status";

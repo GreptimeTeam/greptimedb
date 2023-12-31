@@ -400,6 +400,14 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        SESSION_STATUS => (
+            vec![
+                string_column("VARIABLE_NAME"),
+                string_column("VARIABLE_VALUE"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 
