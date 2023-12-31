@@ -32,7 +32,15 @@ show tables;
 | events                                |
 | files                                 |
 | key_column_usage                      |
+| optimizer_trace                       |
+| parameters                            |
+| profiling                             |
+| referential_constraints               |
+| routines                              |
+| schema_privileges                     |
 | schemata                              |
+| table_privileges                      |
 | tables                                |
+| triggers                              |
 +---------------------------------------+
 
