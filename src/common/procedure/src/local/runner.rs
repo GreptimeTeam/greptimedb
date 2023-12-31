@@ -19,6 +19,7 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use common_telemetry::logging;
 use tokio::time;
 
+use super::rwlock::OwnedKeyRwLockGuard;
 use crate::error::{self, ProcedurePanicSnafu, Result};
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::store::ProcedureStore;
@@ -56,6 +57,7 @@ impl ExecResult {
 struct ProcedureGuard {
     meta: ProcedureMetaRef,
     manager_ctx: Arc<ManagerContext>,
+    key_guards: Vec<OwnedKeyRwLockGuard<String>>,
     finish: bool,
 }
 
@@ -65,6 +67,7 @@ impl ProcedureGuard {
         ProcedureGuard {
             meta,
             manager_ctx,
+            key_guards: vec![],
             finish: false,
         }
     }
@@ -94,11 +97,6 @@ impl Drop for ProcedureGuard {
         if let Some(parent_id) = self.meta.parent_id {
             self.manager_ctx.notify_by_subprocedure(parent_id);
         }
-
-        // Release lock in reverse order.
-        for key in self.meta.lock_key.keys_to_unlock() {
-            self.manager_ctx.lock_map.release_lock(key, self.meta.id);
-        }
     }
 }
 
@@ -121,7 +119,7 @@ impl Runner {
     /// Run the procedure.
     pub(crate) async fn run(mut self) {
         // Ensure we can update the procedure state.
-        let guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
+        let mut guard = ProcedureGuard::new(self.meta.clone(), self.manager_ctx.clone());
 
         logging::info!(
             "Runner {}-{} starts",
@@ -133,10 +131,9 @@ impl Runner {
         // recursive locking by adding a root procedure id to the meta.
         for key in self.meta.lock_key.keys_to_lock() {
             // Acquire lock for each key.
-            self.manager_ctx
-                .lock_map
-                .acquire_lock(key, self.meta.clone())
-                .await;
+            guard
+                .key_guards
+                .push(self.manager_ctx.key_lock.write(key.clone()).await.into());
         }
 
         // Execute the procedure. We need to release the lock whenever the the execution

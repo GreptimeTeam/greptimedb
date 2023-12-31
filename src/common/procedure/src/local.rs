@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//TODO(weny): Remove it.
+#[allow(unused)]
 mod lock;
 mod runner;
 //TODO(weny): Remove it.
@@ -32,11 +34,11 @@ use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
+use self::rwlock::KeyRwLock;
 use crate::error::{
     DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
-use crate::local::lock::LockMap;
 use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
@@ -134,7 +136,7 @@ struct LoadedProcedure {
 pub(crate) struct ManagerContext {
     /// Procedure loaders. The key is the type name of the procedure which the loader returns.
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
-    lock_map: LockMap,
+    key_lock: KeyRwLock<String>,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
@@ -155,8 +157,8 @@ impl ManagerContext {
     /// Returns a new [ManagerContext].
     fn new() -> ManagerContext {
         ManagerContext {
+            key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
-            lock_map: LockMap::new(),
             procedures: RwLock::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
             finished_procedures: Mutex::new(VecDeque::new()),

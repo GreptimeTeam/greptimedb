@@ -19,6 +19,23 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, TryLockError};
 
+pub enum OwnedKeyRwLockGuard<K: Eq + Hash> {
+    Read(OwnedKeyRwLockReadGuard<K>),
+    Write(OwnedKeyRwLockWriteGuard<K>),
+}
+
+impl<K: Eq + Hash> From<OwnedKeyRwLockReadGuard<K>> for OwnedKeyRwLockGuard<K> {
+    fn from(guard: OwnedKeyRwLockReadGuard<K>) -> Self {
+        OwnedKeyRwLockGuard::Read(guard)
+    }
+}
+
+impl<K: Eq + Hash> From<OwnedKeyRwLockWriteGuard<K>> for OwnedKeyRwLockGuard<K> {
+    fn from(guard: OwnedKeyRwLockWriteGuard<K>) -> Self {
+        OwnedKeyRwLockGuard::Write(guard)
+    }
+}
+
 pub struct OwnedKeyRwLockReadGuard<K: Eq + Hash> {
     key: K,
     inner: Arc<Mutex<HashMap<K, Arc<RwLock<()>>>>>,
