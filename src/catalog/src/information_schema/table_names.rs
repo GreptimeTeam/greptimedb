@@ -26,4 +26,5 @@ pub const COLLATION_CHARACTER_SET_APPLICABILITY: &str = "collation_character_set
 pub const CHECK_CONSTRAINTS: &str = "check_constraints";
 pub const EVENTS: &str = "events";
 pub const KEY_COLUMN_USAGE: &str = "key_column_usage";
+pub const FILES: &str = "files";
 pub const SCHEMATA: &str = "schemata";

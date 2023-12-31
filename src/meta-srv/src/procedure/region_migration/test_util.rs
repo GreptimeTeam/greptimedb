@@ -419,7 +419,7 @@ impl ProcedureMigrationTestSuite {
             .unwrap()
             .unwrap()
             .into_inner();
-        let region_routes = table_route.region_routes();
+        let region_routes = table_route.region_routes().unwrap();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;
         let removed_follower_id = self.context.persistent_ctx.from_peer.id;

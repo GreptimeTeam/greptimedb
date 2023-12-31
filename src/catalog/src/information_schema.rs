@@ -60,6 +60,7 @@ lazy_static! {
         COLLATION_CHARACTER_SET_APPLICABILITY,
         CHECK_CONSTRAINTS,
         EVENTS,
+        FILES,
     ];
 }
 
@@ -181,6 +182,7 @@ impl InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            FILES => setup_memory_table!(FILES),
             SCHEMATA => Some(Arc::new(InformationSchemaSchemata::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),

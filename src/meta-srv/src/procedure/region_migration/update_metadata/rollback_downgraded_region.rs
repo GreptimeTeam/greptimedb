@@ -170,7 +170,10 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(&expected_region_routes, table_route.region_routes());
+        assert_eq!(
+            &expected_region_routes,
+            table_route.region_routes().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -231,6 +234,9 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(&expected_region_routes, table_route.region_routes());
+        assert_eq!(
+            &expected_region_routes,
+            table_route.region_routes().unwrap()
+        );
     }
 }

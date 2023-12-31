@@ -116,7 +116,7 @@ impl DropTableProcedure {
 
     /// Register dropping regions if doesn't exist.
     fn register_dropping_regions(&mut self) -> Result<()> {
-        let region_routes = self.data.region_routes();
+        let region_routes = self.data.region_routes()?;
 
         let dropping_regions = operating_leader_regions(region_routes);
 
@@ -190,7 +190,7 @@ impl DropTableProcedure {
     pub async fn on_datanode_drop_regions(&self) -> Result<Status> {
         let table_id = self.data.table_id();
 
-        let region_routes = &self.data.region_routes();
+        let region_routes = &self.data.region_routes()?;
         let leaders = find_leaders(region_routes);
         let mut drop_region_tasks = Vec::with_capacity(leaders.len());
 
@@ -306,7 +306,7 @@ impl DropTableData {
         self.task.table_ref()
     }
 
-    fn region_routes(&self) -> &Vec<RegionRoute> {
+    fn region_routes(&self) -> Result<&Vec<RegionRoute>> {
         self.table_route_value.region_routes()
     }
 

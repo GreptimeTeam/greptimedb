@@ -113,7 +113,7 @@ pub enum Error {
     #[snafu(display("Failed to parse regex DFA"))]
     ParseDFA {
         #[snafu(source)]
-        error: regex_automata::Error,
+        error: Box<regex_automata::dfa::Error>,
         location: Location,
     },
 

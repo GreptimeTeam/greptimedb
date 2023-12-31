@@ -191,7 +191,7 @@ impl AlterTableProcedure {
             .await?
             .context(TableRouteNotFoundSnafu { table_id })?
             .into_inner();
-        let region_routes = table_route.region_routes();
+        let region_routes = table_route.region_routes()?;
 
         let leaders = find_leaders(region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
