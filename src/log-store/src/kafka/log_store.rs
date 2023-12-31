@@ -305,11 +305,10 @@ mod tests {
         }
     }
 
-    // TODO(niebayes): change `expected` to &[EntryImpl].
     async fn check_entries(
         ns: &NamespaceImpl,
         start_offset: EntryId,
-        expected: Vec<EntryImpl>,
+        expected: &[EntryImpl],
         logstore: &KafkaLogStore,
     ) {
         let stream = logstore.read(ns, start_offset).await.unwrap();
@@ -319,7 +318,7 @@ mod tests {
             .into_iter()
             .flat_map(|x| x.unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(expected, got);
+        assert_eq!(expected, &got);
     }
 
     /// Appends entries for one region and checks all entries can be read successfully.
@@ -342,7 +341,7 @@ mod tests {
         let entry = entry_builder.with_random_data();
 
         let last_entry_id = logstore.append(entry.clone()).await.unwrap().last_entry_id;
-        check_entries(&ns, last_entry_id, vec![entry], &logstore).await;
+        check_entries(&ns, last_entry_id, &[entry], &logstore).await;
 
         let entries = (0..10)
             .map(|_| entry_builder.with_random_data())
@@ -352,7 +351,7 @@ mod tests {
             .await
             .unwrap()
             .last_entry_ids[&ns.region_id];
-        check_entries(&ns, last_entry_id, entries, &logstore).await;
+        check_entries(&ns, last_entry_id, &entries, &logstore).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
@@ -389,7 +388,7 @@ mod tests {
 
         for (i, ns) in region_namespaces.iter().enumerate() {
             let expected = region_entries[i].clone();
-            check_entries(ns, last_entry_ids[&ns.region_id], expected, &logstore).await;
+            check_entries(ns, last_entry_ids[&ns.region_id], &expected, &logstore).await;
         }
     }
 
