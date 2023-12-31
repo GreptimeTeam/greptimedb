@@ -79,8 +79,8 @@ pub async fn sql(
         .start_timer();
 
     let resp = if let Some(sql) = &sql {
-        if let Some(resp) = validate_schema(sql_handler.clone(), query_ctx.clone(), format).await {
-            return Json(resp);
+        if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+            return Json(JsonResponse::with_error_message(msg, status, format));
         }
 
         JsonResponse::from_output(sql_handler.do_query(sql, query_ctx).await, format, epoch).await
@@ -129,14 +129,12 @@ pub async fn promql(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    if let Some(resp) = validate_schema(
-        sql_handler.clone(),
-        query_ctx.clone(),
-        ResponseFormat::GreptimedbV1,
-    )
-    .await
-    {
-        return Json(resp);
+    if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+        return Json(JsonResponse::with_error_message(
+            msg,
+            status,
+            ResponseFormat::GreptimedbV1,
+        ));
     }
 
     let prom_query = params.into();
@@ -222,26 +220,23 @@ pub async fn config(State(state): State<GreptimeOptionsConfigState>) -> Response
 async fn validate_schema(
     sql_handler: ServerSqlQueryHandlerRef,
     query_ctx: QueryContextRef,
-    format: ResponseFormat,
-) -> Option<JsonResponse> {
+) -> Option<(StatusCode, String)> {
     match sql_handler
         .is_valid_schema(query_ctx.current_catalog(), query_ctx.current_schema())
         .await
     {
-        Ok(false) => Some(JsonResponse::with_error_message(
-            format!("Database not found: {}", query_ctx.get_db_string()),
+        Ok(true) => None,
+        Ok(false) => Some((
             StatusCode::DatabaseNotFound,
-            format,
+            format!("Database not found: {}", query_ctx.get_db_string()),
         )),
-        Err(e) => Some(JsonResponse::with_error_message(
+        Err(e) => Some((
+            StatusCode::Internal,
             format!(
                 "Error checking database: {}, {}",
                 query_ctx.get_db_string(),
                 e.output_msg(),
             ),
-            StatusCode::Internal,
-            format,
         )),
-        _ => None,
     }
 }
