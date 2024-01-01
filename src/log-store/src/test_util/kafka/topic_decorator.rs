@@ -32,7 +32,7 @@ impl ToString for Affix {
     fn to_string(&self) -> String {
         match self {
             Affix::Fixed(s) => s.to_string(),
-            Affix::TimeNow => chrono::Local::now().timestamp_millis().to_string(),
+            Affix::TimeNow => chrono::Local::now().timestamp_micros().to_string(),
             Affix::Nothing => String::default(),
         }
     }

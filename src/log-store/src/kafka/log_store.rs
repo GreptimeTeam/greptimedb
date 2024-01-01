@@ -291,6 +291,7 @@ impl LogStore for KafkaLogStore {
 #[cfg(test)]
 mod tests {
     use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
+    use rand::seq::IteratorRandom;
 
     use super::*;
     use crate::get_broker_endpoints_from_env;
@@ -298,37 +299,20 @@ mod tests {
         create_topics, entries_with_random_data, Affix, EntryBuilder, TopicDecorator,
     };
 
-    fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
-        NamespaceImpl {
-            region_id,
-            topic: topic.to_string(),
-        }
+    // Stores test context for a region.
+    struct RegionContext {
+        ns: NamespaceImpl,
+        entry_builder: EntryBuilder,
+        expected: Vec<EntryImpl>,
     }
 
-    async fn check_entries(
-        ns: &NamespaceImpl,
-        start_offset: EntryId,
-        expected: &[EntryImpl],
-        logstore: &KafkaLogStore,
-    ) {
-        let stream = logstore.read(ns, start_offset).await.unwrap();
-        let got = stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .flat_map(|x| x.unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(expected, &got);
-    }
-
-    /// Appends entries for one region and checks all entries can be read successfully.
-    #[tokio::test]
-    async fn test_one_region() {
+    /// Prepares for a test in that a log store is constructed and a collection of topics is created.
+    async fn prepare(test_name: &str, num_topics: usize) -> (KafkaLogStore, Vec<Topic>) {
         let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
         let decorator = TopicDecorator::default()
-            .with_prefix(Affix::Fixed("test_one_region".to_string()))
+            .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);
-        let topic = create_topics(1, decorator, &broker_endpoints, None).await[0].clone();
+        let topics = create_topics(num_topics, decorator, &broker_endpoints, None).await;
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -336,64 +320,127 @@ mod tests {
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
 
-        let ns = new_namespace(&topic, 0);
-        let entry_builder = EntryBuilder::new(ns.clone());
-        let entry = entry_builder.with_random_data();
+        (logstore, topics)
+    }
 
-        let last_entry_id = logstore.append(entry.clone()).await.unwrap().last_entry_id;
-        check_entries(&ns, last_entry_id, &[entry], &logstore).await;
+    /// Builds a context for each region.
+    fn build_contexts(num_regions: usize, topics: &[Topic]) -> Vec<RegionContext> {
+        (0..num_regions)
+            .map(|i| {
+                let topic = &topics[i % topics.len()];
+                let ns = NamespaceImpl {
+                    region_id: i as u64,
+                    topic: topic.to_string(),
+                };
+                let entry_builder = EntryBuilder::new(ns.clone());
+                RegionContext {
+                    ns,
+                    entry_builder,
+                    expected: Vec::new(),
+                }
+            })
+            .collect()
+    }
 
-        let entries = (0..10)
-            .map(|_| entry_builder.with_random_data())
-            .collect::<Vec<_>>();
-        let last_entry_id = logstore
-            .append_batch(entries.clone())
-            .await
-            .unwrap()
-            .last_entry_ids[&ns.region_id];
-        check_entries(&ns, last_entry_id, &entries, &logstore).await;
+    /// Creates a vector containing indexes of all regions if the `all` is true.
+    /// Otherwise, creates a subset of the indexes. The cardinality of the subset
+    /// is nearly a quarter of that of the universe set.
+    fn all_or_subset(all: bool, num_regions: usize) -> Vec<usize> {
+        assert!(num_regions > 0);
+        let amount = if all {
+            num_regions
+        } else {
+            (num_regions / 4).max(1)
+        };
+        (0..num_regions).choose_multiple(&mut rand::thread_rng(), amount)
+    }
+
+    /// Builds entries for regions specified with `which`.
+    /// For example, assume `which[i] = x`, then entries for region with id = x will be built.
+    fn build_entries(region_contexts: &mut [RegionContext], which: Vec<usize>) -> Vec<EntryImpl> {
+        let mut entries = Vec::with_capacity(which.len());
+        for i in which {
+            let ctx = &mut region_contexts[i];
+            ctx.expected = entries_with_random_data(25, &ctx.entry_builder);
+            entries.push(ctx.expected.clone());
+        }
+        entries.into_iter().flatten().collect()
+    }
+
+    /// Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
+    async fn check_entries(
+        region_contexts: &[RegionContext],
+        last_entry_ids: HashMap<u64, u64>,
+        logstore: &KafkaLogStore,
+        which: Vec<usize>,
+    ) {
+        for i in which {
+            let ctx = &region_contexts[i];
+            let start_offset = last_entry_ids[&ctx.ns.region_id];
+            let stream = logstore.read(&ctx.ns, start_offset).await.unwrap();
+            let got = stream
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .flat_map(|x| x.unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(ctx.expected, got);
+        }
+    }
+
+    /// Starts a test with:
+    /// * `test_name` - The name of the test.
+    /// * `num_topics` - Number of topics to be created in the preparation phase.
+    /// * `num_regions` - Number of regions involved in the test.
+    /// * `num_appends` - Number of append operations to be performed.
+    /// * `all` - All regions will be involved in an append operation if `all` is true. Otherwise,
+    /// an append operation will only randomly choose a subset of regions.
+    async fn test_with(
+        test_name: &str,
+        num_topics: usize,
+        num_regions: usize,
+        num_appends: usize,
+        all: bool,
+    ) {
+        let (logstore, topics) = prepare(test_name, num_topics).await;
+        let mut region_contexts = build_contexts(num_regions, &topics);
+        for _ in 0..num_appends {
+            let which = all_or_subset(all, num_regions);
+            let entries = build_entries(&mut region_contexts, which.clone());
+            let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
+            check_entries(&region_contexts, last_entry_ids, &logstore, which).await;
+        }
+    }
+
+    /// Appends entries for one region and checks all entries can be read successfully.
+    #[tokio::test]
+    async fn test_one_region() {
+        test_with("test_one_region", 1, 1, 1, true).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
     /// A topic is assigned only a single region.
     #[tokio::test]
     async fn test_multi_regions_disjoint() {
-        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
-        let decorator = TopicDecorator::default()
-            .with_prefix(Affix::Fixed("test_multi_regions_disjoint".to_string()))
-            .with_suffix(Affix::TimeNow);
-        let topics = create_topics(10, decorator, &broker_endpoints, None).await;
-
-        let config = KafkaConfig {
-            broker_endpoints,
-            ..Default::default()
-        };
-        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
-
-        let (region_namespaces, entry_builders): (Vec<_>, Vec<_>) = topics
-            .iter()
-            .enumerate()
-            .map(|(i, topic)| {
-                let ns = new_namespace(topic, i as u64);
-                let entry_builder = EntryBuilder::new(ns.clone());
-                (ns, entry_builder)
-            })
-            .unzip();
-        let region_entries = entry_builders
-            .iter()
-            .map(|builder| entries_with_random_data(25, builder))
-            .collect::<Vec<_>>();
-        let entries = region_entries.iter().flatten().cloned().collect::<Vec<_>>();
-        let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
-
-        for (i, ns) in region_namespaces.iter().enumerate() {
-            let expected = region_entries[i].clone();
-            check_entries(ns, last_entry_ids[&ns.region_id], &expected, &logstore).await;
-        }
+        test_with("test_multi_regions_disjoint", 10, 10, 1, true).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
-    /// A topic may be assigned multiple regions.
+    /// A topic is assigned multiple regions.
     #[tokio::test]
-    async fn test_multi_regions_overlapped() {}
+    async fn test_multi_regions_overlapped() {
+        test_with("test_multi_regions_overlapped", 10, 50, 1, true).await;
+    }
+
+    /// Appends entries for multiple regions and checks entries for each region can be read successfully.
+    /// A topic may be assigned multiple regions. The append operation repeats for a several iterations.
+    /// Each append operation will only append entries for a subset of randomly chosen regions.
+    #[tokio::test]
+    async fn test_multi_appends() {
+        test_with("test_multi_appends", 32, 256, 16, false).await;
+    }
+
+    // / Appends a way-too large entry and checks the log store could handle it correctly.
+    // #[tokio::test]
+    // async fn test_way_too_large() {}
 }

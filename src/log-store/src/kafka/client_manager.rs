@@ -144,7 +144,7 @@ mod tests {
     use crate::test_util::kafka::{create_topics, Affix, TopicDecorator};
 
     /// Checks clients for the given topics are created.
-    async fn ensure_topics_exist(topics: &[Topic], client_manager: &ClientManager) {
+    async fn ensure_clients_exist(topics: &[Topic], client_manager: &ClientManager) {
         let client_pool = client_manager.client_pool.read().await;
         let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
         assert!(all_exist);
@@ -182,7 +182,7 @@ mod tests {
             _ => unreachable!(),
         }
 
-        ensure_topics_exist(&topics, &manager).await;
+        ensure_clients_exist(&topics, &manager).await;
     }
 
     /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.

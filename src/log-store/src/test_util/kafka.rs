@@ -23,6 +23,7 @@ pub use crate::test_util::kafka::entry_builder::EntryBuilder;
 pub use crate::test_util::kafka::topic_decorator::{Affix, TopicDecorator};
 
 /// Gets broker endpoints from environment variables with the given key.
+/// Returns ["localhost:9092"] if no environment variables set for broker endpoints.
 #[macro_export]
 macro_rules! get_broker_endpoints_from_env {
     ($key:expr) => {{
@@ -37,6 +38,7 @@ macro_rules! get_broker_endpoints_from_env {
 }
 
 /// Creates `num_topiocs` number of topics from the seed topic which are going to be decorated with the given TopicDecorator.
+/// A default seed `topic` will be used if the provided seed is None.
 pub async fn create_topics(
     num_topics: usize,
     mut decorator: TopicDecorator,
