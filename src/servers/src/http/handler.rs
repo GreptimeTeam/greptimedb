@@ -18,10 +18,13 @@ use std::time::Instant;
 
 use aide::transform::TransformOperation;
 use axum::extract::{Json, Query, State};
+use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use itertools::Itertools;
+use mime_guess::mime;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,7 +32,8 @@ use session::context::QueryContextRef;
 
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::{
-    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonResponse, ResponseFormat,
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonOutput, JsonResponse,
+    ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -59,7 +63,7 @@ pub async fn sql(
     Query(query_params): Query<SqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
-) -> Json<JsonResponse> {
+) -> Response {
     let sql_handler = &state.sql_handler;
 
     let start = Instant::now();
@@ -96,28 +100,78 @@ pub async fn sql(
 
     match resp {
         Ok(outputs) => match format {
-            ResponseFormat::Csv => todo!(),
+            ResponseFormat::Csv => {
+                let mut resp = {
+                    let resp = GreptimedbV1Response::from_output(outputs).await;
+                    if resp.output.len() > 1 {
+                        GreptimedbV1Response::with_error_message(
+                            "Multi-statements are not allowed".to_string(),
+                            StatusCode::InvalidArguments,
+                        )
+                    } else {
+                        resp
+                    }
+                };
+                let execution_time = start.elapsed().as_millis() as u64;
+                resp.with_execution_time(execution_time);
+                if resp.error.is_some() {
+                    Json(JsonResponse::GreptimedbV1(resp)).into_response()
+                } else {
+                    let tuple = match resp.output.pop() {
+                        None => (
+                            [(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+                            )],
+                            "".to_string(),
+                        ),
+                        Some(JsonOutput::AffectedRows(n)) => (
+                            [(
+                                header::CONTENT_TYPE,
+                                HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+                            )],
+                            format!("{n}"),
+                        ),
+                        Some(JsonOutput::Records(records)) => {
+                            let mut result = records
+                                .rows
+                                .iter()
+                                .map(|row| row.iter().map(|v| v.to_string()).join(","))
+                                .join("\n");
+                            result.push_str("\n");
+                            (
+                                [(
+                                    header::CONTENT_TYPE,
+                                    HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+                                )],
+                                result,
+                            )
+                        }
+                    };
+                    tuple.into_response()
+                }
+            }
             ResponseFormat::GreptimedbV1 => {
                 let mut resp = GreptimedbV1Response::from_output(outputs).await;
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::GreptimedbV1(resp))
+                Json(JsonResponse::GreptimedbV1(resp)).into_response()
             }
             ResponseFormat::InfluxdbV1 => {
                 let mut resp = InfluxdbV1Response::from_output(outputs, epoch).await;
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::InfluxdbV1(resp))
+                Json(JsonResponse::InfluxdbV1(resp)).into_response()
             }
         },
         Err((status, msg)) => match format {
             ResponseFormat::Csv | ResponseFormat::GreptimedbV1 => {
                 let mut resp = GreptimedbV1Response::with_error_message(msg, status);
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::GreptimedbV1(resp))
+                Json(JsonResponse::GreptimedbV1(resp)).into_response()
             }
             ResponseFormat::InfluxdbV1 => {
                 let mut resp = InfluxdbV1Response::with_error_message(msg);
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::InfluxdbV1(resp))
+                Json(JsonResponse::InfluxdbV1(resp)).into_response()
             }
         },
     }
