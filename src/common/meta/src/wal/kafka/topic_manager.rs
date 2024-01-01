@@ -295,4 +295,60 @@ mod tests {
         let manager = TopicManager::new(config, kv_backend);
         manager.start().await.unwrap();
     }
+
+    // Tests that the TopicManager allocates topics in a round-robin mannar.
+    // #[tokio::test]
+    // async fn test_kafka_alloc_topics() {
+    //     let broker_endpoints = std::env::var(BROKER_ENDPOINTS_KEY)
+    //         .unwrap()
+    //         .split(',')
+    //         .map(ToString::to_string)
+    //         .collect::<Vec<_>>();
+    //     let config = MetaSrvKafkaConfig {
+    //         topic_name_prefix: "__test_kafka_alloc_topics".to_string(),
+    //         replication_factor: broker_endpoints.len() as i16,
+    //         broker_endpoints,
+    //         ..Default::default()
+    //     };
+    //     let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+    //     let manager = KafkaTopicManager::new(config.clone(), kv_backend);
+    //     manager.start().await.unwrap();
+
+    //     // Topics should be created.
+    //     let topics = (0..config.num_topics)
+    //         .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
+    //         .collect::<Vec<_>>();
+
+    //     // Selects exactly the number of `num_topics` topics one by one.
+    //     for expected in topics.iter() {
+    //         let got = manager.select().unwrap();
+    //         assert_eq!(got, expected);
+    //     }
+
+    //     // Selects exactly the number of `num_topics` topics in a batching manner.
+    //     let got = manager
+    //         .select_batch(config.num_topics)
+    //         .unwrap()
+    //         .into_iter()
+    //         .map(ToString::to_string)
+    //         .collect::<Vec<_>>();
+    //     assert_eq!(got, topics);
+
+    //     // Selects none.
+    //     let got = manager.select_batch(config.num_topics).unwrap();
+    //     assert!(got.is_empty());
+
+    //     // Selects more than the number of `num_topics` topics.
+    //     let got = manager
+    //         .select_batch(2 * config.num_topics)
+    //         .unwrap()
+    //         .into_iter()
+    //         .map(ToString::to_string)
+    //         .collect::<Vec<_>>();
+    //     let expected = vec![topics.clone(); 2]
+    //         .into_iter()
+    //         .flatten()
+    //         .collect::<Vec<_>>();
+    //     assert_eq!(got, expected);
+    // }
 }

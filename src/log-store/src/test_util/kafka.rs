@@ -18,7 +18,7 @@ pub mod topic_decorator;
 use common_config::wal::KafkaWalTopic as Topic;
 use rskafka::client::ClientBuilder;
 
-use crate::kafka::EntryImpl;
+use crate::kafka::{EntryImpl, NamespaceImpl};
 pub use crate::test_util::kafka::entry_builder::EntryBuilder;
 pub use crate::test_util::kafka::topic_decorator::{Affix, TopicDecorator};
 
@@ -64,6 +64,14 @@ pub async fn create_topics(
     futures::future::try_join_all(tasks).await.unwrap();
 
     topics
+}
+
+/// Creates a new namespace with the given topic and region id.
+pub fn new_namespace(topic: &str, region_id: u64) -> NamespaceImpl {
+    NamespaceImpl {
+        topic: topic.to_string(),
+        region_id,
+    }
 }
 
 /// Builds a batch of entries each with random data.

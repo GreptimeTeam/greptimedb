@@ -128,4 +128,43 @@ mod tests {
             .collect();
         assert_eq!(got, expected);
     }
+
+    // Tests that the wal options allocator could successfully allocate Kafka wal options.
+    // #[tokio::test]
+    // async fn test_kafka_options_allocator() {
+    //     let broker_endpoints = std::env::var(BROKER_ENDPOINTS_KEY)
+    //         .unwrap()
+    //         .split(',')
+    //         .map(ToString::to_string)
+    //         .collect::<Vec<_>>();
+    //     let config = MetaSrvKafkaConfig {
+    //         topic_name_prefix: "__test_kafka_options_allocator".to_string(),
+    //         replication_factor: broker_endpoints.len() as i16,
+    //         broker_endpoints,
+    //         ..Default::default()
+    //     };
+    //     let wal_config = WalConfig::Kafka(config.clone());
+    //     let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+    //     let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+    //     allocator.start().await.unwrap();
+
+    //     let num_regions = 32;
+    //     let regions = (0..num_regions).collect::<Vec<_>>();
+    //     let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+
+    //     // Topics should be allocated.
+    //     let topics = (0..num_regions)
+    //         .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
+    //         .collect::<Vec<_>>();
+    //     // Check the allocated wal options contain the expected topics.
+    //     let expected = (0..num_regions)
+    //         .map(|i| {
+    //             let options = WalOptions::Kafka(KafkaWalOptions {
+    //                 topic: topics[i as usize].clone(),
+    //             });
+    //             (i, serde_json::to_string(&options).unwrap())
+    //         })
+    //         .collect::<HashMap<_, _>>();
+    //     assert_eq!(got, expected);
+    // }
 }

@@ -98,12 +98,12 @@ impl ClientManager {
     /// Gets the client associated with the topic. If the client does not exist, a new one will
     /// be created and returned.
     pub(crate) async fn get_or_insert(&self, topic: &Topic) -> Result<Client> {
-        let client_pool = self.client_pool.read().await;
-        if let Some(client) = client_pool.get(topic) {
-            return Ok(client.clone());
+        {
+            let client_pool = self.client_pool.read().await;
+            if let Some(client) = client_pool.get(topic) {
+                return Ok(client.clone());
+            }
         }
-        // Manullay releases the read lock.
-        drop(client_pool);
 
         // Acquires the write lock.
         let mut client_pool = self.client_pool.write().await;

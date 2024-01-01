@@ -145,26 +145,12 @@ pub(crate) fn decode_from_record(record: Record) -> Result<Vec<EntryImpl>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn new_test_entry<D: AsRef<[u8]>>(data: D, entry_id: EntryId, ns: NamespaceImpl) -> EntryImpl {
-        EntryImpl {
-            data: data.as_ref().to_vec(),
-            id: entry_id,
-            ns,
-        }
-    }
+    use crate::test_util::kafka::{entries_with_random_data, new_namespace, EntryBuilder};
 
     #[test]
     fn test_serde_record_meta() {
-        let ns = NamespaceImpl {
-            region_id: 1,
-            topic: "test_topic".to_string(),
-        };
-        let entries = vec![
-            new_test_entry(b"111", 1, ns.clone()),
-            new_test_entry(b"2222", 2, ns.clone()),
-            new_test_entry(b"33333", 3, ns.clone()),
-        ];
+        let ns = new_namespace("test_topic", 1);
+        let entries = entries_with_random_data(3, &EntryBuilder::new(ns.clone()));
         let meta = RecordMeta::new(ns, &entries);
         let encoded = serde_json::to_vec(&meta).unwrap();
         let decoded: RecordMeta = serde_json::from_slice(&encoded).unwrap();
@@ -173,15 +159,8 @@ mod tests {
 
     #[test]
     fn test_encdec_record() {
-        let ns = NamespaceImpl {
-            region_id: 1,
-            topic: "test_topic".to_string(),
-        };
-        let entries = vec![
-            new_test_entry(b"111", 1, ns.clone()),
-            new_test_entry(b"2222", 2, ns.clone()),
-            new_test_entry(b"33333", 3, ns.clone()),
-        ];
+        let ns = new_namespace("test_topic", 1);
+        let entries = entries_with_random_data(3, &EntryBuilder::new(ns.clone()));
         let record = encode_to_record(ns, entries.clone()).unwrap();
         let decoded_entries = decode_from_record(record).unwrap();
         assert_eq!(entries, decoded_entries);

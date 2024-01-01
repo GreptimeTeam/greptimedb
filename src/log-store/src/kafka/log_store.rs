@@ -293,7 +293,7 @@ mod tests {
     use super::*;
     use crate::get_broker_endpoints_from_env;
     use crate::test_util::kafka::{
-        create_topics, entries_with_random_data, Affix, EntryBuilder, TopicDecorator,
+        create_topics, entries_with_random_data, new_namespace, Affix, EntryBuilder, TopicDecorator,
     };
 
     // Stores test context for a region.
@@ -325,10 +325,7 @@ mod tests {
         (0..num_regions)
             .map(|i| {
                 let topic = &topics[i % topics.len()];
-                let ns = NamespaceImpl {
-                    region_id: i as u64,
-                    topic: topic.to_string(),
-                };
+                let ns = new_namespace(topic, i as u64);
                 let entry_builder = EntryBuilder::new(ns.clone());
                 RegionContext {
                     ns,
