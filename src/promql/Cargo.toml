@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ahash.workspace = true
 async-recursion = "1.0"
 async-trait.workspace = true
 bytemuck.workspace = true

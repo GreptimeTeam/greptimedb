@@ -26,6 +26,7 @@ mod tests {
 
     use arrow::array::{Array, PrimitiveArray};
     use arrow_array::ArrayRef;
+    use common_time::timezone::set_default_timezone;
     use common_time::DateTime;
 
     use super::*;
@@ -37,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_datetime_vector() {
-        std::env::set_var("TZ", "Asia/Shanghai");
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
         let v = DateTimeVector::new(PrimitiveArray::from(vec![1000, 2000, 3000]));
         assert_eq!(ConcreteDataType::datetime_datatype(), v.data_type());
         assert_eq!(3, v.len());

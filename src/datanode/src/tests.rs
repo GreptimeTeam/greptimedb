@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
@@ -93,7 +94,9 @@ pub type MockRequestHandler =
 
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
-    handle_request_mock_fn: Option<MockRequestHandler>,
+    pub(crate) handle_request_delay: Option<Duration>,
+    pub(crate) handle_request_mock_fn: Option<MockRequestHandler>,
+    pub(crate) mock_role: Option<Option<RegionRole>>,
 }
 
 impl MockRegionEngine {
@@ -102,8 +105,10 @@ impl MockRegionEngine {
 
         (
             Arc::new(Self {
+                handle_request_delay: None,
                 sender: tx,
                 handle_request_mock_fn: None,
+                mock_role: None,
             }),
             rx,
         )
@@ -116,11 +121,30 @@ impl MockRegionEngine {
 
         (
             Arc::new(Self {
+                handle_request_delay: None,
                 sender: tx,
                 handle_request_mock_fn: Some(mock_fn),
+                mock_role: None,
             }),
             rx,
         )
+    }
+
+    pub fn with_custom_apply_fn<F>(apply: F) -> (Arc<Self>, Receiver<(RegionId, RegionRequest)>)
+    where
+        F: FnOnce(&mut MockRegionEngine),
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let mut region_engine = Self {
+            handle_request_delay: None,
+            sender: tx,
+            handle_request_mock_fn: None,
+            mock_role: None,
+        };
+
+        apply(&mut region_engine);
+
+        (Arc::new(region_engine), rx)
     }
 }
 
@@ -135,6 +159,9 @@ impl RegionEngine for MockRegionEngine {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<AffectedRows, BoxedError> {
+        if let Some(delay) = self.handle_request_delay {
+            tokio::time::sleep(delay).await;
+        }
         if let Some(mock_fn) = &self.handle_request_mock_fn {
             return mock_fn(region_id, request).map_err(BoxedError::new);
         };
@@ -175,6 +202,9 @@ impl RegionEngine for MockRegionEngine {
     }
 
     fn role(&self, _region_id: RegionId) -> Option<RegionRole> {
+        if let Some(role) = self.mock_role {
+            return role;
+        }
         Some(RegionRole::Leader)
     }
 }

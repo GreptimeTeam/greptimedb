@@ -2,6 +2,8 @@
 mode = "standalone"
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
+# The default timezone of the server
+# default_timezone = "UTC"
 
 # HTTP server options.
 [http]

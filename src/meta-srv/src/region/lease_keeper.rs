@@ -127,7 +127,7 @@ impl RegionLeaseKeeper {
         }
 
         if let Some(table_route) = table_metadata.get(&region_id.table_id()) {
-            if let Some(region_route) = table_route.region_route(region_id) {
+            if let Ok(Some(region_route)) = table_route.region_route(region_id) {
                 return renew_region_lease_via_region_route(&region_route, datanode_id, region_id);
             }
         }

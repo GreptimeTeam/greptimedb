@@ -41,6 +41,7 @@ use crate::metrics;
 use crate::region_server::RegionServer;
 
 pub(crate) mod handler;
+pub(crate) mod task_tracker;
 
 pub struct HeartbeatTask {
     node_id: u64,

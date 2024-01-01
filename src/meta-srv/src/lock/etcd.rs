@@ -25,14 +25,11 @@ use crate::error::Result;
 #[derive(Clone)]
 pub struct EtcdLock {
     client: Client,
-    store_key_prefix: Option<String>,
+    store_key_prefix: String,
 }
 
 impl EtcdLock {
-    pub async fn with_endpoints<E, S>(
-        endpoints: S,
-        store_key_prefix: Option<String>,
-    ) -> Result<DistLockRef>
+    pub async fn with_endpoints<E, S>(endpoints: S, store_key_prefix: String) -> Result<DistLockRef>
     where
         E: AsRef<str>,
         S: AsRef<[E]>,
@@ -44,10 +41,7 @@ impl EtcdLock {
         Self::with_etcd_client(client, store_key_prefix)
     }
 
-    pub fn with_etcd_client(
-        client: Client,
-        store_key_prefix: Option<String>,
-    ) -> Result<DistLockRef> {
+    pub fn with_etcd_client(client: Client, store_key_prefix: String) -> Result<DistLockRef> {
         Ok(Arc::new(EtcdLock {
             client,
             store_key_prefix,
@@ -55,13 +49,12 @@ impl EtcdLock {
     }
 
     fn lock_key(&self, key: Vec<u8>) -> Vec<u8> {
-        match &self.store_key_prefix {
-            Some(prefix) => {
-                let mut prefix = prefix.as_bytes().to_vec();
-                prefix.extend_from_slice(&key);
-                prefix
-            }
-            None => key,
+        if self.store_key_prefix.is_empty() {
+            key
+        } else {
+            let mut prefix = self.store_key_prefix.as_bytes().to_vec();
+            prefix.extend_from_slice(&key);
+            prefix
         }
     }
 }

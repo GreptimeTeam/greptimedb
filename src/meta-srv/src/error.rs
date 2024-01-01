@@ -32,6 +32,15 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
+    PeerUnavailable { location: Location, peer_id: u64 },
+
+    #[snafu(display("Another migration procedure is running for region: {}", region_id))]
+    MigrationRunning {
+        location: Location,
+        region_id: RegionId,
+    },
+
     #[snafu(display("The region migration procedure aborted, reason: {}", reason))]
     MigrationAbort { location: Location, reason: String },
 
@@ -593,6 +602,13 @@ pub enum Error {
 
     #[snafu(display("Weight array is not set"))]
     NotSetWeightArray { location: Location },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable {
+        location: Location,
+        err_msg: String,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -644,7 +660,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::Unsupported { .. } => StatusCode::Internal,
+            | Error::Unsupported { .. }
+            | Error::PeerUnavailable { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -675,7 +692,8 @@ impl ErrorExt for Error {
             | Error::TableIdChanged { .. }
             | Error::RegionOpeningRace { .. }
             | Error::RegionRouteNotFound { .. }
-            | Error::MigrationAbort { .. } => StatusCode::Unexpected,
+            | Error::MigrationAbort { .. }
+            | Error::MigrationRunning { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::InvalidateTableCache { source, .. } => source.status_code(),
             Error::RequestDatanode { source, .. } => source.status_code(),
@@ -706,7 +724,8 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. } => source.status_code(),
+            | Error::GetFullTableInfo { source, .. }
+            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

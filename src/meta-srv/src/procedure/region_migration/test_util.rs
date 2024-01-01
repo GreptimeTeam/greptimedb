@@ -29,8 +29,10 @@ use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeper, MemoryRegionKeeperRef};
 use common_meta::rpc::router::RegionRoute;
 use common_meta::sequence::{Sequence, SequenceBuilder};
+use common_meta::state_store::KvStateStore;
 use common_meta::DatanodeId;
-use common_procedure::{Context as ProcedureContext, ProcedureId, Status};
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::{Context as ProcedureContext, ProcedureId, ProcedureManagerRef, Status};
 use common_procedure_test::MockContextProvider;
 use common_telemetry::debug;
 use common_time::util::current_time_millis;
@@ -41,7 +43,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
-use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
+use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
 use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -90,6 +92,7 @@ pub struct TestingEnv {
     mailbox_ctx: MailboxContext,
     opening_region_keeper: MemoryRegionKeeperRef,
     server_addr: String,
+    procedure_manager: ProcedureManagerRef,
 }
 
 impl TestingEnv {
@@ -104,17 +107,21 @@ impl TestingEnv {
         let mailbox_ctx = MailboxContext::new(mailbox_sequence);
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
 
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let procedure_manager = Arc::new(LocalManager::new(ManagerConfig::default(), state_store));
+
         Self {
             table_metadata_manager,
             opening_region_keeper,
             mailbox_ctx,
             server_addr: "localhost".to_string(),
+            procedure_manager,
         }
     }
 
     /// Returns a context of region migration procedure.
-    pub fn context_factory(&self) -> ContextFactoryImpl {
-        ContextFactoryImpl {
+    pub fn context_factory(&self) -> DefaultContextFactory {
+        DefaultContextFactory {
             table_metadata_manager: self.table_metadata_manager.clone(),
             opening_region_keeper: self.opening_region_keeper.clone(),
             volatile_ctx: Default::default(),
@@ -144,6 +151,11 @@ impl TestingEnv {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
         }
+    }
+
+    /// Returns the [ProcedureManagerRef].
+    pub fn procedure_manager(&self) -> &ProcedureManagerRef {
+        &self.procedure_manager
     }
 
     // Creates a table metadata with the physical table route.
@@ -407,7 +419,7 @@ impl ProcedureMigrationTestSuite {
             .unwrap()
             .unwrap()
             .into_inner();
-        let region_routes = table_route.region_routes();
+        let region_routes = table_route.region_routes().unwrap();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;
         let removed_follower_id = self.context.persistent_ctx.from_peer.id;

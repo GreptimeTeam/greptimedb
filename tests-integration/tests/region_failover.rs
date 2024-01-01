@@ -15,11 +15,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Peer;
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::peer::Peer;
 use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;

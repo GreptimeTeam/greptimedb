@@ -89,8 +89,6 @@ impl RecordProducer {
     pub(crate) async fn produce(self, client_manager: &ClientManagerRef) -> Result<Offset> {
         ensure!(!self.entries.is_empty(), EmptyEntriesSnafu);
 
-        println!("Start producing a record for ns {}", self.ns);
-
         // Produces the record through a client. The client determines when to send the record to kafka server.
         let client = client_manager
             .get_or_insert(&self.ns.topic)
@@ -102,8 +100,6 @@ impl RecordProducer {
                 }
                 .build()
             })?;
-
-        println!("Got the client for ns {}", self.ns);
 
         client
             .producer

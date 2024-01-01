@@ -1543,6 +1543,7 @@ dependencies = [
  "common-recordbatch",
  "common-telemetry",
  "common-test-util",
+ "common-time",
  "common-version",
  "config",
  "datanode",
@@ -2000,6 +2001,7 @@ dependencies = [
  "chrono-tz 0.8.4",
  "common-error",
  "common-macro",
+ "once_cell",
  "rand",
  "serde",
  "serde_json",
@@ -4075,7 +4077,7 @@ dependencies = [
  "prost 0.12.3",
  "rand",
  "regex",
- "regex-automata 0.1.10",
+ "regex-automata 0.2.0",
  "snafu",
  "tokio",
  "tokio-util",
@@ -5023,6 +5025,7 @@ dependencies = [
  "datatypes",
  "futures",
  "humantime-serde",
+ "index",
  "lazy_static",
  "log-store",
  "memcomparable",
@@ -6587,6 +6590,7 @@ dependencies = [
 name = "promql"
 version = "0.5.0"
 dependencies = [
+ "ahash 0.8.6",
  "async-recursion",
  "async-trait",
  "bytemuck",
@@ -7180,7 +7184,17 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c230d73fb8d8c1b9c0b3135c5142a8acee3a0558fb8db5cf1cb65f8d7862132"
 dependencies = [
+ "regex-syntax 0.6.29",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9368763f5a9b804326f3af749e16f9abf378d227bcdee7634b13d8f17793782"
+dependencies = [
  "fst",
+ "memchr",
  "regex-syntax 0.6.29",
 ]
 
@@ -8926,6 +8940,7 @@ dependencies = [
  "common-recordbatch",
  "common-time",
  "serde",
+ "serde_json",
  "sqlness",
  "tinytemplate",
  "tokio",

@@ -383,12 +383,13 @@ mod tests {
     use std::sync::Mutex;
 
     use api::v1::meta::mailbox_message::Payload;
-    use api::v1::meta::{HeartbeatResponse, MailboxMessage, Peer, RequestHeader};
+    use api::v1::meta::{HeartbeatResponse, MailboxMessage, RequestHeader};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::ddl::utils::region_storage_path;
     use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::peer::Peer;
     use common_meta::sequence::SequenceBuilder;
     use common_meta::DatanodeId;
     use common_procedure::{BoxedProcedure, ProcedureId};

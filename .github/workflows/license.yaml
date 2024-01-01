@@ -3,7 +3,7 @@ name: License checker
 on:
   push:
     branches:
-    - develop
+    - main
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 jobs:

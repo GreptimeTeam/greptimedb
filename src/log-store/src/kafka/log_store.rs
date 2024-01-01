@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic, WalOptions};
+use common_telemetry::debug;
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
@@ -104,7 +105,7 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        println!("LogStore handles append_batch with entries {:?}", entries);
+        debug!("LogStore handles append_batch with entries {:?}", entries);
 
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
@@ -119,30 +120,22 @@ impl LogStore for KafkaLogStore {
                 .push(entry);
         }
 
-        // Builds a record from entries belong to a region and produces them to kafka server.
-        let (region_ids, tasks): (Vec<_>, Vec<_>) = producers
-            .into_iter()
-            .map(|(id, producer)| (id, producer.produce(&self.client_manager)))
-            .unzip();
-        // Each produce operation returns a kafka offset of the produced record.
-        // The offsets are then converted to entry ids.
-        let entry_ids = futures::future::try_join_all(tasks)
-            .await?
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<Vec<_>>>()?;
-        println!("The entries are appended at offsets {:?}", entry_ids);
+        // Produces entries for each region and gets the offset those entries written to.
+        // The returned offset is then converted into an entry id.
+        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
+            |(region_id, producer)| async move {
+                let entry_id = producer
+                    .produce(&self.client_manager)
+                    .await
+                    .map(TryInto::try_into)??;
+                Ok((region_id, entry_id))
+            },
+        ))
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
-        let last_entry_ids = region_ids
-            .into_iter()
-            .zip(entry_ids)
-            .collect::<HashMap<_, _>>();
-        for (region, last_entry_id) in last_entry_ids.iter() {
-            println!(
-                "The entries for region {} are appended at offset {}",
-                region, last_entry_id
-            );
-        }
+        debug!("Append batch result: {:?}", last_entry_ids);
 
         Ok(AppendBatchResponse { last_entry_ids })
     }
@@ -177,7 +170,7 @@ impl LogStore for KafkaLogStore {
         // Reads entries with offsets in the range [start_offset, end_offset].
         let start_offset = Offset::try_from(entry_id)?.0;
 
-        println!(
+        debug!(
             "Start reading entries in range [{}, {}] for ns {}",
             start_offset, end_offset, ns
         );
@@ -185,7 +178,7 @@ impl LogStore for KafkaLogStore {
         // Abort if there're no new entries.
         // FIXME(niebayes): how come this case happens?
         if start_offset > end_offset {
-            println!(
+            debug!(
                 "No new entries for ns {} in range [{}, {}]",
                 ns, start_offset, end_offset
             );
@@ -197,7 +190,7 @@ impl LogStore for KafkaLogStore {
             .with_max_wait_ms(self.config.produce_record_timeout.as_millis() as i32)
             .build();
 
-        println!(
+        debug!(
             "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
             ns, start_offset, end_offset
         );
@@ -212,21 +205,25 @@ impl LogStore for KafkaLogStore {
                     ns: ns_clone.clone(),
                 })?;
                 let record_offset = record.offset;
-                println!(
+                debug!(
                     "Read a record at offset {} for ns {}, high watermark: {}",
                     record_offset, ns_clone, high_watermark
                 );
 
+                // Ignores noop records.
+                if record.record.value.is_none() {
+                    continue;
+                }
                 let entries = decode_from_record(record.record)?;
 
                 // Filters entries by region id.
                 if let Some(entry) = entries.first()
                     && entry.ns.region_id == region_id
                 {
-                    println!("{} entries are yielded for ns {}", entries.len(), ns_clone);
+                    debug!("{} entries are yielded for ns {}", entries.len(), ns_clone);
                     yield Ok(entries);
                 } else {
-                    println!(
+                    debug!(
                         "{} entries are filtered out for ns {}",
                         entries.len(),
                         ns_clone
@@ -235,7 +232,7 @@ impl LogStore for KafkaLogStore {
 
                 // Terminates the stream if the entry with the end offset was read.
                 if record_offset >= end_offset {
-                    println!(
+                    debug!(
                         "Stream consumer for ns {} terminates at offset {}",
                         ns_clone, record_offset
                     );

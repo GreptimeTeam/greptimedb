@@ -43,6 +43,7 @@ impl UpdateMetadata {
         let table_id = region_id.table_id();
         let current_table_route_value = ctx.get_table_route_value().await?;
 
+        // TODO(weny): ensures the leader region peer is the `from_peer`.
         if let Err(err) = table_metadata_manager
             .update_leader_region_status(table_id, current_table_route_value, |route| {
                 if route.region.id == region_id
@@ -207,8 +208,8 @@ mod tests {
             .unwrap();
 
         // It should remain unchanged.
-        assert_eq!(latest_table_route.version(), 0);
-        assert!(!latest_table_route.region_routes()[0].is_leader_downgraded());
+        assert_eq!(latest_table_route.version().unwrap(), 0);
+        assert!(!latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 
@@ -248,7 +249,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(latest_table_route.region_routes()[0].is_leader_downgraded());
+        assert!(latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 }

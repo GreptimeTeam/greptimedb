@@ -192,8 +192,11 @@ pub async fn metasrv_builder(
             let etcd_client = create_etcd_client(opts).await?;
             let kv_backend = {
                 let etcd_backend = EtcdStore::with_etcd_client(etcd_client.clone());
-                if let Some(prefix) = opts.store_key_prefix.clone() {
-                    Arc::new(ChrootKvBackend::new(prefix.into_bytes(), etcd_backend))
+                if !opts.store_key_prefix.is_empty() {
+                    Arc::new(ChrootKvBackend::new(
+                        opts.store_key_prefix.clone().into_bytes(),
+                        etcd_backend,
+                    ))
                 } else {
                     etcd_backend
                 }

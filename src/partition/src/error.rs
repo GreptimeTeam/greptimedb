@@ -119,6 +119,13 @@ pub enum Error {
         region_id: RegionId,
         location: Location,
     },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable {
+        location: Location,
+        err_msg: String,
+        source: common_meta::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -138,6 +145,7 @@ impl ErrorExt for Error {
             Error::FindDatanode { .. } => StatusCode::InvalidArguments,
             Error::TableRouteManager { source, .. } => source.status_code(),
             Error::MissingDefaultValue { .. } => StatusCode::Internal,
+            Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
         }
     }
 
