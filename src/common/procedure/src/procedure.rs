@@ -116,7 +116,7 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum StringKey {
     Share(String),
     Exclusive(String),
@@ -124,8 +124,9 @@ pub enum StringKey {
 
 /// Keys to identify required locks.
 ///
-/// [LockKey] respect the input order.
-// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
+/// [LockKey] always sorts keys lexicographically so that they can be acquired
+/// in the same order.
+/// Most procedures should only acquire 1 ~ 2 locks so we use smallvec to hold keys.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LockKey(SmallVec<[StringKey; 2]>);
 
@@ -159,6 +160,7 @@ impl LockKey {
     /// Returns a new [LockKey] with keys from specific `iter`.
     pub fn new(iter: impl IntoIterator<Item = StringKey>) -> LockKey {
         let mut vec: SmallVec<_> = iter.into_iter().collect();
+        vec.sort();
         // Dedup keys to avoid acquiring the same key multiple times.
         vec.dedup();
         LockKey(vec)
@@ -360,6 +362,31 @@ mod tests {
 
         let status = Status::Done;
         assert!(!status.need_persist());
+    }
+
+    #[test]
+    fn test_lock_key() {
+        let entity = "catalog.schema.my_table";
+        let key = LockKey::single_exclusive(entity);
+        assert_eq!(
+            vec![&StringKey::Exclusive(entity.to_string())],
+            key.keys_to_lock().collect::<Vec<_>>()
+        );
+
+        let key = LockKey::new_exclusive([
+            "b".to_string(),
+            "c".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ]);
+        assert_eq!(
+            vec![
+                &StringKey::Exclusive("a".to_string()),
+                &StringKey::Exclusive("b".to_string()),
+                &StringKey::Exclusive("c".to_string())
+            ],
+            key.keys_to_lock().collect::<Vec<_>>()
+        );
     }
 
     #[test]
