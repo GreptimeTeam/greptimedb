@@ -227,6 +227,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        // TODO: GreptimeDB already has query tracing, support later. cc @Taylor-lagrange
         OPTIMIZER_TRACE => (
             vec![
                 string_column("QUERY"),
@@ -287,6 +288,7 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        // TODO: _Must_ reimplement this table when foreign key constraint is supported.
         REFERENTIAL_CONSTRAINTS => (
             vec![
                 string_column("CONSTRAINT_CATALOG"),
@@ -392,6 +394,8 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        // TODO: Considering store internal metrics in `global_status` and
+        // `session_status` tables.
         GLOBAL_STATUS => (
             vec![
                 string_column("VARIABLE_NAME"),
