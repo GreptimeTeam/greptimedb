@@ -47,29 +47,6 @@ impl<K> KeyRwLock<K>
 where
     K: Eq + Hash + Clone,
 {
-    /// Remove locks that are not locked currently.
-    fn clean_up(locks: &mut HashMap<K, Arc<RwLock<()>>>) {
-        let keys = locks
-            .iter()
-            .filter_map(|(key, lock)| {
-                if lock.try_write().is_ok() {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        for key in keys {
-            locks.remove(&key);
-        }
-    }
-}
-
-impl<K> KeyRwLock<K>
-where
-    K: Eq + Hash + Send + Clone,
-{
     pub fn new() -> Self {
         KeyRwLock {
             inner: Default::default(),
@@ -80,8 +57,7 @@ where
     pub async fn read(&self, key: K) -> OwnedRwLockReadGuard<()> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
-            Self::clean_up(&mut locks);
-            locks.entry(key.clone()).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
 
         lock.read_owned().await
@@ -91,8 +67,7 @@ where
     pub async fn write(&self, key: K) -> OwnedRwLockWriteGuard<()> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
-            Self::clean_up(&mut locks);
-            locks.entry(key.clone()).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
 
         lock.write_owned().await
@@ -102,8 +77,7 @@ where
     pub fn try_read(&self, key: K) -> Result<OwnedRwLockReadGuard<()>, TryLockError> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
-            Self::clean_up(&mut locks);
-            locks.entry(key.clone()).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
 
         lock.try_read_owned()
@@ -113,8 +87,7 @@ where
     pub fn try_write(&self, key: K) -> Result<OwnedRwLockWriteGuard<()>, TryLockError> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
-            Self::clean_up(&mut locks);
-            locks.entry(key.clone()).or_default().clone()
+            locks.entry(key).or_default().clone()
         };
 
         lock.try_write_owned()
@@ -128,6 +101,24 @@ where
     /// Returns true the inner map is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Clean up stale locks.
+    pub fn clean_keys<'a>(&'a self, iter: impl IntoIterator<Item = &'a K>) {
+        let mut locks = self.inner.lock().unwrap();
+
+        let mut keys = Vec::new();
+        for key in iter {
+            if let Some(lock) = locks.get(key) {
+                if lock.try_write().is_ok() {
+                    keys.push(key);
+                }
+            }
+        }
+
+        for key in keys {
+            locks.remove(key);
+        }
     }
 }
 
@@ -155,5 +146,8 @@ mod tests {
         }
 
         assert_eq!(lock_key.len(), 2);
+
+        lock_key.clean_keys(&vec!["test1", "test2"]);
+        assert!(lock_key.is_empty());
     }
 }

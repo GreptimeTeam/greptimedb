@@ -153,6 +153,10 @@ impl Runner {
 
         // Release locks and notify parent procedure.
         guard.finish();
+        // Clean the staled locks.
+        self.manager_ctx
+            .key_lock
+            .clean_keys(self.meta.lock_key.keys_to_lock().map(|k| k.as_string()));
 
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
@@ -787,6 +791,7 @@ mod tests {
         runner.manager_ctx = manager_ctx.clone();
 
         runner.run().await;
+        assert!(manager_ctx.key_lock.is_empty());
 
         // Check child procedures.
         for child_id in children_ids {
@@ -1045,10 +1050,11 @@ mod tests {
         // Manually add this procedure to the manager ctx.
         assert!(manager_ctx.try_insert_procedure(meta.clone()));
         // Replace the manager ctx.
-        runner.manager_ctx = manager_ctx;
+        runner.manager_ctx = manager_ctx.clone();
 
         // Run the runner and execute the procedure.
         runner.run().await;
+        assert!(manager_ctx.key_lock.is_empty());
         let err = meta.state().error().unwrap().output_msg();
         assert!(err.contains("subprocedure failed"), "{err}");
     }

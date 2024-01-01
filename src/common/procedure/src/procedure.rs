@@ -136,6 +136,13 @@ impl StringKey {
             StringKey::Exclusive(s) => s,
         }
     }
+
+    pub fn as_string(&self) -> &String {
+        match self {
+            StringKey::Share(s) => s,
+            StringKey::Exclusive(s) => s,
+        }
+    }
 }
 
 impl LockKey {
