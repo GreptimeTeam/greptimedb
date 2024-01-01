@@ -58,7 +58,7 @@ impl ExecResult {
 struct ProcedureGuard {
     meta: ProcedureMetaRef,
     manager_ctx: Arc<ManagerContext>,
-    key_guards: Vec<OwnedKeyRwLockGuard<String>>,
+    key_guards: Vec<OwnedKeyRwLockGuard>,
     finish: bool,
 }
 
