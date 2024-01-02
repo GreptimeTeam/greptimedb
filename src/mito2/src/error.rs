@@ -430,7 +430,14 @@ pub enum Error {
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
         #[snafu(source)]
-        error: index::inverted_index::error::Error,
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to convert value"))]
+    ConvertValue {
+        #[snafu(source)]
+        source: datatypes::error::Error,
         location: Location,
     },
 }
@@ -479,7 +486,6 @@ impl ErrorExt for Error {
             | FillDefault { .. }
             | ConvertColumnDataType { .. }
             | ColumnNotFound { .. }
-            | BuildIndexApplier { .. }
             | InvalidMetadata { .. } => StatusCode::InvalidArguments,
             RegionMetadataNotFound { .. }
             | Join { .. }
@@ -516,6 +522,8 @@ impl ErrorExt for Error {
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
+            BuildIndexApplier { source, .. } => source.status_code(),
+            ConvertValue { source, .. } => source.status_code(),
         }
     }
 

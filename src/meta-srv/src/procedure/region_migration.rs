@@ -127,7 +127,7 @@ pub trait ContextFactory {
 
 /// Default implementation.
 #[derive(Clone)]
-pub struct ContextFactoryImpl {
+pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
@@ -135,7 +135,25 @@ pub struct ContextFactoryImpl {
     server_addr: String,
 }
 
-impl ContextFactory for ContextFactoryImpl {
+impl DefaultContextFactory {
+    /// Returns an [ContextFactoryImpl].
+    pub fn new(
+        table_metadata_manager: TableMetadataManagerRef,
+        opening_region_keeper: MemoryRegionKeeperRef,
+        mailbox: MailboxRef,
+        server_addr: String,
+    ) -> Self {
+        Self {
+            volatile_ctx: VolatileContext::default(),
+            table_metadata_manager,
+            opening_region_keeper,
+            mailbox,
+            server_addr,
+        }
+    }
+}
+
+impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
             persistent_ctx,
@@ -735,7 +753,7 @@ mod tests {
             .unwrap()
             .version();
         // Should be unchanged.
-        assert_eq!(table_routes_version, 0);
+        assert_eq!(table_routes_version.unwrap(), 0);
     }
 
     #[tokio::test]

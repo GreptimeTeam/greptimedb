@@ -229,7 +229,7 @@ impl HeartbeatHandlerGroup {
         let _ = self.pushers.insert(key.to_string(), pusher).await;
     }
 
-    pub async fn unregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
+    pub async fn deregister(&self, key: impl AsRef<str>) -> Option<Pusher> {
         let key = key.as_ref();
         METRIC_META_HEARTBEAT_CONNECTION_NUM.dec();
         info!("Pusher unregister: {}", key);

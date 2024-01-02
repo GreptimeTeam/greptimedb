@@ -483,7 +483,7 @@ impl TableMetadataManager {
             .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(table_route_value.region_routes())?;
+        let distribution = region_distribution(table_route_value.region_routes()?)?;
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -608,7 +608,7 @@ impl TableMetadataManager {
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
-            region_distribution(current_table_route_value.region_routes())?;
+            region_distribution(current_table_route_value.region_routes()?)?;
         let new_region_distribution = region_distribution(&new_region_routes)?;
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
@@ -621,7 +621,7 @@ impl TableMetadataManager {
         )?;
 
         // Updates the table_route.
-        let new_table_route_value = current_table_route_value.update(new_region_routes);
+        let new_table_route_value = current_table_route_value.update(new_region_routes)?;
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
@@ -656,7 +656,7 @@ impl TableMetadataManager {
     where
         F: Fn(&RegionRoute) -> Option<Option<RegionStatus>>,
     {
-        let mut new_region_routes = current_table_route_value.region_routes().clone();
+        let mut new_region_routes = current_table_route_value.region_routes()?.clone();
 
         let mut updated = 0;
         for route in &mut new_region_routes {
@@ -673,7 +673,7 @@ impl TableMetadataManager {
         }
 
         // Updates the table_route.
-        let new_table_route_value = current_table_route_value.update(new_region_routes);
+        let new_table_route_value = current_table_route_value.update(new_region_routes)?;
 
         let (update_table_route_txn, on_update_table_route_failure) = self
             .table_route_manager()
@@ -897,7 +897,11 @@ mod tests {
             table_info
         );
         assert_eq!(
-            remote_table_route.unwrap().into_inner().region_routes(),
+            remote_table_route
+                .unwrap()
+                .into_inner()
+                .region_routes()
+                .unwrap(),
             region_routes
         );
     }
@@ -978,7 +982,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .into_inner();
-        assert_eq!(removed_table_route.region_routes(), region_routes);
+        assert_eq!(removed_table_route.region_routes().unwrap(), region_routes);
     }
 
     #[tokio::test]
@@ -1173,11 +1177,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            updated_route_value.region_routes()[0].leader_status,
+            updated_route_value.region_routes().unwrap()[0].leader_status,
             Some(RegionStatus::Downgraded)
         );
         assert_eq!(
-            updated_route_value.region_routes()[1].leader_status,
+            updated_route_value.region_routes().unwrap()[1].leader_status,
             Some(RegionStatus::Downgraded)
         );
     }
@@ -1271,7 +1275,8 @@ mod tests {
         let current_table_route_value = DeserializedValueWithBytes::from_inner(
             current_table_route_value
                 .inner
-                .update(new_region_routes.clone()),
+                .update(new_region_routes.clone())
+                .unwrap(),
         );
         let new_region_routes = vec![new_region_route(2, 4), new_region_route(5, 5)];
         // it should be ok.
@@ -1295,13 +1300,16 @@ mod tests {
 
         // if the current_table_route_value is wrong, it should return an error.
         // The ABA problem.
-        let wrong_table_route_value =
-            DeserializedValueWithBytes::from_inner(current_table_route_value.update(vec![
-                new_region_route(1, 1),
-                new_region_route(2, 2),
-                new_region_route(3, 3),
-                new_region_route(4, 4),
-            ]));
+        let wrong_table_route_value = DeserializedValueWithBytes::from_inner(
+            current_table_route_value
+                .update(vec![
+                    new_region_route(1, 1),
+                    new_region_route(2, 2),
+                    new_region_route(3, 3),
+                    new_region_route(4, 4),
+                ])
+                .unwrap(),
+        );
         assert!(table_metadata_manager
             .update_table_route(
                 table_id,

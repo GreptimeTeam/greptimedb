@@ -100,25 +100,24 @@ impl LogStore for KafkaLogStore {
                 .push(entry);
         }
 
-        // Builds a record from entries belong to a region and produces them to kafka server.
-        let region_ids = producers.keys().cloned().collect::<Vec<_>>();
+        // Produces entries for each region and gets the offset those entries written to.
+        // The returned offset is then converted into an entry id.
+        let last_entry_ids = futures::future::try_join_all(producers.into_iter().map(
+            |(region_id, producer)| async move {
+                let entry_id = producer
+                    .produce(&self.client_manager)
+                    .await
+                    .map(TryInto::try_into)??;
+                Ok((region_id, entry_id))
+            },
+        ))
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
 
-        let tasks = producers
-            .into_values()
-            .map(|producer| producer.produce(&self.client_manager))
-            .collect::<Vec<_>>();
-        // Each produce operation returns a kafka offset of the produced record.
-        // The offsets are then converted to entry ids.
-        let entry_ids = futures::future::try_join_all(tasks)
-            .await?
-            .into_iter()
-            .map(TryInto::try_into)
-            .collect::<Result<Vec<_>>>()?;
-        debug!("The entries are appended at offsets {:?}", entry_ids);
+        debug!("Append batch result: {:?}", last_entry_ids);
 
-        Ok(AppendBatchResponse {
-            last_entry_ids: region_ids.into_iter().zip(entry_ids).collect(),
-        })
+        Ok(AppendBatchResponse { last_entry_ids })
     }
 
     /// Creates a new `EntryStream` to asynchronously generates `Entry` with entry ids
@@ -186,6 +185,10 @@ impl LogStore for KafkaLogStore {
                     record_offset, ns_clone, high_watermark
                 );
 
+                // Ignores noop records.
+                if record.record.value.is_none() {
+                    continue;
+                }
                 let entries = decode_from_record(record.record)?;
 
                 // Filters entries by region id.
@@ -193,8 +196,6 @@ impl LogStore for KafkaLogStore {
                     && entry.ns.region_id == region_id
                 {
                     yield Ok(entries);
-                } else {
-                    yield Ok(vec![]);
                 }
 
                 // Terminates the stream if the entry with the end offset was read.

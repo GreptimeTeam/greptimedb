@@ -208,8 +208,8 @@ mod tests {
             .unwrap();
 
         // It should remain unchanged.
-        assert_eq!(latest_table_route.version(), 0);
-        assert!(!latest_table_route.region_routes()[0].is_leader_downgraded());
+        assert_eq!(latest_table_route.version().unwrap(), 0);
+        assert!(!latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 
@@ -249,7 +249,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(latest_table_route.region_routes()[0].is_leader_downgraded());
+        assert!(latest_table_route.region_routes().unwrap()[0].is_leader_downgraded());
         assert!(ctx.volatile_ctx.table_route.is_none());
     }
 }

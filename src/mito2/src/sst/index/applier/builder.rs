@@ -13,19 +13,16 @@
 // limitations under the License.
 
 mod between;
-
-// TODO(zhongzc): This PR is too large. The following modules are comming soon.
-
-// mod comparison;
-// mod eq_list;
-// mod in_list;
-// mod regex_match;
+mod comparison;
+mod eq_list;
+mod in_list;
+mod regex_match;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_query::logical_plan::Expr;
+use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr as DfExpr;
 use datatypes::data_type::ConcreteDataType;
@@ -36,7 +33,7 @@ use object_store::ObjectStore;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 
-use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, Result};
+use crate::error::{BuildIndexApplierSnafu, ColumnNotFoundSnafu, ConvertValueSnafu, Result};
 use crate::row_converter::SortField;
 use crate::sst::index::applier::SstIndexApplier;
 use crate::sst::index::codec::IndexValueCodec;
@@ -60,7 +57,6 @@ pub struct SstIndexApplierBuilder<'a> {
 
 impl<'a> SstIndexApplierBuilder<'a> {
     /// Creates a new [`SstIndexApplierBuilder`].
-    #[allow(dead_code)]
     pub fn new(
         region_dir: String,
         object_store: ObjectStore,
@@ -76,10 +72,9 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
     /// Consumes the builder to construct an [`SstIndexApplier`], optionally returned based on
     /// the expressions provided. If no predicates match, returns `None`.
-    #[allow(dead_code)]
     pub fn build(mut self, exprs: &[Expr]) -> Result<Option<SstIndexApplier>> {
         for expr in exprs {
-            self.traverse_and_collect(expr.df_expr())?;
+            self.traverse_and_collect(expr.df_expr());
         }
 
         if self.output.is_empty() {
@@ -91,23 +86,22 @@ impl<'a> SstIndexApplierBuilder<'a> {
         Ok(Some(SstIndexApplier::new(
             self.region_dir,
             self.object_store,
-            Arc::new(applier.context(BuildIndexApplierSnafu)?),
+            Box::new(applier.context(BuildIndexApplierSnafu)?),
         )))
     }
 
     /// Recursively traverses expressions to collect predicates.
     /// Results are stored in `self.output`.
-    fn traverse_and_collect(&mut self, expr: &DfExpr) -> Result<()> {
-        match expr {
+    fn traverse_and_collect(&mut self, expr: &DfExpr) {
+        let res = match expr {
             DfExpr::Between(between) => self.collect_between(between),
-
-            // TODO(zhongzc): This PR is too large. The following arms are comming soon.
 
             // DfExpr::InList(in_list) => self.collect_inlist(in_list),
             // DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
             //     Operator::And => {
-            //         self.traverse_and_collect(left)?;
-            //         self.traverse_and_collect(right)
+            //         self.traverse_and_collect(left);
+            //         self.traverse_and_collect(right);
+            //         Ok(())
             //     }
             //     Operator::Or => self.collect_or_eq_list(left, right),
             //     Operator::Eq => self.collect_eq(left, right),
@@ -120,6 +114,10 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
             // TODO(zhongzc): support more expressions, e.g. IsNull, IsNotNull, ...
             _ => Ok(()),
+        };
+
+        if let Err(err) = res {
+            warn!(err; "Failed to collect predicates, ignore it. expr: {expr}");
         }
     }
 
@@ -147,7 +145,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
             .then(|| column.column_schema.data_type.clone()))
     }
 
-    /// Helper funtion to get a non-null literal.
+    /// Helper function to get a non-null literal.
     fn nonnull_lit(expr: &DfExpr) -> Option<&ScalarValue> {
         match expr {
             DfExpr::Literal(lit) if !lit.is_null() => Some(lit),
@@ -165,7 +163,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
 
     /// Helper function to encode a literal into bytes.
     fn encode_lit(lit: &ScalarValue, data_type: ConcreteDataType) -> Result<Vec<u8>> {
-        let value = Value::try_from(lit.clone()).unwrap();
+        let value = Value::try_from(lit.clone()).context(ConvertValueSnafu)?;
         let mut bytes = vec![];
         let field = SortField::new(data_type);
         IndexValueCodec::encode_value(value.as_value_ref(), &field, &mut bytes)?;

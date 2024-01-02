@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::Peer;
 use common_meta::key::TableMetadataManager;
+use common_meta::peer::Peer;
 use common_meta::rpc::router::find_leaders;
 use common_telemetry::{debug, info};
 use parking_lot::RwLock;
@@ -142,13 +142,19 @@ async fn get_leader_peer_ids(
         .await
         .context(error::TableMetadataManagerSnafu)
         .map(|route| {
-            route.map_or_else(Vec::new, |route| {
-                find_leaders(route.region_routes())
-                    .into_iter()
-                    .map(|peer| peer.id)
-                    .collect()
-            })
-        })
+            route.map_or_else(
+                || Ok(Vec::new()),
+                |route| {
+                    let region_routes = route
+                        .region_routes()
+                        .context(error::UnexpectedLogicalRouteTableSnafu { err_msg: "" })?;
+                    Ok(find_leaders(region_routes)
+                        .into_iter()
+                        .map(|peer| peer.id)
+                        .collect())
+                },
+            )
+        })?
 }
 
 #[cfg(test)]
