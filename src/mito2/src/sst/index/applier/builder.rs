@@ -175,8 +175,12 @@ impl<'a> SstIndexApplierBuilder<'a> {
 mod tests {
     use api::v1::SemanticType;
     use datafusion_common::Column;
+    use datafusion_expr::Between;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use index::inverted_index::search::predicate::{
+        Bound, Range, RangePredicate, RegexMatchPredicate,
+    };
     use object_store::services::Memory;
     use object_store::ObjectStore;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
@@ -264,5 +268,65 @@ mod tests {
         )
         .unwrap();
         bytes
+    }
+
+    pub(crate) fn encoded_int64(s: impl Into<i64>) -> Vec<u8> {
+        let mut bytes = vec![];
+        IndexValueCodec::encode_value(
+            Value::from(s.into()).as_value_ref(),
+            &SortField::new(ConcreteDataType::int64_datatype()),
+            &mut bytes,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn test_collect_and_basic() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(tag_column()),
+                op: Operator::RegexMatch,
+                right: Box::new(string_lit("bar")),
+            })),
+            op: Operator::And,
+            right: Box::new(DfExpr::Between(Between {
+                expr: Box::new(tag_column2()),
+                negated: false,
+                low: Box::new(int64_lit(123)),
+                high: Box::new(int64_lit(456)),
+            })),
+        });
+
+        builder.traverse_and_collect(&expr);
+        let predicates = builder.output.get("a").unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: "bar".to_string()
+            })
+        );
+        let predicates = builder.output.get("b").unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::Range(RangePredicate {
+                range: Range {
+                    lower: Some(Bound {
+                        inclusive: true,
+                        value: encoded_int64(123),
+                    }),
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: encoded_int64(456),
+                    }),
+                }
+            })
+        );
     }
 }
