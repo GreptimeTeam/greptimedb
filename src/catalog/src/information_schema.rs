@@ -61,6 +61,16 @@ lazy_static! {
         CHECK_CONSTRAINTS,
         EVENTS,
         FILES,
+        OPTIMIZER_TRACE,
+        PARAMETERS,
+        PROFILING,
+        REFERENTIAL_CONSTRAINTS,
+        ROUTINES,
+        SCHEMA_PRIVILEGES,
+        TABLE_PRIVILEGES,
+        TRIGGERS,
+        GLOBAL_STATUS,
+        SESSION_STATUS,
     ];
 }
 
@@ -179,6 +189,16 @@ impl InformationSchemaProvider {
             CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
             EVENTS => setup_memory_table!(EVENTS),
             FILES => setup_memory_table!(FILES),
+            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
+            PARAMETERS => setup_memory_table!(PARAMETERS),
+            PROFILING => setup_memory_table!(PROFILING),
+            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
+            ROUTINES => setup_memory_table!(ROUTINES),
+            SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
+            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
+            TRIGGERS => setup_memory_table!(TRIGGERS),
+            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
+            SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
