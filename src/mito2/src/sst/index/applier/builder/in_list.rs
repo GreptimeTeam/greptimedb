@@ -50,3 +50,103 @@ impl<'a> SstIndexApplierBuilder<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::sst::index::applier::builder::tests::{
+        encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
+        test_object_store, test_region_metadata,
+    };
+
+    #[test]
+    fn test_collect_in_list_basic() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let in_list = InList {
+            expr: Box::new(tag_column()),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
+        };
+
+        builder.collect_inlist(&in_list).unwrap();
+
+        let predicates = builder.output.get("a").unwrap();
+        assert_eq!(predicates.len(), 1);
+        assert_eq!(
+            predicates[0],
+            Predicate::InList(InListPredicate {
+                list: HashSet::from_iter([encoded_string("foo"), encoded_string("bar")])
+            })
+        );
+    }
+
+    #[test]
+    fn test_collect_in_list_negated() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let in_list = InList {
+            expr: Box::new(tag_column()),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: true,
+        };
+
+        builder.collect_inlist(&in_list).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_in_list_field_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let in_list = InList {
+            expr: Box::new(field_column()),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
+        };
+
+        builder.collect_inlist(&in_list).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_in_list_type_mismatch() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let in_list = InList {
+            expr: Box::new(tag_column()),
+            list: vec![int64_lit(123), int64_lit(456)],
+            negated: false,
+        };
+
+        let res = builder.collect_inlist(&in_list);
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_in_list_nonexistent_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let in_list = InList {
+            expr: Box::new(nonexistent_column()),
+            list: vec![string_lit("foo"), string_lit("bar")],
+            negated: false,
+        };
+
+        let res = builder.collect_inlist(&in_list);
+        assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
+        assert!(builder.output.is_empty());
+    }
+}

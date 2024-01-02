@@ -440,8 +440,6 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
-
-    
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

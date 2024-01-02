@@ -136,10 +136,10 @@ mod tests {
             SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
 
         builder
-            .collect_eq(&tag_column(), &string_lit("abc"))
+            .collect_eq(&tag_column(), &string_lit("foo"))
             .unwrap();
         builder
-            .collect_eq(&string_lit("def"), &tag_column())
+            .collect_eq(&string_lit("bar"), &tag_column())
             .unwrap();
 
         let predicates = builder.output.get("a").unwrap();
@@ -147,13 +147,13 @@ mod tests {
         assert_eq!(
             predicates[0],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([encoded_string("abc")])
+                list: HashSet::from_iter([encoded_string("foo")])
             })
         );
         assert_eq!(
             predicates[1],
             Predicate::InList(InListPredicate {
-                list: HashSet::from_iter([encoded_string("def")])
+                list: HashSet::from_iter([encoded_string("bar")])
             })
         );
     }
@@ -262,12 +262,12 @@ mod tests {
             op: Operator::Or,
             right: Box::new(DfExpr::BinaryExpr(BinaryExpr {
                 left: Box::new(tag_column()),
-                op: Operator::Gt, // invalid
+                op: Operator::Gt, // invalid op
                 right: Box::new(string_lit("foo")),
             })),
         });
 
-        builder.collect_or_eq_list(&or_eq_list, &eq_expr).unwrap();
+        builder.collect_or_eq_list(&eq_expr, &or_eq_list).unwrap();
         assert!(builder.output.is_empty());
     }
 
@@ -296,7 +296,95 @@ mod tests {
             })),
         });
 
-        builder.collect_or_eq_list(&or_eq_list, &eq_expr).unwrap();
+        builder.collect_or_eq_list(&eq_expr, &or_eq_list).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_or_eq_list_type_mismatch() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(tag_column()),
+            op: Operator::Eq,
+            right: Box::new(string_lit("abc")),
+        });
+        let or_eq_list = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(tag_column()),
+                op: Operator::Eq,
+                right: Box::new(int64_lit(1)), // mismatch type
+            })),
+            op: Operator::Or,
+            right: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(tag_column()),
+                op: Operator::Eq,
+                right: Box::new(string_lit("bar")),
+            })),
+        });
+
+        let res = builder.collect_or_eq_list(&eq_expr, &or_eq_list);
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_or_eq_list_field_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(field_column()),
+            op: Operator::Eq,
+            right: Box::new(string_lit("abc")),
+        });
+        let or_eq_list = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(field_column()),
+                op: Operator::Eq,
+                right: Box::new(string_lit("foo")),
+            })),
+            op: Operator::Or,
+            right: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(field_column()),
+                op: Operator::Eq,
+                right: Box::new(string_lit("bar")),
+            })),
+        });
+
+        builder.collect_or_eq_list(&eq_expr, &or_eq_list).unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_or_eq_list_nonexistent_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+        let eq_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(nonexistent_column()),
+            op: Operator::Eq,
+            right: Box::new(string_lit("abc")),
+        });
+        let or_eq_list = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(nonexistent_column()),
+                op: Operator::Eq,
+                right: Box::new(string_lit("foo")),
+            })),
+            op: Operator::Or,
+            right: Box::new(DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(nonexistent_column()),
+                op: Operator::Eq,
+                right: Box::new(string_lit("bar")),
+            })),
+        });
+
+        let res = builder.collect_or_eq_list(&eq_expr, &or_eq_list);
+        assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
         assert!(builder.output.is_empty());
     }
 }
