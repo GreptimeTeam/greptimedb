@@ -214,7 +214,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
 pub(crate) fn both_instances_cases_with_kafka_wal(
     #[future]
     #[case]
-    instance: Arc<dyn MockInstance>,
+    instance: Option<Box<dyn RebuildableMockInstance>>,
 ) {
 }
 
