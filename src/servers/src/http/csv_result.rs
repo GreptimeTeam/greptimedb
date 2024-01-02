@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::http::{header, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
 use common_query::Output;
+use itertools::Itertools;
+use mime_guess::mime;
 
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
@@ -55,5 +59,33 @@ impl CsvResponse {
 
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
+    }
+}
+
+impl IntoResponse for CsvResponse {
+    fn into_response(mut self) -> Response {
+        let payload = match self.output.pop() {
+            None => "".to_string(),
+            Some(GreptimeQueryOutput::AffectedRows(n)) => {
+                format!("{n}\n")
+            }
+            Some(GreptimeQueryOutput::Records(records)) => {
+                let mut result = String::new();
+                for row in records.rows {
+                    let row = row.iter().map(|v| v.to_string()).join(",");
+                    writeln!(result, "{row}").unwrap();
+                }
+                result
+            }
+        };
+
+        let mut resp = ([], payload).into_response();
+        resp.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+        );
+        resp.headers_mut()
+            .insert("X-GreptimeDB-Format", HeaderValue::from_static("CSV"));
+        resp
     }
 }

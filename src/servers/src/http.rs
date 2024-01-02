@@ -43,7 +43,7 @@ use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
 use axum::middleware::{self, Next};
-use axum::response::{Html, IntoResponse, Json};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
@@ -337,6 +337,17 @@ impl QueryResponse {
             QueryResponse::Error(resp) => {
                 QueryResponse::Error(resp.with_execution_time(execution_time))
             }
+        }
+    }
+}
+
+impl IntoResponse for QueryResponse {
+    fn into_response(self) -> Response {
+        match self {
+            QueryResponse::Csv(resp) => resp.into_response(),
+            QueryResponse::GreptimedbV1(resp) => resp.into_response(),
+            QueryResponse::InfluxdbV1(resp) => resp.into_response(),
+            QueryResponse::Error(resp) => resp.into_response(),
         }
     }
 }

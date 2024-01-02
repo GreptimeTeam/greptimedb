@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::http::HeaderValue;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
@@ -211,5 +214,16 @@ impl InfluxdbV1Response {
 
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
+    }
+}
+
+impl IntoResponse for InfluxdbV1Response {
+    fn into_response(self) -> Response {
+        let mut resp = Json(self).into_response();
+        resp.headers_mut().insert(
+            "X-GreptimeDB-Format",
+            HeaderValue::from_static("influxdb_v1"),
+        );
+        resp
     }
 }

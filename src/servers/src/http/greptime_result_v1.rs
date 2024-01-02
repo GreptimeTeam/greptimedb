@@ -12,10 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::util;
+use reqwest::header::HeaderValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -99,5 +102,16 @@ impl GreptimedbV1Response {
 
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
+    }
+}
+
+impl IntoResponse for GreptimedbV1Response {
+    fn into_response(self) -> Response {
+        let mut resp = Json(self).into_response();
+        resp.headers_mut().insert(
+            "X-GreptimeDB-Format",
+            HeaderValue::from_static("greptimedb_v1"),
+        );
+        resp
     }
 }
