@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
-use common_meta::ddl::utils::region_storage_path;
 use common_meta::key::datanode_table::RegionInfo;
 use common_meta::rpc::router::RegionRoute;
 use common_telemetry::{info, warn};
@@ -138,18 +135,13 @@ impl UpdateMetadata {
         }
 
         let region_routes = self.build_upgrade_candidate_region_metadata(ctx).await?;
-        let table_info_value = ctx.get_table_info_value().await?;
-
-        let table_info = &table_info_value.table_info;
-        let region_storage_path =
-            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
-        let engine = table_info.meta.engine.clone();
-        let region_options: HashMap<String, String> = (&table_info.meta.options).into();
-
-        // TODO(niebayes): properly fetch or construct region wal options.
-        let region_wal_options = HashMap::new();
-
-        // No remote fetch.
+        let datanode_table_value = ctx.get_from_peer_datanode_table_value().await?;
+        let RegionInfo {
+            region_storage_path,
+            region_options,
+            region_wal_options,
+            engine,
+        } = datanode_table_value.region_info.clone();
         let table_route_value = ctx.get_table_route_value().await?;
 
         if let Err(err) = table_metadata_manager

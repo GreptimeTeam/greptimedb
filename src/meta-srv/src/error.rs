@@ -327,6 +327,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Datanode table not found: {}, datanode: {}", table_id, datanode_id))]
+    DatanodeTableNotFound {
+        table_id: TableId,
+        datanode_id: DatanodeId,
+        location: Location,
+    },
+
     #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
     CorruptedTableRoute {
         key: String,
@@ -683,6 +690,7 @@ impl ErrorExt for Error {
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
+            | Error::DatanodeTableNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::MoveValue { .. }
             | Error::InvalidUtf8Value { .. }
