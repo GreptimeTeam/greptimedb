@@ -981,14 +981,25 @@ mod tests {
                 None,
                 Assertion::simple(assert_region_migration_end, assert_done),
             ),
+            // RegionMigrationStart
+            Step::setup(
+                "Sets state to RegionMigrationStart",
+                merge_before_test_fn(vec![
+                    setup_state(Arc::new(|| Box::new(RegionMigrationStart))),
+                    Arc::new(reset_volatile_ctx),
+                ]),
+            ),
+            // RegionMigrationEnd
+            // Note: We can't run this test multiple times;
+            // the `peer_id`'s `DatanodeTable` will be removed after first-time migration success.
+            Step::next(
+                "Should be the region migration end(has been migrated)",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
         ];
 
-        // Note: We can't run this test multiple times;
-        // the `peer_id`'s `DatanodeTable` will be removed after first-time migration success.
-
-        // FIXME(weny): We need to detect before starting if the region has been migrated.
         let steps = [steps.clone()].concat();
-
         let timer = Instant::now();
 
         // Run the table tests.
