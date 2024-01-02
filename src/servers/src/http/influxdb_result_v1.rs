@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
-use common_telemetry::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -124,47 +122,17 @@ impl InfluxdbOutput {
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InfluxdbV1Response {
+    // deprecated - backward compatible
+    r#type: &'static str,
+
     results: Vec<InfluxdbOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u64>,
+    execution_time_ms: u64,
 }
 
 impl InfluxdbV1Response {
-    pub fn with_error(error: impl ErrorExt) -> Self {
-        let code = error.status_code();
-        if code.should_log_error() {
-            error!(error; "Failed to handle HTTP request");
-        } else {
-            debug!("Failed to handle HTTP request, err: {:?}", error);
-        }
-
-        InfluxdbV1Response {
-            results: vec![],
-            error: Some(error.output_msg()),
-            execution_time_ms: None,
-        }
-    }
-
-    pub fn with_error_message(err_msg: String) -> Self {
-        InfluxdbV1Response {
-            results: vec![],
-            error: Some(err_msg),
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_output(results: Vec<InfluxdbOutput>) -> Self {
-        InfluxdbV1Response {
-            results,
-            error: None,
-            execution_time_ms: None,
-        }
-    }
-
-    pub fn with_execution_time(&mut self, execution_time: u64) {
-        self.execution_time_ms = Some(execution_time);
+    pub fn with_execution_time(mut self, execution_time: u64) -> Self {
+        self.execution_time_ms = execution_time;
+        self
     }
 
     /// Create a influxdb v1 response from query result
@@ -172,8 +140,8 @@ impl InfluxdbV1Response {
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
     ) -> Self {
-        // TODO(sunng87): this api response structure cannot represent error
-        // well. It hides successful execution results from error response
+        // TODO(sunng87): this api response structure cannot represent error well.
+        //  It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
         for (statement_id, out) in outputs.into_iter().enumerate() {
             let statement_id = statement_id as u32;
@@ -222,22 +190,19 @@ impl InfluxdbV1Response {
                 }
             }
         }
-        Self::with_output(results)
-    }
 
-    pub fn success(&self) -> bool {
-        self.error.is_none()
-    }
-
-    pub fn error(&self) -> Option<&String> {
-        self.error.as_ref()
+        InfluxdbV1Response {
+            r#type: "influxdb_v1",
+            results,
+            execution_time_ms: 0,
+        }
     }
 
     pub fn results(&self) -> &[InfluxdbOutput] {
         &self.results
     }
 
-    pub fn execution_time_ms(&self) -> Option<u64> {
+    pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
     }
 }
