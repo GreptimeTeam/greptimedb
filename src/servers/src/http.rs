@@ -24,6 +24,7 @@ pub mod prom_store;
 pub mod prometheus;
 pub mod script;
 
+pub mod csv_result;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 pub mod error_result;
@@ -68,7 +69,9 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
+use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -313,6 +316,7 @@ impl Display for Epoch {
 
 #[derive(Debug)]
 pub enum QueryResponse {
+    Csv(CsvResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
     Error(ErrorResponse),
@@ -321,6 +325,9 @@ pub enum QueryResponse {
 impl QueryResponse {
     pub fn with_execution_time(mut self, execution_time: u64) -> Self {
         match self {
+            QueryResponse::Csv(resp) => {
+                QueryResponse::Csv(resp.with_execution_time(execution_time))
+            }
             QueryResponse::GreptimedbV1(resp) => {
                 QueryResponse::GreptimedbV1(resp.with_execution_time(execution_time))
             }

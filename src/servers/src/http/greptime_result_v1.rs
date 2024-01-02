@@ -31,17 +31,12 @@ pub struct GreptimedbV1Response {
     code: u32,
 
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    output: Vec<GreptimeQueryOutput>,
-    execution_time_ms: u64,
+    pub(crate) output: Vec<GreptimeQueryOutput>,
+    pub(crate) execution_time_ms: u64,
 }
 
 impl GreptimedbV1Response {
-    fn with_execution_time(mut self, execution_time: u64) -> Self {
-        self.execution_time_ms = execution_time;
-        self
-    }
-
-    /// Create a json response from query result
+    /// Create a response from query result
     pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> QueryResponse {
         fn make_error_response(error: impl ErrorExt) -> QueryResponse {
             QueryResponse::Error(ErrorResponse::from_error(GREPTIME_V1_TYPE, error))
@@ -95,6 +90,11 @@ impl GreptimedbV1Response {
 
     pub fn output(&self) -> &[GreptimeQueryOutput] {
         &self.output
+    }
+
+    pub fn with_execution_time(mut self, execution_time: u64) -> Self {
+        self.execution_time_ms = execution_time;
+        self
     }
 
     pub fn execution_time_ms(&self) -> u64 {
