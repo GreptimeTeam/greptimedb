@@ -22,6 +22,7 @@ use catalog::kvbackend::{CachedMetaKvBackend, MetaKvBackend};
 use client::client_manager::DatanodeClients;
 use client::Client;
 use common_base::Plugins;
+use common_config::WalConfig;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
 use common_meta::heartbeat::handler::HandlerGroupExecutor;
@@ -70,6 +71,7 @@ pub struct GreptimeDbClusterBuilder {
     store_config: Option<ObjectStoreConfig>,
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
+    wal_config: WalConfig,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -95,6 +97,7 @@ impl GreptimeDbClusterBuilder {
             store_config: None,
             store_providers: None,
             datanodes: None,
+            wal_config: WalConfig::default(),
         }
     }
 
@@ -110,6 +113,11 @@ impl GreptimeDbClusterBuilder {
 
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
+        self
+    }
+
+    pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
+        self.wal_config = wal_config;
         self
     }
 
@@ -176,19 +184,27 @@ impl GreptimeDbClusterBuilder {
 
         for i in 0..datanodes {
             let datanode_id = i as u64 + 1;
-
+            let mode = Mode::Distributed;
             let mut opts = if let Some(store_config) = &self.store_config {
                 let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
                 let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
 
                 dir_guards.push(FileDirGuard::new(home_tmp_dir));
 
-                create_datanode_opts(store_config.clone(), vec![], home_dir)
+                create_datanode_opts(
+                    mode,
+                    store_config.clone(),
+                    vec![],
+                    home_dir,
+                    self.wal_config.clone(),
+                )
             } else {
                 let (opts, guard) = create_tmp_dir_and_datanode_opts(
+                    mode,
                     StorageType::File,
                     self.store_providers.clone().unwrap_or_default(),
                     &format!("{}-dn-{}", self.cluster_name, datanode_id),
+                    self.wal_config.clone(),
                 );
 
                 storage_guards.push(guard.storage_guards);
@@ -197,7 +213,6 @@ impl GreptimeDbClusterBuilder {
                 opts
             };
             opts.node_id = Some(datanode_id);
-            opts.mode = Mode::Distributed;
 
             let datanode = self.create_datanode(opts, meta_srv.clone()).await;
 
