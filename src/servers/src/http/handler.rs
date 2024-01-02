@@ -32,8 +32,7 @@ use session::context::QueryContextRef;
 
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::{
-    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonOutput, QueryResponse,
-    ResponseFormat,
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, QueryResponse, ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
@@ -125,14 +124,14 @@ pub async fn sql(
                             )],
                             "".to_string(),
                         ),
-                        Some(JsonOutput::AffectedRows(n)) => (
+                        Some(GreptimeQueryOutput::AffectedRows(n)) => (
                             [(
                                 header::CONTENT_TYPE,
                                 HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
                             )],
                             format!("{n}"),
                         ),
-                        Some(JsonOutput::Records(records)) => {
+                        Some(GreptimeQueryOutput::Records(records)) => {
                             let mut result = records
                                 .rows
                                 .iter()

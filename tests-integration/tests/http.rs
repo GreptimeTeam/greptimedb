@@ -22,7 +22,7 @@ use serde_json::json;
 use servers::http::handler::HealthResponse;
 use servers::http::influxdb_result_v1::InfluxdbOutput;
 use servers::http::prometheus::{PrometheusJsonResponse, PrometheusResponse};
-use servers::http::{JsonOutput, QueryResponse};
+use servers::http::{GreptimeQueryOutput, QueryResponse};
 use tests_integration::test_util::{
     setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -148,7 +148,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records" :{"schema":{"column_schemas":[{"name":"number","data_type":"UInt32"}]},"rows":[[0],[1],[2],[3],[4],[5],[6],[7],[8],[9]]}
         })).unwrap()
     );
@@ -201,7 +201,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"host","data_type":"String"},{"name":"cpu","data_type":"Float64"},{"name":"memory","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[["host",66.6,1024.0,0]]}
         })).unwrap()
     );
@@ -224,7 +224,7 @@ pub async fn test_sql_api(store_type: StorageType) {
 
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -246,7 +246,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"c","data_type":"Float64"},{"name":"time","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -268,13 +268,13 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(outputs.len(), 2);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
     assert_eq!(
         outputs[1],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"rows":[]}
         }))
         .unwrap()
@@ -313,7 +313,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -347,7 +347,7 @@ pub async fn test_sql_api(store_type: StorageType) {
     assert_eq!(outputs.len(), 1);
     assert_eq!(
         outputs[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"cpu","data_type":"Float64"},{"name":"ts","data_type":"TimestampMillisecond"}]},"rows":[[66.6,0]]}
         })).unwrap()
     );
@@ -629,7 +629,7 @@ def test(n) -> vector[f64]:
     assert_eq!(output.len(), 1);
     assert_eq!(
         output[0],
-        serde_json::from_value::<JsonOutput>(json!({
+        serde_json::from_value::<GreptimeQueryOutput>(json!({
             "records":{"schema":{"column_schemas":[{"name":"n","data_type":"Float64"}]},"rows":[[1.0],[2.0],[3.0],[4.0],[5.0],[6.0],[7.0],[8.0],[9.0],[10.0]]}
         })).unwrap()
     );

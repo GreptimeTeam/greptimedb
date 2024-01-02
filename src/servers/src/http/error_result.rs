@@ -1,4 +1,19 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_telemetry::logging::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,24 +23,29 @@ pub struct ErrorResponse {
     // deprecated - backward compatible
     r#type: &'static str,
 
+    code: u32,
     error: String,
     execution_time_ms: u64,
 }
 
 impl ErrorResponse {
     pub fn from_error(ty: &'static str, error: impl ErrorExt) -> Self {
-        if error.status_code().should_log_error() {
+        let code = error.status_code();
+
+        if code.should_log_error() {
             error!(error; "Failed to handle HTTP request");
         } else {
             debug!("Failed to handle HTTP request, err: {:?}", error);
         }
-        Self::from_error_message(ty, error.output_msg())
+
+        Self::from_error_message(ty, error.output_msg(), code)
     }
 
-    pub fn from_error_message(ty: &'static str, err_msg: String) -> Self {
+    pub fn from_error_message(ty: &'static str, msg: String, code: StatusCode) -> Self {
         ErrorResponse {
             r#type: ty,
-            error: err_msg,
+            code: code as u32,
+            error: msg,
             execution_time_ms: 0,
         }
     }
@@ -37,5 +57,9 @@ impl ErrorResponse {
 
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
+    }
+
+    pub fn code(&self) -> u32 {
+        self.code
     }
 }

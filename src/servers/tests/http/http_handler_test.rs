@@ -21,7 +21,7 @@ use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
-    JsonOutput, QueryResponse,
+    GreptimeQueryOutput, QueryResponse,
 };
 use servers::metrics_handler::MetricsHandler;
 use session::context::QueryContext;
@@ -106,7 +106,7 @@ async fn test_sql_output_rows() {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
                 match &resp.output()[0] {
-                    JsonOutput::Records(records) => {
+                    GreptimeQueryOutput::Records(records) => {
                         assert_eq!(1, records.num_rows());
                         let json = serde_json::to_string_pretty(&records).unwrap();
                         assert_eq!(
@@ -190,7 +190,7 @@ async fn test_sql_form() {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
                 match &resp.output()[0] {
-                    JsonOutput::Records(records) => {
+                    GreptimeQueryOutput::Records(records) => {
                         assert_eq!(1, records.num_rows());
                         let json = serde_json::to_string_pretty(&records).unwrap();
                         assert_eq!(
@@ -332,7 +332,7 @@ def test(n) -> vector[i64]:
     assert!(json.error().is_none());
 
     match &json.output()[0] {
-        JsonOutput::Records(records) => {
+        GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();
             assert_eq!(5, records.num_rows());
             assert_eq!(
@@ -402,7 +402,7 @@ def test(n, **params)  -> vector[i64]:
     assert!(json.error().is_none());
 
     match &json.output()[0] {
-        JsonOutput::Records(records) => {
+        GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();
             assert_eq!(5, records.num_rows());
             assert_eq!(

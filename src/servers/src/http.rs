@@ -27,6 +27,7 @@ pub mod script;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 pub mod error_result;
+pub mod greptime_result_v1;
 pub mod influxdb_result_v1;
 
 use std::fmt::Display;
@@ -241,123 +242,9 @@ impl TryFrom<Vec<RecordBatch>> for HttpRecordsOutput {
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum JsonOutput {
+pub enum GreptimeQueryOutput {
     AffectedRows(usize),
     Records(HttpRecordsOutput),
-}
-
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
-pub struct GreptimedbV1Response {
-    code: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    output: Vec<JsonOutput>,
-    execution_time_ms: u64,
-}
-
-impl GreptimedbV1Response {
-    pub fn with_error(error: impl ErrorExt) -> Self {
-        let code = error.status_code();
-        if code.should_log_error() {
-            error!(error; "Failed to handle HTTP request");
-        } else {
-            debug!("Failed to handle HTTP request, err: {:?}", error);
-        }
-
-        GreptimedbV1Response {
-            error: Some(error.output_msg()),
-            code: code as u32,
-            output: vec![],
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_error_message(err_msg: String, error_code: StatusCode) -> Self {
-        GreptimedbV1Response {
-            error: Some(err_msg),
-            code: error_code as u32,
-            output: vec![],
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_output(output: Vec<JsonOutput>) -> Self {
-        GreptimedbV1Response {
-            error: None,
-            code: StatusCode::Success as u32,
-            output,
-            execution_time_ms: None,
-        }
-    }
-
-    fn with_execution_time(mut self, execution_time: u64) -> Self {
-        self.execution_time_ms = execution_time;
-        self
-    }
-
-    /// Create a json response from query result
-    pub async fn from_output(outputs: Vec<Result<Output>>) -> Self {
-        // TODO(sunng87): this api response structure cannot represent error
-        // well. It hides successful execution results from error response
-        let mut results = Vec::with_capacity(outputs.len());
-        for out in outputs {
-            match out {
-                Ok(Output::AffectedRows(rows)) => {
-                    results.push(JsonOutput::AffectedRows(rows));
-                }
-                Ok(Output::Stream(stream)) => {
-                    // TODO(sunng87): streaming response
-                    match util::collect(stream).await {
-                        Ok(rows) => match HttpRecordsOutput::try_from(rows) {
-                            Ok(rows) => {
-                                results.push(JsonOutput::Records(rows));
-                            }
-                            Err(err) => {
-                                return Self::with_error(err);
-                            }
-                        },
-
-                        Err(e) => {
-                            return Self::with_error(e);
-                        }
-                    }
-                }
-                Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
-                    Ok(rows) => {
-                        results.push(JsonOutput::Records(rows));
-                    }
-                    Err(err) => {
-                        return Self::with_error(err);
-                    }
-                },
-                Err(e) => {
-                    return Self::with_error(e);
-                }
-            }
-        }
-        Self::with_output(results)
-    }
-
-    pub fn code(&self) -> u32 {
-        self.code
-    }
-
-    pub fn success(&self) -> bool {
-        self.code == (StatusCode::Success as u32)
-    }
-
-    pub fn error(&self) -> Option<&String> {
-        self.error.as_ref()
-    }
-
-    pub fn output(&self) -> &[JsonOutput] {
-        &self.output
-    }
-
-    pub fn execution_time_ms(&self) -> Option<u64> {
-        self.execution_time_ms
-    }
 }
 
 /// It allows the results of SQL queries to be presented in different formats.
@@ -1031,7 +918,7 @@ mod test {
             match json_resp {
                 QueryResponse::GreptimedbV1(json_resp) => {
                     let json_output = &json_resp.output[0];
-                    if let JsonOutput::Records(r) = json_output {
+                    if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
                         assert_eq!(r.num_cols(), 2);
                         let schema = r.schema.as_ref().unwrap();
