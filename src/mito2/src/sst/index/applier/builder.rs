@@ -193,20 +193,25 @@ mod tests {
                 column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Field,
+                column_schema: ColumnSchema::new("b", ConcreteDataType::int64_datatype(), false),
+                semantic_type: SemanticType::Tag,
                 column_id: 2,
             })
             .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("c", ConcreteDataType::string_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "c",
+                    "d",
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 ),
                 semantic_type: SemanticType::Timestamp,
-                column_id: 3,
+                column_id: 4,
             })
-            .primary_key(vec![1]);
+            .primary_key(vec![1, 2]);
         builder.build().unwrap()
     }
 
@@ -221,10 +226,17 @@ mod tests {
         })
     }
 
-    pub(crate) fn field_column() -> DfExpr {
+    pub(crate) fn tag_column2() -> DfExpr {
         DfExpr::Column(Column {
             relation: None,
             name: "b".to_string(),
+        })
+    }
+
+    pub(crate) fn field_column() -> DfExpr {
+        DfExpr::Column(Column {
+            relation: None,
+            name: "c".to_string(),
         })
     }
 
