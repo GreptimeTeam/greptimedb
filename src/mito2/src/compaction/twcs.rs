@@ -17,7 +17,6 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
@@ -31,6 +30,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::compaction::output::CompactionOutput;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
+use crate::config::MitoConfig;
 use crate::error;
 use crate::error::CompactRegionSnafu;
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
@@ -125,7 +125,7 @@ impl Picker for TwcsPicker {
             waiters,
             file_purger,
             start_time,
-            sst_write_buffer_size,
+            engine_config,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -173,12 +173,12 @@ impl Picker for TwcsPicker {
             sst_layer: access_layer,
             outputs,
             expired_ssts,
-            sst_write_buffer_size,
             compaction_time_window: Some(time_window_size),
             request_sender,
             waiters,
             file_purger,
             start_time,
+            engine_config,
         };
         Some(Box::new(task))
     }
@@ -232,7 +232,6 @@ pub(crate) struct TwcsCompactionTask {
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
-    pub sst_write_buffer_size: ReadableSize,
     pub compaction_time_window: Option<i64>,
     pub file_purger: FilePurgerRef,
     /// Request sender to notify the worker.
@@ -241,6 +240,7 @@ pub(crate) struct TwcsCompactionTask {
     pub waiters: Vec<OutputTx>,
     /// Start time of compaction task
     pub start_time: Instant,
+    pub engine_config: Arc<MitoConfig>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -278,7 +278,7 @@ impl TwcsCompactionTask {
         for output in self.outputs.drain(..) {
             let schema = self.schema.clone();
             let sst_layer = self.sst_layer.clone();
-            let sst_write_buffer_size = self.sst_write_buffer_size;
+            let engine_config = self.engine_config.clone();
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             info!(
@@ -296,7 +296,7 @@ impl TwcsCompactionTask {
             // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
             futs.push(async move {
                 output
-                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
+                    .build(region_id, schema, sst_layer, engine_config)
                     .await
             });
         }

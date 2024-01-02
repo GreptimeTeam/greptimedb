@@ -462,6 +462,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Operate on aborted index"))]
+    OperateAbortedIndex { location: Location },
+
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
         #[snafu(source)]
@@ -533,6 +536,7 @@ impl ErrorExt for Error {
             | CreateDefault { .. }
             | InvalidParquet { .. }
             | PuffinBlobTypeNotFound { .. }
+            | OperateAbortedIndex { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }

@@ -26,13 +26,14 @@ use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use object_store::ObjectStore;
 use puffin::file_format::writer::{Blob, PuffinAsyncWriter, PuffinFileWriter};
-use snafu::ResultExt;
+use snafu::{ensure, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    IndexFinishSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu, PushIndexValueSnafu, Result,
+    IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
+    PushIndexValueSnafu, Result,
 };
 use crate::metrics::INDEX_PUFFIN_WRITE_BYTES_TOTAL;
 use crate::read::Batch;
@@ -60,6 +61,7 @@ pub struct SstIndexCreator {
     temp_file_provider: Arc<TempFileProvider>,
     value_buf: Vec<u8>,
 
+    aborted: bool,
     stats: Statistics,
 }
 
@@ -94,11 +96,14 @@ impl SstIndexCreator {
             index_creator,
             temp_file_provider,
             value_buf: vec![],
+            aborted: false,
             stats: Statistics::default(),
         }
     }
 
     pub async fn update(&mut self, batch: &Batch) -> Result<()> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
         if batch.is_empty() {
             return Ok(());
         }
@@ -118,6 +123,8 @@ impl SstIndexCreator {
     }
 
     pub async fn finish(&mut self) -> Result<(RowCount, ByteCount)> {
+        ensure!(!self.aborted, OperateAbortedIndexSnafu);
+
         if self.stats.row_count() == 0 {
             // no IO is performed, no garbage to clean up, just return
             return Ok((0, 0));
@@ -134,6 +141,15 @@ impl SstIndexCreator {
         }
 
         finish_res.map(|_| (self.stats.row_count(), self.stats.byte_count()))
+    }
+
+    pub async fn abort(&mut self) -> Result<()> {
+        if self.aborted {
+            return Ok(());
+        }
+        self.aborted = true;
+
+        self.do_cleanup().await
     }
 
     async fn do_update(&mut self, batch: &Batch) -> Result<()> {

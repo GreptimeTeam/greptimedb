@@ -19,6 +19,7 @@ use std::num::NonZeroUsize;
 use common_datasource::file_format::parquet::BufferedWriter;
 use common_telemetry::{debug, warn};
 use common_time::Timestamp;
+use futures::TryFutureExt;
 use object_store::ObjectStore;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
@@ -27,6 +28,7 @@ use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::consts::SEQUENCE_COLUMN_NAME;
+use store_api::storage::RegionId;
 
 use super::helper::parse_parquet_metadata;
 use crate::error::{InvalidMetadataSnafu, Result, WriteBufferSnafu};
@@ -98,74 +100,26 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
+        let mut index_creator = IndexCreator::new(
+            self.file_id.clone(),
+            self.region_dir.clone(),
+            &self.metadata,
+            self.object_store.clone(),
+            opts,
+        );
 
-        let mut index_creator = match (
-            self.metadata.primary_key.is_empty(),
-            NonZeroUsize::new(opts.row_group_size),
-        ) {
-            (no_tags, _) if no_tags => {
-                debug!(
-                    "No tag columns, skip creating index, region_id: {}, file_id: {}",
-                    self.metadata.region_id, self.file_id,
-                );
-                None
-            }
-            (_, None) => {
-                warn!(
-                    "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
-                    self.metadata.region_id, self.file_id,
-                );
-                None
-            }
-            (_, Some(row_group_size)) => Some(SstIndexCreator::new(
-                self.region_dir.clone(),
-                self.file_id,
-                &self.metadata,
-                self.object_store.clone(),
-                Some(4 * 1024 * 1024),
-                row_group_size,
-            )),
-        };
-
-        while let Some(batch) = self.source.next_batch().await? {
+        while let Some(batch) = self
+            .write_next_batch(&write_format, &mut buffered_writer)
+            .or_else(|err| async {
+                index_creator.abort().await;
+                Err(err)
+            })
+            .await?
+        {
             stats.update(&batch);
-            let arrow_batch = write_format.convert_batch(&batch)?;
-
-            buffered_writer
-                .write(&arrow_batch)
-                .await
-                .context(WriteBufferSnafu)?;
-
-            if let Some(creator) = index_creator.as_mut() {
-                if let Err(err) = creator.update(&batch).await {
-                    warn!(
-                        err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
-                        self.metadata.region_id, self.file_id,
-                    );
-
-                    // Skip index creation if error occurs.
-                    index_creator = None;
-                }
-            }
+            index_creator.update(&batch).await;
         }
-
-        if let Some(mut creator) = index_creator {
-            match creator.finish().await {
-                Ok((row_count, byte_count)) => {
-                    debug!(
-                        "Create index successfully, region_id: {}, file_id: {}, bytes: {byte_count}, rows: {row_count}",
-                        self.metadata.region_id, self.file_id,
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        err; "Failed to create index, region_id: {}, file_id: {}",
-                        self.metadata.region_id, self.file_id,
-                    );
-                    return Ok(None);
-                }
-            }
-        }
+        index_creator.finish().await;
 
         if stats.num_rows == 0 {
             debug!("No data written, try to stop the writer: {file_path}");
@@ -189,6 +143,24 @@ impl ParquetWriter {
             num_rows: stats.num_rows,
             file_metadata: Some(parquet_metadata),
         }))
+    }
+
+    async fn write_next_batch(
+        &mut self,
+        write_format: &WriteFormat,
+        buffered_writer: &mut BufferedWriter,
+    ) -> Result<Option<Batch>> {
+        let Some(batch) = self.source.next_batch().await? else {
+            return Ok(None);
+        };
+
+        let arrow_batch = write_format.convert_batch(&batch)?;
+        buffered_writer
+            .write(&arrow_batch)
+            .await
+            .context(WriteBufferSnafu)?;
+
+        Ok(Some(batch))
     }
 
     /// Customizes per-column config according to schema and maybe column cardinality.
@@ -236,6 +208,119 @@ impl SourceStats {
             time_range.1 = time_range.1.max(max_in_batch);
         } else {
             self.time_range = Some((min_in_batch, max_in_batch));
+        }
+    }
+}
+
+struct IndexCreator {
+    file_id: FileId,
+    region_id: RegionId,
+    inner: Option<SstIndexCreator>,
+}
+
+impl IndexCreator {
+    fn new(
+        file_id: FileId,
+        region_dir: String,
+        metadata: &RegionMetadataRef,
+        object_store: ObjectStore,
+        opts: &WriteOptions,
+    ) -> Self {
+        let Some(option) = &opts.inverted_index_options else {
+            debug!(
+                "Skip creating index due to config, region_id: {}, file_id: {}",
+                metadata.region_id, file_id,
+            );
+            return Self {
+                file_id,
+                region_id: metadata.region_id,
+                inner: None,
+            };
+        };
+
+        if metadata.primary_key.is_empty() {
+            debug!(
+                "No tag columns, skip creating index, region_id: {}, file_id: {}",
+                metadata.region_id, file_id,
+            );
+            return Self {
+                file_id,
+                region_id: metadata.region_id,
+                inner: None,
+            };
+        }
+
+        let Some(row_group_size) = NonZeroUsize::new(opts.row_group_size) else {
+            warn!(
+                "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
+                metadata.region_id, file_id,
+            );
+            return Self {
+                file_id,
+                region_id: metadata.region_id,
+                inner: None,
+            };
+        };
+
+        let creator = SstIndexCreator::new(
+            region_dir.clone(),
+            file_id.clone(),
+            metadata,
+            object_store,
+            option.memory_usage_threshold,
+            row_group_size,
+        );
+
+        Self {
+            file_id,
+            region_id: metadata.region_id,
+            inner: Some(creator),
+        }
+    }
+
+    async fn update(&mut self, batch: &Batch) {
+        if let Some(creator) = self.inner.as_mut() {
+            if let Err(err) = creator.update(&batch).await {
+                warn!(
+                    err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
+                    self.region_id, self.file_id,
+                );
+
+                // Skip index creation if error occurs.
+                self.inner = None;
+            }
+        }
+    }
+
+    async fn finish(mut self) {
+        if let Some(creator) = self.inner.as_mut() {
+            match creator.finish().await {
+                Ok((row_count, byte_count)) => {
+                    debug!(
+                        "Create index successfully, region_id: {}, file_id: {}, bytes: {byte_count}, rows: {row_count}",
+                        self.region_id, self.file_id,
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        err; "Failed to create index, region_id: {}, file_id: {}",
+                        self.region_id, self.file_id,
+                    );
+                }
+            }
+        }
+    }
+
+    async fn abort(&mut self) {
+        if let Some(creator) = self.inner.as_mut() {
+            if let Err(err) = creator.abort().await {
+                warn!(
+                    err; "Failed to abort index, region_id: {}, file_id: {}",
+                    self.region_id, self.file_id,
+                );
+            }
+
+            self.inner = None;
         }
     }
 }

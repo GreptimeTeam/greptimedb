@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error};
 pub use picker::CompactionPickerRef;
 use snafu::ResultExt;
@@ -53,8 +52,8 @@ pub struct CompactionRequest {
     pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
-    /// Buffering threshold while writing SST files.
-    pub(crate) sst_write_buffer_size: ReadableSize,
+
+    pub(crate) engine_config: Arc<MitoConfig>,
 }
 
 impl CompactionRequest {
@@ -324,7 +323,7 @@ impl CompactionStatus {
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
             start_time,
-            sst_write_buffer_size: engine_config.sst_write_buffer_size,
+            engine_config,
         };
 
         if let Some(pending) = self.pending_compaction.take() {

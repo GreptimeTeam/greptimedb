@@ -98,6 +98,7 @@ impl SstIndexApplier {
         let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
 
         let context = SearchContext {
+            // Encountering a non-existing column indicates that it doesn't match predicates.
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
         let res = self

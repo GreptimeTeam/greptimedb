@@ -40,7 +40,7 @@ use crate::request::{
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{FileId, FileMeta};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::{InvertedIndexCreateOptions, WriteOptions};
 use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
@@ -290,8 +290,19 @@ impl RegionFlushTask {
             .with_label_values(&["flush_memtables"])
             .start_timer();
 
+        let inverted_index_config = &self.engine_config.inverted_index;
+        let inverted_index_options =
+            (!inverted_index_config.disable_creation_on_flush).then(|| {
+                InvertedIndexCreateOptions {
+                    memory_usage_threshold: inverted_index_config
+                        .creation_memory_usage_threshold
+                        .map(|size| size.as_bytes() as _),
+                }
+            });
+
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
+            inverted_index_options,
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {

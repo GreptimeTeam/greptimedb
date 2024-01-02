@@ -78,6 +78,9 @@ pub struct MitoConfig {
     pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
+
+    #[serde(flatten)]
+    pub inverted_index: InvertedIndexConfig,
 }
 
 impl Default for MitoConfig {
@@ -98,6 +101,7 @@ impl Default for MitoConfig {
             sst_write_buffer_size: ReadableSize::mb(8),
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            inverted_index: InvertedIndexConfig::default(),
         }
     }
 }
@@ -159,4 +163,21 @@ fn divide_num_cpus(divisor: usize) -> usize {
     debug_assert!(cores > 0);
 
     (cores + divisor - 1) / divisor
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct InvertedIndexConfig {
+    pub disable_creation_on_flush: bool,
+    pub disable_creation_on_compact: bool,
+    pub creation_memory_usage_threshold: Option<ReadableSize>,
+}
+
+impl Default for InvertedIndexConfig {
+    fn default() -> Self {
+        InvertedIndexConfig {
+            disable_creation_on_flush: false,
+            disable_creation_on_compact: false,
+            creation_memory_usage_threshold: Some(ReadableSize::mb(128)),
+        }
+    }
 }

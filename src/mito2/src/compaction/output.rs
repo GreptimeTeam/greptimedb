@@ -12,17 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::readable_size::ReadableSize;
+use std::sync::Arc;
+
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
 use crate::access_layer::AccessLayerRef;
+use crate::config::MitoConfig;
 use crate::error;
 use crate::read::projection::ProjectionMapper;
 use crate::read::seq_scan::SeqScan;
 use crate::read::{BoxedBatchReader, Source};
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{InvertedIndexCreateOptions, SstInfo, WriteOptions};
 
 #[derive(Debug)]
 pub(crate) struct CompactionOutput {
@@ -39,12 +41,23 @@ impl CompactionOutput {
         region_id: RegionId,
         schema: RegionMetadataRef,
         sst_layer: AccessLayerRef,
-        sst_write_buffer_size: ReadableSize,
+        engine_config: Arc<MitoConfig>,
     ) -> error::Result<Option<FileMeta>> {
         let reader = build_sst_reader(schema.clone(), sst_layer.clone(), &self.inputs).await?;
 
+        let inverted_index_config = &engine_config.inverted_index;
+        let inverted_index_options =
+            (!inverted_index_config.disable_creation_on_compact).then(|| {
+                InvertedIndexCreateOptions {
+                    memory_usage_threshold: inverted_index_config
+                        .creation_memory_usage_threshold
+                        .map(|size| size.as_bytes() as _),
+                }
+            });
+
         let opts = WriteOptions {
-            write_buffer_size: sst_write_buffer_size,
+            write_buffer_size: engine_config.sst_write_buffer_size,
+            inverted_index_options,
             ..Default::default()
         };
 
