@@ -143,20 +143,13 @@ mod tests {
     use crate::get_broker_endpoints_from_env;
     use crate::test_util::kafka::{create_topics, Affix, TopicDecorator};
 
-    /// Checks clients for the given topics are created.
-    async fn ensure_clients_exist(topics: &[Topic], client_manager: &ClientManager) {
-        let client_pool = client_manager.client_pool.read().await;
-        let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
-        assert!(all_exist);
-    }
-
-    async fn test_which(test_name: &str) {
-        // Creates a collection of topics in Kafka.
+    /// Prepares for a test in that a collection of topics and a client manager are created.
+    async fn prepare(test_name: &str, num_topics: usize) -> (ClientManager, Vec<Topic>) {
         let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
         let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);
-        let topics = create_topics(256, decorator, &broker_endpoints, None).await;
+        let topics = create_topics(num_topics, decorator, &broker_endpoints, None).await;
 
         let config = KafkaConfig {
             broker_endpoints,
@@ -164,36 +157,54 @@ mod tests {
         };
         let manager = ClientManager::try_new(&config).await.unwrap();
 
+        (manager, topics)
+    }
+
+    /// Checks clients for the given topics are created.
+    async fn ensure_clients_exist(topics: &[Topic], client_manager: &ClientManager) {
+        let client_pool = client_manager.client_pool.read().await;
+        let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+        assert!(all_exist);
+    }
+
+    async fn test_with(test_name: &str) {
+        let (manager, topics) = prepare(test_name, 128).await;
+        // Assigns multiple regions to a topic.
+        let region_topic = (0..512)
+            .map(|region_id| (region_id, &topics[region_id % topics.len()]))
+            .collect::<HashMap<_, _>>();
+
+        // Gets the assigned topic for each region and then gets the associated client.
         match test_name {
             "test_sequential" => {
                 // Gets all clients sequentially.
-                for topic in topics.iter() {
+                for (_, topic) in region_topic {
                     manager.get_or_insert(topic).await.unwrap();
                 }
             }
             "test_parallel" => {
                 // Gets all clients in parallel.
-                let tasks = topics
-                    .iter()
+                let tasks = region_topic
+                    .values()
                     .map(|topic| manager.get_or_insert(topic))
                     .collect::<Vec<_>>();
                 futures::future::try_join_all(tasks).await.unwrap();
             }
             _ => unreachable!(),
         }
-
+        // Ensures all clients are created successfully.
         ensure_clients_exist(&topics, &manager).await;
     }
 
     /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
     async fn test_sequential() {
-        test_which("test_sequential").await;
+        test_with("test_sequential").await;
     }
 
     /// Sends `get_or_insert` requests in parallel to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
     async fn test_parallel() {
-        test_which("test_parallel").await;
+        test_with("test_parallel").await;
     }
 }

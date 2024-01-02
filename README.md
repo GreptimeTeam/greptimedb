@@ -27,9 +27,6 @@
     <a href="https://greptime.com/slack"><img src="https://img.shields.io/badge/slack-GreptimeDB-0abd59?logo=slack" alt="slack" /></a>
 </p>
 
-> [!WARNING]  
-> Our default branch has changed from `develop` to `main` (issue [#3025](https://github.com/GreptimeTeam/greptimedb/issues/3025)). Please update your local repository to use the `main` branch.
-
 ## What is GreptimeDB
 
 GreptimeDB is an open-source time-series database with a special focus on
