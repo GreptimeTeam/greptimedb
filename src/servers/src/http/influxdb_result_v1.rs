@@ -120,6 +120,8 @@ impl InfluxdbOutput {
     }
 }
 
+const INFLUXDB_V1_TYPE: &str = "influxdb_v1";
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InfluxdbV1Response {
     // deprecated - backward compatible
@@ -192,7 +194,7 @@ impl InfluxdbV1Response {
         }
 
         InfluxdbV1Response {
-            r#type: "influxdb_v1",
+            r#type: INFLUXDB_V1_TYPE,
             results,
             execution_time_ms: 0,
         }

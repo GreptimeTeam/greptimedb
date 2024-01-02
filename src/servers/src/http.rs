@@ -26,6 +26,7 @@ pub mod script;
 
 #[cfg(feature = "dashboard")]
 mod dashboard;
+pub mod error_result;
 pub mod influxdb_result_v1;
 
 use std::fmt::Display;
