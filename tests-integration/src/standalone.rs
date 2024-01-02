@@ -24,7 +24,7 @@ use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::{WalConfig as MetaSrvWalConfig, WalOptionsAllocator};
+use common_meta::wal::{WalConfig as MetaWalConfig, WalOptionsAllocator};
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -47,6 +47,7 @@ pub struct GreptimeDbStandalone {
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
     wal_config: WalConfig,
+    meta_wal_config: MetaWalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -60,6 +61,7 @@ impl GreptimeDbStandaloneBuilder {
             plugin: None,
             default_store: None,
             wal_config: WalConfig::default(),
+            meta_wal_config: MetaWalConfig::default(),
         }
     }
 
@@ -88,6 +90,11 @@ impl GreptimeDbStandaloneBuilder {
 
     pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
         self.wal_config = wal_config;
+        self
+    }
+
+    pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
+        self.meta_wal_config = wal_meta;
         self
     }
 
@@ -132,7 +139,7 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let wal_meta = MetaSrvWalConfig::default();
+        let wal_meta = self.meta_wal_config.clone();
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
             wal_meta.clone(),
             kv_backend.clone(),

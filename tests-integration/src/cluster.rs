@@ -31,6 +31,7 @@ use common_meta::kv_backend::etcd::EtcdStore;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
+use common_meta::wal::WalConfig as MetaWalConfig;
 use common_meta::DatanodeId;
 use common_runtime::Builder as RuntimeBuilder;
 use common_test_util::temp_dir::create_temp_dir;
@@ -73,6 +74,7 @@ pub struct GreptimeDbClusterBuilder {
     store_providers: Option<Vec<StorageType>>,
     datanodes: Option<u32>,
     wal_config: WalConfig,
+    meta_wal_config: MetaWalConfig,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -99,6 +101,7 @@ impl GreptimeDbClusterBuilder {
             store_providers: None,
             datanodes: None,
             wal_config: WalConfig::default(),
+            meta_wal_config: MetaWalConfig::default(),
         }
     }
 
@@ -122,13 +125,29 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
+        self.meta_wal_config = wal_meta;
+        self
+    }
+
     pub async fn build(self) -> GreptimeDbCluster {
         let datanodes = self.datanodes.unwrap_or(4);
 
         let channel_config = ChannelConfig::new().timeout(Duration::from_secs(20));
         let datanode_clients = Arc::new(DatanodeClients::new(channel_config));
 
-        let meta_srv = self.build_metasrv(datanode_clients.clone()).await;
+        let opt = MetaSrvOptions {
+            procedure: ProcedureConfig {
+                // Due to large network delay during cross data-center.
+                // We only make max_retry_times and retry_delay large than the default in tests.
+                max_retry_times: 5,
+                retry_delay: Duration::from_secs(1),
+            },
+            wal: self.meta_wal_config.clone(),
+            ..Default::default()
+        };
+
+        let meta_srv = self.build_metasrv(opt, datanode_clients.clone()).await;
 
         let (datanode_instances, storage_guards, dir_guards) =
             self.build_datanodes(meta_srv.clone(), datanodes).await;
@@ -156,17 +175,11 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    async fn build_metasrv(&self, datanode_clients: Arc<DatanodeClients>) -> MockInfo {
-        let opt = MetaSrvOptions {
-            procedure: ProcedureConfig {
-                // Due to large network delay during cross data-center.
-                // We only make max_retry_times and retry_delay large than the default in tests.
-                max_retry_times: 5,
-                retry_delay: Duration::from_secs(1),
-            },
-            ..Default::default()
-        };
-
+    async fn build_metasrv(
+        &self,
+        opt: MetaSrvOptions,
+        datanode_clients: Arc<DatanodeClients>,
+    ) -> MockInfo {
         meta_srv::mocks::mock(opt, self.kv_backend.clone(), None, Some(datanode_clients)).await
     }
 

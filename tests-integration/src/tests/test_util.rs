@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use common_config::wal::KafkaConfig;
 use common_config::WalConfig;
+use common_meta::wal::kafka::KafkaConfig as MetaKafkaConfig;
+use common_meta::wal::WalConfig as MetaWalConfig;
 use common_query::Output;
 use common_recordbatch::util;
 use common_telemetry::warn;
@@ -61,6 +63,8 @@ impl MockInstance for MockDistributedInstance {
     }
 }
 
+/// For test purpose.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MockInstanceBuilder {
     Standalone(GreptimeDbStandaloneBuilder),
     Distributed(GreptimeDbClusterBuilder),
@@ -153,14 +157,22 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         return None;
     }
 
-    let endpoints = endpoints.split(',').map(|s| s.trim().to_string()).collect();
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let builder = GreptimeDbStandaloneBuilder::new(&test_name).with_wal_config(WalConfig::Kafka(
-        KafkaConfig {
-            broker_endpoints: endpoints,
+    let builder = GreptimeDbStandaloneBuilder::new(&test_name)
+        .with_wal_config(WalConfig::Kafka(KafkaConfig {
+            broker_endpoints: endpoints.clone(),
             ..Default::default()
-        },
-    ));
+        }))
+        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
+            broker_endpoints: endpoints,
+            topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
+            ..Default::default()
+        }));
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
     Some(Box::new(instance))
 }
@@ -174,12 +186,21 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
         return None;
     }
 
-    let endpoints = endpoints.split(',').map(|s| s.trim().to_string()).collect();
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
     let builder = GreptimeDbClusterBuilder::new(&test_name)
         .await
         .with_wal_config(WalConfig::Kafka(KafkaConfig {
+            broker_endpoints: endpoints.clone(),
+            ..Default::default()
+        }))
+        .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
             broker_endpoints: endpoints,
+            topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
@@ -195,7 +216,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
 pub(crate) fn both_instances_cases_with_kafka_wal(
     #[future]
     #[case]
-    instance: Arc<dyn MockInstance>,
+    instance: Option<Box<dyn RebuildableMockInstance>>,
 ) {
 }
 
