@@ -27,10 +27,10 @@ use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace as NamespaceTrait};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use crate::error;
 use crate::error::{
-    AddEntryLogBatchSnafu, Error, FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu,
-    OverrideCompactedEntrySnafu, RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
+    AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, Error, FetchEntrySnafu,
+    IllegalNamespaceSnafu, IllegalStateSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result,
+    StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
@@ -167,10 +167,21 @@ impl LogStore for RaftEngineLogStore {
         if let Some(first_index) = self.engine.first_index(namespace_id) {
             ensure!(
                 entry_id >= first_index,
-                error::OverrideCompactedEntrySnafu {
+                OverrideCompactedEntrySnafu {
                     namespace: namespace_id,
                     first_index,
                     attempt_index: entry_id,
+                }
+            );
+        }
+
+        if let Some(last_index) = self.engine.last_index(namespace_id) {
+            ensure!(
+                entry_id == last_index + 1,
+                DiscontinuousLogIndexSnafu {
+                    region_id: namespace_id,
+                    last_index,
+                    attempt_index: entry_id
                 }
             );
         }
