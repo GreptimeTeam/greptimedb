@@ -60,6 +60,14 @@ impl TopicSelector for RoundRobinTopicSelector {
 mod tests {
     use super::*;
 
+    /// Tests that a selector behaves as expected when the given topic pool is empty.
+    #[test]
+    fn test_empty_topic_pool() {
+        let topic_pool = vec![];
+        let selector = RoundRobinTopicSelector::default();
+        assert!(selector.select(&topic_pool).is_err());
+    }
+
     #[test]
     fn test_round_robin_topic_selector() {
         let topic_pool: Vec<_> = [0, 1, 2].into_iter().map(|v| v.to_string()).collect();

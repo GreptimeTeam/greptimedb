@@ -105,11 +105,15 @@ pub fn allocate_region_wal_options(
 
 #[cfg(test)]
 mod tests {
+    use common_test_util::get_broker_endpoints;
+    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
+    use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::wal::kafka::KafkaConfig;
 
     // Tests the wal options allocator could successfully allocate raft-engine wal options.
-    // Note: tests for allocator with kafka are integration tests.
     #[tokio::test]
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
@@ -130,41 +134,44 @@ mod tests {
     }
 
     // Tests that the wal options allocator could successfully allocate Kafka wal options.
-    // #[tokio::test]
-    // async fn test_kafka_options_allocator() {
-    //     let broker_endpoints = std::env::var(BROKER_ENDPOINTS_KEY)
-    //         .unwrap()
-    //         .split(',')
-    //         .map(ToString::to_string)
-    //         .collect::<Vec<_>>();
-    //     let config = MetaSrvKafkaConfig {
-    //         topic_name_prefix: "__test_kafka_options_allocator".to_string(),
-    //         replication_factor: broker_endpoints.len() as i16,
-    //         broker_endpoints,
-    //         ..Default::default()
-    //     };
-    //     let wal_config = WalConfig::Kafka(config.clone());
-    //     let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-    //     let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
-    //     allocator.start().await.unwrap();
+    #[tokio::test]
+    async fn test_allocator_with_kafka() {
+        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
+        // Constructs topics that should be created.
+        let mut decorator = TopicDecorator::default()
+            .with_prefix(Affix::Fixed("test_allocator_with_kafka".to_string()))
+            .with_suffix(Affix::TimeNow);
+        let topics = (0..256)
+            .map(|i| decorator.decorate(&format!("topic_{i}")))
+            .collect::<Vec<_>>();
 
-    //     let num_regions = 32;
-    //     let regions = (0..num_regions).collect::<Vec<_>>();
-    //     let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+        // Creates a topic manager.
+        let config = KafkaConfig {
+            replication_factor: broker_endpoints.len() as i16,
+            broker_endpoints,
+            ..Default::default()
+        };
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+        let mut topic_manager = KafkaTopicManager::new(config.clone(), kv_backend);
 
-    //     // Topics should be allocated.
-    //     let topics = (0..num_regions)
-    //         .map(|topic_id| format!("{}_{topic_id}", config.topic_name_prefix))
-    //         .collect::<Vec<_>>();
-    //     // Check the allocated wal options contain the expected topics.
-    //     let expected = (0..num_regions)
-    //         .map(|i| {
-    //             let options = WalOptions::Kafka(KafkaWalOptions {
-    //                 topic: topics[i as usize].clone(),
-    //             });
-    //             (i, serde_json::to_string(&options).unwrap())
-    //         })
-    //         .collect::<HashMap<_, _>>();
-    //     assert_eq!(got, expected);
-    // }
+        // Creates an options allocator.
+        let wal_config = WalConfig::Kafka(config.clone());
+        let allocator = WalOptionsAllocator::Kafka(topic_manager);
+        allocator.start().await.unwrap();
+
+        let num_regions = 32;
+        let regions = (0..num_regions).collect::<Vec<_>>();
+        let got = allocate_region_wal_options(regions.clone(), &allocator).unwrap();
+
+        // Check the allocated wal options contain the expected topics.
+        let expected = (0..num_regions)
+            .map(|i| {
+                let options = WalOptions::Kafka(KafkaWalOptions {
+                    topic: topics[i as usize].clone(),
+                });
+                (i, serde_json::to_string(&options).unwrap())
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(got, expected);
+    }
 }

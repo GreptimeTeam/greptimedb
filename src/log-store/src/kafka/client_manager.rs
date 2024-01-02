@@ -137,15 +137,15 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
-    use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
+    use common_test_util::get_broker_endpoints;
+    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
+    use common_test_util::wal::kafka::{create_topics, BROKER_ENDPOINTS_KEY};
 
     use super::*;
-    use crate::get_broker_endpoints_from_env;
-    use crate::test_util::kafka::{create_topics, Affix, TopicDecorator};
 
     /// Prepares for a test in that a collection of topics and a client manager are created.
     async fn prepare(test_name: &str, num_topics: usize) -> (ClientManager, Vec<Topic>) {
-        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
+        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
         let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);

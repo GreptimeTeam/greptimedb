@@ -287,14 +287,13 @@ impl LogStore for KafkaLogStore {
 
 #[cfg(test)]
 mod tests {
-    use common_test_util::wal::kafka::BROKER_ENDPOINTS_KEY;
+    use common_test_util::get_broker_endpoints;
+    use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
+    use common_test_util::wal::kafka::{create_topics, BROKER_ENDPOINTS_KEY};
     use rand::seq::IteratorRandom;
 
     use super::*;
-    use crate::get_broker_endpoints_from_env;
-    use crate::test_util::kafka::{
-        create_topics, entries_with_random_data, new_namespace, Affix, EntryBuilder, TopicDecorator,
-    };
+    use crate::test_util::kafka::{entries_with_random_data, new_namespace, EntryBuilder};
 
     // Stores test context for a region.
     struct RegionContext {
@@ -305,7 +304,7 @@ mod tests {
 
     /// Prepares for a test in that a log store is constructed and a collection of topics is created.
     async fn prepare(test_name: &str, num_topics: usize) -> (KafkaLogStore, Vec<Topic>) {
-        let broker_endpoints = get_broker_endpoints_from_env!(BROKER_ENDPOINTS_KEY);
+        let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
         let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed(test_name.to_string()))
             .with_suffix(Affix::TimeNow);
@@ -434,6 +433,7 @@ mod tests {
         test_with("test_multi_appends", 32, 256, 16, false).await;
     }
 
+    // TODO(niebayes): implement.
     // / Appends a way-too large entry and checks the log store could handle it correctly.
     // #[tokio::test]
     // async fn test_way_too_large() {}
