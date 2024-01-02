@@ -172,6 +172,33 @@ mod tests {
                     .clone()
             };
             assert_eq!(Arc::strong_count(&rwlock), 2);
+            let _guard = rwlock.read_owned().await;
+
+            {
+                let inner = lock_key.inner.lock().unwrap();
+                let rwlock = inner.get("test").unwrap();
+                assert_eq!(Arc::strong_count(rwlock), 2);
+            }
+        }
+
+        {
+            let rwlock = {
+                lock_key
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .entry("test")
+                    .or_default()
+                    .clone()
+            };
+            assert_eq!(Arc::strong_count(&rwlock), 2);
+            let _guard = rwlock.write_owned().await;
+
+            {
+                let inner = lock_key.inner.lock().unwrap();
+                let rwlock = inner.get("test").unwrap();
+                assert_eq!(Arc::strong_count(rwlock), 2);
+            }
         }
 
         {
