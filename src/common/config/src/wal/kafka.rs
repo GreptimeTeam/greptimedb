@@ -49,7 +49,7 @@ pub struct KafkaConfig {
     pub linger: Duration,
     /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
     #[serde(with = "humantime_serde")]
-    pub produce_record_timeout: Duration,
+    pub consumer_wait_timeout: Duration,
     /// The backoff config.
     #[serde(flatten, with = "kafka_backoff")]
     pub backoff: KafkaBackoffConfig,
@@ -62,7 +62,7 @@ impl Default for KafkaConfig {
             compression: RsKafkaCompression::NoCompression,
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
-            produce_record_timeout: Duration::from_millis(100),
+            consumer_wait_timeout: Duration::from_millis(100),
             backoff: KafkaBackoffConfig::default(),
         }
     }

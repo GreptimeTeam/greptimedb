@@ -112,7 +112,7 @@ provider = "raft_engine"
 # The linger duration of a kafka batch producer.
 # linger = "200ms"
 # The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
-# produce_record_timeout = "100ms"
+# consumer_wait_timeout = "100ms"
 # Above which a topic creation operation will be cancelled.
 # create_topic_timeout = "30s"
 
