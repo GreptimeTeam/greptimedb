@@ -12,39 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod authorize;
-pub mod handler;
-pub mod header;
-pub mod influxdb;
-pub mod mem_prof;
-pub mod opentsdb;
-pub mod otlp;
-pub mod pprof;
-pub mod prom_store;
-pub mod prometheus;
-pub mod script;
-
-pub mod csv_result;
-#[cfg(feature = "dashboard")]
-mod dashboard;
-pub mod error_result;
-pub mod greptime_result_v1;
-pub mod influxdb_result_v1;
-
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use aide::axum::{routing as apirouting, ApiRouter, IntoApiResponse};
 use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
+use aide::OperationOutput;
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, MatchedPath, Query, State};
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{routing, BoxError, Extension, Form, Router};
+use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
@@ -71,7 +53,6 @@ use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSna
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
-use crate::http::handler::SqlQuery;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -89,6 +70,25 @@ use crate::query_handler::{
     PromStoreProtocolHandlerRef, ScriptHandlerRef,
 };
 use crate::server::Server;
+
+pub mod authorize;
+pub mod handler;
+pub mod header;
+pub mod influxdb;
+pub mod mem_prof;
+pub mod opentsdb;
+pub mod otlp;
+pub mod pprof;
+pub mod prom_store;
+pub mod prometheus;
+pub mod script;
+
+pub mod csv_result;
+#[cfg(feature = "dashboard")]
+mod dashboard;
+pub mod error_result;
+pub mod greptime_result_v1;
+pub mod influxdb_result_v1;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
@@ -343,6 +343,10 @@ impl IntoResponse for HttpResponse {
             HttpResponse::Error(resp) => resp.into_response(),
         }
     }
+}
+
+impl OperationOutput for HttpResponse {
+    type Inner = Response;
 }
 
 impl From<CsvResponse> for HttpResponse {
@@ -631,28 +635,11 @@ impl HttpServer {
     }
 
     fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
-        // TODO(@tisonkun): aide should support ret `impl IntoResponse`.
-        #[axum_macros::debug_handler]
-        pub async fn sql(
-            State(state): State<ApiState>,
-            Query(query_params): Query<SqlQuery>,
-            Extension(query_ctx): Extension<QueryContextRef>,
-            Form(form_params): Form<SqlQuery>,
-        ) -> Response {
-            let response = handler::sql(
-                State(state),
-                Query(query_params),
-                Extension(query_ctx),
-                Form(form_params),
-            )
-            .await;
-            response.into_response()
-        }
-
         ApiRouter::new()
             .api_route(
                 "/sql",
-                apirouting::get_with(sql, handler::sql_docs).post_with(sql, handler::sql_docs),
+                apirouting::get_with(handler::sql, handler::sql_docs)
+                    .post_with(handler::sql, handler::sql_docs),
             )
             .api_route(
                 "/promql",
@@ -827,7 +814,6 @@ mod test {
     use query::parser::PromQuery;
     use query::plan::LogicalPlan;
     use query::query_engine::DescribeResult;
-    use session::context::QueryContextRef;
     use tokio::sync::mpsc;
 
     use super::*;
