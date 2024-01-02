@@ -30,7 +30,7 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::GreptimeDbName;
-use super::{GreptimedbV1Response, JsonResponse, PUBLIC_APIS};
+use super::{GreptimedbV1Response, QueryResponse, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
@@ -120,9 +120,9 @@ pub async fn check_http_auth<B>(
 
 fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
     let body = if is_influxdb {
-        JsonResponse::InfluxdbV1(InfluxdbV1Response::with_error(err))
+        QueryResponse::InfluxdbV1(InfluxdbV1Response::with_error(err))
     } else {
-        JsonResponse::GreptimedbV1(GreptimedbV1Response::with_error(err))
+        QueryResponse::GreptimedbV1(GreptimedbV1Response::with_error(err))
     };
     (StatusCode::UNAUTHORIZED, Json(body))
 }

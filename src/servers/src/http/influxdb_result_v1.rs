@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_recordbatch::{util, RecordBatch};
 use schemars::JsonSchema;
@@ -20,7 +21,8 @@ use serde_json::Value;
 use snafu::ResultExt;
 
 use crate::error::{Error, ToJsonSnafu};
-use crate::http::Epoch;
+use crate::http::error_result::ErrorResponse;
+use crate::http::{Epoch, QueryResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -120,7 +122,7 @@ impl InfluxdbOutput {
     }
 }
 
-const INFLUXDB_V1_TYPE: &str = "influxdb_v1";
+pub(crate) const INFLUXDB_V1_TYPE: &str = "influxdb_v1";
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InfluxdbV1Response {
@@ -141,7 +143,11 @@ impl InfluxdbV1Response {
     pub async fn from_output(
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
-    ) -> Self {
+    ) -> QueryResponse {
+        fn make_error_response(error: impl ErrorExt) -> QueryResponse {
+            QueryResponse::Error(ErrorResponse::from_error(INFLUXDB_V1_TYPE, error))
+        }
+
         // TODO(sunng87): this api response structure cannot represent error well.
         //  It hides successful execution results from error response
         let mut results = Vec::with_capacity(outputs.len());
@@ -165,12 +171,11 @@ impl InfluxdbV1Response {
                                 });
                             }
                             Err(err) => {
-                                return Self::with_error(err);
+                                return make_error_response(err);
                             }
                         },
-
-                        Err(e) => {
-                            return Self::with_error(e);
+                        Err(err) => {
+                            return make_error_response(err);
                         }
                     }
                 }
@@ -183,21 +188,21 @@ impl InfluxdbV1Response {
                             });
                         }
                         Err(err) => {
-                            return Self::with_error(err);
+                            return make_error_response(err);
                         }
                     }
                 }
-                Err(e) => {
-                    return Self::with_error(e);
+                Err(err) => {
+                    return make_error_response(err);
                 }
             }
         }
 
-        InfluxdbV1Response {
+        QueryResponse::InfluxdbV1(InfluxdbV1Response {
             r#type: INFLUXDB_V1_TYPE,
             results,
             execution_time_ms: 0,
-        }
+        })
     }
 
     pub fn results(&self) -> &[InfluxdbOutput] {

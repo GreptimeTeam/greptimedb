@@ -34,4 +34,8 @@ impl ErrorResponse {
         self.execution_time_ms = execution_time;
         self
     }
+
+    pub fn execution_time_ms(&self) -> u64 {
+        self.execution_time_ms
+    }
 }

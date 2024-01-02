@@ -67,6 +67,7 @@ use tower_http::trace::TraceLayer;
 use self::authorize::AuthState;
 use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
+use crate::http::error_result::ErrorResponse;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -252,8 +253,7 @@ pub struct GreptimedbV1Response {
     error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     output: Vec<JsonOutput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    execution_time_ms: Option<u64>,
+    execution_time_ms: u64,
 }
 
 impl GreptimedbV1Response {
@@ -291,8 +291,9 @@ impl GreptimedbV1Response {
         }
     }
 
-    fn with_execution_time(&mut self, execution_time: u64) {
-        self.execution_time_ms = Some(execution_time);
+    fn with_execution_time(mut self, execution_time: u64) -> Self {
+        self.execution_time_ms = execution_time;
+        self
     }
 
     /// Create a json response from query result
@@ -423,22 +424,26 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, JsonSchema)]
-#[serde(tag = "type")]
-pub enum JsonResponse {
+#[derive(Debug)]
+pub enum QueryResponse {
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
+    Error(ErrorResponse),
 }
 
-impl From<GreptimedbV1Response> for JsonResponse {
-    fn from(value: GreptimedbV1Response) -> Self {
-        JsonResponse::GreptimedbV1(value)
-    }
-}
-
-impl From<InfluxdbV1Response> for JsonResponse {
-    fn from(value: InfluxdbV1Response) -> Self {
-        JsonResponse::InfluxdbV1(value)
+impl QueryResponse {
+    pub fn with_execution_time(mut self, execution_time: u64) -> Self {
+        match self {
+            QueryResponse::GreptimedbV1(resp) => {
+                QueryResponse::GreptimedbV1(resp.with_execution_time(execution_time))
+            }
+            QueryResponse::InfluxdbV1(resp) => {
+                QueryResponse::InfluxdbV1(resp.with_execution_time(execution_time))
+            }
+            QueryResponse::Error(resp) => {
+                QueryResponse::Error(resp.with_execution_time(execution_time))
+            }
+        }
     }
 }
 
@@ -857,10 +862,10 @@ impl Server for HttpServer {
 }
 
 /// handle error middleware
-async fn handle_error(err: BoxError) -> Json<JsonResponse> {
+async fn handle_error(err: BoxError) -> Json<QueryResponse> {
     error!(err; "Unhandled internal error");
 
-    Json(JsonResponse::GreptimedbV1(
+    Json(QueryResponse::GreptimedbV1(
         GreptimedbV1Response::with_error_message(
             format!("Unhandled internal error: {err}"),
             StatusCode::Unexpected,
@@ -1016,15 +1021,15 @@ mod test {
             let json_resp = match format {
                 ResponseFormat::Csv => unreachable!(),
                 ResponseFormat::GreptimedbV1 => {
-                    JsonResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
+                    QueryResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
                 }
                 ResponseFormat::InfluxdbV1 => {
-                    JsonResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
+                    QueryResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
                 }
             };
 
             match json_resp {
-                JsonResponse::GreptimedbV1(json_resp) => {
+                QueryResponse::GreptimedbV1(json_resp) => {
                     let json_output = &json_resp.output[0];
                     if let JsonOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
@@ -1038,7 +1043,7 @@ mod test {
                         panic!("invalid output type");
                     }
                 }
-                JsonResponse::InfluxdbV1(json_resp) => {
+                QueryResponse::InfluxdbV1(json_resp) => {
                     let json_output = &json_resp.results()[0];
                     assert_eq!(json_output.num_rows(), 4);
                     assert_eq!(json_output.num_cols(), 2);

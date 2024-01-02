@@ -32,7 +32,7 @@ use session::context::QueryContextRef;
 
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::{
-    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonOutput, JsonResponse,
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimedbV1Response, JsonOutput, QueryResponse,
     ResponseFormat,
 };
 use crate::metrics_handler::MetricsHandler;
@@ -115,7 +115,7 @@ pub async fn sql(
                 let execution_time = start.elapsed().as_millis() as u64;
                 resp.with_execution_time(execution_time);
                 if resp.error.is_some() {
-                    Json(JsonResponse::GreptimedbV1(resp)).into_response()
+                    Json(QueryResponse::GreptimedbV1(resp)).into_response()
                 } else {
                     let tuple = match resp.output.pop() {
                         None => (
@@ -154,24 +154,24 @@ pub async fn sql(
             ResponseFormat::GreptimedbV1 => {
                 let mut resp = GreptimedbV1Response::from_output(outputs).await;
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::GreptimedbV1(resp)).into_response()
+                Json(QueryResponse::GreptimedbV1(resp)).into_response()
             }
             ResponseFormat::InfluxdbV1 => {
                 let mut resp = InfluxdbV1Response::from_output(outputs, epoch).await;
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::InfluxdbV1(resp)).into_response()
+                Json(QueryResponse::InfluxdbV1(resp)).into_response()
             }
         },
         Err((status, msg)) => match format {
             ResponseFormat::Csv | ResponseFormat::GreptimedbV1 => {
                 let mut resp = GreptimedbV1Response::with_error_message(msg, status);
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::GreptimedbV1(resp)).into_response()
+                Json(QueryResponse::GreptimedbV1(resp)).into_response()
             }
             ResponseFormat::InfluxdbV1 => {
                 let mut resp = InfluxdbV1Response::with_error_message(msg);
                 resp.with_execution_time(start.elapsed().as_millis() as u64);
-                Json(JsonResponse::InfluxdbV1(resp)).into_response()
+                Json(QueryResponse::InfluxdbV1(resp)).into_response()
             }
         },
     }
@@ -203,7 +203,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
-) -> Json<JsonResponse> {
+) -> Json<QueryResponse> {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
@@ -212,7 +212,7 @@ pub async fn promql(
         .start_timer();
 
     if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
-        return Json(JsonResponse::GreptimedbV1(
+        return Json(QueryResponse::GreptimedbV1(
             GreptimedbV1Response::with_error_message(msg, status),
         ));
     }
@@ -223,11 +223,11 @@ pub async fn promql(
     )
     .await;
     resp.with_execution_time(exec_start.elapsed().as_millis() as u64);
-    Json(JsonResponse::GreptimedbV1(resp))
+    Json(QueryResponse::GreptimedbV1(resp))
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.response::<200, Json<JsonResponse>>()
+    op.response::<200, Json<QueryResponse>>()
 }
 
 /// Handler to export metrics
