@@ -18,8 +18,11 @@ pub mod options_allocator;
 use std::collections::HashMap;
 
 use common_config::wal::StandaloneWalConfig;
+use common_config::WAL_OPTIONS_KEY;
+use common_telemetry::warn;
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
+use store_api::storage::{RegionId, RegionNumber};
 
 use crate::error::Result;
 use crate::wal::kafka::KafkaConfig;
@@ -52,6 +55,18 @@ impl From<StandaloneWalConfig> for WalConfig {
                 backoff: config.base.backoff,
             }),
         }
+    }
+}
+
+pub fn prepare_wal_option(
+    options: &mut HashMap<String, String>,
+    region_id: RegionId,
+    region_wal_options: &HashMap<RegionNumber, String>,
+) {
+    if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
+        options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
+    } else {
+        warn!("Trying to prepare wal option for region: {region_id}, no wal option is found.")
     }
 }
 
