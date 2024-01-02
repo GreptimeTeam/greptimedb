@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
-// TODO(weny): Remove it.
-#[allow(dead_code, unused_macros)]
 mod test_util;
 
 use std::collections::HashMap;
