@@ -21,6 +21,7 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use common_config::WalConfig;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
@@ -294,9 +295,11 @@ impl TestGuard {
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
+    mode: Mode,
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
+    wal_config: WalConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -314,7 +317,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, store_providers, home_dir);
+    let opts = create_datanode_opts(mode, default_store, store_providers, home_dir, wal_config);
 
     (
         opts,
@@ -326,9 +329,11 @@ pub fn create_tmp_dir_and_datanode_opts(
 }
 
 pub(crate) fn create_datanode_opts(
+    mode: Mode,
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
+    wal_config: WalConfig,
 ) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),
@@ -339,7 +344,8 @@ pub(crate) fn create_datanode_opts(
             store: default_store,
             ..Default::default()
         },
-        mode: Mode::Standalone,
+        mode,
+        wal: wal_config,
         ..Default::default()
     }
 }

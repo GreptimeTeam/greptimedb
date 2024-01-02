@@ -17,7 +17,7 @@ use std::sync::Arc;
 use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::KvBackendConfig;
+use common_config::{KvBackendConfig, WalConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
@@ -32,6 +32,7 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
@@ -42,8 +43,10 @@ pub struct GreptimeDbStandalone {
     pub guard: TestGuard,
 }
 
+#[derive(Clone)]
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
+    wal_config: WalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -56,6 +59,7 @@ impl GreptimeDbStandaloneBuilder {
             store_providers: None,
             plugin: None,
             default_store: None,
+            wal_config: WalConfig::default(),
         }
     }
 
@@ -82,12 +86,22 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
+    pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
+        self.wal_config = wal_config;
+        self
+    }
+
     pub async fn build(self) -> GreptimeDbStandalone {
         let default_store_type = self.default_store.unwrap_or(StorageType::File);
         let store_types = self.store_providers.unwrap_or_default();
 
-        let (opts, guard) =
-            create_tmp_dir_and_datanode_opts(default_store_type, store_types, &self.instance_name);
+        let (opts, guard) = create_tmp_dir_and_datanode_opts(
+            Mode::Standalone,
+            default_store_type,
+            store_types,
+            &self.instance_name,
+            self.wal_config.clone(),
+        );
 
         let procedure_config = ProcedureConfig::default();
         let kv_backend_config = KvBackendConfig::default();
