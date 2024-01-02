@@ -65,6 +65,7 @@ pub struct GreptimeDbCluster {
     pub frontend: Arc<FeInstance>,
 }
 
+#[derive(Clone)]
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,

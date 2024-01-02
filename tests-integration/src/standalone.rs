@@ -43,6 +43,7 @@ pub struct GreptimeDbStandalone {
     pub guard: TestGuard,
 }
 
+#[derive(Clone)]
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
     wal_config: WalConfig,
