@@ -104,14 +104,21 @@ where
     }
 
     /// Clean up stale locks.
+    ///
+    /// Note: It only cleans a lock if
+    /// - Its strong ref count equals one.
+    /// - Able to acquire the write lock.
     pub fn clean_keys<'a>(&'a self, iter: impl IntoIterator<Item = &'a K>) {
         let mut locks = self.inner.lock().unwrap();
-
         let mut keys = Vec::new();
         for key in iter {
             if let Some(lock) = locks.get(key) {
                 if lock.try_write().is_ok() {
-                    keys.push(key);
+                    debug_assert_eq!(Arc::weak_count(lock), 0);
+                    // Ensures nobody keeps this ref.
+                    if Arc::strong_count(lock) == 1 {
+                        keys.push(key);
+                    }
                 }
             }
         }
@@ -149,5 +156,47 @@ mod tests {
 
         lock_key.clean_keys(&vec!["test1", "test2"]);
         assert!(lock_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clean_keys() {
+        let lock_key = KeyRwLock::<&str>::new();
+        {
+            let rwlock = {
+                lock_key
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .entry("test")
+                    .or_default()
+                    .clone()
+            };
+            assert_eq!(Arc::strong_count(&rwlock), 2);
+        }
+
+        {
+            let inner = lock_key.inner.lock().unwrap();
+            let rwlock = inner.get("test").unwrap();
+            assert_eq!(Arc::strong_count(rwlock), 1);
+        }
+
+        // Someone has the ref of the rwlock, but it waits to be granted the lock.
+        let rwlock = {
+            lock_key
+                .inner
+                .lock()
+                .unwrap()
+                .entry("test")
+                .or_default()
+                .clone()
+        };
+        assert_eq!(Arc::strong_count(&rwlock), 2);
+        // However, One thread trying to remove the "test" key should have no effect.
+        lock_key.clean_keys(vec![&"test"]);
+        // Should get the rwlock.
+        {
+            let inner = lock_key.inner.lock().unwrap();
+            inner.get("test").unwrap();
+        }
     }
 }
