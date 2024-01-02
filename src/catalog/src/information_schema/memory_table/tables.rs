@@ -227,7 +227,6 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
-        // TODO: GreptimeDB already has query tracing, support later. cc @Taylor-lagrange
         OPTIMIZER_TRACE => (
             vec![
                 string_column("QUERY"),
