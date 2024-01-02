@@ -25,19 +25,24 @@ use session::context::QueryContext;
 use snafu::ResultExt;
 
 use crate::error::{HyperSnafu, InvalidUtf8ValueSnafu};
-use crate::http::{ApiState, GreptimedbV1Response, QueryResponse};
+use crate::http::error_result::ErrorResponse;
+use crate::http::greptime_result_v1::GREPTIME_V1_TYPE;
+use crate::http::{ApiState, GreptimedbV1Response, HttpResponse};
 
 macro_rules! json_err {
     ($e: expr) => {{
-        return Json(QueryResponse::GreptimedbV1(
-            GreptimedbV1Response::with_error($e),
-        ));
+        return Json(HttpResponse::Error(ErrorResponse::from_error(
+            GREPTIME_V1_TYPE,
+            $e,
+        )));
     }};
 
     ($msg: expr, $code: expr) => {{
-        return Json(QueryResponse::GreptimedbV1(
-            GreptimedbV1Response::with_error_message($msg.to_string(), $code),
-        ));
+        return Json(HttpResponse::Error(ErrorResponse::from_error_message(
+            GREPTIME_V1_TYPE,
+            $code,
+            $msg.to_string(),
+        )));
     }};
 }
 
@@ -56,7 +61,7 @@ pub async fn scripts(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
     RawBody(body): RawBody,
-) -> Json<QueryResponse> {
+) -> Json<HttpResponse> {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -84,7 +89,7 @@ pub async fn scripts(
             .insert_script(query_ctx, name.unwrap(), &script)
             .await
         {
-            Ok(()) => GreptimedbV1Response::with_output(vec![]).into(),
+            Ok(()) => GreptimedbV1Response::from_output(vec![]).await,
             Err(e) => json_err!(
                 format!("Insert script error: {}", e.output_msg()),
                 e.status_code()
@@ -114,7 +119,7 @@ pub struct ScriptQuery {
 pub async fn run_script(
     State(state): State<ApiState>,
     Query(params): Query<ScriptQuery>,
-) -> Json<QueryResponse> {
+) -> Json<HttpResponse> {
     if let Some(script_handler) = &state.script_handler {
         let catalog = params
             .catalog
@@ -137,9 +142,8 @@ pub async fn run_script(
         let output = script_handler
             .execute_script(query_ctx, name.unwrap(), params.params)
             .await;
-        let mut resp = GreptimedbV1Response::from_output(vec![output]).await;
-        resp.with_execution_time(start.elapsed().as_millis() as u64);
-        Json(QueryResponse::GreptimedbV1(resp))
+        let resp = GreptimedbV1Response::from_output(vec![output]).await;
+        Json(resp.with_execution_time(start.elapsed().as_millis() as u64))
     } else {
         json_err!(
             "Script execution not supported, missing script handler",

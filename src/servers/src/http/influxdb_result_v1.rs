@@ -25,7 +25,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, ToJsonSnafu};
 use crate::http::error_result::ErrorResponse;
-use crate::http::{Epoch, QueryResponse};
+use crate::http::{Epoch, HttpResponse};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -146,9 +146,9 @@ impl InfluxdbV1Response {
     pub async fn from_output(
         outputs: Vec<crate::error::Result<Output>>,
         epoch: Option<Epoch>,
-    ) -> QueryResponse {
-        fn make_error_response(error: impl ErrorExt) -> QueryResponse {
-            QueryResponse::Error(ErrorResponse::from_error(INFLUXDB_V1_TYPE, error))
+    ) -> HttpResponse {
+        fn make_error_response(error: impl ErrorExt) -> HttpResponse {
+            HttpResponse::Error(ErrorResponse::from_error(INFLUXDB_V1_TYPE, error))
         }
 
         // TODO(sunng87): this api response structure cannot represent error well.
@@ -201,7 +201,7 @@ impl InfluxdbV1Response {
             }
         }
 
-        QueryResponse::InfluxdbV1(InfluxdbV1Response {
+        HttpResponse::InfluxdbV1(InfluxdbV1Response {
             r#type: INFLUXDB_V1_TYPE,
             results,
             execution_time_ms: 0,

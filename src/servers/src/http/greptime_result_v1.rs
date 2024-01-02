@@ -23,7 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::http::error_result::ErrorResponse;
-use crate::http::{GreptimeQueryOutput, HttpRecordsOutput, QueryResponse};
+use crate::http::{GreptimeQueryOutput, HttpRecordsOutput, HttpResponse};
 
 pub(crate) const GREPTIME_V1_TYPE: &str = "greptime_v1";
 
@@ -40,9 +40,9 @@ pub struct GreptimedbV1Response {
 
 impl GreptimedbV1Response {
     /// Create a response from query result
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> QueryResponse {
-        fn make_error_response(error: impl ErrorExt) -> QueryResponse {
-            QueryResponse::Error(ErrorResponse::from_error(GREPTIME_V1_TYPE, error))
+    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
+        fn make_error_response(error: impl ErrorExt) -> HttpResponse {
+            HttpResponse::Error(ErrorResponse::from_error(GREPTIME_V1_TYPE, error))
         }
 
         // TODO(sunng87): this api response structure cannot represent error well.
@@ -83,7 +83,7 @@ impl GreptimedbV1Response {
             }
         }
 
-        QueryResponse::GreptimedbV1(GreptimedbV1Response {
+        HttpResponse::GreptimedbV1(GreptimedbV1Response {
             r#type: GREPTIME_V1_TYPE,
             code: StatusCode::Success as u32,
             output: results,

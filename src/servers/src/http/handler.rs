@@ -22,7 +22,6 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use itertools::Itertools;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -32,7 +31,7 @@ use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
 use crate::http::influxdb_result_v1::{InfluxdbV1Response, INFLUXDB_V1_TYPE};
-use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, QueryResponse, ResponseFormat};
+use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, HttpResponse, ResponseFormat};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -61,7 +60,7 @@ pub async fn sql(
     Query(query_params): Query<SqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
     Form(form_params): Form<SqlQuery>,
-) -> QueryResponse {
+) -> HttpResponse {
     let sql_handler = &state.sql_handler;
 
     let start = Instant::now();
@@ -102,8 +101,8 @@ pub async fn sql(
                 ResponseFormat::InfluxdbV1 => INFLUXDB_V1_TYPE,
                 _ => GREPTIME_V1_TYPE,
             };
-            return QueryResponse::Error(
-                ErrorResponse::from_error_message(ty, msg, status)
+            return HttpResponse::Error(
+                ErrorResponse::from_error_message(ty, status, msg)
                     .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
@@ -145,7 +144,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
-) -> QueryResponse {
+) -> Response {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
@@ -156,19 +155,20 @@ pub async fn promql(
     let resp = if let Some((status, msg)) =
         validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        let resp = ErrorResponse::from_error_message(GREPTIME_V1_TYPE, msg, status);
-        QueryResponse::Error(resp)
+        let resp = ErrorResponse::from_error_message(GREPTIME_V1_TYPE, status, msg);
+        HttpResponse::Error(resp)
     } else {
         let prom_query = params.into();
         let outputs = sql_handler.do_promql_query(&prom_query, query_ctx).await;
-        GreptimedbV1Response::from_output(outputs).await;
+        GreptimedbV1Response::from_output(outputs).await
     };
 
     resp.with_execution_time(exec_start.elapsed().as_millis() as u64)
+        .into_response()
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {
-    op.response::<200, Json<QueryResponse>>()
+    op.response::<200, Json<HttpResponse>>()
 }
 
 /// Handler to export metrics

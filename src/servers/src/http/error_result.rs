@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::http::{header, HeaderValue};
+use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
-use bytes::{BufMut, BytesMut};
+use axum::Json;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_telemetry::logging::{debug, error};
-use mime_guess::mime;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,10 +41,10 @@ impl ErrorResponse {
             debug!("Failed to handle HTTP request, err: {:?}", error);
         }
 
-        Self::from_error_message(ty, error.output_msg(), code)
+        Self::from_error_message(ty, code, error.output_msg())
     }
 
-    pub fn from_error_message(ty: &'static str, msg: String, code: StatusCode) -> Self {
+    pub fn from_error_message(ty: &'static str, code: StatusCode, msg: String) -> Self {
         ErrorResponse {
             r#type: ty,
             code: code as u32,
@@ -70,25 +69,10 @@ impl ErrorResponse {
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        let mut buf = BytesMut::with_capacity(128).writer();
-        if let Err(err) = serde_json::to_writer(&mut buf, &self) {
-            return (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                [(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(mime::TEXT_PLAIN_UTF_8.as_ref()),
-                )],
-                err.to_string(),
-            )
-                .into_response();
-        }
-
-        let mut headers = headers::HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static(mime::APPLICATION_JSON.as_ref()),
-        );
-        headers.insert("X-GreptimeDB-Error-Code", HeaderValue::from(self.code));
-        (headers, buf.into_inner().freeze()).into_response()
+        let code = self.code;
+        let mut resp = Json(self).into_response();
+        resp.headers_mut()
+            .insert("X-GreptimeDB-Error-Code", HeaderValue::from(code));
+        resp
     }
 }

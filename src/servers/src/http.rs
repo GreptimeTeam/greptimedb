@@ -40,18 +40,16 @@ use aide::openapi::{Info, OpenApi, Server as OpenAPIServer};
 use async_trait::async_trait;
 use auth::UserProviderRef;
 use axum::error_handling::HandleErrorLayer;
-use axum::extract::{DefaultBodyLimit, MatchedPath};
+use axum::extract::{DefaultBodyLimit, MatchedPath, Query, State};
 use axum::http::Request;
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Json, Response};
-use axum::{routing, BoxError, Extension, Router};
+use axum::{routing, BoxError, Extension, Form, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
-use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_query::Output;
-use common_recordbatch::{util, RecordBatch};
-use common_telemetry::logging::{debug, error, info};
+use common_recordbatch::RecordBatch;
+use common_telemetry::logging::{error, info};
 use common_time::timestamp::TimeUnit;
 use common_time::Timestamp;
 use datatypes::data_type::DataType;
@@ -59,6 +57,7 @@ use futures::FutureExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use session::context::QueryContextRef;
 use snafu::{ensure, ResultExt};
 use tokio::sync::oneshot::{self, Sender};
 use tokio::sync::Mutex;
@@ -71,7 +70,8 @@ use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GreptimedbV1Response;
+use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
+use crate::http::handler::SqlQuery;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -315,40 +315,57 @@ impl Display for Epoch {
 }
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
-pub enum QueryResponse {
+#[serde(bound(deserialize = "'de: 'static"))]
+pub enum HttpResponse {
     Csv(CsvResponse),
+    Error(ErrorResponse),
     GreptimedbV1(GreptimedbV1Response),
     InfluxdbV1(InfluxdbV1Response),
-    Error(ErrorResponse),
 }
 
-impl QueryResponse {
-    pub fn with_execution_time(mut self, execution_time: u64) -> Self {
+impl HttpResponse {
+    pub fn with_execution_time(self, execution_time: u64) -> Self {
         match self {
-            QueryResponse::Csv(resp) => {
-                QueryResponse::Csv(resp.with_execution_time(execution_time))
-            }
-            QueryResponse::GreptimedbV1(resp) => {
-                QueryResponse::GreptimedbV1(resp.with_execution_time(execution_time))
-            }
-            QueryResponse::InfluxdbV1(resp) => {
-                QueryResponse::InfluxdbV1(resp.with_execution_time(execution_time))
-            }
-            QueryResponse::Error(resp) => {
-                QueryResponse::Error(resp.with_execution_time(execution_time))
-            }
+            HttpResponse::Csv(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::GreptimedbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::InfluxdbV1(resp) => resp.with_execution_time(execution_time).into(),
+            HttpResponse::Error(resp) => resp.with_execution_time(execution_time).into(),
         }
     }
 }
 
-impl IntoResponse for QueryResponse {
+impl IntoResponse for HttpResponse {
     fn into_response(self) -> Response {
         match self {
-            QueryResponse::Csv(resp) => resp.into_response(),
-            QueryResponse::GreptimedbV1(resp) => resp.into_response(),
-            QueryResponse::InfluxdbV1(resp) => resp.into_response(),
-            QueryResponse::Error(resp) => resp.into_response(),
+            HttpResponse::Csv(resp) => resp.into_response(),
+            HttpResponse::GreptimedbV1(resp) => resp.into_response(),
+            HttpResponse::InfluxdbV1(resp) => resp.into_response(),
+            HttpResponse::Error(resp) => resp.into_response(),
         }
+    }
+}
+
+impl From<CsvResponse> for HttpResponse {
+    fn from(value: CsvResponse) -> Self {
+        HttpResponse::Csv(value)
+    }
+}
+
+impl From<ErrorResponse> for HttpResponse {
+    fn from(value: ErrorResponse) -> Self {
+        HttpResponse::Error(value)
+    }
+}
+
+impl From<GreptimedbV1Response> for HttpResponse {
+    fn from(value: GreptimedbV1Response) -> Self {
+        HttpResponse::GreptimedbV1(value)
+    }
+}
+
+impl From<InfluxdbV1Response> for HttpResponse {
+    fn from(value: InfluxdbV1Response) -> Self {
+        HttpResponse::InfluxdbV1(value)
     }
 }
 
@@ -614,11 +631,28 @@ impl HttpServer {
     }
 
     fn route_sql<S>(&self, api_state: ApiState) -> ApiRouter<S> {
+        // TODO(@tisonkun): aide should support ret `impl IntoResponse`.
+        #[axum_macros::debug_handler]
+        pub async fn sql(
+            State(state): State<ApiState>,
+            Query(query_params): Query<SqlQuery>,
+            Extension(query_ctx): Extension<QueryContextRef>,
+            Form(form_params): Form<SqlQuery>,
+        ) -> Response {
+            let response = handler::sql(
+                State(state),
+                Query(query_params),
+                Extension(query_ctx),
+                Form(form_params),
+            )
+            .await;
+            response.into_response()
+        }
+
         ApiRouter::new()
             .api_route(
                 "/sql",
-                apirouting::get_with(handler::sql, handler::sql_docs)
-                    .post_with(handler::sql, handler::sql_docs),
+                apirouting::get_with(sql, handler::sql_docs).post_with(sql, handler::sql_docs),
             )
             .api_route(
                 "/promql",
@@ -767,15 +801,13 @@ impl Server for HttpServer {
 }
 
 /// handle error middleware
-async fn handle_error(err: BoxError) -> Json<QueryResponse> {
+async fn handle_error(err: BoxError) -> Json<HttpResponse> {
     error!(err; "Unhandled internal error");
-
-    Json(QueryResponse::GreptimedbV1(
-        GreptimedbV1Response::with_error_message(
-            format!("Unhandled internal error: {err}"),
-            StatusCode::Unexpected,
-        ),
-    ))
+    Json(HttpResponse::Error(ErrorResponse::from_error_message(
+        GREPTIME_V1_TYPE,
+        StatusCode::Unexpected,
+        format!("Unhandled internal error: {err}"),
+    )))
 }
 
 #[cfg(test)]
@@ -926,15 +958,15 @@ mod test {
             let json_resp = match format {
                 ResponseFormat::Csv => unreachable!(),
                 ResponseFormat::GreptimedbV1 => {
-                    QueryResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
+                    HttpResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
                 }
                 ResponseFormat::InfluxdbV1 => {
-                    QueryResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
+                    HttpResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
                 }
             };
 
             match json_resp {
-                QueryResponse::GreptimedbV1(json_resp) => {
+                HttpResponse::GreptimedbV1(json_resp) => {
                     let json_output = &json_resp.output[0];
                     if let GreptimeQueryOutput::Records(r) = json_output {
                         assert_eq!(r.num_rows(), 4);
@@ -948,7 +980,7 @@ mod test {
                         panic!("invalid output type");
                     }
                 }
-                QueryResponse::InfluxdbV1(json_resp) => {
+                HttpResponse::InfluxdbV1(json_resp) => {
                     let json_output = &json_resp.results()[0];
                     assert_eq!(json_output.num_rows(), 4);
                     assert_eq!(json_output.num_cols(), 2);

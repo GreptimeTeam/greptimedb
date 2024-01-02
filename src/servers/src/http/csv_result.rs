@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write;
+
 use axum::http::{header, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use common_error::status_code::StatusCode;
@@ -23,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
-use crate::http::{GreptimeQueryOutput, QueryResponse};
+use crate::http::{GreptimeQueryOutput, HttpResponse};
 
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct CsvResponse {
@@ -32,23 +34,23 @@ pub struct CsvResponse {
 }
 
 impl CsvResponse {
-    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> QueryResponse {
+    pub async fn from_output(outputs: Vec<crate::error::Result<Output>>) -> HttpResponse {
         let response = match GreptimedbV1Response::from_output(outputs).await {
-            QueryResponse::GreptimedbV1(resp) => resp,
-            QueryResponse::Error(resp) => {
-                return QueryResponse::Error(resp);
+            HttpResponse::GreptimedbV1(resp) => resp,
+            HttpResponse::Error(resp) => {
+                return HttpResponse::Error(resp);
             }
             resp => unreachable!("neither greptime_v1 nor error: {:?}", resp),
         };
 
         if response.output.len() > 1 {
-            QueryResponse::Error(ErrorResponse::from_error_message(
+            HttpResponse::Error(ErrorResponse::from_error_message(
                 GREPTIME_V1_TYPE,
-                "Multi-statements are not allowed".to_string(),
                 StatusCode::InvalidArguments,
+                "Multi-statements are not allowed".to_string(),
             ))
         } else {
-            QueryResponse::Csv(CsvResponse {
+            HttpResponse::Csv(CsvResponse {
                 output: response.output,
                 execution_time_ms: response.execution_time_ms,
             })
@@ -59,6 +61,11 @@ impl CsvResponse {
         &self.output
     }
 
+    pub fn with_execution_time(mut self, execution_time: u64) -> Self {
+        self.execution_time_ms = execution_time;
+        self
+    }
+
     pub fn execution_time_ms(&self) -> u64 {
         self.execution_time_ms
     }
@@ -66,6 +73,11 @@ impl CsvResponse {
 
 impl IntoResponse for CsvResponse {
     fn into_response(mut self) -> Response {
+        debug_assert!(
+            self.output.len() <= 1,
+            "self.output has extra elements: {}",
+            self.output.len()
+        );
         let payload = match self.output.pop() {
             None => "".to_string(),
             Some(GreptimeQueryOutput::AffectedRows(n)) => {
@@ -81,11 +93,14 @@ impl IntoResponse for CsvResponse {
             }
         };
 
-        let mut resp = ([], payload).into_response();
-        resp.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
-        );
+        let mut resp = (
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(mime::TEXT_CSV_UTF_8.as_ref()),
+            )],
+            payload,
+        )
+            .into_response();
         resp.headers_mut()
             .insert("X-GreptimeDB-Format", HeaderValue::from_static("CSV"));
         resp

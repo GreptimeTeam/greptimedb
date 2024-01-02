@@ -21,7 +21,7 @@ use http_body::combinators::UnsyncBoxBody;
 use hyper::Response;
 use servers::http::{
     handler as http_handler, script as script_handler, ApiState, GreptimeOptionsConfigState,
-    GreptimeQueryOutput, QueryResponse,
+    GreptimeQueryOutput, HttpResponse,
 };
 use servers::metrics_handler::MetricsHandler;
 use session::context::QueryContext;
@@ -58,7 +58,7 @@ async fn test_sql_not_provided() {
         .await;
 
         match json {
-            QueryResponse::GreptimedbV1(resp) => {
+            HttpResponse::GreptimedbV1(resp) => {
                 assert!(!resp.success());
                 assert_eq!(
                     Some(&"sql parameter is required.".to_string()),
@@ -66,7 +66,7 @@ async fn test_sql_not_provided() {
                 );
                 assert!(resp.output().is_empty());
             }
-            QueryResponse::InfluxdbV1(resp) => {
+            HttpResponse::InfluxdbV1(resp) => {
                 assert!(!resp.success());
                 assert_eq!(
                     Some(&"sql parameter is required.".to_string()),
@@ -102,7 +102,7 @@ async fn test_sql_output_rows() {
         .await;
 
         match json {
-            QueryResponse::GreptimedbV1(resp) => {
+            HttpResponse::GreptimedbV1(resp) => {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
                 match &resp.output()[0] {
@@ -131,7 +131,7 @@ async fn test_sql_output_rows() {
                     _ => unreachable!(),
                 }
             }
-            QueryResponse::InfluxdbV1(resp) => {
+            HttpResponse::InfluxdbV1(resp) => {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
 
@@ -186,7 +186,7 @@ async fn test_sql_form() {
         .await;
 
         match json {
-            QueryResponse::GreptimedbV1(resp) => {
+            HttpResponse::GreptimedbV1(resp) => {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
                 match &resp.output()[0] {
@@ -215,7 +215,7 @@ async fn test_sql_form() {
                     _ => unreachable!(),
                 }
             }
-            QueryResponse::InfluxdbV1(resp) => {
+            HttpResponse::InfluxdbV1(resp) => {
                 assert!(resp.success(), "{resp:?}");
                 assert!(resp.error().is_none());
 
@@ -275,7 +275,7 @@ async fn insert_script(
         body,
     )
     .await;
-    let QueryResponse::GreptimedbV1(json) = json else {
+    let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
     assert!(!json.success(), "{json:?}");
@@ -293,7 +293,7 @@ async fn insert_script(
         body,
     )
     .await;
-    let QueryResponse::GreptimedbV1(json) = json else {
+    let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
     assert!(json.success(), "{json:?}");
@@ -325,7 +325,7 @@ def test(n) -> vector[i64]:
         exec,
     )
     .await;
-    let QueryResponse::GreptimedbV1(json) = json else {
+    let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
     assert!(json.success(), "{json:?}");
@@ -395,7 +395,7 @@ def test(n, **params)  -> vector[i64]:
         exec,
     )
     .await;
-    let QueryResponse::GreptimedbV1(json) = json else {
+    let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
     assert!(json.success(), "{json:?}");
