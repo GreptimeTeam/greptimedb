@@ -65,8 +65,6 @@ pub fn prepare_wal_option(
 ) {
     if let Some(wal_options) = region_wal_options.get(&region_id.region_number()) {
         options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone());
-    } else {
-        warn!("Trying to prepare wal option for region: {region_id}, no wal option is found.")
     }
 }
 
