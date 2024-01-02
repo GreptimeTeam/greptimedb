@@ -25,15 +25,15 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let Some(column_name) = Self::column_name(column) else {
             return Ok(());
         };
-        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = pattern else {
-            return Ok(());
-        };
         let Some(data_type) = self.tag_column_type(column_name)? else {
             return Ok(());
         };
         if !data_type.is_string() {
             return Ok(());
         }
+        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = pattern else {
+            return Ok(());
+        };
 
         let predicate = Predicate::RegexMatch(RegexMatchPredicate {
             pattern: pattern.clone(),

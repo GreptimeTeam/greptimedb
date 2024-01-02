@@ -24,7 +24,7 @@ use api::v1::SemanticType;
 use common_query::logical_plan::Expr;
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
-use datafusion_expr::Expr as DfExpr;
+use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::inverted_index::search::index_apply::PredicatesIndexApplier;
@@ -96,21 +96,21 @@ impl<'a> SstIndexApplierBuilder<'a> {
         let res = match expr {
             DfExpr::Between(between) => self.collect_between(between),
 
-            // DfExpr::InList(in_list) => self.collect_inlist(in_list),
-            // DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
-            //     Operator::And => {
-            //         self.traverse_and_collect(left);
-            //         self.traverse_and_collect(right);
-            //         Ok(())
-            //     }
-            //     Operator::Or => self.collect_or_eq_list(left, right),
-            //     Operator::Eq => self.collect_eq(left, right),
-            //     Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => {
-            //         self.collect_comparison_expr(left, op, right)
-            //     }
-            //     Operator::RegexMatch => self.collect_regex_match(left, right),
-            //     _ => Ok(()),
-            // },
+            DfExpr::InList(in_list) => self.collect_inlist(in_list),
+            DfExpr::BinaryExpr(BinaryExpr { left, op, right }) => match op {
+                Operator::And => {
+                    self.traverse_and_collect(left);
+                    self.traverse_and_collect(right);
+                    Ok(())
+                }
+                Operator::Or => self.collect_or_eq_list(left, right),
+                Operator::Eq => self.collect_eq(left, right),
+                Operator::Lt | Operator::LtEq | Operator::Gt | Operator::GtEq => {
+                    self.collect_comparison_expr(left, op, right)
+                }
+                Operator::RegexMatch => self.collect_regex_match(left, right),
+                _ => Ok(()),
+            },
 
             // TODO(zhongzc): support more expressions, e.g. IsNull, IsNotNull, ...
             _ => Ok(()),

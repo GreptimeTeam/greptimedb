@@ -126,3 +126,155 @@ impl<'a> SstIndexApplierBuilder<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use crate::error::Error;
+    use crate::sst::index::applier::builder::tests::{
+        encoded_string, field_column, int64_lit, nonexistent_column, string_lit, tag_column,
+        test_object_store, test_region_metadata,
+    };
+
+    #[test]
+    fn test_collect_comparison_basic() {
+        let cases = [
+            (
+                (&tag_column(), &Operator::Lt, &string_lit("123")),
+                Range {
+                    lower: None,
+                    upper: Some(Bound {
+                        inclusive: false,
+                        value: encoded_string("123"),
+                    }),
+                },
+            ),
+            (
+                (&string_lit("123"), &Operator::Lt, &tag_column()),
+                Range {
+                    lower: Some(Bound {
+                        inclusive: false,
+                        value: encoded_string("123"),
+                    }),
+                    upper: None,
+                },
+            ),
+            (
+                (&tag_column(), &Operator::LtEq, &string_lit("123")),
+                Range {
+                    lower: None,
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("123"),
+                    }),
+                },
+            ),
+            (
+                (&string_lit("123"), &Operator::LtEq, &tag_column()),
+                Range {
+                    lower: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("123"),
+                    }),
+                    upper: None,
+                },
+            ),
+            (
+                (&tag_column(), &Operator::Gt, &string_lit("123")),
+                Range {
+                    lower: Some(Bound {
+                        inclusive: false,
+                        value: encoded_string("123"),
+                    }),
+                    upper: None,
+                },
+            ),
+            (
+                (&string_lit("123"), &Operator::Gt, &tag_column()),
+                Range {
+                    lower: None,
+                    upper: Some(Bound {
+                        inclusive: false,
+                        value: encoded_string("123"),
+                    }),
+                },
+            ),
+            (
+                (&tag_column(), &Operator::GtEq, &string_lit("123")),
+                Range {
+                    lower: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("123"),
+                    }),
+                    upper: None,
+                },
+            ),
+            (
+                (&string_lit("123"), &Operator::GtEq, &tag_column()),
+                Range {
+                    lower: None,
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: encoded_string("123"),
+                    }),
+                },
+            ),
+        ];
+
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        for ((left, op, right), _) in &cases {
+            builder.collect_comparison_expr(left, op, right).unwrap();
+        }
+
+        let predicates = builder.output.get("a").unwrap();
+        assert_eq!(predicates.len(), cases.len());
+        for ((_, expected), actual) in cases.into_iter().zip(predicates) {
+            assert_eq!(
+                actual,
+                &Predicate::Range(RangePredicate { range: expected })
+            );
+        }
+    }
+
+    #[test]
+    fn test_collect_comparison_type_mismatch() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let res = builder.collect_comparison_expr(&tag_column(), &Operator::Lt, &int64_lit(10));
+        assert!(matches!(res, Err(Error::FieldTypeMismatch { .. })));
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_comparison_field_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        builder
+            .collect_comparison_expr(&field_column(), &Operator::Lt, &string_lit("abc"))
+            .unwrap();
+        assert!(builder.output.is_empty());
+    }
+
+    #[test]
+    fn test_collect_comparison_nonexistent_column() {
+        let metadata = test_region_metadata();
+        let mut builder =
+            SstIndexApplierBuilder::new("test".to_string(), test_object_store(), &metadata);
+
+        let res = builder.collect_comparison_expr(
+            &nonexistent_column(),
+            &Operator::Lt,
+            &string_lit("abc"),
+        );
+        assert!(matches!(res, Err(Error::ColumnNotFound { .. })));
+        assert!(builder.output.is_empty());
+    }
+}
