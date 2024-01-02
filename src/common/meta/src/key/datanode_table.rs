@@ -56,8 +56,8 @@ pub struct RegionInfo {
 }
 
 pub struct DatanodeTableKey {
-    datanode_id: DatanodeId,
-    table_id: TableId,
+    pub datanode_id: DatanodeId,
+    pub table_id: TableId,
 }
 
 impl DatanodeTableKey {
