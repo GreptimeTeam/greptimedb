@@ -34,6 +34,7 @@ use crate::rpc::store::RangeRequest;
 use crate::rpc::KeyValue;
 use crate::DatanodeId;
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 /// RegionInfo
 /// For compatible reason, DON'T modify the field name.
@@ -48,14 +49,15 @@ pub struct RegionInfo {
     #[serde(default)]
     pub region_options: HashMap<String, String>,
     /// The per-region wal options.
-    /// Key: region number (in string representation). Value: the encoded wal options of the region.
+    /// Key: region number. Value: the encoded wal options of the region.
     #[serde(default)]
-    pub region_wal_options: HashMap<String, String>,
+    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    pub region_wal_options: HashMap<RegionNumber, String>,
 }
 
 pub struct DatanodeTableKey {
-    datanode_id: DatanodeId,
-    table_id: TableId,
+    pub datanode_id: DatanodeId,
+    pub table_id: TableId,
 }
 
 impl DatanodeTableKey {
@@ -181,7 +183,7 @@ impl DatanodeTableManager {
                     .filter_map(|region_number| {
                         region_wal_options
                             .get(region_number)
-                            .map(|wal_options| (region_number.to_string(), wal_options.clone()))
+                            .map(|wal_options| (*region_number, wal_options.clone()))
                     })
                     .collect();
 
@@ -214,7 +216,7 @@ impl DatanodeTableManager {
         current_region_distribution: RegionDistribution,
         new_region_distribution: RegionDistribution,
         new_region_options: &HashMap<String, String>,
-        new_region_wal_options: &HashMap<String, String>,
+        new_region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<Txn> {
         let mut opts = Vec::new();
 
@@ -306,6 +308,61 @@ mod tests {
         assert!(parsed.is_ok());
     }
 
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct StringHashMap {
+        inner: HashMap<String, String>,
+    }
+
+    #[serde_with::serde_as]
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct IntegerHashMap {
+        #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+        inner: HashMap<u32, String>,
+    }
+
+    #[test]
+    fn test_serde_with_integer_hash_map() {
+        let map = StringHashMap {
+            inner: HashMap::from([
+                ("1".to_string(), "aaa".to_string()),
+                ("2".to_string(), "bbb".to_string()),
+                ("3".to_string(), "ccc".to_string()),
+            ]),
+        };
+        let encoded = serde_json::to_string(&map).unwrap();
+        let decoded: IntegerHashMap = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            IntegerHashMap {
+                inner: HashMap::from([
+                    (1, "aaa".to_string()),
+                    (2, "bbb".to_string()),
+                    (3, "ccc".to_string()),
+                ]),
+            },
+            decoded
+        );
+
+        let map = IntegerHashMap {
+            inner: HashMap::from([
+                (1, "aaa".to_string()),
+                (2, "bbb".to_string()),
+                (3, "ccc".to_string()),
+            ]),
+        };
+        let encoded = serde_json::to_string(&map).unwrap();
+        let decoded: StringHashMap = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            StringHashMap {
+                inner: HashMap::from([
+                    ("1".to_string(), "aaa".to_string()),
+                    ("2".to_string(), "bbb".to_string()),
+                    ("3".to_string(), "ccc".to_string()),
+                ]),
+            },
+            decoded
+        );
+    }
+
     // This test intends to ensure both the `serde_json::to_string` + `serde_json::from_str`
     // and `serde_json::to_vec` + `serde_json::from_slice` work for `DatanodeTableValue`.
     // Warning: if the key of `region_wal_options` is of type non-String, this test would fail.
@@ -320,9 +377,9 @@ mod tests {
                 ("c".to_string(), "cc".to_string()),
             ]),
             region_wal_options: HashMap::from([
-                ("1".to_string(), "aaa".to_string()),
-                ("2".to_string(), "bbb".to_string()),
-                ("3".to_string(), "ccc".to_string()),
+                (1, "aaa".to_string()),
+                (2, "bbb".to_string()),
+                (3, "ccc".to_string()),
             ]),
         };
         let table_value = DatanodeTableValue {

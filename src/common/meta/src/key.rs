@@ -604,7 +604,7 @@ impl TableMetadataManager {
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
         new_region_options: &HashMap<String, String>,
-        new_region_wal_options: &HashMap<String, String>,
+        new_region_wal_options: &HashMap<RegionNumber, String>,
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =

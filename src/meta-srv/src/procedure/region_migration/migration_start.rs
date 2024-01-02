@@ -52,7 +52,7 @@ impl State for RegionMigrationStart {
         let region_route = self.retrieve_region_route(ctx, region_id).await?;
         let to_peer = &ctx.persistent_ctx.to_peer;
 
-        if self.check_leader_region_on_peer(&region_route, to_peer)? {
+        if self.has_migrated(&region_route, to_peer)? {
             Ok((Box::new(RegionMigrationEnd), Status::Done))
         } else if self.check_candidate_region_on_peer(&region_route, to_peer) {
             Ok((Box::new(UpdateMetadata::Downgrade), Status::executing(true)))
@@ -112,16 +112,12 @@ impl RegionMigrationStart {
         region_opened
     }
 
-    /// Checks whether the leader region on region has been opened.
-    /// Returns true if it's been opened.
+    /// Checks whether the region has been migrated.
+    /// Returns true if it's.
     ///     
     /// Abort(non-retry):
     /// - Leader peer of RegionRoute is not found.
-    fn check_leader_region_on_peer(
-        &self,
-        region_route: &RegionRoute,
-        to_peer: &Peer,
-    ) -> Result<bool> {
+    fn has_migrated(&self, region_route: &RegionRoute, to_peer: &Peer) -> Result<bool> {
         let region_id = region_route.region.id;
 
         let region_opened = region_route

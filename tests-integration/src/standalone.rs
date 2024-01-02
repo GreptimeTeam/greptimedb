@@ -17,14 +17,14 @@ use std::sync::Arc;
 use cmd::options::MixOptions;
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
-use common_config::KvBackendConfig;
+use common_config::{KvBackendConfig, WalConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::TableMetadataManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::sequence::SequenceBuilder;
-use common_meta::wal::{WalConfig as MetaSrvWalConfig, WalOptionsAllocator};
+use common_meta::wal::{WalConfig as MetaWalConfig, WalOptionsAllocator};
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::LoggingOptions;
 use datanode::config::DatanodeOptions;
@@ -32,6 +32,7 @@ use datanode::datanode::DatanodeBuilder;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance, StandaloneDatanodeManager};
+use servers::Mode;
 
 use crate::test_util::{self, create_tmp_dir_and_datanode_opts, StorageType, TestGuard};
 
@@ -42,8 +43,11 @@ pub struct GreptimeDbStandalone {
     pub guard: TestGuard,
 }
 
+#[derive(Clone)]
 pub struct GreptimeDbStandaloneBuilder {
     instance_name: String,
+    wal_config: WalConfig,
+    meta_wal_config: MetaWalConfig,
     store_providers: Option<Vec<StorageType>>,
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
@@ -56,6 +60,8 @@ impl GreptimeDbStandaloneBuilder {
             store_providers: None,
             plugin: None,
             default_store: None,
+            wal_config: WalConfig::default(),
+            meta_wal_config: MetaWalConfig::default(),
         }
     }
 
@@ -82,12 +88,27 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
+    pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
+        self.wal_config = wal_config;
+        self
+    }
+
+    pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
+        self.meta_wal_config = wal_meta;
+        self
+    }
+
     pub async fn build(self) -> GreptimeDbStandalone {
         let default_store_type = self.default_store.unwrap_or(StorageType::File);
         let store_types = self.store_providers.unwrap_or_default();
 
-        let (opts, guard) =
-            create_tmp_dir_and_datanode_opts(default_store_type, store_types, &self.instance_name);
+        let (opts, guard) = create_tmp_dir_and_datanode_opts(
+            Mode::Standalone,
+            default_store_type,
+            store_types,
+            &self.instance_name,
+            self.wal_config.clone(),
+        );
 
         let procedure_config = ProcedureConfig::default();
         let kv_backend_config = KvBackendConfig::default();
@@ -118,7 +139,7 @@ impl GreptimeDbStandaloneBuilder {
                 .step(10)
                 .build(),
         );
-        let wal_meta = MetaSrvWalConfig::default();
+        let wal_meta = self.meta_wal_config.clone();
         let wal_options_allocator = Arc::new(WalOptionsAllocator::new(
             wal_meta.clone(),
             kv_backend.clone(),

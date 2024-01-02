@@ -92,13 +92,15 @@ impl Display for OpenRegion {
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
     pub region_options: HashMap<String, String>,
     #[serde(default)]
-    pub region_wal_options: HashMap<String, String>,
+    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
 }
@@ -108,7 +110,7 @@ impl OpenRegion {
         region_ident: RegionIdent,
         path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<String, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
         skip_wal_replay: bool,
     ) -> Self {
         Self {
