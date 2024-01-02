@@ -170,6 +170,7 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
@@ -199,6 +200,7 @@ pub(crate) async fn distributed_with_kafka_wal() -> Option<Box<dyn RebuildableMo
         .with_meta_wal_config(MetaWalConfig::Kafka(MetaKafkaConfig {
             broker_endpoints: endpoints,
             topic_name_prefix: test_name.to_string(),
+            num_topics: 3,
             ..Default::default()
         }));
     let instance = TestContext::new(MockInstanceBuilder::Distributed(builder)).await;
