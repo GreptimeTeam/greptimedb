@@ -30,6 +30,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 
+use crate::http::error_result::ErrorResponse;
+use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::{
     ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, QueryResponse, ResponseFormat,
@@ -202,7 +204,7 @@ pub async fn promql(
     State(state): State<ApiState>,
     Query(params): Query<PromqlQuery>,
     Extension(query_ctx): Extension<QueryContextRef>,
-) -> Json<QueryResponse> {
+) -> QueryResponse {
     let sql_handler = &state.sql_handler;
     let exec_start = Instant::now();
     let db = query_ctx.get_db_string();
@@ -210,19 +212,18 @@ pub async fn promql(
         .with_label_values(&[db.as_str()])
         .start_timer();
 
-    if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
-        return Json(QueryResponse::GreptimedbV1(
-            GreptimedbV1Response::with_error_message(msg, status),
-        ));
-    }
+    let resp = if let Some((status, msg)) =
+        validate_schema(sql_handler.clone(), query_ctx.clone()).await
+    {
+        let resp = ErrorResponse::from_error_message(GREPTIME_V1_TYPE, msg, status);
+        QueryResponse::Error(resp)
+    } else {
+        let prom_query = params.into();
+        let outputs = sql_handler.do_promql_query(&prom_query, query_ctx).await;
+        GreptimedbV1Response::from_output(outputs).await;
+    };
 
-    let prom_query = params.into();
-    let mut resp = GreptimedbV1Response::from_output(
-        sql_handler.do_promql_query(&prom_query, query_ctx).await,
-    )
-    .await;
-    resp.with_execution_time(exec_start.elapsed().as_millis() as u64);
-    Json(QueryResponse::GreptimedbV1(resp))
+    resp.with_execution_time(exec_start.elapsed().as_millis() as u64)
 }
 
 pub(crate) fn sql_docs(op: TransformOperation) -> TransformOperation {

@@ -18,12 +18,14 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use itertools::Itertools;
 use mime_guess::mime;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::http::error_result::ErrorResponse;
 use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
 use crate::http::{GreptimeQueryOutput, QueryResponse};
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct CsvResponse {
     output: Vec<GreptimeQueryOutput>,
     execution_time_ms: u64,

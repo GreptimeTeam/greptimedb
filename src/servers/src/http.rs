@@ -314,7 +314,7 @@ impl Display for Epoch {
     }
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub enum QueryResponse {
     Csv(CsvResponse),
     GreptimedbV1(GreptimedbV1Response),
