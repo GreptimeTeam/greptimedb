@@ -24,6 +24,7 @@ use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
@@ -44,7 +45,7 @@ pub(super) struct ActivateRegion {
     // An `None` option stands for uninitialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
-    region_wal_options: Option<HashMap<String, String>>,
+    region_wal_options: Option<HashMap<RegionNumber, String>>,
 }
 
 impl ActivateRegion {
