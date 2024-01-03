@@ -120,8 +120,8 @@ mod tests {
         let container = docker.run(Image::with_exposed_port(port));
 
         // Creates a Kafka client.
-        let bootstrap_brokers = vec![format!("127.0.0.1:{}", container.get_host_port_ipv4(port))];
-        let client = ClientBuilder::new(bootstrap_brokers).build().await.unwrap();
+        let broker_endpoints = vec![format!("127.0.0.1:{}", container.get_host_port_ipv4(port))];
+        let client = ClientBuilder::new(broker_endpoints).build().await.unwrap();
 
         // Creates a topic.
         let topic = "test_topic";

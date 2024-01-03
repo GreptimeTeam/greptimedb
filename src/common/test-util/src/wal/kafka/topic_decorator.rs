@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use common_config::wal::KafkaWalTopic as Topic;
@@ -45,7 +46,7 @@ pub struct TopicDecorator {
     /// A suffix to be inserted at the back of each topic.
     suffix: Affix,
     /// Topics built so far. Used to filter out duplicate topics.
-    created: HashSet<Topic>,
+    created: RefCell<HashSet<Topic>>,
 }
 
 impl Default for TopicDecorator {
@@ -53,7 +54,7 @@ impl Default for TopicDecorator {
         Self {
             prefix: Affix::Nothing,
             suffix: Affix::Nothing,
-            created: HashSet::with_capacity(256),
+            created: RefCell::new(HashSet::with_capacity(256)),
         }
     }
 }
@@ -70,7 +71,7 @@ impl TopicDecorator {
     }
 
     /// Builds a topic by inserting a prefix and a suffix into the given topic.
-    pub fn decorate(&mut self, topic: &str) -> Topic {
+    pub fn decorate(&self, topic: &str) -> Topic {
         const ITERS: usize = 24;
         for _ in 0..ITERS {
             let decorated = format!(
@@ -79,13 +80,14 @@ impl TopicDecorator {
                 topic,
                 self.suffix.to_string()
             );
-            if !self.created.contains(&decorated) {
-                self.created.insert(decorated.clone());
+            let mut created_topics = self.created.borrow_mut();
+            if !created_topics.contains(&decorated) {
+                created_topics.insert(decorated.clone());
                 return decorated;
             }
         }
         unreachable!(
-            "Building a topic should be completed within iterations {}",
+            "Topic decoration should be completed within iterations {}",
             ITERS
         )
     }

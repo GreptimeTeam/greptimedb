@@ -111,6 +111,7 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::wal::kafka::topic_selector::RoundRobinTopicSelector;
     use crate::wal::kafka::KafkaConfig;
 
     // Tests the wal options allocator could successfully allocate raft-engine wal options.
@@ -138,7 +139,7 @@ mod tests {
     async fn test_allocator_with_kafka() {
         let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
         // Constructs topics that should be created.
-        let mut decorator = TopicDecorator::default()
+        let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed("test_allocator_with_kafka".to_string()))
             .with_suffix(Affix::TimeNow);
         let topics = (0..256)
@@ -153,6 +154,10 @@ mod tests {
         };
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let mut topic_manager = KafkaTopicManager::new(config.clone(), kv_backend);
+        // Replaces the default topic pool with the constructed topics.
+        topic_manager.topic_pool = topics.clone();
+        // Replaces the default selector with a round-robin selector without shuffled.
+        topic_manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
 
         // Creates an options allocator.
         let wal_config = WalConfig::Kafka(config.clone());

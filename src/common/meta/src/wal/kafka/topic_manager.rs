@@ -48,7 +48,7 @@ const DEFAULT_PARTITION: i32 = 0;
 pub struct TopicManager {
     config: KafkaConfig,
     pub(crate) topic_pool: Vec<Topic>,
-    topic_selector: TopicSelectorRef,
+    pub(crate) topic_selector: TopicSelectorRef,
     kv_backend: KvBackendRef,
 }
 
@@ -249,7 +249,6 @@ mod tests {
 
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
-    use crate::kv_backend::{self};
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
     #[tokio::test]
@@ -281,7 +280,7 @@ mod tests {
     async fn test_alloc_topics() {
         let broker_endpoints = get_broker_endpoints!(BROKER_ENDPOINTS_KEY);
         // Constructs topics that should be created.
-        let mut decorator = TopicDecorator::default()
+        let decorator = TopicDecorator::default()
             .with_prefix(Affix::Fixed("test_alloc_topics".to_string()))
             .with_suffix(Affix::TimeNow);
         let topics = (0..256)
@@ -298,13 +297,16 @@ mod tests {
         let mut manager = TopicManager::new(config.clone(), kv_backend);
         // Replaces the default topic pool with the constructed topics.
         manager.topic_pool = topics.clone();
+        // Replaces the default selector with a round-robin selector without shuffled.
+        manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
         manager.start().await.unwrap();
 
         // Selects exactly the number of `num_topics` topics one by one.
-        for expected in topics.iter() {
-            let got = manager.select().unwrap();
-            assert_eq!(got, expected);
-        }
+        let got = (0..topics.len())
+            .map(|_| manager.select().unwrap())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(got, topics);
 
         // Selects exactly the number of `num_topics` topics in a batching manner.
         let got = manager

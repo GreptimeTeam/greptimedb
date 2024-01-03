@@ -42,7 +42,7 @@ macro_rules! get_broker_endpoints {
 /// A default seed `topic` will be used if the provided seed is None.
 pub async fn create_topics(
     num_topics: usize,
-    mut decorator: TopicDecorator,
+    decorator: TopicDecorator,
     broker_endpoints: &[String],
     seed: Option<&str>,
 ) -> Vec<Topic> {
