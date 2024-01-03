@@ -169,7 +169,7 @@ mod tests {
         assert_eq!("test", table.table_name());
         assert_eq!(schema, InformationTable::schema(&table));
 
-        let stream = table.to_stream().unwrap();
+        let stream = table.to_stream(ScanRequest::default()).unwrap();
 
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
@@ -198,7 +198,7 @@ mod tests {
         assert_eq!("test", table.table_name());
         assert_eq!(schema, InformationTable::schema(&table));
 
-        let stream = table.to_stream().unwrap();
+        let stream = table.to_stream(ScanRequest::default()).unwrap();
 
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
