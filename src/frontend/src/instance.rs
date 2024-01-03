@@ -192,12 +192,9 @@ impl Instance {
         opts: impl Into<FrontendOptions> + TomlSerializable,
     ) -> Result<()> {
         let opts: FrontendOptions = opts.into();
-        self.export_metrics_task = ExportMetricsTask::try_new(
-            &opts.export_metrics,
-            Some(&opts.http.addr),
-            Some(&self.plugins),
-        )
-        .context(StartServerSnafu)?;
+        self.export_metrics_task =
+            ExportMetricsTask::try_new(&opts.export_metrics, Some(&self.plugins))
+                .context(StartServerSnafu)?;
         let servers = Services::build(opts, Arc::new(self.clone()), self.plugins.clone()).await?;
         self.servers = Arc::new(servers);
 
@@ -239,9 +236,9 @@ impl FrontendInstance for Instance {
                     self.inserter.clone(),
                     self.statement_executor.clone(),
                 );
-                t.start(Some(handler))
+                t.start(Some(handler)).context(StartServerSnafu)?
             } else {
-                t.start(None)
+                t.start(None).context(StartServerSnafu)?;
             }
         }
 

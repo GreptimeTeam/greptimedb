@@ -38,21 +38,40 @@ use crate::query_handler::PromStoreProtocolHandlerRef;
 #[serde(default)]
 pub struct ExportMetricsOption {
     pub enable: bool,
-    pub endpoint: String,
-    pub db: String,
     #[serde(with = "humantime_serde")]
     pub write_interval: Duration,
+    pub self_import: Option<SelfImportOption>,
+    pub remote_write: Option<RemoteWriteOption>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct RemoteWriteOption {
+    pub url: String,
     pub headers: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SelfImportOption {
+    pub db: String,
+}
+
+impl Default for SelfImportOption {
+    fn default() -> Self {
+        Self {
+            db: "information_schema".to_string(),
+        }
+    }
 }
 
 impl Default for ExportMetricsOption {
     fn default() -> Self {
         Self {
             enable: false,
-            endpoint: "127.0.0.1:4000".to_string(),
-            db: "information_schema".to_string(),
             write_interval: Duration::from_secs(30),
-            headers: HashMap::new(),
+            self_import: None,
+            remote_write: None,
         }
     }
 }
@@ -68,7 +87,6 @@ pub struct ExportMetricsTask {
 impl ExportMetricsTask {
     pub fn try_new(
         config: &ExportMetricsOption,
-        http_addr: Option<&str>,
         plugins: Option<&Plugins>,
     ) -> Result<Option<Self>> {
         if !config.enable {
@@ -82,80 +100,89 @@ impl ExportMetricsTask {
             }
         );
         ensure!(
-            !config.db.is_empty(),
+            (config.remote_write.is_none() && config.self_import.is_some())
+                || (config.remote_write.is_some() && config.self_import.is_none()),
             InvalidExportMetricsConfigSnafu {
-                msg: "Expected export metrics db not empty"
+                msg: "Only one of `self_import` or `remote_write` can be used as the export method"
             }
         );
-        // construct http header
-        let mut headers = reqwest::header::HeaderMap::with_capacity(config.headers.len());
-        config.headers.iter().try_for_each(|(k, v)| {
-            let header = match TryInto::<HeaderName>::try_into(k) {
-                Ok(header) => header,
-                Err(_) => {
-                    return InvalidExportMetricsConfigSnafu {
-                        msg: format!("Export metrics: invalid HTTP header name: {}", k),
-                    }
-                    .fail()
+        if let Some(self_import) = &config.self_import {
+            ensure!(
+                !self_import.db.is_empty(),
+                InvalidExportMetricsConfigSnafu {
+                    msg: "Expected `self_import` metrics `db` not empty"
                 }
-            };
-            match TryInto::<HeaderValue>::try_into(v) {
-                Ok(value) => headers.insert(header, value),
-                Err(_) => {
-                    return InvalidExportMetricsConfigSnafu {
-                        msg: format!("Export metrics: invalid HTTP header value: {}", v),
-                    }
-                    .fail()
+            );
+        }
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(remote_write) = &config.remote_write {
+            ensure!(
+                !remote_write.url.is_empty(),
+                InvalidExportMetricsConfigSnafu {
+                    msg: "Expected `remote_write` metrics `url` not empty"
                 }
-            };
-            Ok(())
-        })?;
-        let same_addr = if let Some(addr) = http_addr {
-            addr == config.endpoint.as_str()
-        } else {
-            false
-        };
-        // send by handler when remote write addr same with frontend http endpoint, or endpoint is not set
-        let send_by_handler = same_addr || config.endpoint.is_empty();
-        // `http_addr.is_none()` means is `datanode` or `metasrv`, can't omit `endpoint`
-        if http_addr.is_none() && config.endpoint.is_empty() {
-            return InvalidExportMetricsConfigSnafu {
-                msg: "Export metrics: Missing `export_metrics.endpoint`. only `standalone` and `frontend` can omit it".to_string(),
-            }
-            .fail();
+            );
+            // construct http header
+            remote_write.headers.iter().try_for_each(|(k, v)| {
+                let header = match TryInto::<HeaderName>::try_into(k) {
+                    Ok(header) => header,
+                    Err(_) => {
+                        return InvalidExportMetricsConfigSnafu {
+                            msg: format!("Export metrics: invalid HTTP header name: {}", k),
+                        }
+                        .fail()
+                    }
+                };
+                match TryInto::<HeaderValue>::try_into(v) {
+                    Ok(value) => headers.insert(header, value),
+                    Err(_) => {
+                        return InvalidExportMetricsConfigSnafu {
+                            msg: format!("Export metrics: invalid HTTP header value: {}", v),
+                        }
+                        .fail()
+                    }
+                };
+                Ok(())
+            })?;
         }
         Ok(Some(Self {
             config: config.clone(),
             filter,
             headers,
-            send_by_handler,
+            send_by_handler: config.self_import.is_some(),
         }))
     }
 
-    pub fn start(&self, handler: Option<PromStoreProtocolHandlerRef>) {
+    pub fn start(&self, handler: Option<PromStoreProtocolHandlerRef>) -> Result<()> {
         if !self.config.enable {
-            return;
+            return Ok(());
         }
         let interval = time::interval(self.config.write_interval);
         let filter = self.filter.clone();
-        let _handle = if let Some(h) = handler {
+        let _handle = if let Some(self_import) = &self.config.self_import {
+            ensure!(
+                handler.is_some(),
+                InvalidExportMetricsConfigSnafu {
+                    msg: "Only `frontend` or `standalone` can use `self_import` as export method."
+                }
+            );
             common_runtime::spawn_bg(write_system_metric_by_handler(
-                self.config.db.clone(),
-                h,
+                self_import.db.clone(),
+                handler.unwrap(),
+                filter,
+                interval,
+            ))
+        } else if let Some(remote_write) = &self.config.remote_write {
+            common_runtime::spawn_bg(write_system_metric_by_network(
+                self.headers.clone(),
+                remote_write.url.clone(),
                 filter,
                 interval,
             ))
         } else {
-            common_runtime::spawn_bg(write_system_metric_by_network(
-                self.headers.clone(),
-                format!(
-                    "http://{}/v1/prometheus/write?db={}",
-                    self.config.endpoint, self.config.db
-                ),
-                filter,
-                interval,
-            ))
+            unreachable!()
         };
+        Ok(())
     }
 }
 
@@ -232,5 +259,85 @@ pub async fn write_system_metric_by_handler(
         if let Err(e) = handler.write(request, ctx.clone()).await {
             error!("report export metrics by handler failed, error {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use crate::export_metrics::{
+        ExportMetricsOption, ExportMetricsTask, RemoteWriteOption, SelfImportOption,
+    };
+
+    #[tokio::test]
+    async fn test_config() {
+        // zero write_interval
+        assert!(ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                write_interval: Duration::from_secs(0),
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        // none self_import and remote_write
+        assert!(ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        // both self_import and remote_write
+        assert!(ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                self_import: Some(SelfImportOption::default()),
+                remote_write: Some(RemoteWriteOption::default()),
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        // empty db
+        assert!(ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                self_import: Some(SelfImportOption { db: "".to_string() }),
+                remote_write: None,
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        // empty url
+        assert!(ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                self_import: None,
+                remote_write: Some(RemoteWriteOption {
+                    url: "".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None
+        )
+        .is_err());
+        // self import but no handle
+        let s = ExportMetricsTask::try_new(
+            &ExportMetricsOption {
+                enable: true,
+                self_import: Some(SelfImportOption::default()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(s.start(None).is_err());
     }
 }
