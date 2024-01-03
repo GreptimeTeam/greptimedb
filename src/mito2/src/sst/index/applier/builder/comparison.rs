@@ -32,38 +32,38 @@ impl<'a> SstIndexApplierBuilder<'a> {
         match op {
             Operator::Lt => {
                 if matches!(right, DfExpr::Column(_)) {
-                    self.collect_gt(right, left)
+                    self.collect_column_gt_lit(right, left)
                 } else {
-                    self.collect_lt(left, right)
+                    self.collect_column_lt_lit(left, right)
                 }
             }
             Operator::LtEq => {
                 if matches!(right, DfExpr::Column(_)) {
-                    self.collect_ge(right, left)
+                    self.collect_column_ge_lit(right, left)
                 } else {
-                    self.collect_le(left, right)
+                    self.collect_column_le_lit(left, right)
                 }
             }
             Operator::Gt => {
                 if matches!(right, DfExpr::Column(_)) {
-                    self.collect_lt(right, left)
+                    self.collect_column_lt_lit(right, left)
                 } else {
-                    self.collect_gt(left, right)
+                    self.collect_column_gt_lit(left, right)
                 }
             }
             Operator::GtEq => {
                 if matches!(right, DfExpr::Column(_)) {
-                    self.collect_le(right, left)
+                    self.collect_column_le_lit(right, left)
                 } else {
-                    self.collect_ge(left, right)
+                    self.collect_column_ge_lit(left, right)
                 }
             }
             _ => Ok(()),
         }
     }
 
-    fn collect_lt(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        self.collect_cmp(left, right, |value| Range {
+    fn collect_column_lt_lit(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
+        self.collect_column_cmp_lit(left, right, |value| Range {
             lower: None,
             upper: Some(Bound {
                 inclusive: false,
@@ -72,8 +72,8 @@ impl<'a> SstIndexApplierBuilder<'a> {
         })
     }
 
-    fn collect_gt(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        self.collect_cmp(left, right, |value| Range {
+    fn collect_column_gt_lit(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
+        self.collect_column_cmp_lit(left, right, |value| Range {
             lower: Some(Bound {
                 inclusive: false,
                 value,
@@ -82,8 +82,8 @@ impl<'a> SstIndexApplierBuilder<'a> {
         })
     }
 
-    fn collect_le(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        self.collect_cmp(left, right, |value| Range {
+    fn collect_column_le_lit(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
+        self.collect_column_cmp_lit(left, right, |value| Range {
             lower: None,
             upper: Some(Bound {
                 inclusive: true,
@@ -92,8 +92,8 @@ impl<'a> SstIndexApplierBuilder<'a> {
         })
     }
 
-    fn collect_ge(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        self.collect_cmp(left, right, |value| Range {
+    fn collect_column_ge_lit(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
+        self.collect_column_cmp_lit(left, right, |value| Range {
             lower: Some(Bound {
                 inclusive: true,
                 value,
@@ -102,7 +102,7 @@ impl<'a> SstIndexApplierBuilder<'a> {
         })
     }
 
-    fn collect_cmp(
+    fn collect_column_cmp_lit(
         &mut self,
         column: &DfExpr,
         literal: &DfExpr,
