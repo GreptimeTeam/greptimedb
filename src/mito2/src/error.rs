@@ -440,6 +440,13 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display(
+        "Verify checksum failed! calculated: {}, expected: {}",
+        calculated,
+        expect
+    ))]
+    VerifyChecksum { calculated: String, expect: String },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -524,6 +531,7 @@ impl ErrorExt for Error {
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             BuildIndexApplier { source, .. } => source.status_code(),
             ConvertValue { source, .. } => source.status_code(),
+            VerifyChecksum { .. } => StatusCode::Unexpected,
         }
     }
 

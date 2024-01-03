@@ -4970,6 +4970,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "common-time",
+ "crc32fast",
  "dashmap",
  "datafusion",
  "datafusion-common",
