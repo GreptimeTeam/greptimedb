@@ -12,11 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use testcontainers::core::{ContainerState, ExecCommand, WaitFor};
 
-use crate::wal::kafka::config::{
-    Config, KAFKA_ADVERTISED_LISTENER_PORT, KAFKA_LISTENER_PORT, ZOOKEEPER_PORT,
-};
+const IMAGE_NAME: &str = "confluentinc/cp-kafka";
+const IMAGE_TAG: &str = "7.4.3";
+/// Through which port the Zookeeper node listens for external traffics, e.g. traffics from the Kafka node.
+const ZOOKEEPER_PORT: u16 = 2181;
+/// Through which port the Kafka node listens for internal traffics, i.e. traffics between Kafka nodes in the same Kafka cluster.
+const KAFKA_LISTENER_PORT: u16 = 19092;
+/// Through which port the Kafka node listens for external traffics, e.g. traffics from Kafka clients.
+const KAFKA_ADVERTISED_LISTENER_PORT: u16 = 9092;
 
 #[derive(Debug, Clone, Default)]
 pub struct ImageArgs;
@@ -45,44 +52,56 @@ impl testcontainers::ImageArgs for ImageArgs {
     }
 }
 
-#[derive(Default)]
 pub struct Image {
-    config: Config,
+    env_vars: HashMap<String, String>,
 }
 
-impl Image {
-    pub fn with_exposed_port(port: u16) -> Self {
-        let config = Config {
-            exposed_port: port,
-            ..Default::default()
-        };
-        Self { config }
+impl Default for Image {
+    fn default() -> Self {
+        Self {
+            env_vars: build_env_vars(),
+        }
     }
 }
 
 impl testcontainers::Image for Image {
     type Args = ImageArgs;
 
+    /// The name of the Kafka image hosted in the docker hub.
     fn name(&self) -> String {
-        self.config.image_name.clone()
+        IMAGE_NAME.to_string()
     }
 
+    /// The tag of the kafka image hosted in the docker hub.
+    /// Warning: please use a tag with long-term support. Do not use `latest` or any other tags that
+    /// the underlying image may suddenly change.
     fn tag(&self) -> String {
-        self.config.image_tag.clone()
+        IMAGE_TAG.to_string()
     }
 
+    /// The runtime is regarded ready to be used if all ready conditions are met.
+    /// Warning: be sure to update the conditions when necessary if the image is altered.
     fn ready_conditions(&self) -> Vec<WaitFor> {
-        self.config.ready_conditions.clone()
+        vec![WaitFor::message_on_stdout(
+            "started (kafka.server.KafkaServer)",
+        )]
     }
 
+    /// The environment variables required to run the runtime.
+    /// Warning: be sure to update the environment variables when necessary if the image is altered.
     fn env_vars(&self) -> Box<dyn Iterator<Item = (&String, &String)> + '_> {
-        Box::new(self.config.env_vars.iter())
+        Box::new(self.env_vars.iter())
     }
 
+    /// The runtime is running in a docker container and has its own network. In order to be used by the host machine,
+    /// the runtime must expose an internal port. For e.g. assume the runtime has an internal port 9092,
+    /// and the `exposed_port` is set to 9092, then the host machine can get a mapped external port with
+    /// `container.get_host_port_ipv4(exposed_port)`. With the mapped port, the host machine could connect with the runtime.
     fn expose_ports(&self) -> Vec<u16> {
-        vec![self.config.exposed_port]
+        vec![KAFKA_ADVERTISED_LISTENER_PORT]
     }
 
+    /// Specifies a collection of commands to be executed when the container is started.
     fn exec_after_start(&self, cs: ContainerState) -> Vec<ExecCommand> {
         let mut commands = vec![];
         let cmd = format!(
@@ -101,6 +120,37 @@ impl testcontainers::Image for Image {
     }
 }
 
+fn build_env_vars() -> HashMap<String, String> {
+    [
+        (
+            "KAFKA_ZOOKEEPER_CONNECT".to_string(),
+            format!("localhost:{ZOOKEEPER_PORT}"),
+        ),
+        (
+            "KAFKA_LISTENERS".to_string(),
+            format!("PLAINTEXT://0.0.0.0:{KAFKA_ADVERTISED_LISTENER_PORT},BROKER://0.0.0.0:{KAFKA_LISTENER_PORT}"),
+        ),
+        (
+            "KAFKA_ADVERTISED_LISTENERS".to_string(),
+            format!("PLAINTEXT://localhost:{KAFKA_ADVERTISED_LISTENER_PORT},BROKER://localhost:{KAFKA_LISTENER_PORT}",),
+        ),
+        (
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_string(),
+            "BROKER:PLAINTEXT,PLAINTEXT:PLAINTEXT".to_string(),
+        ),
+        (
+            "KAFKA_INTER_BROKER_LISTENER_NAME".to_string(),
+            "BROKER".to_string(),
+        ),
+        ("KAFKA_BROKER_ID".to_string(), "1".to_string()),
+        (
+            "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_string(),
+            "1".to_string(),
+        ),
+    ]
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use rskafka::chrono::{TimeZone, Utc};
@@ -109,15 +159,14 @@ mod tests {
     use rskafka::record::Record;
     use testcontainers::clients::Cli as DockerCli;
 
-    use crate::wal::kafka::config::KAFKA_ADVERTISED_LISTENER_PORT;
-    use crate::wal::kafka::image::Image;
+    use super::*;
 
     #[tokio::test]
     async fn test_image() {
         // Starts a Kafka container.
         let port = KAFKA_ADVERTISED_LISTENER_PORT;
         let docker = DockerCli::default();
-        let container = docker.run(Image::with_exposed_port(port));
+        let container = docker.run(Image::default());
 
         // Creates a Kafka client.
         let broker_endpoints = vec![format!("127.0.0.1:{}", container.get_host_port_ipv4(port))];
