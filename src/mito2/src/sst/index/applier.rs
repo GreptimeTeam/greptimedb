@@ -101,13 +101,10 @@ impl SstIndexApplier {
             // Encountering a non-existing column indicates that it doesn't match predicates.
             index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
         };
-        let res = self
-            .index_applier
+        self.index_applier
             .apply(context, &mut index_reader)
             .await
-            .context(ApplyIndexSnafu)?;
-
-        Ok(res)
+            .context(ApplyIndexSnafu)
     }
 }
 
