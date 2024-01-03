@@ -99,8 +99,11 @@ impl Drop for ProcedureGuard {
             self.manager_ctx.notify_by_subprocedure(parent_id);
         }
 
-        // Drops the key guards.
-        std::mem::take(&mut self.key_guards);
+        // Drops the key guards in the reverse order.
+        {
+            let mut key_guards = std::mem::take(&mut self.key_guards);
+            key_guards.reverse();
+        }
 
         // Clean the staled locks.
         self.manager_ctx
