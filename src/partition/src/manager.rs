@@ -79,7 +79,7 @@ impl PartitionRuleManager {
             route
                 .region_routes()
                 .context(error::UnexpectedLogicalRouteTableSnafu {
-                    err_msg: "{self:?} is a non-physical TableRouteValue.",
+                    err_msg: format!("{route:?} is a non-physical TableRouteValue."),
                 })?;
         Ok(RegionRoutes(region_routes.clone()))
     }
@@ -96,7 +96,7 @@ impl PartitionRuleManager {
             route
                 .region_routes()
                 .context(error::UnexpectedLogicalRouteTableSnafu {
-                    err_msg: "{self:?} is a non-physical TableRouteValue.",
+                    err_msg: format!("{route:?} is a non-physical TableRouteValue."),
                 })?;
 
         ensure!(
