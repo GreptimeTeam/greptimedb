@@ -233,11 +233,12 @@ impl InformationSchemaColumnsBuilder {
         let data_type = &column_schema.data_type.name();
 
         let row = [
-            ("catalog_name", &Value::from(catalog_name)),
-            ("schema_name", &Value::from(schema_name)),
-            ("table_name", &Value::from(table_name)),
-            ("semantic_type", &Value::from(semantic_type)),
-            ("data_type", &Value::from(data_type.as_str())),
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (COLUMN_NAME, &Value::from(column_schema.name.as_str())),
+            (DATA_TYPE, &Value::from(data_type.as_str())),
+            (SEMANTIC_TYPE, &Value::from(semantic_type)),
         ];
 
         if !predicates.eval(&row) {

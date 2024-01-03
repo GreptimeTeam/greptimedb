@@ -174,8 +174,8 @@ impl InformationSchemaSchemataBuilder {
         let row = [
             ("catalog_name", &Value::from(catalog_name)),
             ("schema_name", &Value::from(schema_name)),
-            ("charset_name", &Value::from("utf8")),
-            ("collation_name", &Value::from("utf8_bin")),
+            ("default_character_set_name", &Value::from("utf8")),
+            ("default_collation_name", &Value::from("utf8_bin")),
         ];
 
         if !predicates.eval(&row) {

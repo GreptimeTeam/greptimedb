@@ -32,58 +32,63 @@ enum Predicate {
 }
 
 impl Predicate {
-    /// Evaluate the predicate with value, returns:
-    /// - `None` when the predicate can't run on value,
-    /// - `Some(true)`  when the predicate is satisfied,.
-    /// - `Some(false)` when the predicate is not satisfied.
-    fn eval(&self, column: &str, value: &Value) -> Option<bool> {
+    /// Evaluate the predicate with the row, returns:
+    /// - None when the predicate can't evaluate with the row.
+    /// - Some(true) when the predicate is satisfied,
+    /// - Some(false) when the predicate is satisfied,
+    fn eval(&self, row: &[(&str, &Value)]) -> Option<bool> {
         match self {
             Predicate::Eq(c, v) => {
-                if c != column {
-                    return None;
+                for (column, value) in row {
+                    if c != column {
+                        continue;
+                    }
+                    return Some(v == *value);
                 }
-                Some(v == value)
             }
             Predicate::NotEq(c, v) => {
-                if c != column {
-                    return None;
+                for (column, value) in row {
+                    if c != column {
+                        continue;
+                    }
+                    return Some(v != *value);
                 }
-                Some(v != value)
             }
             Predicate::InList(c, values) => {
-                if c != column {
-                    return None;
+                for (column, value) in row {
+                    if c != column {
+                        continue;
+                    }
+                    return Some(values.iter().any(|v| v == *value));
                 }
-                Some(values.iter().any(|v| v == value))
             }
             Predicate::And(left, right) => {
-                let Some(left) = left.eval(column, value) else {
-                    return None;
+                return match (left.eval(row), right.eval(row)) {
+                    (Some(left), Some(right)) => Some(left && right),
+                    (Some(false), None) => Some(false),
+                    (None, Some(false)) => Some(false),
+                    _ => None,
                 };
-                let Some(right) = right.eval(column, value) else {
-                    return None;
-                };
-
-                Some(left && right)
             }
             Predicate::Or(left, right) => {
-                let Some(left) = left.eval(column, value) else {
-                    return None;
+                return match (left.eval(row), right.eval(row)) {
+                    (Some(left), Some(right)) => Some(left || right),
+                    (Some(true), None) => Some(true),
+                    (None, Some(true)) => Some(true),
+                    _ => None,
                 };
-                let Some(right) = right.eval(column, value) else {
-                    return None;
-                };
-
-                Some(left || right)
             }
             Predicate::Not(p) => {
-                let Some(p) = p.eval(column, value) else {
+                let Some(b) = p.eval(row) else {
                     return None;
                 };
 
-                Some(!p)
+                return Some(!b);
             }
         }
+
+        // Can't evaluate predicate on the row
+        None
     }
 
     // Try to create a predicate from datafusion `Expr`, return None if fails.
@@ -203,29 +208,6 @@ impl Predicates {
         }
     }
 
-    /// Evaluate the predicates with the column value,
-    /// returns true when all the predicates are satisfied or can't be evaluated.
-    fn eval_column(&self, column: &str, value: &Value) -> bool {
-        let mut result = true;
-        for predicate in &self.predicates {
-            match predicate.eval(column, value) {
-                Some(b) => {
-                    result = result && b;
-                }
-                None => {
-                    // Can't eval this predicate, continue
-                    continue;
-                }
-            }
-
-            if !result {
-                break;
-            }
-        }
-
-        result
-    }
-
     /// Evaluate the predicates with the columns and values,
     /// returns true when all the predicates are satisfied or can't be evaluated.
     pub fn eval(&self, row: &[(&str, &Value)]) -> bool {
@@ -235,8 +217,15 @@ impl Predicates {
         }
 
         let mut result = true;
-        for (column, value) in row {
-            result = result && self.eval_column(column, value);
+
+        for predicate in &self.predicates {
+            match predicate.eval(row) {
+                Some(b) => {
+                    result = result && b;
+                }
+                // The predicate can't evalute on the row, continue
+                None => continue,
+            }
 
             if !result {
                 break;
@@ -250,4 +239,99 @@ impl Predicates {
 /// Returns true when the values are all `ScalarValue`.
 fn is_all_scalars(list: &[DfExpr]) -> bool {
     list.iter().all(|v| matches!(v, DfExpr::Literal(_)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_predicate_eval() {
+        let a_col = "a".to_string();
+        let b_col = "b".to_string();
+        let a_value = Value::from("a_value");
+        let b_value = Value::from("b_value");
+        let wrong_value = Value::from("wrong_value");
+
+        let a_row = [(a_col.as_str(), &a_value)];
+        let b_row = [("b", &wrong_value)];
+        let wrong_row = [(a_col.as_str(), &wrong_value)];
+
+        // Predicate::Eq
+        let p = Predicate::Eq(a_col.clone(), a_value.clone());
+        assert!(p.eval(&a_row).unwrap());
+        assert!(p.eval(&b_row).is_none());
+        assert!(!p.eval(&wrong_row).unwrap());
+
+        // Predicate::NotEq
+        let p = Predicate::NotEq(a_col.clone(), a_value.clone());
+        assert!(!p.eval(&a_row).unwrap());
+        assert!(p.eval(&b_row).is_none());
+        assert!(p.eval(&wrong_row).unwrap());
+
+        // Predicate::InList
+        let p = Predicate::InList(a_col.clone(), vec![a_value.clone(), b_value.clone()]);
+        assert!(p.eval(&a_row).unwrap());
+        assert!(p.eval(&b_row).is_none());
+        assert!(!p.eval(&wrong_row).unwrap());
+        assert!(p.eval(&[(&a_col, &b_value)]).unwrap());
+
+        let p1 = Predicate::Eq(a_col.clone(), a_value.clone());
+        let p2 = Predicate::Eq(b_col.clone(), b_value.clone());
+        let row = [(a_col.as_str(), &a_value), (b_col.as_str(), &b_value)];
+        let wrong_row = [(a_col.as_str(), &a_value), (b_col.as_str(), &wrong_value)];
+
+        //Predicate::And
+        let p = Predicate::And(Box::new(p1.clone()), Box::new(p2.clone()));
+        assert!(p.eval(&row).unwrap());
+        assert!(!p.eval(&wrong_row).unwrap());
+        assert!(p.eval(&[]).is_none());
+        assert!(p.eval(&[("c", &a_value)]).is_none());
+        assert!(!p
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
+            .unwrap());
+        assert!(!p
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
+            .unwrap());
+        assert!(p
+            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
+            .is_none());
+        assert!(!p
+            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
+            .unwrap());
+
+        //Predicate::Or
+        let p = Predicate::Or(Box::new(p1), Box::new(p2));
+        assert!(p.eval(&row).unwrap());
+        assert!(p.eval(&wrong_row).unwrap());
+        assert!(p.eval(&[]).is_none());
+        assert!(p.eval(&[("c", &a_value)]).is_none());
+        assert!(!p
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &a_value)])
+            .unwrap());
+        assert!(p
+            .eval(&[(a_col.as_str(), &b_value), (b_col.as_str(), &b_value)])
+            .unwrap());
+        assert!(p
+            .eval(&[(a_col.as_ref(), &a_value), ("c", &a_value)])
+            .unwrap());
+        assert!(p
+            .eval(&[(a_col.as_ref(), &b_value), ("c", &a_value)])
+            .is_none());
+    }
+
+    #[test]
+    fn test_predicate_from_expr() {
+        todo!()
+    }
+
+    #[test]
+    fn test_predicates_from_scan_request() {
+        todo!()
+    }
+
+    #[test]
+    fn test_predicates_eval_row() {
+        todo!()
+    }
 }

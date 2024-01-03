@@ -24,6 +24,16 @@ from information_schema.tables
 where table_schema = 'my_db'
 order by table_name;
 
+select table_name
+from information_schema.tables
+where table_schema in ('my_db', 'public')
+order by table_name;
+
+select table_name
+from information_schema.tables
+where table_schema not in ('my_db', 'information_schema')
+order by table_name;
+
 select table_catalog, table_schema, table_name, table_type, engine
 from information_schema.tables
 where table_catalog = 'greptime'
@@ -38,11 +48,27 @@ where table_catalog = 'greptime'
   and table_schema != 'information_schema'
 order by table_schema, table_name, column_name;
 
+-- test query filter for columns --
+select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
+from information_schema.columns
+where table_catalog = 'greptime'
+  and (table_schema in ('public')
+      or
+      table_schema == 'my_db')
+order by table_schema, table_name, column_name;
+
 use public;
 
 drop schema my_db;
 
 use information_schema;
+
+-- test query filter for key_column_usage --
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
 
 -- schemata --
 

@@ -204,8 +204,8 @@ impl InformationSchemaTablesBuilder {
         };
 
         let row = [
-            ("catalog_name", &Value::from(catalog_name)),
-            ("schema_name", &Value::from(schema_name)),
+            ("table_catalog", &Value::from(catalog_name)),
+            ("table_schema", &Value::from(schema_name)),
             ("table_name", &Value::from(table_name)),
             ("table_type", &Value::from(table_type)),
         ];
