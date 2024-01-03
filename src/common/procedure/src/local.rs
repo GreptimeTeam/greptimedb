@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod lock;
 mod runner;
+mod rwlock;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,11 +29,11 @@ use snafu::{ensure, ResultExt};
 use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
+use self::rwlock::KeyRwLock;
 use crate::error::{
     DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu, Result,
     StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
 };
-use crate::local::lock::LockMap;
 use crate::local::runner::Runner;
 use crate::procedure::BoxedProcedureLoader;
 use crate::store::{ProcedureMessage, ProcedureStore, StateStoreRef};
@@ -57,8 +57,6 @@ const META_TTL: Duration = Duration::from_secs(60 * 10);
 pub(crate) struct ProcedureMeta {
     /// Id of this procedure.
     id: ProcedureId,
-    /// Notify to wait for a lock.
-    lock_notify: Notify,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
     /// Notify to wait for subprocedures.
@@ -78,7 +76,6 @@ impl ProcedureMeta {
         let (state_sender, state_receiver) = watch::channel(ProcedureState::Running);
         ProcedureMeta {
             id,
-            lock_notify: Notify::new(),
             parent_id,
             child_notify: Notify::new(),
             lock_key,
@@ -131,7 +128,7 @@ struct LoadedProcedure {
 pub(crate) struct ManagerContext {
     /// Procedure loaders. The key is the type name of the procedure which the loader returns.
     loaders: Mutex<HashMap<String, BoxedProcedureLoader>>,
-    lock_map: LockMap,
+    key_lock: KeyRwLock<String>,
     procedures: RwLock<HashMap<ProcedureId, ProcedureMetaRef>>,
     /// Messages loaded from the procedure store.
     messages: Mutex<HashMap<ProcedureId, ProcedureMessage>>,
@@ -152,8 +149,8 @@ impl ManagerContext {
     /// Returns a new [ManagerContext].
     fn new() -> ManagerContext {
         ManagerContext {
+            key_lock: KeyRwLock::new(),
             loaders: Mutex::new(HashMap::new()),
-            lock_map: LockMap::new(),
             procedures: RwLock::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
             finished_procedures: Mutex::new(VecDeque::new()),
@@ -850,7 +847,7 @@ mod tests {
         assert!(manager.procedure_watcher(procedure_id).is_none());
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         assert!(manager
             .submit(ProcedureWithId {
                 id: procedure_id,
@@ -918,7 +915,7 @@ mod tests {
             }
 
             fn lock_key(&self) -> LockKey {
-                LockKey::single("test.submit")
+                LockKey::single_exclusive("test.submit")
             }
         }
 
@@ -955,7 +952,7 @@ mod tests {
         let manager = LocalManager::new(config, state_store);
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert_matches!(
             manager
@@ -986,7 +983,7 @@ mod tests {
         manager.start().await.unwrap();
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {
@@ -1018,7 +1015,7 @@ mod tests {
         manager.manager_ctx.set_running();
 
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {
@@ -1041,7 +1038,7 @@ mod tests {
         // The remove_outdated_meta method has been stopped, so any procedure meta-data will not be automatically removed.
         manager.stop().await.unwrap();
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
 
         manager.manager_ctx.set_running();
@@ -1063,7 +1060,7 @@ mod tests {
 
         // After restart
         let mut procedure = ProcedureToLoad::new("submit");
-        procedure.lock_key = LockKey::single("test.submit");
+        procedure.lock_key = LockKey::single_exclusive("test.submit");
         let procedure_id = ProcedureId::random();
         assert!(manager
             .submit(ProcedureWithId {
