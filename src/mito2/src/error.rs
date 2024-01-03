@@ -440,6 +440,33 @@ pub enum Error {
         source: datatypes::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to apply index"))]
+    ApplyIndex {
+        #[snafu(source)]
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin metadata"))]
+    PuffinReadMetadata {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to read puffin blob"))]
+    PuffinReadBlob {
+        #[snafu(source)]
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
+    PuffinBlobTypeNotFound {
+        blob_type: String,
+        location: Location,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -477,6 +504,7 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
+            | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             ObjectStoreNotFound { .. }
@@ -522,8 +550,11 @@ impl ErrorExt for Error {
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
-            BuildIndexApplier { source, .. } => source.status_code(),
             ConvertValue { source, .. } => source.status_code(),
+            BuildIndexApplier { source, .. } | ApplyIndex { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. } | PuffinReadBlob { source, .. } => {
+                source.status_code()
+            }
         }
     }
 

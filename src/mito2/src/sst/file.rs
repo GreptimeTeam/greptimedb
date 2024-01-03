@@ -20,13 +20,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use common_time::Timestamp;
-use object_store::util::join_path;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use store_api::storage::RegionId;
 use uuid::Uuid;
 
 use crate::sst::file_purger::{FilePurgerRef, PurgeRequest};
+use crate::sst::location;
 
 /// Type to store SST level.
 pub type Level = u8;
@@ -56,6 +56,11 @@ impl FileId {
     /// Append `.parquet` to file id to make a complete file name
     pub fn as_parquet(&self) -> String {
         format!("{}{}", self, ".parquet")
+    }
+
+    /// Append `.puffin` to file id to make a complete file name
+    pub fn as_puffin(&self) -> String {
+        format!("{}{}", self, ".puffin")
     }
 }
 
@@ -131,7 +136,7 @@ impl FileHandle {
 
     /// Returns the complete file path of the file.
     pub fn file_path(&self, file_dir: &str) -> String {
-        join_path(file_dir, &self.file_id().as_parquet())
+        location::sst_file_path(file_dir, self.file_id())
     }
 
     /// Returns the time range of the file.

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::mem::size_of;
 
 use async_trait::async_trait;
@@ -43,11 +44,11 @@ pub struct PredicatesIndexApplier {
 impl IndexApplier for PredicatesIndexApplier {
     /// Applies all `FstApplier`s to the data in the inverted index reader, intersecting the individual
     /// bitmaps obtained for each index to result in a final set of indices.
-    async fn apply(
+    async fn apply<'a>(
         &self,
         context: SearchContext,
-        reader: &mut dyn InvertedIndexReader,
-    ) -> Result<Vec<usize>> {
+        reader: &mut (dyn InvertedIndexReader + 'a),
+    ) -> Result<BTreeSet<usize>> {
         let metadata = reader.metadata().await?;
 
         let mut bitmap = Self::bitmap_full_range(&metadata);
@@ -60,7 +61,7 @@ impl IndexApplier for PredicatesIndexApplier {
             let Some(meta) = metadata.metas.get(name) else {
                 match context.index_not_found_strategy {
                     IndexNotFoundStrategy::ReturnEmpty => {
-                        return Ok(vec![]);
+                        return Ok(BTreeSet::default());
                     }
                     IndexNotFoundStrategy::Ignore => {
                         continue;
@@ -209,7 +210,7 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, vec![0, 2, 4, 6]);
+        assert_eq!(indices, BTreeSet::from_iter([0, 2, 4, 6]));
 
         // An index reader with a single tag "tag-0" but without value "tag-0_value-0"
         let mut mock_reader = MockInvertedIndexReader::new();
@@ -263,7 +264,7 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, vec![0, 4, 6]);
+        assert_eq!(indices, BTreeSet::from_iter([0, 4, 6]));
     }
 
     #[tokio::test]
@@ -281,7 +282,7 @@ mod tests {
             .apply(SearchContext::default(), &mut mock_reader)
             .await
             .unwrap();
-        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]); // full range to scan
+        assert_eq!(indices, BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7])); // full range to scan
     }
 
     #[tokio::test]
@@ -353,7 +354,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(indices, BTreeSet::from_iter([0, 1, 2, 3, 4, 5, 6, 7]));
     }
 
     #[test]

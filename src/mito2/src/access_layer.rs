@@ -14,13 +14,14 @@
 
 use std::sync::Arc;
 
-use object_store::{util, ObjectStore};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::error::{DeleteSstSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
+use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 
@@ -61,7 +62,7 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let path = location::sst_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&path)
             .await
@@ -81,12 +82,7 @@ impl AccessLayer {
         metadata: RegionMetadataRef,
         source: Source,
     ) -> ParquetWriter {
-        let path = self.sst_file_path(&file_id.as_parquet());
+        let path = location::sst_file_path(&self.region_dir, file_id);
         ParquetWriter::new(path, metadata, source, self.object_store.clone())
-    }
-
-    /// Returns the `file_path` for the `file_name` in the object store.
-    fn sst_file_path(&self, file_name: &str) -> String {
-        util::join_path(&self.region_dir, file_name)
     }
 }

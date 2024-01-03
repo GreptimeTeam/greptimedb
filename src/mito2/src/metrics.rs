@@ -21,6 +21,8 @@ pub const STAGE_LABEL: &str = "stage";
 pub const TYPE_LABEL: &str = "type";
 /// Reason to flush.
 pub const FLUSH_REASON: &str = "reason";
+/// File type label.
+pub const FILE_TYPE_LABEL: &str = "file_type";
 
 lazy_static! {
     /// Global write buffer size in bytes.
@@ -143,4 +145,50 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    // ------- End of cache metrics.
+
+    // Index metrics.
+    /// Timer of index application.
+    pub static ref INDEX_APPLY_COST_TIME: Histogram = register_histogram!(
+        "index_apply_cost_time",
+        "index apply cost time",
+    )
+    .unwrap();
+    /// Gauge of index apply memory usage.
+    pub static ref INDEX_APPLY_MEMORY_USAGE: IntGauge = register_int_gauge!(
+        "index_apply_memory_usage",
+        "index apply memory usage",
+    )
+    .unwrap();
+    /// Counter of r/w bytes on index related IO operations.
+    pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "index_io_bytes_total",
+        "index io bytes total",
+        &[TYPE_LABEL, FILE_TYPE_LABEL]
+    )
+    .unwrap();
+    /// Counter of read bytes on puffin files.
+    pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["read", "puffin"]);
+
+    /// Counter of r/w operations on index related IO operations, e.g. read, write, seek and flush.
+    pub static ref INDEX_IO_OP_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "index_io_op_total",
+        "index io op total",
+        &[TYPE_LABEL, FILE_TYPE_LABEL]
+    )
+    .unwrap();
+    /// Counter of read operations on puffin files.
+    pub static ref INDEX_PUFFIN_READ_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["read", "puffin"]);
+    /// Counter of seek operations on puffin files.
+    pub static ref INDEX_PUFFIN_SEEK_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["seek", "puffin"]);
+    /// Counter of write operations on puffin files.
+    pub static ref INDEX_PUFFIN_WRITE_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["write", "puffin"]);
+    /// Counter of flush operations on puffin files.
+    pub static ref INDEX_PUFFIN_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["flush", "puffin"]);
+    // ------- End of index metrics.
 }
