@@ -24,8 +24,7 @@ use store_api::storage::RegionId;
 use strum::IntoStaticStr;
 use tokio::sync::mpsc;
 
-use crate::access_layer::AccessLayerRef;
-use crate::cache::write_cache::UploadPartWriter;
+use crate::access_layer::{AccessLayerRef, SstWriteRequest};
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -247,18 +246,8 @@ impl RegionFlushTask {
         let timer = FLUSH_ELAPSED.with_label_values(&["total"]).start_timer();
         self.listener.on_flush_begin(self.region_id).await;
 
-        let version = &version_data.version;
-        // Prepare a upload part.
-        let mut writer = self
-            .access_layer
-            .upload_part_writer(version.metadata.clone(), &self.cache_manager)
-            .with_storage(version.options.storage.clone());
-
-        let worker_request = match self
-            .flush_memtables(&version_data.version, &mut writer)
-            .await
-        {
-            Ok(()) => {
+        let worker_request = match self.flush_memtables(&version_data.version).await {
+            Ok(file_metas) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -266,11 +255,10 @@ impl RegionFlushTask {
                     .iter()
                     .map(|m| m.id())
                     .collect();
-                let upload_part = writer.finish();
 
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
-                    file_metas: upload_part.file_metas,
+                    file_metas,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     flushed_sequence: version_data.committed_sequence,
@@ -301,11 +289,7 @@ impl RegionFlushTask {
     }
 
     /// Flushes memtables to level 0 SSTs.
-    async fn flush_memtables(
-        &self,
-        version: &VersionRef,
-        part_writer: &mut UploadPartWriter,
-    ) -> Result<()> {
+    async fn flush_memtables(&self, version: &VersionRef) -> Result<Vec<FileMeta>> {
         let timer = FLUSH_ELAPSED
             .with_label_values(&["flush_memtables"])
             .start_timer();
@@ -319,7 +303,8 @@ impl RegionFlushTask {
         }
 
         let memtables = version.memtables.immutables();
-        part_writer.reserve_capacity(memtables.len());
+        let mut file_metas = Vec::with_capacity(memtables.len());
+        let mut flushed_bytes = 0;
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -331,11 +316,22 @@ impl RegionFlushTask {
             let source = Source::Iter(iter);
 
             // Flush to level 0.
-            let mut sst_writer = part_writer.new_sst_writer(file_id);
-            let Some(sst_info) = sst_writer.write_all(source, &write_opts).await? else {
+            let write_request = SstWriteRequest {
+                file_id,
+                metadata: version.metadata.clone(),
+                source,
+                cache_manager: self.cache_manager.clone(),
+                storage: version.options.storage.clone(),
+            };
+            let Some(sst_info) = self
+                .access_layer
+                .write_sst(write_request, &write_opts)
+                .await?
+            else {
                 // No data written.
                 continue;
             };
+            flushed_bytes += sst_info.file_size;
             let file_meta = FileMeta {
                 region_id: self.region_id,
                 file_id,
@@ -343,23 +339,14 @@ impl RegionFlushTask {
                 level: 0,
                 file_size: sst_info.file_size,
             };
-            part_writer.add_sst(file_meta);
+            file_metas.push(file_meta);
         }
 
-        if !part_writer.written_file_metas().is_empty() {
-            let flushed_bytes = part_writer
-                .written_file_metas()
-                .iter()
-                .map(|meta| meta.file_size)
-                .sum();
+        if !file_metas.is_empty() {
             FLUSH_BYTES_TOTAL.inc_by(flushed_bytes);
         }
 
-        let file_ids: Vec<_> = part_writer
-            .written_file_metas()
-            .iter()
-            .map(|f| f.file_id)
-            .collect();
+        let file_ids: Vec<_> = file_metas.iter().map(|f| f.file_id).collect();
         info!(
             "Successfully flush memtables, region: {}, reason: {}, files: {:?}, cost: {:?}s",
             self.region_id,
@@ -368,7 +355,7 @@ impl RegionFlushTask {
             timer.stop_and_record(),
         );
 
-        Ok(())
+        Ok(file_metas)
     }
 
     /// Notify flush job status.

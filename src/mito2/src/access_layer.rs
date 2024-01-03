@@ -18,11 +18,13 @@ use object_store::{util, ObjectStore};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
-use crate::cache::write_cache::UploadPartWriter;
 use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
+use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
+use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -74,16 +76,32 @@ impl AccessLayer {
         ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
-    // Returns a [UploadPartWriter] to upload.
-    pub(crate) fn upload_part_writer(
+    /// Writes a SST with specific `file_id` and `metadata` to the layer.
+    ///
+    /// Returns the info of the SST. If no data written, returns None.
+    pub(crate) async fn write_sst(
         &self,
-        metadata: RegionMetadataRef,
-        _cache_manager: &CacheManagerRef,
-    ) -> UploadPartWriter {
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
+        // Ignore unused storage and cache manager.
         // TODO(yingwen): Use local store in the cache manager once the cache is ready.
-        UploadPartWriter::new(self.object_store.clone(), metadata)
-            .with_region_dir(self.region_dir.clone())
+        let _cache_manager = request.cache_manager;
+        let _storage = request.storage;
+
+        let path = sst_file_path(&self.region_dir, request.file_id);
+        let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
+        writer.write_all(request.source, write_opts).await
     }
+}
+
+/// Contents to build a SST.
+pub(crate) struct SstWriteRequest {
+    pub(crate) file_id: FileId,
+    pub(crate) metadata: RegionMetadataRef,
+    pub(crate) source: Source,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) storage: Option<String>,
 }
 
 /// Returns the `file_path` for the `file_id` in the object store.
