@@ -56,11 +56,22 @@ impl Drop for RegionMigrationProcedureGuard {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RegionMigrationProcedureTask {
+pub struct RegionMigrationProcedureTask {
     pub(crate) cluster_id: ClusterId,
     pub(crate) region_id: RegionId,
     pub(crate) from_peer: Peer,
     pub(crate) to_peer: Peer,
+}
+
+impl RegionMigrationProcedureTask {
+    pub fn new(cluster_id: ClusterId, region_id: RegionId, from_peer: Peer, to_peer: Peer) -> Self {
+        Self {
+            cluster_id,
+            region_id,
+            from_peer,
+            to_peer,
+        }
+    }
 }
 
 impl Display for RegionMigrationProcedureTask {
@@ -223,7 +234,7 @@ impl RegionMigrationManager {
     }
 
     /// Submits a new region migration procedure.
-    pub(crate) async fn submit_procedure(
+    pub async fn submit_procedure(
         &self,
         task: RegionMigrationProcedureTask,
     ) -> Result<Option<ProcedureId>> {
