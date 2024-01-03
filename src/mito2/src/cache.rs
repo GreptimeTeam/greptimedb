@@ -194,6 +194,11 @@ impl CacheManager {
             cache.insert(page_key, pages);
         }
     }
+
+    /// Gets the the write cache.
+    pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
+        self.write_cache.as_ref()
+    }
 }
 
 fn meta_cache_weight(k: &SstMetaKey, v: &Arc<ParquetMetaData>) -> u32 {

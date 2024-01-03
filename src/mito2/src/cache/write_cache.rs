@@ -23,13 +23,14 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::mpsc::Sender;
 
+use crate::access_layer::SstWriteRequest;
 use crate::cache::file_cache::{FileCache, FileCacheRef};
 use crate::error::Result;
 use crate::read::Source;
 use crate::request::WorkerRequest;
 use crate::sst::file::{FileId, FileMeta, Level};
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::WriteOptions;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::sst_file_path;
 use crate::wal::EntryId;
 
@@ -46,7 +47,6 @@ pub struct WriteCache {
 pub type WriteCacheRef = Arc<WriteCache>;
 
 impl WriteCache {
-    // TODO(yingwen): Maybe pass cache path instead of local store.
     /// Create the cache with a `local_store` to cache files and a
     /// `object_store_manager` for all object stores.
     pub fn new(
@@ -65,11 +65,30 @@ impl WriteCache {
         self.file_cache.recover().await
     }
 
-    /// Adds files to the cache.
-    pub(crate) async fn upload(&self, upload: Upload) -> Result<()> {
-        // Add the upload metadata to the manifest.
-        unimplemented!()
+    /// Writes SST to the cache and then uploads it to the remote object store.
+    pub(crate) async fn write_and_upload_sst(
+        &self,
+        request: SstUploadRequest,
+        write_opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
+        // TODO(yingwen): Write to the local store and then upload.
+        // Now we write to the remote and ignore local cache.
+        let mut writer =
+            ParquetWriter::new(request.upload_path, request.metadata, request.remote_store);
+        writer.write_all(request.source, write_opts).await
     }
+}
+
+/// Request to write and upload a SST.
+pub(crate) struct SstUploadRequest {
+    pub(crate) file_id: FileId,
+    pub(crate) metadata: RegionMetadataRef,
+    pub(crate) source: Source,
+    pub(crate) storage: Option<String>,
+    /// Path to upload the file.
+    pub(crate) upload_path: String,
+    /// Remote object store to upload.
+    pub(crate) remote_store: ObjectStore,
 }
 
 /// A remote write request to upload files.
@@ -78,7 +97,7 @@ pub(crate) struct Upload {
     pub(crate) parts: Vec<UploadPart>,
 }
 
-/// Metadata of SSTs to upload together.
+/// Metadata of SST to upload together.
 pub(crate) struct UploadPart {
     /// Region id.
     region_id: RegionId,

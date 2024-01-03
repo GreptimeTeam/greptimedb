@@ -18,6 +18,7 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::cache::write_cache::SstUploadRequest;
 use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::read::Source;
@@ -85,12 +86,26 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        // Ignore unused storage and cache manager.
-        // TODO(yingwen): Use local store in the cache manager once the cache is ready.
-        let _cache_manager = request.cache_manager;
-        let _storage = request.storage;
-
         let path = sst_file_path(&self.region_dir, request.file_id);
+
+        if let Some(write_cache) = request.cache_manager.write_cache() {
+            // Write to the write cache.
+            return write_cache
+                .write_and_upload_sst(
+                    SstUploadRequest {
+                        file_id: request.file_id,
+                        metadata: request.metadata,
+                        source: request.source,
+                        storage: request.storage,
+                        upload_path: path,
+                        remote_store: self.object_store.clone(),
+                    },
+                    write_opts,
+                )
+                .await;
+        }
+
+        // Write cache is disabled.
         let mut writer = ParquetWriter::new(path, request.metadata, self.object_store.clone());
         writer.write_all(request.source, write_opts).await
     }
