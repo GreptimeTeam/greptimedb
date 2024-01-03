@@ -303,10 +303,11 @@ async fn test_object_store_cache_policy() -> Result<()> {
 
     // create file cache layer
     let cache_dir = create_temp_dir("test_object_store_cache_policy_cache");
+    let atomic_temp_dir = create_temp_dir("test_object_store_cache_policy_cache_tmp");
     let mut builder = Fs::default();
     let _ = builder
         .root(&cache_dir.path().to_string_lossy())
-        .atomic_write_dir(&cache_dir.path().to_string_lossy());
+        .atomic_write_dir(&atomic_temp_dir.path().to_string_lossy());
     let file_cache = Arc::new(builder.build().unwrap());
     let cache_store = OperatorBuilder::new(file_cache.clone()).finish();
 
@@ -367,6 +368,8 @@ async fn test_object_store_cache_policy() -> Result<()> {
     )
     .await;
 
+    // Read the deleted file without a deterministic range size requires an extra `stat.`
+    // Therefore, it won't go into the cache.
     assert!(store.read(p2).await.is_err());
 
     let p3 = "test_file3";
@@ -375,8 +378,7 @@ async fn test_object_store_cache_policy() -> Result<()> {
     // Try to read p3
     let _ = store.read(p3).await.unwrap();
     let _ = store.read_with(p3).range(0..5).await.unwrap();
-    // Read the deleted file without a deterministic range size requires an extra `stat.`
-    // Therefore, it won't go into the cache.
+
     assert_eq!(cache_layer.read_cache_stat().await, (3, 35));
 
     // However, The real open file happens after the reader is created.

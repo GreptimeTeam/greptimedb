@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use bytes::Bytes;
 use common_telemetry::logging::debug;
 use futures::FutureExt;
 use moka::future::Cache;
@@ -223,6 +222,22 @@ impl<C: Accessor + Clone> ReadCache<C> {
         }
     }
 
+    async fn try_write_cache<I>(&self, mut reader: I::Reader, read_key: &str) -> Result<usize>
+    where
+        I: Accessor,
+    {
+        let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
+        let mut total = 0;
+        while let Some(bytes) = reader.next().await {
+            let bytes = &bytes?;
+            total += bytes.len();
+            writer.write(bytes).await?;
+        }
+        // Call `close` to ensure data is written.
+        writer.close().await?;
+        Ok(total)
+    }
+
     /// Read the file from remote storage. If success, write the content into local cache.
     async fn read_remote<I>(
         &self,
@@ -237,19 +252,11 @@ impl<C: Accessor + Clone> ReadCache<C> {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
         // The real read will happen after `read_to_end` is invoked.
-        let (_, mut reader) = inner.read(path, args).await?;
-        let mut buf = Vec::new();
-        let result = reader.read_to_end(&mut buf).await;
+        let (_, reader) = inner.read(path, args).await?;
+        let result = self.try_write_cache::<I>(reader, read_key).await;
 
         match result {
             Ok(read_bytes) => {
-                let (_, mut writer) = self.file_cache.write(read_key, OpWrite::new()).await?;
-
-                let bytes = Bytes::from(buf);
-                writer.write(&bytes).await?;
-                // Call `close` to ensure data is written.
-                writer.close().await?;
-
                 OBJECT_STORE_LRU_CACHE_ENTRIES.inc();
                 OBJECT_STORE_LRU_CACHE_BYTES.add(read_bytes as i64);
 
