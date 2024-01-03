@@ -13,8 +13,6 @@
 // limitations under the License.
 
 mod runner;
-// TODO(weny): Remove it.
-#[allow(dead_code)]
 mod rwlock;
 
 use std::collections::{HashMap, VecDeque};
