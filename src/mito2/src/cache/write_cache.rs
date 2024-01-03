@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_base::readable_size::ReadableSize;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
@@ -23,6 +24,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::sst_file_path;
+use crate::cache::file_cache::{FileCache, FileCacheRef};
 use crate::error::Result;
 use crate::read::Source;
 use crate::request::WorkerRequest;
@@ -35,8 +37,8 @@ use crate::wal::EntryId;
 ///
 /// It keeps files in local disk and then sends files to object stores.
 pub(crate) struct WriteCache {
-    /// Local object storage to store files to upload.
-    local_store: ObjectStore,
+    /// Local file cache.
+    file_cache: FileCacheRef,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
 }
@@ -50,10 +52,10 @@ impl WriteCache {
     pub(crate) fn new(
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
+        cache_capacity: ReadableSize,
     ) -> Self {
-        // TODO(yingwen): Cache capacity.
         Self {
-            local_store,
+            file_cache: Arc::new(FileCache::new(local_store, cache_capacity)),
             object_store_manager,
         }
     }
