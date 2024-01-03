@@ -56,6 +56,8 @@ use session::context::QueryContext;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
 
+pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum StorageType {
     S3,

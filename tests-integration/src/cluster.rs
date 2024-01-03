@@ -54,7 +54,7 @@ use tower::service_fn;
 
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
-    StorageType,
+    StorageType, PEER_PLACEHOLDER_ADDR,
 };
 
 pub struct GreptimeDbCluster {
@@ -110,36 +110,43 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
+    #[must_use]
     pub fn with_store_config(mut self, store_config: ObjectStoreConfig) -> Self {
         self.store_config = Some(store_config);
         self
     }
 
+    #[must_use]
     pub fn with_store_providers(mut self, store_providers: Vec<StorageType>) -> Self {
         self.store_providers = Some(store_providers);
         self
     }
 
+    #[must_use]
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
         self
     }
 
+    #[must_use]
     pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
         self.wal_config = wal_config;
         self
     }
 
+    #[must_use]
     pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
         self
     }
 
+    #[must_use]
     pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
         self.shared_home_dir = Some(shared_home_dir);
         self
     }
 
+    #[must_use]
     pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
         self.meta_selector = Some(selector);
         self
@@ -388,8 +395,8 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // "127.0.0.1:3001" is just a placeholder, does not actually connect to it.
-    let addr = "127.0.0.1:3001";
+    // `PEER_PLACEHOLDER_ADDR` is just a placeholder, does not actually connect to it.
+    let addr = PEER_PLACEHOLDER_ADDR;
     let channel_manager = ChannelManager::new();
     let _ = channel_manager
         .reset_with_connector(

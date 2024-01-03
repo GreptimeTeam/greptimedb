@@ -39,6 +39,7 @@ use table::metadata::TableId;
 use tests_integration::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use tests_integration::test_util::{
     check_output_stream, get_test_store_config, run_test_with_kafka_wal, StorageType,
+    PEER_PLACEHOLDER_ADDR,
 };
 use uuid::Uuid;
 
@@ -57,7 +58,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let cluster_name = "test_region_migration";
     let peer_factory = |id| Peer {
         id,
-        addr: "127.0.0.1:3001".to_string(),
+        addr: PEER_PLACEHOLDER_ADDR.to_string(),
     };
 
     // Prepares test cluster.
