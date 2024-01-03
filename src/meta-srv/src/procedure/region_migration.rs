@@ -42,6 +42,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+pub use manager::RegionMigrationProcedureTask;
 use serde::{Deserialize, Serialize};
 use snafu::{location, Location, OptionExt, ResultExt};
 use store_api::storage::RegionId;
