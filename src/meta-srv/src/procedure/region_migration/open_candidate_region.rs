@@ -392,6 +392,7 @@ mod tests {
         // from_peer: 1
         // to_peer: 2
         let persistent_context = new_persistent_context();
+        let from_peer_id = persistent_context.from_peer.id;
         let region_id = persistent_context.region_id;
         let to_peer_id = persistent_context.to_peer.id;
         let mut env = TestingEnv::new();
@@ -400,7 +401,7 @@ mod tests {
         let table_info = new_test_table_info(1024, vec![1]).into();
         let region_routes = vec![RegionRoute {
             region: Region::new_test(persistent_context.region_id),
-            leader_peer: Some(Peer::empty(1)),
+            leader_peer: Some(Peer::empty(from_peer_id)),
             ..Default::default()
         }];
 
