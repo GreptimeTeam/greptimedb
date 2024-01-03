@@ -44,8 +44,8 @@ pub trait PuffinSyncWriter {
     /// Add a blob to the Puffin file
     fn add_blob<R: std::io::Read>(&mut self, blob: Blob<R>) -> Result<()>;
 
-    /// Finish writing the Puffin file
-    fn finish(&mut self) -> Result<()>;
+    /// Finish writing the Puffin file, returns the number of bytes written
+    fn finish(&mut self) -> Result<usize>;
 }
 
 /// The trait for writing Puffin files asynchronously
@@ -57,6 +57,6 @@ pub trait PuffinAsyncWriter {
     /// Add a blob to the Puffin file
     async fn add_blob<R: futures::AsyncRead + Send>(&mut self, blob: Blob<R>) -> Result<()>;
 
-    /// Finish writing the Puffin file
-    async fn finish(&mut self) -> Result<()>;
+    /// Finish writing the Puffin file, returns the number of bytes written
+    async fn finish(&mut self) -> Result<usize>;
 }
