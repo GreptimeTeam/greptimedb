@@ -36,20 +36,20 @@ use crate::wal::EntryId;
 /// A cache for uploading files to remote object stores.
 ///
 /// It keeps files in local disk and then sends files to object stores.
-pub(crate) struct WriteCache {
+pub struct WriteCache {
     /// Local file cache.
     file_cache: FileCacheRef,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
 }
 
-pub(crate) type WriteCacheRef = Arc<WriteCache>;
+pub type WriteCacheRef = Arc<WriteCache>;
 
 impl WriteCache {
     // TODO(yingwen): Maybe pass cache path instead of local store.
     /// Create the cache with a `local_store` to cache files and a
     /// `object_store_manager` for all object stores.
-    pub(crate) fn new(
+    pub fn new(
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
@@ -58,6 +58,11 @@ impl WriteCache {
             file_cache: Arc::new(FileCache::new(local_store, cache_capacity)),
             object_store_manager,
         }
+    }
+
+    /// Recovers the write cache from local store.
+    pub async fn recover(&self) -> Result<()> {
+        self.file_cache.recover().await
     }
 
     /// Adds files to the cache.
