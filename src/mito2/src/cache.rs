@@ -15,6 +15,9 @@
 //! Cache for the engine.
 
 mod cache_size;
+// TODO(yingwen): Remove this after the write cache is ready.
+#[allow(unused)]
+pub(crate) mod file_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 
@@ -38,6 +41,8 @@ const SST_META_TYPE: &str = "sst_meta";
 const VECTOR_TYPE: &str = "vector";
 // Metrics type key for pages.
 const PAGE_TYPE: &str = "page";
+// Metrics type key for files on the local store.
+const FILE_TYPE: &str = "file";
 
 /// Manages cached data for the engine.
 pub struct CacheManager {
