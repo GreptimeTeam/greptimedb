@@ -240,7 +240,7 @@ trait InformationTable {
 
     fn schema(&self) -> SchemaRef;
 
-    fn to_stream(&self, requst: ScanRequest) -> Result<SendableRecordBatchStream>;
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary

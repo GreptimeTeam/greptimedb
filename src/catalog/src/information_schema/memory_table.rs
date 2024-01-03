@@ -74,7 +74,7 @@ impl InformationTable for MemoryTable {
         self.schema.clone()
     }
 
-    fn to_stream(&self, _requets: ScanRequest) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
