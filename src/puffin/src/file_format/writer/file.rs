@@ -87,7 +87,8 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
         self.write_header_if_needed_sync()?;
         self.write_footer_sync()?;
         self.writer.flush().context(FlushSnafu)?;
-        Ok(self.written_bytes as _)
+
+        Ok(self.written_bytes as usize)
     }
 }
 
@@ -116,7 +117,8 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
         self.write_footer_async().await?;
         self.writer.flush().await.context(FlushSnafu)?;
         self.writer.close().await.context(CloseSnafu)?;
-        Ok(self.written_bytes as _)
+
+        Ok(self.written_bytes as usize)
     }
 }
 

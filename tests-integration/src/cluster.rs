@@ -43,17 +43,18 @@ use frontend::instance::builder::FrontendBuilder;
 use frontend::instance::{FrontendInstance, Instance as FeInstance};
 use meta_client::client::MetaClientBuilder;
 use meta_srv::cluster::MetaPeerClientRef;
-use meta_srv::metasrv::{MetaSrv, MetaSrvOptions};
+use meta_srv::metasrv::{MetaSrv, MetaSrvOptions, SelectorRef};
 use meta_srv::mocks::MockInfo;
 use servers::grpc::GrpcServer;
 use servers::heartbeat_options::HeartbeatOptions;
 use servers::Mode;
+use tempfile::TempDir;
 use tonic::transport::Server;
 use tower::service_fn;
 
 use crate::test_util::{
     self, create_datanode_opts, create_tmp_dir_and_datanode_opts, FileDirGuard, StorageGuard,
-    StorageType,
+    StorageType, PEER_PLACEHOLDER_ADDR,
 };
 
 pub struct GreptimeDbCluster {
@@ -75,6 +76,8 @@ pub struct GreptimeDbClusterBuilder {
     datanodes: Option<u32>,
     wal_config: WalConfig,
     meta_wal_config: MetaWalConfig,
+    shared_home_dir: Option<Arc<TempDir>>,
+    meta_selector: Option<SelectorRef>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -102,31 +105,50 @@ impl GreptimeDbClusterBuilder {
             datanodes: None,
             wal_config: WalConfig::default(),
             meta_wal_config: MetaWalConfig::default(),
+            shared_home_dir: None,
+            meta_selector: None,
         }
     }
 
+    #[must_use]
     pub fn with_store_config(mut self, store_config: ObjectStoreConfig) -> Self {
         self.store_config = Some(store_config);
         self
     }
 
+    #[must_use]
     pub fn with_store_providers(mut self, store_providers: Vec<StorageType>) -> Self {
         self.store_providers = Some(store_providers);
         self
     }
 
+    #[must_use]
     pub fn with_datanodes(mut self, datanodes: u32) -> Self {
         self.datanodes = Some(datanodes);
         self
     }
 
+    #[must_use]
     pub fn with_wal_config(mut self, wal_config: WalConfig) -> Self {
         self.wal_config = wal_config;
         self
     }
 
+    #[must_use]
     pub fn with_meta_wal_config(mut self, wal_meta: MetaWalConfig) -> Self {
         self.meta_wal_config = wal_meta;
+        self
+    }
+
+    #[must_use]
+    pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
+        self.shared_home_dir = Some(shared_home_dir);
+        self
+    }
+
+    #[must_use]
+    pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
+        self.meta_selector = Some(selector);
         self
     }
 
@@ -147,7 +169,13 @@ impl GreptimeDbClusterBuilder {
             ..Default::default()
         };
 
-        let meta_srv = self.build_metasrv(opt, datanode_clients.clone()).await;
+        let meta_srv = meta_srv::mocks::mock(
+            opt,
+            self.kv_backend.clone(),
+            self.meta_selector.clone(),
+            Some(datanode_clients.clone()),
+        )
+        .await;
 
         let (datanode_instances, storage_guards, dir_guards) =
             self.build_datanodes(meta_srv.clone(), datanodes).await;
@@ -175,14 +203,6 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
-    async fn build_metasrv(
-        &self,
-        opt: MetaSrvOptions,
-        datanode_clients: Arc<DatanodeClients>,
-    ) -> MockInfo {
-        meta_srv::mocks::mock(opt, self.kv_backend.clone(), None, Some(datanode_clients)).await
-    }
-
     async fn build_datanodes(
         &self,
         meta_srv: MockInfo,
@@ -200,10 +220,15 @@ impl GreptimeDbClusterBuilder {
             let datanode_id = i as u64 + 1;
             let mode = Mode::Distributed;
             let mut opts = if let Some(store_config) = &self.store_config {
-                let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
-                let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
+                let home_dir = if let Some(home_dir) = &self.shared_home_dir {
+                    home_dir.path().to_str().unwrap().to_string()
+                } else {
+                    let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
+                    let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
+                    dir_guards.push(FileDirGuard::new(home_tmp_dir));
 
-                dir_guards.push(FileDirGuard::new(home_tmp_dir));
+                    home_dir
+                };
 
                 create_datanode_opts(
                     mode,
@@ -370,8 +395,8 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
     // Move client to an option so we can _move_ the inner value
     // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // "127.0.0.1:3001" is just a placeholder, does not actually connect to it.
-    let addr = "127.0.0.1:3001";
+    // `PEER_PLACEHOLDER_ADDR` is just a placeholder, does not actually connect to it.
+    let addr = PEER_PLACEHOLDER_ADDR;
     let channel_manager = ChannelManager::new();
     let _ = channel_manager
         .reset_with_connector(
