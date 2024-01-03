@@ -121,20 +121,6 @@ impl IntersectionFstApplier {
 
         Ok(Self { dfas, ranges })
     }
-
-    fn range_memory_usage(range: &Range) -> usize {
-        let mut memory_usage = std::mem::size_of::<Range>();
-
-        if let Some(lower) = &range.lower {
-            memory_usage += lower.value.len();
-        }
-
-        if let Some(upper) = &range.upper {
-            memory_usage += upper.value.len();
-        }
-
-        memory_usage
-    }
 }
 
 impl TryFrom<Vec<Predicate>> for IntersectionFstApplier {
