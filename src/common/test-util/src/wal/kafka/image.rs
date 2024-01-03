@@ -52,6 +52,17 @@ impl testcontainers::ImageArgs for ImageArgs {
     }
 }
 
+/// # Example
+/// ```rust
+/// // Starts a Kafka container.
+/// let port = KAFKA_ADVERTISED_LISTENER_PORT;
+/// let docker = DockerCli::default();
+/// let container = docker.run(Image::default());
+/// // Gets the broker endpoints of the containerized Kafka node.
+/// let broker_endpoints = vec![format!("127.0.0.1:{}", container.get_host_port_ipv4(port))];
+/// // Do something with the broker endpoints, for e.g. building a Kafka client.
+/// let client = ClientBuilder::new(broker_endpoints).build().await.unwrap();
+/// ```
 pub struct Image {
     env_vars: HashMap<String, String>,
 }
