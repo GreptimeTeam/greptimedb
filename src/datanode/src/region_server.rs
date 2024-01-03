@@ -43,6 +43,7 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr as DfExpr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
 use futures_util::future::try_join_all;
+use metric_engine::engine::MetricEngine;
 use prost::Message;
 use query::QueryEngineRef;
 use servers::error::{self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult};
@@ -51,6 +52,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -60,8 +62,9 @@ use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
     self, BuildRegionRequestsSnafu, DecodeLogicalPlanSnafu, ExecuteLogicalPlanSnafu,
-    GetRegionMetadataSnafu, HandleRegionRequestSnafu, RegionEngineNotFoundSnafu,
-    RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnsupportedOutputSnafu,
+    FindLogicalRegionsSnafu, GetRegionMetadataSnafu, HandleRegionRequestSnafu,
+    RegionEngineNotFoundSnafu, RegionNotFoundSnafu, Result, StopRegionEngineSnafu, UnexpectedSnafu,
+    UnsupportedOutputSnafu,
 };
 use crate::event_listener::RegionServerEventListenerRef;
 
@@ -460,7 +463,8 @@ impl RegionServerInner {
         {
             Ok(result) => {
                 // Sets corresponding region status to ready.
-                self.set_region_status_ready(region_id, engine, region_change);
+                self.set_region_status_ready(region_id, engine, region_change)
+                    .await?;
                 Ok(result)
             }
             Err(err) => {
@@ -505,16 +509,20 @@ impl RegionServerInner {
         }
     }
 
-    fn set_region_status_ready(
+    async fn set_region_status_ready(
         &self,
         region_id: RegionId,
         engine: RegionEngineRef,
         region_change: RegionChange,
-    ) {
+    ) -> Result<()> {
         let engine_type = engine.name();
         match region_change {
             RegionChange::None => {}
             RegionChange::Register(_) => {
+                if engine_type == METRIC_ENGINE_NAME {
+                    self.register_logical_regions(&engine, region_id).await?;
+                }
+
                 info!("Region {region_id} is registered to engine {engine_type}");
                 self.region_map
                     .insert(region_id, RegionEngineWithStatus::Ready(engine));
@@ -528,6 +536,37 @@ impl RegionServerInner {
                 self.event_listener.on_region_deregistered(region_id);
             }
         }
+        Ok(())
+    }
+
+    async fn register_logical_regions(
+        &self,
+        engine: &RegionEngineRef,
+        physical_region_id: RegionId,
+    ) -> Result<()> {
+        let metric_engine =
+            engine
+                .as_any()
+                .downcast_ref::<MetricEngine>()
+                .context(UnexpectedSnafu {
+                    violated: format!(
+                        "expecting engine type '{}', actual '{}'",
+                        METRIC_ENGINE_NAME,
+                        engine.name(),
+                    ),
+                })?;
+
+        let logical_regions = metric_engine
+            .logical_regions(physical_region_id)
+            .await
+            .context(FindLogicalRegionsSnafu { physical_region_id })?;
+
+        for region in logical_regions {
+            self.region_map
+                .insert(region, RegionEngineWithStatus::Ready(engine.clone()));
+            info!("Logical region {} is registered!", region);
+        }
+        Ok(())
     }
 
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {

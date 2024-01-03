@@ -21,6 +21,7 @@ mod read;
 mod region_metadata;
 mod state;
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -38,6 +39,7 @@ use tokio::sync::RwLock;
 
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
+use crate::error::Result;
 use crate::metadata_region::MetadataRegion;
 use crate::utils;
 
@@ -193,6 +195,10 @@ impl RegionEngine for MetricEngine {
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         todo!()
     }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl MetricEngine {
@@ -207,6 +213,13 @@ impl MetricEngine {
                 state: RwLock::default(),
             }),
         }
+    }
+
+    pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
+        self.inner
+            .metadata_region
+            .logical_regions(physical_region_id)
+            .await
     }
 }
 
