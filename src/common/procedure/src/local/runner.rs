@@ -98,6 +98,14 @@ impl Drop for ProcedureGuard {
         if let Some(parent_id) = self.meta.parent_id {
             self.manager_ctx.notify_by_subprocedure(parent_id);
         }
+
+        // Drops the key guards.
+        std::mem::take(&mut self.key_guards);
+
+        // Clean the staled locks.
+        self.manager_ctx
+            .key_lock
+            .clean_keys(self.meta.lock_key.keys_to_lock().map(|k| k.as_string()));
     }
 }
 
@@ -153,10 +161,6 @@ impl Runner {
 
         // Release locks and notify parent procedure.
         guard.finish();
-        // Clean the staled locks.
-        self.manager_ctx
-            .key_lock
-            .clean_keys(self.meta.lock_key.keys_to_lock().map(|k| k.as_string()));
 
         // If this is the root procedure, clean up message cache.
         if self.meta.parent_id.is_none() {
