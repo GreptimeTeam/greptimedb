@@ -62,7 +62,7 @@ impl FileCache {
             .async_eviction_listener(move |key, value, cause| {
                 let store = cache_store.clone();
                 // Stores files under FILE_DIR.
-                let file_path = cache_file_path(&FILE_DIR, *key);
+                let file_path = cache_file_path(FILE_DIR, *key);
                 async move {
                     if let RemovalCause::Replaced = cause {
                         // The cache is replaced by another file. This is unexpected, we don't remove the same
