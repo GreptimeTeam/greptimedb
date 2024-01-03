@@ -473,6 +473,18 @@ pub enum Error {
 
     #[snafu(display("Invalid config, {reason}"))]
     InvalidConfig { reason: String, location: Location },
+
+    #[snafu(display(
+        "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
+        region_id,
+        flushed_entry_id,
+        unexpected_entry_id
+    ))]
+    StaleLogEntry {
+        region_id: RegionId,
+        flushed_entry_id: u64,
+        unexpected_entry_id: u64,
+    },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -563,6 +575,7 @@ impl ErrorExt for Error {
             }
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
+            StaleLogEntry { .. } => StatusCode::Unexpected,
         }
     }
 

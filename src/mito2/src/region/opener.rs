@@ -32,7 +32,9 @@ use store_api::storage::{ColumnId, RegionId};
 use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
-use crate::error::{EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result};
+use crate::error::{
+    EmptyRegionDirSnafu, ObjectStoreNotFoundSnafu, RegionCorruptedSnafu, Result, StaleLogEntrySnafu,
+};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::manifest_compress_type;
 use crate::memtable::MemtableBuilderRef;
@@ -386,7 +388,14 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
-        debug_assert!(entry_id > flushed_entry_id);
+        ensure!(
+            entry_id > flushed_entry_id,
+            StaleLogEntrySnafu {
+                region_id,
+                flushed_entry_id,
+                unexpected_entry_id: entry_id
+            }
+        );
         last_entry_id = last_entry_id.max(entry_id);
         for mutation in entry.mutations {
             rows_replayed += mutation

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -22,7 +22,7 @@ use common_runtime::{RepeatedTask, TaskFunction};
 use common_telemetry::{error, info};
 use raft_engine::{Config, Engine, LogBatch, MessageExt, ReadableSize, RecoveryMode};
 use snafu::{ensure, ResultExt};
-use store_api::logstore::entry::{Entry, Id as EntryId};
+use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::{Id as NamespaceId, Namespace as NamespaceTrait};
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
