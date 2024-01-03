@@ -424,6 +424,18 @@ pub enum Error {
         error: parquet::errors::ParquetError,
     },
 
+    #[snafu(display(
+        "Stale log entry found during replay, region: {}, flushed: {}, replayed: {}",
+        region_id,
+        flushed_entry_id,
+        unexpected_entry_id
+    ))]
+    StaleLogEntry {
+        region_id: RegionId,
+        flushed_entry_id: u64,
+        unexpected_entry_id: u64,
+    },
+
     #[snafu(display("Column not found, column: {column}"))]
     ColumnNotFound { column: String, location: Location },
 
