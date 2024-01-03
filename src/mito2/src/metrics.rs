@@ -182,6 +182,7 @@ lazy_static! {
         "index create bytes total",
     )
     .unwrap();
+
     /// Counter of r/w bytes on index related IO operations.
     pub static ref INDEX_IO_BYTES_TOTAL: IntCounterVec = register_int_counter_vec!(
         "index_io_bytes_total",
@@ -190,12 +191,29 @@ lazy_static! {
     )
     .unwrap();
     /// Counter of read bytes on intermediate files.
-    pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "intermediate"]);
+    pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["read", "intermediate"]);
     /// Counter of write bytes on intermediate files.
-    pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "intermediate"]);
+    pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["write", "intermediate"]);
     /// Counter of read bytes on puffin files.
-    pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["read", "puffin"]);
+    pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["read", "puffin"]);
     /// Counter of write bytes on puffin files.
-    pub static ref INDEX_PUFFIN_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL.with_label_values(&["write", "puffin"]);
+    pub static ref INDEX_PUFFIN_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["write", "puffin"]);
+
+    /// Counter of seek operations on index related files.
+    pub static ref INDEX_IO_SEEK_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "index_io_seek_total",
+        "index io seek total",
+        &[FILE_TYPE_LABEL]
+    ).unwrap();
+    /// Counter of seek operations on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_SEEK_TOTAL: IntCounter = INDEX_IO_SEEK_TOTAL
+        .with_label_values(&["intermediate"]);
+    /// Counter of seek operations on puffin files.
+    pub static ref INDEX_PUFFIN_SEEK_TOTAL: IntCounter = INDEX_IO_SEEK_TOTAL
+        .with_label_values(&["puffin"]);
     // ------- End of index metrics.
 }

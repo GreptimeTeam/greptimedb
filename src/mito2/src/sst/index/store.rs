@@ -37,10 +37,15 @@ impl InstrumentedStore {
     pub async fn reader<'a>(
         &self,
         path: &str,
-        recorder: &'a IntCounter,
+        read_byte_count: &'a IntCounter,
+        seek_count: &'a IntCounter,
     ) -> Result<InstrumentedAsyncRead<'a, object_store::Reader>> {
         let reader = self.object_store.reader(path).await.context(OpenDalSnafu)?;
-        Ok(InstrumentedAsyncRead::new(reader, recorder))
+        Ok(InstrumentedAsyncRead::new(
+            reader,
+            read_byte_count,
+            seek_count,
+        ))
     }
 
     pub async fn writer<'a>(
@@ -69,14 +74,16 @@ impl InstrumentedStore {
 pub(crate) struct InstrumentedAsyncRead<'a, R> {
     #[pin]
     inner: R,
-    recorder: BytesRecorder<'a>,
+    read_byte_count: Counter<'a>,
+    seek_count: Counter<'a>,
 }
 
 impl<'a, R> InstrumentedAsyncRead<'a, R> {
-    fn new(inner: R, recorder: &'a IntCounter) -> Self {
+    fn new(inner: R, read_byte_count: &'a IntCounter, seek_count: &'a IntCounter) -> Self {
         Self {
             inner,
-            recorder: BytesRecorder::new(recorder),
+            read_byte_count: Counter::new(read_byte_count),
+            seek_count: Counter::new(seek_count),
         }
     }
 }
@@ -89,7 +96,7 @@ impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R>
     ) -> Poll<io::Result<usize>> {
         let poll = self.as_mut().project().inner.poll_read(cx, buf);
         if let Poll::Ready(Ok(n)) = &poll {
-            self.recorder.inc_by(*n);
+            self.read_byte_count.inc_by(*n);
         }
         poll
     }
@@ -97,11 +104,15 @@ impl<'a, R: AsyncRead + Unpin + Send> AsyncRead for InstrumentedAsyncRead<'a, R>
 
 impl<'a, R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'a, R> {
     fn poll_seek(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         pos: io::SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        self.project().inner.poll_seek(cx, pos)
+        let poll = self.as_mut().project().inner.poll_seek(cx, pos);
+        if let Poll::Ready(Ok(_)) = &poll {
+            self.seek_count.inc_by(1);
+        }
+        poll
     }
 }
 
@@ -109,14 +120,14 @@ impl<'a, R: AsyncSeek + Unpin + Send> AsyncSeek for InstrumentedAsyncRead<'a, R>
 pub(crate) struct InstrumentedAsyncWrite<'a, W> {
     #[pin]
     inner: W,
-    recorder: BytesRecorder<'a>,
+    write_byte_count: Counter<'a>,
 }
 
 impl<'a, W> InstrumentedAsyncWrite<'a, W> {
-    fn new(inner: W, recorder: &'a IntCounter) -> Self {
+    fn new(inner: W, write_byte_count: &'a IntCounter) -> Self {
         Self {
             inner,
-            recorder: BytesRecorder::new(recorder),
+            write_byte_count: Counter::new(write_byte_count),
         }
     }
 }
@@ -129,7 +140,7 @@ impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a,
     ) -> Poll<io::Result<usize>> {
         let poll = self.as_mut().project().inner.poll_write(cx, buf);
         if let Poll::Ready(Ok(n)) = &poll {
-            self.recorder.inc_by(*n);
+            self.write_byte_count.inc_by(*n);
         }
         poll
     }
@@ -143,25 +154,25 @@ impl<'a, W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'a,
     }
 }
 
-struct BytesRecorder<'a> {
-    bytes: usize,
-    recorder: &'a IntCounter,
+struct Counter<'a> {
+    count: usize,
+    counter: &'a IntCounter,
 }
 
-impl<'a> BytesRecorder<'a> {
-    fn new(recorder: &'a IntCounter) -> Self {
-        Self { bytes: 0, recorder }
+impl<'a> Counter<'a> {
+    fn new(counter: &'a IntCounter) -> Self {
+        Self { count: 0, counter }
     }
 
-    fn inc_by(&mut self, bytes: usize) {
-        self.bytes += bytes;
+    fn inc_by(&mut self, n: usize) {
+        self.count += n;
     }
 }
 
-impl<'a> Drop for BytesRecorder<'a> {
+impl<'a> Drop for Counter<'a> {
     fn drop(&mut self) {
-        if self.bytes > 0 {
-            self.recorder.inc_by(self.bytes as _);
+        if self.count > 0 {
+            self.counter.inc_by(self.count as _);
         }
     }
 }

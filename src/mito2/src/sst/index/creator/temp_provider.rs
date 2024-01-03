@@ -22,7 +22,10 @@ use index::inverted_index::error::Result as IndexResult;
 use snafu::ResultExt;
 
 use crate::error::Result;
-use crate::metrics::{INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL};
+use crate::metrics::{
+    INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_SEEK_TOTAL,
+    INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL,
+};
 use crate::sst::index::store::InstrumentedStore;
 use crate::sst::location::IntermediateLocation;
 
@@ -69,7 +72,11 @@ impl ExternalTempFileProvider for TempFileProvider {
 
             let reader = self
                 .store
-                .reader(entry.path(), &INDEX_INTERMEDIATE_READ_BYTES_TOTAL)
+                .reader(
+                    entry.path(),
+                    &INDEX_INTERMEDIATE_READ_BYTES_TOTAL,
+                    &INDEX_INTERMEDIATE_SEEK_TOTAL,
+                )
                 .await
                 .map_err(BoxedError::new)
                 .context(index_error::ExternalSnafu)?;

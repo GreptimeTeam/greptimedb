@@ -101,7 +101,7 @@ impl ParquetWriter {
 
         let mut stats = SourceStats::default();
         let mut index_creator = IndexCreator::new(
-            self.file_id.clone(),
+            self.file_id,
             self.region_dir.clone(),
             &self.metadata,
             self.object_store.clone(),
@@ -264,7 +264,7 @@ impl IndexCreator {
 
         let creator = SstIndexCreator::new(
             region_dir.clone(),
-            file_id.clone(),
+            file_id,
             metadata,
             object_store,
             option.memory_usage_threshold,
@@ -280,7 +280,7 @@ impl IndexCreator {
 
     async fn update(&mut self, batch: &Batch) {
         if let Some(creator) = self.inner.as_mut() {
-            if let Err(err) = creator.update(&batch).await {
+            if let Err(err) = creator.update(batch).await {
                 warn!(
                     err; "Failed to update index, skip creating index, region_id: {}, file_id: {}",
                     self.region_id, self.file_id,

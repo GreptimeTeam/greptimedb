@@ -17,6 +17,7 @@ pub mod builder;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use futures::{AsyncRead, AsyncSeek};
 use index::inverted_index::format::reader::InvertedIndexBlobReader;
 use index::inverted_index::search::index_apply::{
     IndexApplier, IndexNotFoundStrategy, SearchContext,
@@ -31,6 +32,7 @@ use crate::error::{
 };
 use crate::metrics::{
     INDEX_APPLY_COST_TIME, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
+    INDEX_PUFFIN_SEEK_TOTAL,
 };
 use crate::sst::file::FileId;
 use crate::sst::index::store::InstrumentedStore;
@@ -72,14 +74,39 @@ impl SstIndexApplier {
     pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
         let _timer = INDEX_APPLY_COST_TIME.start_timer();
 
-        let file_path = location::index_file_path(&self.region_dir, &file_id);
+        let mut puffin_reader = self.puffin_reader(file_id).await?;
+        let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;
+        let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
 
+        let context = SearchContext {
+            // Encountering a non-existing column indicates that it doesn't match predicates.
+            index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
+        };
+        self.index_applier
+            .apply(context, &mut index_reader)
+            .await
+            .context(ApplyIndexSnafu)
+    }
+
+    async fn puffin_reader(
+        &self,
+        file_id: FileId,
+    ) -> Result<PuffinFileReader<impl AsyncRead + AsyncSeek>> {
+        let file_path = location::index_file_path(&self.region_dir, &file_id);
         let file_reader = self
             .store
-            .reader(&file_path, &INDEX_PUFFIN_READ_BYTES_TOTAL)
+            .reader(
+                &file_path,
+                &INDEX_PUFFIN_READ_BYTES_TOTAL,
+                &INDEX_PUFFIN_SEEK_TOTAL,
+            )
             .await?;
-        let mut puffin_reader = PuffinFileReader::new(file_reader);
+        Ok(PuffinFileReader::new(file_reader))
+    }
 
+    async fn index_blob_reader(
+        puffin_reader: &mut PuffinFileReader<impl AsyncRead + AsyncSeek + Unpin + Send>,
+    ) -> Result<impl AsyncRead + AsyncSeek + '_> {
         let file_meta = puffin_reader
             .metadata()
             .await
@@ -91,20 +118,9 @@ impl SstIndexApplier {
             .context(PuffinBlobTypeNotFoundSnafu {
                 blob_type: INDEX_BLOB_TYPE,
             })?;
-
-        let blob_reader = puffin_reader
+        puffin_reader
             .blob_reader(blob_meta)
-            .context(PuffinReadBlobSnafu)?;
-        let mut index_reader = InvertedIndexBlobReader::new(blob_reader);
-
-        let context = SearchContext {
-            // Encountering a non-existing column indicates that it doesn't match predicates.
-            index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
-        };
-        self.index_applier
-            .apply(context, &mut index_reader)
-            .await
-            .context(ApplyIndexSnafu)
+            .context(PuffinReadBlobSnafu)
     }
 }
 
