@@ -100,9 +100,8 @@ impl Drop for ProcedureGuard {
         }
 
         // Drops the key guards in the reverse order.
-        {
-            let mut key_guards = std::mem::take(&mut self.key_guards);
-            key_guards.reverse();
+        while !self.key_guards.is_empty() {
+            self.key_guards.pop();
         }
 
         // Clean the staled locks.
