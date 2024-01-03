@@ -115,11 +115,12 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
         to_regions
     );
 
+    let region_id = RegionId::new(table_id, from_regions[0]);
     // Trigger region migration.
     let procedure = region_migration_manager
         .submit_procedure(RegionMigrationProcedureTask::new(
             0,
-            RegionId::new(table_id, from_regions[0]),
+            region_id,
             peer_factory(from_peer_id),
             peer_factory(to_peer_id),
         ))
@@ -160,6 +161,18 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
 
     // Asserts the writes.
     assert_values(&cluster.frontend).await;
+
+    // Triggers again.
+    let procedure = region_migration_manager
+        .submit_procedure(RegionMigrationProcedureTask::new(
+            0,
+            region_id,
+            peer_factory(from_peer_id),
+            peer_factory(to_peer_id),
+        ))
+        .await
+        .unwrap();
+    assert!(procedure.is_none());
 }
 
 pub struct ConstNodeSelector {
