@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem::size_of;
+
 use fst::map::OpBuilder;
 use fst::{IntoStreamer, Streamer};
 use regex_automata::dfa::dense::DFA;
@@ -67,6 +69,26 @@ impl FstApplier for IntersectionFstApplier {
             values.push(v[0].value)
         }
         values
+    }
+
+    fn memory_usage(&self) -> usize {
+        let mut size = self.ranges.capacity() * size_of::<Range>();
+        for range in &self.ranges {
+            size += range
+                .lower
+                .as_ref()
+                .map_or(0, |bound| bound.value.capacity());
+            size += range
+                .upper
+                .as_ref()
+                .map_or(0, |bound| bound.value.capacity());
+        }
+
+        size += self.dfas.capacity() * size_of::<DFA<Vec<u32>>>();
+        for dfa in &self.dfas {
+            size += dfa.memory_usage();
+        }
+        size
     }
 }
 
@@ -339,5 +361,37 @@ mod tests {
             result,
             Err(Error::IntersectionApplierWithInList { .. })
         ));
+    }
+
+    #[test]
+    fn test_intersection_fst_applier_memory_usage() {
+        let applier = IntersectionFstApplier {
+            ranges: vec![],
+            dfas: vec![],
+        };
+
+        assert_eq!(applier.memory_usage(), 0);
+
+        let dfa = DFA::new("^abc$").unwrap();
+        assert_eq!(dfa.memory_usage(), 320);
+
+        let applier = IntersectionFstApplier {
+            ranges: vec![Range {
+                lower: Some(Bound {
+                    value: b"aa".to_vec(),
+                    inclusive: true,
+                }),
+                upper: Some(Bound {
+                    value: b"cc".to_vec(),
+                    inclusive: true,
+                }),
+            }],
+            dfas: vec![dfa],
+        };
+
+        assert_eq!(
+            applier.memory_usage(),
+            size_of::<Range>() + 4 + size_of::<DFA<Vec<u32>>>() + 320
+        );
     }
 }
