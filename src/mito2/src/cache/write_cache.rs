@@ -23,7 +23,6 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{RegionId, SequenceNumber};
 use tokio::sync::mpsc::Sender;
 
-use crate::access_layer::sst_file_path;
 use crate::cache::file_cache::{FileCache, FileCacheRef};
 use crate::error::Result;
 use crate::read::Source;
@@ -31,6 +30,7 @@ use crate::request::WorkerRequest;
 use crate::sst::file::{FileId, FileMeta, Level};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::WriteOptions;
+use crate::sst::sst_file_path;
 use crate::wal::EntryId;
 
 /// A cache for uploading files to remote object stores.

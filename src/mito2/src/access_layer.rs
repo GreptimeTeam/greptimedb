@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use object_store::{util, ObjectStore};
+use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
@@ -25,6 +25,7 @@ use crate::sst::file::{FileHandle, FileId};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::sst_file_path;
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -102,9 +103,4 @@ pub(crate) struct SstWriteRequest {
     pub(crate) source: Source,
     pub(crate) cache_manager: CacheManagerRef,
     pub(crate) storage: Option<String>,
-}
-
-/// Returns the `file_path` for the `file_id` in the object store.
-pub(crate) fn sst_file_path(region_dir: &str, file_id: FileId) -> String {
-    util::join_path(region_dir, &file_id.as_parquet())
 }
