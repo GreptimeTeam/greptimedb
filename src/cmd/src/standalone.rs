@@ -22,7 +22,8 @@ use common_config::wal::StandaloneWalConfig;
 use common_config::{metadata_store_dir, KvBackendConfig};
 use common_meta::cache_invalidator::DummyCacheInvalidator;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::{DdlTaskExecutorRef, TableMetadataAllocatorRef};
+use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::DdlTaskExecutorRef;
 use common_meta::ddl_manager::DdlManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
@@ -32,12 +33,12 @@ use common_meta::wal::{WalOptionsAllocator, WalOptionsAllocatorRef};
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::info;
 use common_telemetry::logging::LoggingOptions;
+use common_time::timezone::set_default_timezone;
 use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::standalone::StandaloneTableMetadataAllocator;
 use frontend::instance::{FrontendInstance, Instance as FeInstance, StandaloneDatanodeManager};
 use frontend::service_config::{
     GrpcOptions, InfluxdbOptions, MysqlOptions, OpentsdbOptions, PostgresOptions, PromStoreOptions,
@@ -51,8 +52,8 @@ use servers::Mode;
 use snafu::ResultExt;
 
 use crate::error::{
-    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, Result,
-    ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
+    CreateDirSnafu, IllegalConfigSnafu, InitDdlManagerSnafu, InitMetadataSnafu, InitTimezoneSnafu,
+    Result, ShutdownDatanodeSnafu, ShutdownFrontendSnafu, StartDatanodeSnafu, StartFrontendSnafu,
     StartProcedureManagerSnafu, StartWalOptionsAllocatorSnafu, StopProcedureManagerSnafu,
 };
 use crate::options::{CliOptions, MixOptions, Options};
@@ -98,6 +99,7 @@ impl SubCommand {
 pub struct StandaloneOptions {
     pub mode: Mode,
     pub enable_telemetry: bool,
+    pub default_timezone: Option<String>,
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     pub mysql: MysqlOptions,
@@ -121,6 +123,7 @@ impl Default for StandaloneOptions {
         Self {
             mode: Mode::Standalone,
             enable_telemetry: true,
+            default_timezone: None,
             http: HttpOptions::default(),
             grpc: GrpcOptions::default(),
             mysql: MysqlOptions::default(),
@@ -147,6 +150,7 @@ impl StandaloneOptions {
     fn frontend_options(self) -> FrontendOptions {
         FrontendOptions {
             mode: self.mode,
+            default_timezone: self.default_timezone,
             http: self.http,
             grpc: self.grpc,
             mysql: self.mysql,
@@ -369,6 +373,9 @@ impl StartCommand {
 
         info!("Building standalone instance with {opts:#?}");
 
+        set_default_timezone(opts.frontend.default_timezone.as_deref())
+            .context(InitTimezoneSnafu)?;
+
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(&opts.data_home)).context(CreateDirSnafu {
             dir: &opts.data_home,
@@ -399,10 +406,8 @@ impl StartCommand {
             opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator = Arc::new(StandaloneTableMetadataAllocator::new(
-            table_id_sequence,
-            wal_options_allocator.clone(),
-        ));
+        let table_meta_allocator =
+            TableMetadataAllocator::new(table_id_sequence, wal_options_allocator.clone());
 
         let ddl_task_executor = Self::create_ddl_task_executor(
             kv_backend.clone(),
@@ -439,7 +444,7 @@ impl StartCommand {
         kv_backend: KvBackendRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
-        table_meta_allocator: TableMetadataAllocatorRef,
+        table_meta_allocator: TableMetadataAllocator,
     ) -> Result<DdlTaskExecutorRef> {
         let table_metadata_manager =
             Self::create_table_metadata_manager(kv_backend.clone()).await?;

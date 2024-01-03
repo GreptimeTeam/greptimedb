@@ -17,129 +17,74 @@ use common_meta::error::{InvalidHeartbeatResponseSnafu, Result as MetaResult};
 use common_meta::heartbeat::handler::{
     HandleControl, HeartbeatResponseHandler, HeartbeatResponseHandlerContext,
 };
-use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, Instruction, InstructionReply, OpenRegion, SimpleReply,
-};
+use common_meta::instruction::{Instruction, InstructionReply};
 use common_meta::RegionIdent;
 use common_telemetry::error;
 use futures::future::BoxFuture;
 use snafu::OptionExt;
-use store_api::path_utils::region_dir;
-use store_api::region_engine::SetReadonlyResponse;
-use store_api::region_request::{RegionCloseRequest, RegionOpenRequest, RegionRequest};
 use store_api::storage::RegionId;
 
-use crate::error;
+mod close_region;
+mod downgrade_region;
+mod open_region;
+mod upgrade_region;
+
+use super::task_tracker::TaskTracker;
 use crate::region_server::RegionServer;
+
 /// Handler for [Instruction::OpenRegion] and [Instruction::CloseRegion].
 #[derive(Clone)]
 pub struct RegionHeartbeatResponseHandler {
     region_server: RegionServer,
+    catchup_tasks: TaskTracker<()>,
 }
 
 /// Handler of the instruction.
 pub type InstructionHandler =
-    Box<dyn FnOnce(RegionServer) -> BoxFuture<'static, InstructionReply> + Send>;
+    Box<dyn FnOnce(HandlerContext) -> BoxFuture<'static, InstructionReply> + Send>;
+
+#[derive(Clone)]
+pub struct HandlerContext {
+    region_server: RegionServer,
+    catchup_tasks: TaskTracker<()>,
+}
+
+impl HandlerContext {
+    fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
+        RegionId::new(region_ident.table_id, region_ident.region_number)
+    }
+}
 
 impl RegionHeartbeatResponseHandler {
     /// Returns the [RegionHeartbeatResponseHandler].
     pub fn new(region_server: RegionServer) -> Self {
-        Self { region_server }
+        Self {
+            region_server,
+            catchup_tasks: TaskTracker::new(),
+        }
     }
 
     /// Builds the [InstructionHandler].
     fn build_handler(instruction: Instruction) -> MetaResult<InstructionHandler> {
         match instruction {
-            Instruction::OpenRegion(OpenRegion {
-                region_ident,
-                region_storage_path,
-                region_options,
-                region_wal_options,
-                skip_wal_replay,
-            }) => Ok(Box::new(move |region_server| {
-                Box::pin(async move {
-                    let region_id = Self::region_ident_to_region_id(&region_ident);
-                    // TODO(niebayes): extends region options with region_wal_options.
-                    let _ = region_wal_options;
-                    let request = RegionRequest::Open(RegionOpenRequest {
-                        engine: region_ident.engine,
-                        region_dir: region_dir(&region_storage_path, region_id),
-                        options: region_options,
-                        skip_wal_replay,
-                    });
-                    let result = region_server.handle_request(region_id, request).await;
-
-                    let success = result.is_ok();
-                    let error = result.as_ref().map_err(|e| e.to_string()).err();
-
-                    InstructionReply::OpenRegion(SimpleReply {
-                        result: success,
-                        error,
-                    })
-                })
+            Instruction::OpenRegion(open_region) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_open_region_instruction(open_region)
             })),
-            Instruction::CloseRegion(region_ident) => Ok(Box::new(|region_server| {
-                Box::pin(async move {
-                    let region_id = Self::region_ident_to_region_id(&region_ident);
-                    let request = RegionRequest::Close(RegionCloseRequest {});
-                    let result = region_server.handle_request(region_id, request).await;
-
-                    match result {
-                        Ok(_) => InstructionReply::CloseRegion(SimpleReply {
-                            result: true,
-                            error: None,
-                        }),
-                        Err(error::Error::RegionNotFound { .. }) => {
-                            InstructionReply::CloseRegion(SimpleReply {
-                                result: true,
-                                error: None,
-                            })
-                        }
-                        Err(err) => InstructionReply::CloseRegion(SimpleReply {
-                            result: false,
-                            error: Some(err.to_string()),
-                        }),
-                    }
-                })
+            Instruction::CloseRegion(close_region) => Ok(Box::new(|handler_context| {
+                handler_context.handle_close_region_instruction(close_region)
             })),
-            Instruction::DowngradeRegion(DowngradeRegion { region_id }) => {
-                Ok(Box::new(move |region_server| {
-                    Box::pin(async move {
-                        match region_server.set_readonly_gracefully(region_id).await {
-                            Ok(SetReadonlyResponse::Success { last_entry_id }) => {
-                                InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                                    last_entry_id,
-                                    exists: true,
-                                    error: None,
-                                })
-                            }
-                            Ok(SetReadonlyResponse::NotFound) => {
-                                InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                                    last_entry_id: None,
-                                    exists: false,
-                                    error: None,
-                                })
-                            }
-                            Err(err) => InstructionReply::DowngradeRegion(DowngradeRegionReply {
-                                last_entry_id: None,
-                                exists: false,
-                                error: Some(err.to_string()),
-                            }),
-                        }
-                    })
+            Instruction::DowngradeRegion(downgrade_region) => {
+                Ok(Box::new(move |handler_context| {
+                    handler_context.handle_downgrade_region_instruction(downgrade_region)
                 }))
             }
-            Instruction::UpgradeRegion(_) => {
-                todo!()
-            }
+            Instruction::UpgradeRegion(upgrade_region) => Ok(Box::new(move |handler_context| {
+                handler_context.handle_upgrade_region_instruction(upgrade_region)
+            })),
             Instruction::InvalidateTableIdCache(_) | Instruction::InvalidateTableNameCache(_) => {
                 InvalidHeartbeatResponseSnafu.fail()
             }
         }
-    }
-
-    fn region_ident_to_region_id(region_ident: &RegionIdent) -> RegionId {
-        RegionId::new(region_ident.table_id, region_ident.region_number)
     }
 }
 
@@ -151,6 +96,7 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
             Some((_, Instruction::OpenRegion { .. }))
                 | Some((_, Instruction::CloseRegion { .. }))
                 | Some((_, Instruction::DowngradeRegion { .. }))
+                | Some((_, Instruction::UpgradeRegion { .. }))
         )
     }
 
@@ -162,9 +108,14 @@ impl HeartbeatResponseHandler for RegionHeartbeatResponseHandler {
 
         let mailbox = ctx.mailbox.clone();
         let region_server = self.region_server.clone();
+        let catchup_tasks = self.catchup_tasks.clone();
         let handler = Self::build_handler(instruction)?;
         let _handle = common_runtime::spawn_bg(async move {
-            let reply = handler(region_server).await;
+            let reply = handler(HandlerContext {
+                region_server,
+                catchup_tasks,
+            })
+            .await;
 
             if let Err(e) = mailbox.send((meta, reply)).await {
                 error!(e; "Failed to send reply to mailbox");
@@ -184,10 +135,12 @@ mod tests {
     use common_meta::heartbeat::mailbox::{
         HeartbeatMailbox, IncomingMessage, MailboxRef, MessageMeta,
     };
+    use common_meta::instruction::{DowngradeRegion, OpenRegion, UpgradeRegion};
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
-    use store_api::region_request::RegionRequest;
+    use store_api::path_utils::region_dir;
+    use store_api::region_request::{RegionCloseRequest, RegionRequest};
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::{self, Receiver};
 
@@ -221,6 +174,44 @@ mod tests {
                 incoming_message: Some(incoming_message),
             }
         }
+    }
+
+    #[test]
+    fn test_is_acceptable() {
+        common_telemetry::init_default_ut_logging();
+        let region_server = mock_region_server();
+        let heartbeat_handler = RegionHeartbeatResponseHandler::new(region_server.clone());
+        let heartbeat_env = HeartbeatResponseTestEnv::new();
+        let meta = MessageMeta::new_test(1, "test", "dn-1", "me-0");
+
+        // Open region
+        let region_id = RegionId::new(1024, 1);
+        let storage_path = "test";
+        let instruction = open_region_instruction(region_id, storage_path);
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Close region
+        let instruction = close_region_instruction(region_id);
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Downgrade region
+        let instruction = Instruction::DowngradeRegion(DowngradeRegion {
+            region_id: RegionId::new(2048, 1),
+        });
+        assert!(heartbeat_handler
+            .is_acceptable(&heartbeat_env.create_handler_ctx((meta.clone(), instruction))));
+
+        // Upgrade region
+        let instruction = Instruction::UpgradeRegion(UpgradeRegion {
+            region_id,
+            last_entry_id: None,
+            wait_for_replay_timeout: None,
+        });
+        assert!(
+            heartbeat_handler.is_acceptable(&heartbeat_env.create_handler_ctx((meta, instruction)))
+        );
     }
 
     fn close_region_instruction(region_id: RegionId) -> Instruction {

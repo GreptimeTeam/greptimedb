@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 
-use api::v1::meta::Peer;
+use common_meta::peer::Peer;
 use snafu::ensure;
 
 use super::weighted_choose::{WeightedChoose, WeightedItem};
@@ -92,7 +92,7 @@ where
 mod tests {
     use std::collections::HashSet;
 
-    use api::v1::meta::Peer;
+    use common_meta::peer::Peer;
 
     use crate::selector::common::choose_peers;
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};

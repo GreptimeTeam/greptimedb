@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use api::v1::meta::Peer;
+use common_meta::peer::Peer;
 use itertools::{Itertools, MinMaxResult};
 
 use crate::keys::{StatKey, StatValue};
@@ -92,7 +92,7 @@ impl WeightCompute for RegionNumsBasedWeightCompute {
 mod tests {
     use std::collections::HashMap;
 
-    use api::v1::meta::Peer;
+    use common_meta::peer::Peer;
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
 

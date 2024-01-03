@@ -32,6 +32,7 @@ common-recordbatch.workspace = true
 common-telemetry = { workspace = true, features = [
     "deadlock_detection",
 ] }
+common-time.workspace = true
 config = "0.13"
 datanode.workspace = true
 datatypes.workspace = true

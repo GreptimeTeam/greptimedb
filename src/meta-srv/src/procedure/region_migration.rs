@@ -13,6 +13,9 @@
 // limitations under the License.
 
 pub(crate) mod downgrade_leader_region;
+// TODO(weny): remove it.
+#[allow(dead_code)]
+pub(crate) mod manager;
 pub(crate) mod migration_abort;
 pub(crate) mod migration_end;
 pub(crate) mod migration_start;
@@ -28,6 +31,7 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use common_meta::instruction::Instruction;
+use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::key::{DeserializedValueWithBytes, TableMetadataManagerRef};
@@ -38,6 +42,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+pub use manager::RegionMigrationProcedureTask;
 use serde::{Deserialize, Serialize};
 use snafu::{location, Location, OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -87,6 +92,8 @@ pub struct VolatileContext {
     opening_region_guard: Option<OperatingRegionGuard>,
     /// `table_route` is stored via previous steps for future use.
     table_route: Option<DeserializedValueWithBytes<TableRouteValue>>,
+    /// `datanode_table` is stored via previous steps for future use.
+    from_peer_datanode_table: Option<DatanodeTableValue>,
     /// `table_info` is stored via previous steps for future use.
     ///
     /// `table_info` should remain unchanged during the procedure;
@@ -123,7 +130,8 @@ pub trait ContextFactory {
 }
 
 /// Default implementation.
-pub struct ContextFactoryImpl {
+#[derive(Clone)]
+pub struct DefaultContextFactory {
     volatile_ctx: VolatileContext,
     table_metadata_manager: TableMetadataManagerRef,
     opening_region_keeper: MemoryRegionKeeperRef,
@@ -131,7 +139,25 @@ pub struct ContextFactoryImpl {
     server_addr: String,
 }
 
-impl ContextFactory for ContextFactoryImpl {
+impl DefaultContextFactory {
+    /// Returns an [ContextFactoryImpl].
+    pub fn new(
+        table_metadata_manager: TableMetadataManagerRef,
+        opening_region_keeper: MemoryRegionKeeperRef,
+        mailbox: MailboxRef,
+        server_addr: String,
+    ) -> Self {
+        Self {
+            volatile_ctx: VolatileContext::default(),
+            table_metadata_manager,
+            opening_region_keeper,
+            mailbox,
+            server_addr,
+        }
+    }
+}
+
+impl ContextFactory for DefaultContextFactory {
     fn new_context(self, persistent_ctx: PersistentContext) -> Context {
         Context {
             persistent_ctx,
@@ -226,6 +252,42 @@ impl Context {
         }
 
         Ok(table_info_value.as_ref().unwrap())
+    }
+
+    /// Returns the `table_info` of [VolatileContext] if any.
+    /// Otherwise, returns the value retrieved from remote.
+    ///
+    /// Retry:
+    /// - Failed to retrieve the metadata of datanode.
+    pub async fn get_from_peer_datanode_table_value(&mut self) -> Result<&DatanodeTableValue> {
+        let datanode_value = &mut self.volatile_ctx.from_peer_datanode_table;
+
+        if datanode_value.is_none() {
+            let table_id = self.persistent_ctx.region_id.table_id();
+            let datanode_id = self.persistent_ctx.from_peer.id;
+
+            let datanode_table = self
+                .table_metadata_manager
+                .datanode_table_manager()
+                .get(&DatanodeTableKey {
+                    datanode_id,
+                    table_id,
+                })
+                .await
+                .context(error::TableMetadataManagerSnafu)
+                .map_err(|e| error::Error::RetryLater {
+                    reason: e.to_string(),
+                    location: location!(),
+                })?
+                .context(error::DatanodeTableNotFoundSnafu {
+                    table_id,
+                    datanode_id,
+                })?;
+
+            *datanode_value = Some(datanode_table);
+        }
+
+        Ok(datanode_value.as_ref().unwrap())
     }
 
     /// Removes the `table_info` of [VolatileContext], returns true if any.
@@ -731,7 +793,7 @@ mod tests {
             .unwrap()
             .version();
         // Should be unchanged.
-        assert_eq!(table_routes_version, 0);
+        assert_eq!(table_routes_version.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -867,7 +929,7 @@ mod tests {
                     to_peer_id,
                     Arc::new(|id| Ok(new_open_region_reply(id, false, None))),
                 )),
-                Assertion::error(|error| assert!(error.is_retryable())),
+                Assertion::error(|error| assert!(error.is_retryable(), "err: {error:?}")),
             ),
             // OpenCandidateRegion
             Step::next(
@@ -920,25 +982,25 @@ mod tests {
                 None,
                 Assertion::simple(assert_region_migration_end, assert_done),
             ),
+            // RegionMigrationStart
+            Step::setup(
+                "Sets state to RegionMigrationStart",
+                merge_before_test_fn(vec![
+                    setup_state(Arc::new(|| Box::new(RegionMigrationStart))),
+                    Arc::new(reset_volatile_ctx),
+                ]),
+            ),
+            // RegionMigrationEnd
+            // Note: We can't run this test multiple times;
+            // the `peer_id`'s `DatanodeTable` will be removed after first-time migration success.
+            Step::next(
+                "Should be the region migration end(has been migrated)",
+                None,
+                Assertion::simple(assert_region_migration_end, assert_done),
+            ),
         ];
 
-        let setup_to_latest_persisted_state = Step::setup(
-            "Sets state to OpenCandidateRegion",
-            merge_before_test_fn(vec![
-                setup_state(Arc::new(|| Box::new(OpenCandidateRegion))),
-                Arc::new(reset_volatile_ctx),
-            ]),
-        );
-
-        let steps = [
-            steps.clone(),
-            vec![setup_to_latest_persisted_state.clone()],
-            steps.clone()[1..].to_vec(),
-            vec![setup_to_latest_persisted_state],
-            steps.clone()[1..].to_vec(),
-        ]
-        .concat();
-
+        let steps = [steps.clone()].concat();
         let timer = Instant::now();
 
         // Run the table tests.

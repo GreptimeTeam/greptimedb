@@ -79,9 +79,9 @@ impl From<PbGrantedRegion> for GrantedRegion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionRole {
-    // Readonly region(mito2), Readonly region(file).
+    // Readonly region(mito2)
     Follower,
-    // Writable region(mito2).
+    // Writable region(mito2), Readonly region(file).
     Leader,
 }
 

@@ -19,6 +19,9 @@ mod normalize;
 mod planner;
 mod range_manipulate;
 mod series_divide;
+#[cfg(test)]
+mod test_util;
+mod union_distinct_on;
 
 use datafusion::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 pub use empty_metric::{build_special_time_expr, EmptyMetric, EmptyMetricExec, EmptyMetricStream};
@@ -28,5 +31,6 @@ pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream}
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
+pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub(crate) type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

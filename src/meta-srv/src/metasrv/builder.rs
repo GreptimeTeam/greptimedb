@@ -21,7 +21,7 @@ use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::datanode_manager::DatanodeManagerRef;
-use common_meta::ddl::TableMetadataAllocatorRef;
+use common_meta::ddl::table_meta::TableMetadataAllocator;
 use common_meta::ddl_manager::{DdlManager, DdlManagerRef};
 use common_meta::distributed_time_constants;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
@@ -57,12 +57,14 @@ use crate::metasrv::{
     ElectionRef, MetaSrv, MetaSrvOptions, MetasrvInfo, SelectorContext, SelectorRef, TABLE_ID_SEQ,
 };
 use crate::procedure::region_failover::RegionFailoverManager;
+use crate::procedure::region_migration::manager::RegionMigrationManager;
+use crate::procedure::region_migration::DefaultContextFactory;
 use crate::pubsub::PublishRef;
 use crate::selector::lease_based::LeaseBasedSelector;
 use crate::service::mailbox::MailboxRef;
 use crate::service::store::cached_kv::{CheckLeader, LeaderCachedKvBackend};
 use crate::state::State;
-use crate::table_meta_alloc::MetaSrvTableMetadataAllocator;
+use crate::table_meta_alloc::MetasrvPeerAllocator;
 
 // TODO(fys): try use derive_builder macro
 pub struct MetaSrvBuilder {
@@ -76,7 +78,7 @@ pub struct MetaSrvBuilder {
     lock: Option<DistLockRef>,
     datanode_manager: Option<DatanodeManagerRef>,
     plugins: Option<Plugins>,
-    table_metadata_allocator: Option<TableMetadataAllocatorRef>,
+    table_metadata_allocator: Option<TableMetadataAllocator>,
 }
 
 impl MetaSrvBuilder {
@@ -148,7 +150,7 @@ impl MetaSrvBuilder {
 
     pub fn table_metadata_allocator(
         mut self,
-        table_metadata_allocator: TableMetadataAllocatorRef,
+        table_metadata_allocator: TableMetadataAllocator,
     ) -> Self {
         self.table_metadata_allocator = Some(table_metadata_allocator);
         self
@@ -216,12 +218,15 @@ impl MetaSrvBuilder {
                     .step(10)
                     .build(),
             );
-            Arc::new(MetaSrvTableMetadataAllocator::new(
+            let peer_allocator = Arc::new(MetasrvPeerAllocator::new(
                 selector_ctx.clone(),
                 selector.clone(),
-                sequence.clone(),
+            ));
+            TableMetadataAllocator::with_peer_allocator(
+                sequence,
                 wal_options_allocator.clone(),
-            ))
+                peer_allocator,
+            )
         });
 
         let opening_region_keeper = Arc::new(MemoryRegionKeeper::default());
@@ -235,6 +240,17 @@ impl MetaSrvBuilder {
             table_metadata_allocator,
             &opening_region_keeper,
         )?;
+
+        let region_migration_manager = Arc::new(RegionMigrationManager::new(
+            procedure_manager.clone(),
+            DefaultContextFactory::new(
+                table_metadata_manager.clone(),
+                opening_region_keeper.clone(),
+                mailbox.clone(),
+                options.server_addr.clone(),
+            ),
+        ));
+        region_migration_manager.try_start()?;
 
         let handler_group = match handler_group {
             Some(handler_group) => handler_group,
@@ -323,6 +339,7 @@ impl MetaSrvBuilder {
             .await,
             plugins: plugins.unwrap_or_else(Plugins::default),
             memory_region_keeper: opening_region_keeper,
+            region_migration_manager,
         })
     }
 }
@@ -368,7 +385,7 @@ fn build_ddl_manager(
     procedure_manager: &ProcedureManagerRef,
     mailbox: &MailboxRef,
     table_metadata_manager: &TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocatorRef,
+    table_metadata_allocator: TableMetadataAllocator,
     memory_region_keeper: &MemoryRegionKeeperRef,
 ) -> Result<DdlManagerRef> {
     let datanode_clients = datanode_clients.unwrap_or_else(|| {

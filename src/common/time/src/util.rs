@@ -14,23 +14,24 @@
 
 use std::str::FromStr;
 
-use chrono::offset::Local;
 use chrono::{LocalResult, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 
+use crate::timezone::get_timezone;
+
 pub fn format_utc_datetime(utc: &NaiveDateTime, pattern: &str) -> String {
-    if let Some(tz) = find_tz_from_env() {
-        format!("{}", tz.from_utc_datetime(utc).format(pattern))
-    } else {
-        format!("{}", Local.from_utc_datetime(utc).format(pattern))
+    match get_timezone(None) {
+        crate::Timezone::Offset(offset) => {
+            offset.from_utc_datetime(utc).format(pattern).to_string()
+        }
+        crate::Timezone::Named(tz) => tz.from_utc_datetime(utc).format(pattern).to_string(),
     }
 }
 
 pub fn local_datetime_to_utc(local: &NaiveDateTime) -> LocalResult<NaiveDateTime> {
-    if let Some(tz) = find_tz_from_env() {
-        tz.from_local_datetime(local).map(|x| x.naive_utc())
-    } else {
-        Local.from_local_datetime(local).map(|x| x.naive_utc())
+    match get_timezone(None) {
+        crate::Timezone::Offset(offset) => offset.from_local_datetime(local).map(|x| x.naive_utc()),
+        crate::Timezone::Named(tz) => tz.from_local_datetime(local).map(|x| x.naive_utc()),
     }
 }
 

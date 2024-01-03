@@ -17,14 +17,32 @@ Affected Rows: 0
 
 show tables;
 
-+-------------------+
-| Tables            |
-+-------------------+
-| build_info        |
-| column_privileges |
-| column_statistics |
-| columns           |
-| engines           |
-| tables            |
-+-------------------+
++---------------------------------------+
+| Tables                                |
++---------------------------------------+
+| build_info                            |
+| character_sets                        |
+| check_constraints                     |
+| collation_character_set_applicability |
+| collations                            |
+| column_privileges                     |
+| column_statistics                     |
+| columns                               |
+| engines                               |
+| events                                |
+| files                                 |
+| global_status                         |
+| key_column_usage                      |
+| optimizer_trace                       |
+| parameters                            |
+| profiling                             |
+| referential_constraints               |
+| routines                              |
+| schema_privileges                     |
+| schemata                              |
+| session_status                        |
+| table_privileges                      |
+| tables                                |
+| triggers                              |
++---------------------------------------+
 

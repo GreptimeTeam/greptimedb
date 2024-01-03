@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use store_api::storage::{RegionId, RegionNumber};
@@ -91,13 +92,15 @@ impl Display for OpenRegion {
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OpenRegion {
     pub region_ident: RegionIdent,
     pub region_storage_path: String,
     pub region_options: HashMap<String, String>,
     #[serde(default)]
-    pub region_wal_options: HashMap<String, String>,
+    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
+    pub region_wal_options: HashMap<RegionNumber, String>,
     #[serde(default)]
     pub skip_wal_replay: bool,
 }
@@ -107,7 +110,7 @@ impl OpenRegion {
         region_ident: RegionIdent,
         path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<String, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
         skip_wal_replay: bool,
     ) -> Self {
         Self {
@@ -140,11 +143,12 @@ pub struct UpgradeRegion {
     pub region_id: RegionId,
     /// The `last_entry_id` of old leader region.
     pub last_entry_id: Option<u64>,
-    /// The second of waiting for a wal replay.
+    /// The timeout of waiting for a wal replay.
     ///
     /// `None` stands for no wait,
     /// it's helpful to verify whether the leader region is ready.
-    pub wait_for_replay_secs: Option<u64>,
+    #[serde(with = "humantime_serde")]
+    pub wait_for_replay_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Display)]

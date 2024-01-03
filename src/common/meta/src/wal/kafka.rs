@@ -27,6 +27,7 @@ pub use crate::wal::kafka::topic_manager::TopicManager;
 
 /// Configurations for kafka wal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KafkaConfig {
     /// The broker endpoints of the Kafka cluster.
     pub broker_endpoints: Vec<String>,
@@ -40,7 +41,7 @@ pub struct KafkaConfig {
     pub num_partitions: i32,
     /// The replication factor of each topic.
     pub replication_factor: i16,
-    /// Above which a topic creation operation will be cancelled.
+    /// The timeout of topic creation.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
     /// The backoff config.
@@ -50,13 +51,16 @@ pub struct KafkaConfig {
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let broker_endpoints = vec!["127.0.0.1:9092".to_string()];
+        let replication_factor = broker_endpoints.len() as i16;
+
         Self {
-            broker_endpoints: vec!["127.0.0.1:9092".to_string()],
+            broker_endpoints,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor,
             create_topic_timeout: Duration::from_secs(30),
             backoff: KafkaBackoffConfig::default(),
         }

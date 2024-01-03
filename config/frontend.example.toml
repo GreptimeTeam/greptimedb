@@ -1,5 +1,7 @@
 # Node running mode, see `standalone.example.toml`.
 mode = "distributed"
+# The default timezone of the server
+# default_timezone = "UTC"
 
 [heartbeat]
 # Interval for sending heartbeat task to the Metasrv, 5 seconds by default.

@@ -15,6 +15,8 @@ selector = "lease_based"
 use_memory_store = false
 # Whether to enable greptimedb telemetry, true by default.
 enable_telemetry = true
+# If it's not empty, the metasrv will store all data with this key prefix.
+store_key_prefix = ""
 
 # Log options, see `standalone.example.toml`
 # [logging]
@@ -65,7 +67,7 @@ provider = "raft_engine"
 # Number of partitions per topic.
 # num_partitions = 1
 # Expected number of replicas of each partition.
-# replication_factor = 3
+# replication_factor = 1
 # Above which a topic creation operation will be cancelled.
 # create_topic_timeout = "30s"
 # The initial backoff for kafka clients.
@@ -73,7 +75,7 @@ provider = "raft_engine"
 # The maximum backoff for kafka clients.
 # backoff_max = "10s"
 # Exponential backoff rate, i.e. next backoff = base * current backoff.
-# backoff_base = 2.0
+# backoff_base = 2
 # Stop reconnecting if the total wait time reaches the deadline. If this config is missing, the reconnecting won't terminate.
 # backoff_deadline = "5mins"
 

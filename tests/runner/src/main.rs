@@ -14,12 +14,19 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
-use env::Env;
+use clap::{Parser, ValueEnum};
+use env::{Env, WalConfig};
 use sqlness::{ConfigBuilder, Runner};
 
 mod env;
 mod util;
+
+#[derive(ValueEnum, Debug, Clone)]
+#[clap(rename_all = "snake_case")]
+enum Wal {
+    RaftEngine,
+    Kafka,
+}
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -41,9 +48,17 @@ struct Args {
     #[clap(short, long, default_value = ".*")]
     test_filter: String,
 
-    /// Address of the server
+    /// Address of the server.
     #[clap(short, long)]
     server_addr: Option<String>,
+
+    /// The type of Wal.
+    #[clap(short, long, default_value = "raft_engine")]
+    wal: Wal,
+
+    /// The kafka wal broker endpoints.
+    #[clap(short, long, default_value = "127.0.0.1:9092")]
+    kafka_wal_broker_endpoints: String,
 }
 
 #[tokio::main]
@@ -63,6 +78,18 @@ async fn main() {
         .env_config_file(args.env_config_file)
         .build()
         .unwrap();
-    let runner = Runner::new(config, Env::new(data_home, args.server_addr));
+
+    let wal = match args.wal {
+        Wal::RaftEngine => WalConfig::RaftEngine,
+        Wal::Kafka => WalConfig::Kafka {
+            broker_endpoints: args
+                .kafka_wal_broker_endpoints
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+        },
+    };
+
+    let runner = Runner::new(config, Env::new(data_home, args.server_addr, wal));
     runner.run().await.unwrap();
 }

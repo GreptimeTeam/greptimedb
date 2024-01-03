@@ -42,14 +42,14 @@ pub struct KafkaConfig {
     #[serde(skip)]
     #[serde(default)]
     pub compression: RsKafkaCompression,
-    /// The maximum log size a kakfa batch producer could buffer.
+    /// The max size of a single producer batch.
     pub max_batch_size: ReadableSize,
     /// The linger duration of a kafka batch producer.
     #[serde(with = "humantime_serde")]
     pub linger: Duration,
-    /// The maximum amount of time (in milliseconds) to wait for Kafka records to be returned.
+    /// The consumer wait timeout.
     #[serde(with = "humantime_serde")]
-    pub produce_record_timeout: Duration,
+    pub consumer_wait_timeout: Duration,
     /// The backoff config.
     #[serde(flatten, with = "kafka_backoff")]
     pub backoff: KafkaBackoffConfig,
@@ -62,7 +62,7 @@ impl Default for KafkaConfig {
             compression: RsKafkaCompression::NoCompression,
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
-            produce_record_timeout: Duration::from_millis(100),
+            consumer_wait_timeout: Duration::from_millis(100),
             backoff: KafkaBackoffConfig::default(),
         }
     }
@@ -73,17 +73,15 @@ with_prefix!(pub kafka_backoff "backoff_");
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct KafkaBackoffConfig {
-    /// The initial backoff for kafka clients.
+    /// The initial backoff delay.
     #[serde(with = "humantime_serde")]
     pub init: Duration,
-    /// The maximum backoff for kafka clients.
+    /// The maximum backoff delay.
     #[serde(with = "humantime_serde")]
     pub max: Duration,
     /// Exponential backoff rate, i.e. next backoff = base * current backoff.
-    // Sets to u32 type since some structs containing the KafkaConfig need to derive the Eq trait.
     pub base: u32,
-    /// Stop reconnecting if the total wait time reaches the deadline.
-    /// If it's None, the reconnecting won't terminate.
+    /// The deadline of retries. `None` stands for no deadline.
     #[serde(with = "humantime_serde")]
     pub deadline: Option<Duration>,
 }
@@ -114,20 +112,23 @@ pub struct StandaloneKafkaConfig {
     pub num_partitions: i32,
     /// The replication factor of each topic.
     pub replication_factor: i16,
-    /// Above which a topic creation operation will be cancelled.
+    /// The timeout of topic creation.
     #[serde(with = "humantime_serde")]
     pub create_topic_timeout: Duration,
 }
 
 impl Default for StandaloneKafkaConfig {
     fn default() -> Self {
+        let base = KafkaConfig::default();
+        let replication_factor = base.broker_endpoints.len() as i16;
+
         Self {
-            base: KafkaConfig::default(),
+            base,
             num_topics: 64,
             selector_type: TopicSelectorType::RoundRobin,
             topic_name_prefix: "greptimedb_wal_topic".to_string(),
             num_partitions: 1,
-            replication_factor: 3,
+            replication_factor,
             create_topic_timeout: Duration::from_secs(30),
         }
     }

@@ -26,10 +26,10 @@ use crate::datanode_manager::DatanodeManagerRef;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::drop_table::DropTableProcedure;
+use crate::ddl::table_meta::TableMetadataAllocator;
 use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::{
     DdlContext, DdlTaskExecutor, ExecutorContext, TableMetadata, TableMetadataAllocatorContext,
-    TableMetadataAllocatorRef,
 };
 use crate::error::{
     self, RegisterProcedureLoaderSnafu, Result, SubmitProcedureSnafu, TableNotFoundSnafu,
@@ -54,7 +54,7 @@ pub struct DdlManager {
     datanode_manager: DatanodeManagerRef,
     cache_invalidator: CacheInvalidatorRef,
     table_metadata_manager: TableMetadataManagerRef,
-    table_metadata_allocator: TableMetadataAllocatorRef,
+    table_metadata_allocator: TableMetadataAllocator,
     memory_region_keeper: MemoryRegionKeeperRef,
 }
 
@@ -65,7 +65,7 @@ impl DdlManager {
         datanode_clients: DatanodeManagerRef,
         cache_invalidator: CacheInvalidatorRef,
         table_metadata_manager: TableMetadataManagerRef,
-        table_metadata_allocator: TableMetadataAllocatorRef,
+        table_metadata_allocator: TableMetadataAllocator,
         memory_region_keeper: MemoryRegionKeeperRef,
     ) -> Result<Self> {
         let manager = Self {
@@ -278,7 +278,7 @@ async fn handle_truncate_table_task(
     let table_route_value =
         table_route_value.context(error::TableRouteNotFoundSnafu { table_id })?;
 
-    let table_route = table_route_value.into_inner().region_routes().clone();
+    let table_route = table_route_value.into_inner().region_routes()?.clone();
 
     let id = ddl_manager
         .submit_truncate_table_task(
@@ -461,15 +461,15 @@ mod tests {
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
+    use crate::ddl::table_meta::TableMetadataAllocator;
     use crate::ddl::truncate_table::TruncateTableProcedure;
-    use crate::ddl::{TableMetadata, TableMetadataAllocator, TableMetadataAllocatorContext};
-    use crate::error::Result;
     use crate::key::TableMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
-    use crate::rpc::ddl::CreateTableTask;
+    use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
+    use crate::wal::WalOptionsAllocator;
 
     /// A dummy implemented [DatanodeManager].
     pub struct DummyDatanodeManager;
@@ -481,26 +481,12 @@ mod tests {
         }
     }
 
-    /// A dummy implemented [TableMetadataAllocator].
-    pub struct DummyTableMetadataAllocator;
-
-    #[async_trait::async_trait]
-    impl TableMetadataAllocator for DummyTableMetadataAllocator {
-        async fn create(
-            &self,
-            _ctx: &TableMetadataAllocatorContext,
-            _task: &CreateTableTask,
-        ) -> Result<TableMetadata> {
-            unimplemented!()
-        }
-    }
-
     #[test]
     fn test_try_new() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
-        let state_store = Arc::new(KvStateStore::new(kv_backend));
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
         let procedure_manager = Arc::new(LocalManager::new(Default::default(), state_store));
 
         let _ = DdlManager::try_new(
@@ -508,7 +494,10 @@ mod tests {
             Arc::new(DummyDatanodeManager),
             Arc::new(DummyCacheInvalidator),
             table_metadata_manager,
-            Arc::new(DummyTableMetadataAllocator),
+            TableMetadataAllocator::new(
+                Arc::new(SequenceBuilder::new("test", kv_backend).build()),
+                Arc::new(WalOptionsAllocator::default()),
+            ),
             Arc::new(MemoryRegionKeeper::default()),
         );
 

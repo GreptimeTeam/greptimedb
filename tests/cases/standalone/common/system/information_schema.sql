@@ -44,12 +44,22 @@ drop schema my_db;
 
 use information_schema;
 
+-- schemata --
+
+desc table schemata;
+
+select * from schemata where catalog_name = 'greptime' and schema_name != 'public' order by catalog_name, schema_name;
+
 -- test engines
 select * from engines;
 
 desc table build_info;
 
 select count(*) from build_info;
+
+desc table key_column_usage;
+
+select * from key_column_usage;
 
 -- tables not implemented
 desc table COLUMN_PRIVILEGES;
@@ -59,5 +69,15 @@ select * from COLUMN_PRIVILEGES;
 desc table COLUMN_STATISTICS;
 
 select * from COLUMN_STATISTICS;
+
+select * from CHARACTER_SETS;
+
+select * from COLLATIONS;
+
+select * from COLLATION_CHARACTER_SET_APPLICABILITY;
+
+desc table CHECK_CONSTRAINTS;
+
+select * from CHECK_CONSTRAINTS;
 
 use public;

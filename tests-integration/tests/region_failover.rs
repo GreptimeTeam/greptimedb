@@ -15,11 +15,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use api::v1::meta::Peer;
 use catalog::kvbackend::{CachedMetaKvBackend, KvBackendCatalogManager};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_meta::key::table_route::TableRouteKey;
 use common_meta::key::{RegionDistribution, TableMetaKey};
+use common_meta::peer::Peer;
 use common_meta::{distributed_time_constants, RegionIdent};
 use common_procedure::{watcher, ProcedureWithId};
 use common_query::Output;
@@ -100,7 +100,7 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     let table_id = prepare_testing_table(&cluster).await;
 
-    let results = write_datas(&frontend, logical_timer).await;
+    let results = insert_values(&frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
@@ -141,12 +141,12 @@ pub async fn test_region_failover(store_type: StorageType) {
 
     // Inserts data to each datanode after failover
     let frontend = cluster.frontend.clone();
-    let results = write_datas(&frontend, logical_timer).await;
+    let results = insert_values(&frontend, logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
 
-    assert_writes(&frontend).await;
+    assert_values(&frontend).await;
 
     assert!(!distribution.contains_key(&failed_region.datanode_id));
 
@@ -179,12 +179,12 @@ async fn has_route_cache(instance: &Arc<Instance>, table_id: TableId) -> bool {
         .is_some()
 }
 
-async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
     let query_ctx = QueryContext::arc();
 
     let mut results = Vec::new();
     for range in [5, 15, 25, 55] {
-        let result = write_data(
+        let result = insert_value(
             instance,
             &format!("INSERT INTO my_table VALUES ({},{})", range, ts),
             query_ctx.clone(),
@@ -196,7 +196,7 @@ async fn write_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Ou
     results
 }
 
-async fn write_data(
+async fn insert_value(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
@@ -204,7 +204,7 @@ async fn write_data(
     instance.do_query(sql, query_ctx).await.remove(0)
 }
 
-async fn assert_writes(instance: &Arc<Instance>) {
+async fn assert_values(instance: &Arc<Instance>) {
     let query_ctx = QueryContext::arc();
 
     let result = instance

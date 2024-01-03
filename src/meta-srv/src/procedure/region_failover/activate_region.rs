@@ -17,13 +17,14 @@ use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
 use async_trait::async_trait;
-use common_meta::ddl::utils::region_storage_path;
 use common_meta::instruction::{Instruction, InstructionReply, OpenRegion, SimpleReply};
+use common_meta::key::datanode_table::{DatanodeTableKey, RegionInfo};
 use common_meta::peer::Peer;
 use common_meta::RegionIdent;
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::update_metadata::UpdateRegionMetadata;
 use super::{RegionFailoverContext, State};
@@ -44,7 +45,7 @@ pub(super) struct ActivateRegion {
     // An `None` option stands for uninitialized.
     region_storage_path: Option<String>,
     region_options: Option<HashMap<String, String>>,
-    region_wal_options: Option<HashMap<String, String>>,
+    region_wal_options: Option<HashMap<RegionNumber, String>>,
 }
 
 impl ActivateRegion {
@@ -65,27 +66,31 @@ impl ActivateRegion {
         timeout: Duration,
     ) -> Result<MailboxReceiver> {
         let table_id = failed_region.table_id;
-        let table_info = ctx
+        // Retrieves the wal options from failed datanode table value.
+        let datanode_table_value = ctx
             .table_metadata_manager
-            .table_info_manager()
-            .get(table_id)
+            .datanode_table_manager()
+            .get(&DatanodeTableKey::new(failed_region.datanode_id, table_id))
             .await
             .context(error::TableMetadataManagerSnafu)?
-            .context(error::TableInfoNotFoundSnafu { table_id })?
-            .into_inner()
-            .table_info;
-
-        let region_storage_path =
-            region_storage_path(&table_info.catalog_name, &table_info.schema_name);
+            .context(error::DatanodeTableNotFoundSnafu {
+                table_id,
+                datanode_id: failed_region.datanode_id,
+            })?;
 
         let candidate_ident = RegionIdent {
             datanode_id: self.candidate.id,
             ..failed_region.clone()
         };
         info!("Activating region: {candidate_ident:?}");
-        let region_options: HashMap<String, String> = (&table_info.meta.options).into();
-        // TODO(niebayes): properly fetch or construct region wal options.
-        let region_wal_options = HashMap::new();
+
+        let RegionInfo {
+            region_storage_path,
+            region_options,
+            region_wal_options,
+            ..
+        } = datanode_table_value.region_info;
+
         let instruction = Instruction::OpenRegion(OpenRegion::new(
             candidate_ident.clone(),
             &region_storage_path,

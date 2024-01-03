@@ -59,7 +59,7 @@ impl RegionFailoverStart {
             .iter()
             .filter_map(|p| {
                 if p.id != failed_region.datanode_id {
-                    Some(p.clone().into())
+                    Some(p.clone())
                 } else {
                     None
                 }

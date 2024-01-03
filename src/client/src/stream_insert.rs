@@ -39,7 +39,7 @@ use crate::from_grpc_response;
 /// ```
 ///
 /// If you want to see a concrete usage example, please see
-/// [stream_inserter.rs](https://github.com/GreptimeTeam/greptimedb/blob/develop/src/client/examples/stream_ingest.rs).
+/// [stream_inserter.rs](https://github.com/GreptimeTeam/greptimedb/blob/main/src/client/examples/stream_ingest.rs).
 pub struct StreamInserter {
     sender: mpsc::Sender<GreptimeRequest>,
 

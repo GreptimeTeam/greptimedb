@@ -11,7 +11,6 @@ on:
       - '.gitignore'
   push:
     branches:
-      - develop
       - main
     paths-ignore:
       - 'docs/**'
@@ -97,6 +96,37 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Run sqlness
         run: cargo sqlness
+      - name: Upload sqlness logs
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: sqlness-logs
+          path: ${{ runner.temp }}/greptime-*.log
+          retention-days: 3
+
+  sqlness-kafka-wal:
+    name: Sqlness Test with Kafka Wal
+    if: github.event.pull_request.draft == false
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-20.04-8-cores ]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v3
+      - uses: arduino/setup-protoc@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Setup kafka server
+        working-directory: tests-integration/fixtures/kafka
+        run: docker compose -f docker-compose-standalone.yml up -d --wait
+      - name: Run sqlness
+        run: cargo sqlness -w kafka -k 127.0.0.1:9092
       - name: Upload sqlness logs
         if: always()
         uses: actions/upload-artifact@v3

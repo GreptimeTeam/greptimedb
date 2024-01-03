@@ -44,6 +44,42 @@ pub const INFORMATION_SCHEMA_COLUMN_PRIVILEGES_TABLE_ID: u32 = 6;
 pub const INFORMATION_SCHEMA_COLUMN_STATISTICS_TABLE_ID: u32 = 7;
 /// id for information_schema.build_info
 pub const INFORMATION_SCHEMA_BUILD_INFO_TABLE_ID: u32 = 8;
+/// id for information_schema.CHARACTER_SETS
+pub const INFORMATION_SCHEMA_CHARACTER_SETS_TABLE_ID: u32 = 9;
+/// id for information_schema.COLLATIONS
+pub const INFORMATION_SCHEMA_COLLATIONS_TABLE_ID: u32 = 10;
+/// id for information_schema.COLLATIONS
+pub const INFORMATION_SCHEMA_COLLATION_CHARACTER_SET_APPLICABILITY_TABLE_ID: u32 = 11;
+/// id for information_schema.CHECK_CONSTRAINTS
+pub const INFORMATION_SCHEMA_CHECK_CONSTRAINTS_TABLE_ID: u32 = 12;
+/// id for information_schema.EVENTS
+pub const INFORMATION_SCHEMA_EVENTS_TABLE_ID: u32 = 13;
+/// id for information_schema.FILES
+pub const INFORMATION_SCHEMA_FILES_TABLE_ID: u32 = 14;
+/// id for information_schema.SCHEMATA
+pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 15;
+/// id for information_schema.KEY_COLUMN_USAGE
+pub const INFORMATION_SCHEMA_KEY_COLUMN_USAGE_TABLE_ID: u32 = 16;
+/// id for information_schema.OPTIMIZER_TRACE
+pub const INFORMATION_SCHEMA_OPTIMIZER_TRACE_TABLE_ID: u32 = 17;
+/// id for information_schema.PARAMETERS
+pub const INFORMATION_SCHEMA_PARAMETERS_TABLE_ID: u32 = 18;
+/// id for information_schema.PROFILING
+pub const INFORMATION_SCHEMA_PROFILING_TABLE_ID: u32 = 19;
+/// id for information_schema.REFERENTIAL_CONSTRAINTS
+pub const INFORMATION_SCHEMA_REFERENTIAL_CONSTRAINTS_TABLE_ID: u32 = 20;
+/// id for information_schema.ROUTINES
+pub const INFORMATION_SCHEMA_ROUTINES_TABLE_ID: u32 = 21;
+/// id for information_schema.SCHEMA_PRIVILEGES
+pub const INFORMATION_SCHEMA_SCHEMA_PRIVILEGES_TABLE_ID: u32 = 22;
+/// id for information_schema.TABLE_PRIVILEGES
+pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
+/// id for information_schema.TRIGGERS
+pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
+/// id for information_schema.GLOBAL_STATUS
+pub const INFORMATION_SCHEMA_GLOBAL_STATUS_TABLE_ID: u32 = 25;
+/// id for information_schema.SESSION_STATUS
+pub const INFORMATION_SCHEMA_SESSION_STATUS_TABLE_ID: u32 = 26;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

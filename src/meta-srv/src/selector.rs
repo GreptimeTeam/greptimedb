@@ -56,6 +56,7 @@ impl Default for SelectorOptions {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(try_from = "String")]
 pub enum SelectorType {
     #[default]
     LoadBased,
@@ -74,6 +75,14 @@ impl TryFrom<&str> for SelectorType {
             }
             .fail(),
         }
+    }
+}
+
+impl TryFrom<String> for SelectorType {
+    type Error = error::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        SelectorType::try_from(value.as_str())
     }
 }
 
