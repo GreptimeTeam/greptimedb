@@ -522,7 +522,6 @@ CREATE TABLE {table_name} (
             .into_inner();
 
         let region_to_dn_map = region_distribution(table_route_value.region_routes())
-            .unwrap()
             .iter()
             .map(|(k, v)| (v[0], *k))
             .collect::<HashMap<u32, u64>>();

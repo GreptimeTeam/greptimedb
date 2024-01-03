@@ -352,10 +352,10 @@ impl TableRouteManager {
         &self,
         table_id: TableId,
     ) -> Result<Option<RegionDistribution>> {
-        self.get(table_id)
+        Ok(self
+            .get(table_id)
             .await?
-            .map(|table_route| region_distribution(table_route.region_routes()))
-            .transpose()
+            .map(|table_route| region_distribution(table_route.region_routes())))
     }
 }
 
