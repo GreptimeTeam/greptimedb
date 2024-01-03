@@ -66,7 +66,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         let version = self.physical_table_route().version;
@@ -84,7 +84,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self.physical_table_route().version)
@@ -95,7 +95,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self
@@ -116,7 +116,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(&self.physical_table_route().region_routes)

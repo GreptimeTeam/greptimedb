@@ -256,7 +256,7 @@ impl RegionMigrationManager {
         let region_route = table_route
             .region_route(region_id)
             .context(error::UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{table_route:?} is a non-physical TableRouteValue."),
             })?
             .context(error::RegionRouteNotFoundSnafu { region_id })?;
 
