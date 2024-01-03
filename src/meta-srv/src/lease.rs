@@ -14,27 +14,57 @@
 
 use std::collections::HashMap;
 
-use common_meta::util;
+use common_meta::peer::Peer;
+use common_meta::{util, ClusterId};
 use common_time::util as time_util;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::Result;
 use crate::keys::{LeaseKey, LeaseValue, DN_LEASE_PREFIX};
 
+fn build_lease_filter(lease_secs: u64) -> impl Fn(&LeaseKey, &LeaseValue) -> bool {
+    move |_: &LeaseKey, v: &LeaseValue| {
+        ((time_util::current_time_millis() - v.timestamp_millis) as u64) < lease_secs * 1000
+    }
+}
+
+pub async fn lookup_alive_datanode_peer(
+    cluster_id: ClusterId,
+    datanode_id: u64,
+    meta_peer_client: &MetaPeerClientRef,
+    lease_secs: u64,
+) -> Result<Option<Peer>> {
+    let lease_filter = build_lease_filter(lease_secs);
+    let lease_key = LeaseKey {
+        cluster_id,
+        node_id: datanode_id,
+    };
+    let Some(kv) = meta_peer_client.get(lease_key.clone().try_into()?).await? else {
+        return Ok(None);
+    };
+    let lease_value: LeaseValue = kv.value.try_into()?;
+    if lease_filter(&lease_key, &lease_value) {
+        Ok(Some(Peer {
+            id: lease_key.node_id,
+            addr: lease_value.node_addr,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 pub async fn alive_datanodes(
-    cluster_id: u64,
+    cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     lease_secs: u64,
 ) -> Result<HashMap<LeaseKey, LeaseValue>> {
-    let lease_filter = |_: &LeaseKey, v: &LeaseValue| {
-        ((time_util::current_time_millis() - v.timestamp_millis) as u64) < lease_secs * 1000
-    };
+    let lease_filter = build_lease_filter(lease_secs);
 
     filter_datanodes(cluster_id, meta_peer_client, lease_filter).await
 }
 
 pub async fn filter_datanodes<P>(
-    cluster_id: u64,
+    cluster_id: ClusterId,
     meta_peer_client: &MetaPeerClientRef,
     predicate: P,
 ) -> Result<HashMap<LeaseKey, LeaseValue>>

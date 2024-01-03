@@ -21,7 +21,7 @@ mod otlp;
 mod prom_store;
 pub mod test_util;
 
-mod standalone;
+pub mod standalone;
 #[cfg(test)]
 mod tests;
 

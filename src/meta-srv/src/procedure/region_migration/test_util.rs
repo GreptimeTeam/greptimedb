@@ -43,7 +43,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use super::migration_abort::RegionMigrationAbort;
 use super::upgrade_candidate_region::UpgradeCandidateRegion;
-use super::{Context, ContextFactory, ContextFactoryImpl, State, VolatileContext};
+use super::{Context, ContextFactory, DefaultContextFactory, State, VolatileContext};
 use crate::error::{self, Error, Result};
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
@@ -120,8 +120,8 @@ impl TestingEnv {
     }
 
     /// Returns a context of region migration procedure.
-    pub fn context_factory(&self) -> ContextFactoryImpl {
-        ContextFactoryImpl {
+    pub fn context_factory(&self) -> DefaultContextFactory {
+        DefaultContextFactory {
             table_metadata_manager: self.table_metadata_manager.clone(),
             opening_region_keeper: self.opening_region_keeper.clone(),
             volatile_ctx: Default::default(),
@@ -419,7 +419,7 @@ impl ProcedureMigrationTestSuite {
             .unwrap()
             .unwrap()
             .into_inner();
-        let region_routes = table_route.region_routes();
+        let region_routes = table_route.region_routes().unwrap();
 
         let expected_leader_id = self.context.persistent_ctx.to_peer.id;
         let removed_follower_id = self.context.persistent_ctx.from_peer.id;

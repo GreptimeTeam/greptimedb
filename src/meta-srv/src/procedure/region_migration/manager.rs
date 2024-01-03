@@ -21,21 +21,23 @@ use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::RegionRoute;
 use common_meta::ClusterId;
-use common_procedure::{watcher, ProcedureManagerRef, ProcedureWithId};
+use common_procedure::{watcher, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::{error, info};
 use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
 use crate::procedure::region_migration::{
-    ContextFactoryImpl, PersistentContext, RegionMigrationProcedure,
+    DefaultContextFactory, PersistentContext, RegionMigrationProcedure,
 };
 
+pub type RegionMigrationManagerRef = Arc<RegionMigrationManager>;
+
 /// Manager of region migration procedure.
-pub(crate) struct RegionMigrationManager {
+pub struct RegionMigrationManager {
     procedure_manager: ProcedureManagerRef,
     running_procedures: Arc<RwLock<HashMap<RegionId, RegionMigrationProcedureTask>>>,
-    context_factory: ContextFactoryImpl,
+    context_factory: DefaultContextFactory,
 }
 
 /// The guard of running [RegionMigrationProcedureTask].
@@ -55,10 +57,10 @@ impl Drop for RegionMigrationProcedureGuard {
 
 #[derive(Debug, Clone)]
 pub(crate) struct RegionMigrationProcedureTask {
-    cluster_id: ClusterId,
-    region_id: RegionId,
-    from_peer: Peer,
-    to_peer: Peer,
+    pub(crate) cluster_id: ClusterId,
+    pub(crate) region_id: RegionId,
+    pub(crate) from_peer: Peer,
+    pub(crate) to_peer: Peer,
 }
 
 impl Display for RegionMigrationProcedureTask {
@@ -93,7 +95,7 @@ impl RegionMigrationManager {
     /// Returns new [RegionMigrationManager]
     pub(crate) fn new(
         procedure_manager: ProcedureManagerRef,
-        context_factory: ContextFactoryImpl,
+        context_factory: DefaultContextFactory,
     ) -> Self {
         Self {
             procedure_manager,
@@ -221,7 +223,10 @@ impl RegionMigrationManager {
     }
 
     /// Submits a new region migration procedure.
-    pub(crate) async fn submit_procedure(&self, task: RegionMigrationProcedureTask) -> Result<()> {
+    pub(crate) async fn submit_procedure(
+        &self,
+        task: RegionMigrationProcedureTask,
+    ) -> Result<Option<ProcedureId>> {
         let Some(guard) = self.insert_running_procedure(&task) else {
             return error::MigrationRunningSnafu {
                 region_id: task.region_id,
@@ -239,11 +244,14 @@ impl RegionMigrationManager {
         // Safety: checked before.
         let region_route = table_route
             .region_route(region_id)
+            .context(error::UnexpectedLogicalRouteTableSnafu {
+                err_msg: "{self:?} is a non-physical TableRouteValue.",
+            })?
             .context(error::RegionRouteNotFoundSnafu { region_id })?;
 
         if self.has_migrated(&region_route, &task)? {
             info!("Skipping region migration task: {task}");
-            return Ok(());
+            return Ok(None);
         }
 
         self.verify_region_leader_peer(&region_route, &task)?;
@@ -274,7 +282,7 @@ impl RegionMigrationManager {
             info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
         });
 
-        Ok(())
+        Ok(Some(procedure_id))
     }
 }
 

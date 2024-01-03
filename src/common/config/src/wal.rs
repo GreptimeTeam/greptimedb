@@ -94,7 +94,7 @@ mod tests {
             broker_endpoints = ["127.0.0.1:9092"]
             max_batch_size = "4MB"
             linger = "200ms"
-            produce_record_timeout = "100ms"
+            consumer_wait_timeout = "100ms"
             backoff_init = "500ms"
             backoff_max = "10s"
             backoff_base = 2
@@ -106,7 +106,7 @@ mod tests {
             compression: RsKafkaCompression::default(),
             max_batch_size: ReadableSize::mb(4),
             linger: Duration::from_millis(200),
-            produce_record_timeout: Duration::from_millis(100),
+            consumer_wait_timeout: Duration::from_millis(100),
             backoff: KafkaBackoffConfig {
                 init: Duration::from_millis(500),
                 max: Duration::from_secs(10),

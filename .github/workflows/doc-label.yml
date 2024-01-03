@@ -18,3 +18,14 @@ jobs:
         enable-versioned-regex: false
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         sync-labels: 1
+    - name: create an issue in doc repo
+      uses: dacbd/create-issue-action@main
+      if: ${{ github.event.action == 'opened' && contains(github.event.pull_request.body, '- [ ]  This PR does not require documentation updates.') }}
+      with:
+        owner: GreptimeTeam
+        repo: docs
+        token: ${{ secrets.DOCS_REPO_TOKEN }}
+        title: Update docs for ${{ github.event.issue.title || github.event.pull_request.title }}
+        body: |
+          A document change request is generated from
+          ${{ github.event.issue.html_url || github.event.pull_request.html_url }}

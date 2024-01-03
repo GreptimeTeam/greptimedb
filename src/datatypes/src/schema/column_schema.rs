@@ -109,6 +109,11 @@ impl ColumnSchema {
         &mut self.metadata
     }
 
+    /// Retrieve the column comment
+    pub fn column_comment(&self) -> Option<&String> {
+        self.metadata.get(COMMENT_KEY)
+    }
+
     pub fn with_time_index(mut self, is_time_index: bool) -> Self {
         self.is_time_index = is_time_index;
         if is_time_index {
@@ -315,12 +320,16 @@ mod tests {
 
     #[test]
     fn test_column_schema_with_metadata() {
-        let metadata = Metadata::from([("k1".to_string(), "v1".to_string())]);
+        let metadata = Metadata::from([
+            ("k1".to_string(), "v1".to_string()),
+            (COMMENT_KEY.to_string(), "test comment".to_string()),
+        ]);
         let column_schema = ColumnSchema::new("test", ConcreteDataType::int32_datatype(), true)
             .with_metadata(metadata)
             .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
             .unwrap();
         assert_eq!("v1", column_schema.metadata().get("k1").unwrap());
+        assert_eq!("test comment", column_schema.column_comment().unwrap());
         assert!(column_schema
             .metadata()
             .get(DEFAULT_CONSTRAINT_KEY)

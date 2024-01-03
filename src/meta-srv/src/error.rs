@@ -32,6 +32,9 @@ use crate::pubsub::Message;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("The target peer is unavailable temporally: {}", peer_id))]
+    PeerUnavailable { location: Location, peer_id: u64 },
+
     #[snafu(display("Another migration procedure is running for region: {}", region_id))]
     MigrationRunning {
         location: Location,
@@ -324,6 +327,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Datanode table not found: {}, datanode: {}", table_id, datanode_id))]
+    DatanodeTableNotFound {
+        table_id: TableId,
+        datanode_id: DatanodeId,
+        location: Location,
+    },
+
     #[snafu(display("Table route corrupted, key: {}, reason: {}", key, reason))]
     CorruptedTableRoute {
         key: String,
@@ -599,6 +609,13 @@ pub enum Error {
 
     #[snafu(display("Weight array is not set"))]
     NotSetWeightArray { location: Location },
+
+    #[snafu(display("Unexpected table route type: {}", err_msg))]
+    UnexpectedLogicalRouteTable {
+        location: Location,
+        err_msg: String,
+        source: common_meta::error::Error,
+    },
 }
 
 impl Error {
@@ -650,7 +667,8 @@ impl ErrorExt for Error {
             | Error::Join { .. }
             | Error::WeightArray { .. }
             | Error::NotSetWeightArray { .. }
-            | Error::Unsupported { .. } => StatusCode::Internal,
+            | Error::Unsupported { .. }
+            | Error::PeerUnavailable { .. } => StatusCode::Internal,
             Error::TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
             Error::EmptyKey { .. }
             | Error::MissingRequiredParameter { .. }
@@ -672,6 +690,7 @@ impl ErrorExt for Error {
             | Error::InvalidRegionKeyFromUtf8 { .. }
             | Error::TableRouteNotFound { .. }
             | Error::TableInfoNotFound { .. }
+            | Error::DatanodeTableNotFound { .. }
             | Error::CorruptedTableRoute { .. }
             | Error::MoveValue { .. }
             | Error::InvalidUtf8Value { .. }
@@ -713,7 +732,8 @@ impl ErrorExt for Error {
             | Error::TableMetadataManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UpdateTableRoute { source, .. }
-            | Error::GetFullTableInfo { source, .. } => source.status_code(),
+            | Error::GetFullTableInfo { source, .. }
+            | Error::UnexpectedLogicalRouteTable { source, .. } => source.status_code(),
 
             Error::InitMetadata { source, .. } | Error::InitDdlManager { source, .. } => {
                 source.status_code()

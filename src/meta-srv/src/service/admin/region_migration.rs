@@ -17,22 +17,24 @@ use std::num::ParseIntError;
 use std::str::FromStr;
 
 use common_meta::peer::Peer;
-use common_meta::ClusterId;
+use common_meta::{distributed_time_constants, ClusterId};
 use serde::Serialize;
-use snafu::ResultExt;
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use tonic::codegen::http;
 
 use super::HttpHandler;
+use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Error, Result};
-
-pub trait PeerLookup: Send + Sync {
-    fn peer(&self, peer_id: u64) -> Option<Peer>;
-}
+use crate::lease::lookup_alive_datanode_peer;
+use crate::procedure::region_migration::manager::{
+    RegionMigrationManagerRef, RegionMigrationProcedureTask,
+};
 
 /// The handler of submitting migration task.
 pub struct SubmitRegionMigrationTaskHandler {
-    // TODO(weny): waits for https://github.com/GreptimeTeam/greptimedb/pull/3014
+    pub region_migration_manager: RegionMigrationManagerRef,
+    pub meta_peer_client: MetaPeerClientRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +47,8 @@ struct SubmitRegionMigrationTaskRequest {
 
 #[derive(Debug, Serialize)]
 struct SubmitRegionMigrationTaskResponse {
-    procedure_id: String,
+    /// The `None` stands region has been migrated.
+    procedure_id: Option<String>,
 }
 
 fn parse_num_parameter_with_default<T, F>(
@@ -96,13 +99,63 @@ impl TryFrom<&HashMap<String, String>> for SubmitRegionMigrationTaskRequest {
 }
 
 impl SubmitRegionMigrationTaskHandler {
+    fn is_leader(&self) -> bool {
+        self.meta_peer_client.is_leader()
+    }
+
+    /// Checks the peer is available.
+    async fn lookup_peer(&self, cluster_id: ClusterId, peer_id: u64) -> Result<Option<Peer>> {
+        lookup_alive_datanode_peer(
+            cluster_id,
+            peer_id,
+            &self.meta_peer_client,
+            distributed_time_constants::DATANODE_LEASE_SECS,
+        )
+        .await
+    }
+
     /// Submits a region migration task, returns the procedure id.
     async fn handle_submit(
         &self,
-        _task: SubmitRegionMigrationTaskRequest,
+        task: SubmitRegionMigrationTaskRequest,
     ) -> Result<SubmitRegionMigrationTaskResponse> {
-        // TODO(weny): waits for https://github.com/GreptimeTeam/greptimedb/pull/3014
-        todo!()
+        ensure!(
+            self.is_leader(),
+            error::UnexpectedSnafu {
+                violated: "Trying to submit a region migration procedure to non-leader meta server"
+            }
+        );
+
+        let SubmitRegionMigrationTaskRequest {
+            cluster_id,
+            region_id,
+            from_peer_id,
+            to_peer_id,
+        } = task;
+
+        let from_peer = self.lookup_peer(cluster_id, from_peer_id).await?.context(
+            error::PeerUnavailableSnafu {
+                peer_id: from_peer_id,
+            },
+        )?;
+        let to_peer = self.lookup_peer(cluster_id, to_peer_id).await?.context(
+            error::PeerUnavailableSnafu {
+                peer_id: to_peer_id,
+            },
+        )?;
+        let procedure_id = self
+            .region_migration_manager
+            .submit_procedure(RegionMigrationProcedureTask {
+                cluster_id,
+                region_id,
+                from_peer,
+                to_peer,
+            })
+            .await?;
+
+        Ok(SubmitRegionMigrationTaskResponse {
+            procedure_id: procedure_id.map(|id| id.to_string()),
+        })
     }
 }
 
