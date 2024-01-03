@@ -14,12 +14,8 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-#[cfg(test)]
-use std::result::Result;
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-use tokio::sync::TryLockError;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 pub enum OwnedKeyRwLockGuard {
@@ -108,7 +104,7 @@ where
     K: Eq + Hash + Clone,
 {
     /// Tries to lock the key with shared read access, returning immediately.
-    pub fn try_read(&self, key: K) -> Result<OwnedRwLockReadGuard<()>, TryLockError> {
+    pub fn try_read(&self, key: K) -> Result<OwnedRwLockReadGuard<()>, tokio::sync::TryLockError> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
             locks.entry(key).or_default().clone()
@@ -118,7 +114,10 @@ where
     }
 
     /// Tries lock this key with exclusive write access, returning immediately.
-    pub fn try_write(&self, key: K) -> Result<OwnedRwLockWriteGuard<()>, TryLockError> {
+    pub fn try_write(
+        &self,
+        key: K,
+    ) -> Result<OwnedRwLockWriteGuard<()>, tokio::sync::TryLockError> {
         let lock = {
             let mut locks = self.inner.lock().unwrap();
             locks.entry(key).or_default().clone()
