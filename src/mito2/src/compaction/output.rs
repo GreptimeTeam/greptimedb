@@ -68,6 +68,7 @@ impl CompactionOutput {
             |SstInfo {
                  time_range,
                  file_size,
+                 inverted_index_available,
                  ..
              }| {
                 FileMeta {
@@ -76,6 +77,7 @@ impl CompactionOutput {
                     time_range,
                     level: self.output_level,
                     file_size,
+                    inverted_index_available,
                 }
             },
         );

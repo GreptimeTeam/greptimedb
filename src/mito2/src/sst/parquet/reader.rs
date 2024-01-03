@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use common_telemetry::debug;
+use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
 use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
@@ -249,21 +249,18 @@ impl ParquetReaderBuilder {
         metrics: &mut Metrics,
     ) -> BTreeSet<usize> {
         let mut row_group_ids: BTreeSet<_> = (0..parquet_meta.num_row_groups()).collect();
-        metrics.num_unfiltered_row_groups += row_group_ids.len();
+        metrics.num_row_groups_unfiltered += row_group_ids.len();
 
         // Applies index to prune row groups.
         if let Some(index_applier) = &self.index_applier {
-            match index_applier.apply(self.file_handle.file_id()).await {
-                Ok(row_groups) => row_group_ids = row_groups,
-                Err(err) => {
-                    if !err.is_object_not_found() {
-                        debug!("Failed to apply index: {err}");
-                    }
-                    // Ignores the error since it won't affect correctness.
+            if self.file_handle.meta().inverted_index_available {
+                match index_applier.apply(self.file_handle.file_id()).await {
+                    Ok(row_groups) => row_group_ids = row_groups,
+                    Err(err) => warn!(err; "Failed to apply index"),
                 }
             }
         }
-        metrics.num_inverted_index_filtered_row_groups += row_group_ids.len();
+        metrics.num_row_groups_inverted_index_filtered += row_group_ids.len();
 
         // Prunes row groups by metadata.
         if let Some(predicate) = &self.predicate {
@@ -289,7 +286,7 @@ impl ParquetReaderBuilder {
                 row_group_ids.remove(&row_group_id);
             }
         };
-        metrics.num_min_max_filtered_row_groups += row_group_ids.len();
+        metrics.num_row_groups_min_max_filtered += row_group_ids.len();
 
         row_group_ids
     }
@@ -299,11 +296,11 @@ impl ParquetReaderBuilder {
 #[derive(Debug, Default)]
 struct Metrics {
     /// Number of unfiltered row groups.
-    num_unfiltered_row_groups: usize,
+    num_row_groups_unfiltered: usize,
     /// Number of row groups to read after filtering by inverted index.
-    num_inverted_index_filtered_row_groups: usize,
+    num_row_groups_inverted_index_filtered: usize,
     /// Number of row groups to read after filtering by min-max index.
-    num_min_max_filtered_row_groups: usize,
+    num_row_groups_min_max_filtered: usize,
     /// Duration to build the parquet reader.
     build_cost: Duration,
     /// Duration to scan the reader.
@@ -431,8 +428,8 @@ impl Drop for ParquetReader {
             self.reader_builder.file_handle.region_id(),
             self.reader_builder.file_handle.file_id(),
             self.reader_builder.file_handle.time_range(),
-            self.metrics.num_min_max_filtered_row_groups,
-            self.metrics.num_unfiltered_row_groups,
+            self.metrics.num_row_groups_min_max_filtered,
+            self.metrics.num_row_groups_unfiltered,
             self.metrics
         );
 
@@ -448,13 +445,13 @@ impl Drop for ParquetReader {
             .inc_by(self.metrics.num_rows as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["unfiltered"])
-            .inc_by(self.metrics.num_unfiltered_row_groups as u64);
+            .inc_by(self.metrics.num_row_groups_unfiltered as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["inverted_index_filtered"])
-            .inc_by(self.metrics.num_inverted_index_filtered_row_groups as u64);
+            .inc_by(self.metrics.num_row_groups_inverted_index_filtered as u64);
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["min_max_filtered"])
-            .inc_by(self.metrics.num_min_max_filtered_row_groups as u64);
+            .inc_by(self.metrics.num_row_groups_min_max_filtered as u64);
     }
 }
 

@@ -73,6 +73,8 @@ pub struct SstInfo {
     pub num_rows: usize,
     /// File Meta Data
     pub file_metadata: Option<ParquetMetaData>,
+    /// Whether inverted index is available.
+    pub inverted_index_available: bool,
 }
 
 #[cfg(test)]
@@ -250,6 +252,7 @@ mod tests {
             .await
             .unwrap()
             .expect("write_all should return sst info");
+        assert!(sst_info.inverted_index_available);
         let writer_metadata = sst_info.file_metadata.unwrap();
 
         // read the sst file metadata

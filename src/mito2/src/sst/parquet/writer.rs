@@ -119,7 +119,8 @@ impl ParquetWriter {
             stats.update(&batch);
             index_creator.update(&batch).await;
         }
-        index_creator.finish().await;
+
+        let inverted_index_available = index_creator.finish().await;
 
         if stats.num_rows == 0 {
             debug!("No data written, try to stop the writer: {file_path}");
@@ -142,6 +143,7 @@ impl ParquetWriter {
             file_size,
             num_rows: stats.num_rows,
             file_metadata: Some(parquet_metadata),
+            inverted_index_available,
         }))
     }
 
@@ -212,6 +214,7 @@ impl SourceStats {
     }
 }
 
+#[derive(Default)]
 struct IndexCreator {
     file_id: FileId,
     region_id: RegionId,
@@ -231,11 +234,7 @@ impl IndexCreator {
                 "Skip creating index due to config, region_id: {}, file_id: {}",
                 metadata.region_id, file_id,
             );
-            return Self {
-                file_id,
-                region_id: metadata.region_id,
-                inner: None,
-            };
+            return Self::default();
         };
 
         if metadata.primary_key.is_empty() {
@@ -243,11 +242,7 @@ impl IndexCreator {
                 "No tag columns, skip creating index, region_id: {}, file_id: {}",
                 metadata.region_id, file_id,
             );
-            return Self {
-                file_id,
-                region_id: metadata.region_id,
-                inner: None,
-            };
+            return Self::default();
         }
 
         let Some(row_group_size) = NonZeroUsize::new(opts.row_group_size) else {
@@ -255,11 +250,7 @@ impl IndexCreator {
                 "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
                 metadata.region_id, file_id,
             );
-            return Self {
-                file_id,
-                region_id: metadata.region_id,
-                inner: None,
-            };
+            return Self::default();
         };
 
         let creator = SstIndexCreator::new(
@@ -292,14 +283,15 @@ impl IndexCreator {
         }
     }
 
-    async fn finish(mut self) {
+    async fn finish(mut self) -> bool {
         if let Some(creator) = self.inner.as_mut() {
             match creator.finish().await {
                 Ok((row_count, byte_count)) => {
                     debug!(
-                        "Create index successfully, region_id: {}, file_id: {}, bytes: {byte_count}, rows: {row_count}",
-                        self.region_id, self.file_id,
+                        "Create index successfully, region_id: {}, file_id: {}, bytes: {}, rows: {}",
+                        self.region_id, self.file_id, byte_count, row_count
                     );
+                    return true;
                 }
                 Err(err) => {
                     warn!(
@@ -309,6 +301,8 @@ impl IndexCreator {
                 }
             }
         }
+
+        false
     }
 
     async fn abort(&mut self) {
