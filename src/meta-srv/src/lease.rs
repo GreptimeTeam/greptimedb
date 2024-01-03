@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use common_meta::kv_backend::KvBackend;
 use common_meta::util;
 use common_time::util as time_util;
 
@@ -43,8 +44,13 @@ where
 {
     let key = get_lease_prefix(cluster_id);
     let range_end = util::get_prefix_end_key(&key);
-
-    let kvs = meta_peer_client.range(key, range_end, false).await?;
+    let range_req = common_meta::rpc::store::RangeRequest {
+        key,
+        range_end,
+        keys_only: false,
+        ..Default::default()
+    };
+    let kvs = meta_peer_client.range(range_req).await?.kvs;
     let mut lease_kvs = HashMap::new();
     for kv in kvs {
         let lease_key: LeaseKey = kv.key.try_into()?;
