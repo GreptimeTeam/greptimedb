@@ -20,19 +20,13 @@ use common_base::readable_size::ReadableSize;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{RegionId, SequenceNumber};
-use tokio::sync::mpsc::Sender;
 
-use crate::access_layer::SstWriteRequest;
 use crate::cache::file_cache::{FileCache, FileCacheRef};
 use crate::error::Result;
 use crate::read::Source;
-use crate::request::WorkerRequest;
-use crate::sst::file::{FileId, FileMeta, Level};
+use crate::sst::file::FileId;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::sst_file_path;
-use crate::wal::EntryId;
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -89,99 +83,4 @@ pub(crate) struct SstUploadRequest {
     pub(crate) upload_path: String,
     /// Remote object store to upload.
     pub(crate) remote_store: ObjectStore,
-}
-
-/// A remote write request to upload files.
-pub(crate) struct Upload {
-    /// Parts to upload.
-    pub(crate) parts: Vec<UploadPart>,
-}
-
-/// Metadata of SST to upload together.
-pub(crate) struct UploadPart {
-    /// Region id.
-    region_id: RegionId,
-    /// Directory of the region data.
-    region_dir: String,
-    /// Meta of files created.
-    pub(crate) file_metas: Vec<FileMeta>,
-    /// Target storage of SSTs.
-    storage: Option<String>,
-}
-
-/// Writer to build a upload part.
-pub(crate) struct UploadPartWriter {
-    /// Local object store to cache SSTs.
-    local_store: ObjectStore,
-    /// Metadata of the region.
-    metadata: RegionMetadataRef,
-    /// Directory of the region.
-    region_dir: String,
-    /// Meta of files created.
-    file_metas: Vec<FileMeta>,
-    /// Target storage of SSTs.
-    storage: Option<String>,
-}
-
-impl UploadPartWriter {
-    /// Creates a new writer.
-    pub(crate) fn new(local_store: ObjectStore, metadata: RegionMetadataRef) -> Self {
-        Self {
-            local_store,
-            metadata,
-            region_dir: String::new(),
-            file_metas: Vec::new(),
-            storage: None,
-        }
-    }
-
-    /// Sets region directory for the part.
-    #[must_use]
-    pub(crate) fn with_region_dir(mut self, region_dir: String) -> Self {
-        self.region_dir = region_dir;
-        self
-    }
-
-    /// Sets target storage for the part.
-    #[must_use]
-    pub(crate) fn with_storage(mut self, storage: Option<String>) -> Self {
-        self.storage = storage;
-        self
-    }
-
-    /// Reserve capacity for `additional` files.
-    pub(crate) fn reserve_capacity(&mut self, additional: usize) {
-        self.file_metas.reserve(additional);
-    }
-
-    /// Builds a new parquet writer to write to this part.
-    pub(crate) fn new_sst_writer(&self, file_id: FileId) -> ParquetWriter {
-        let path = sst_file_path(&self.region_dir, file_id);
-        ParquetWriter::new(path, self.metadata.clone(), self.local_store.clone())
-    }
-
-    /// Adds a SST to this part.
-    pub(crate) fn add_sst(&mut self, file_meta: FileMeta) {
-        self.file_metas.push(file_meta);
-    }
-
-    /// Adds multiple SSTs to this part.
-    pub(crate) fn extend_ssts(&mut self, iter: impl IntoIterator<Item = FileMeta>) {
-        self.file_metas.extend(iter)
-    }
-
-    /// Returns [FileMeta] of written files.
-    pub(crate) fn written_file_metas(&self) -> &[FileMeta] {
-        &self.file_metas
-    }
-
-    /// Finishes the writer and builds a part.
-    pub(crate) fn finish(self) -> UploadPart {
-        UploadPart {
-            region_id: self.metadata.region_id,
-            region_dir: self.region_dir,
-            file_metas: self.file_metas,
-            storage: self.storage,
-        }
-    }
 }
