@@ -31,7 +31,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::{StringVectorBuilder, VectorRef};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
 use super::{InformationTable, COLUMNS};
 use crate::error::{
@@ -102,7 +102,7 @@ impl InformationTable for InformationSchemaColumns {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(

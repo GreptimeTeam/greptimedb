@@ -27,7 +27,7 @@ use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::vectors::StringVectorBuilder;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
 use super::SCHEMATA;
 use crate::error::{
@@ -92,7 +92,7 @@ impl InformationTable for InformationSchemaSchemata {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(

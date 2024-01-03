@@ -238,7 +238,7 @@ trait InformationTable {
 
     fn schema(&self) -> SchemaRef;
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+    fn to_stream(&self, requst: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
@@ -272,7 +272,7 @@ impl DataSource for InformationTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request.projection;
+        let projection = request.projection.clone();
         let projected_schema = match &projection {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
@@ -280,7 +280,7 @@ impl DataSource for InformationTableDataSource {
 
         let stream = self
             .table
-            .to_stream()
+            .to_stream(request)
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?

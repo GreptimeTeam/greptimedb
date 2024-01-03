@@ -26,7 +26,7 @@ use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatc
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::VectorRef;
 use snafu::ResultExt;
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 pub use tables::get_schema_columns;
 
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
@@ -74,7 +74,7 @@ impl InformationTable for MemoryTable {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, _requets: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
