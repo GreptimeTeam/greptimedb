@@ -167,6 +167,7 @@ impl RegionWriteCtx {
             &self.wal_entry,
             &self.wal_options,
         )?;
+        self.next_entry_id += 1;
         Ok(())
     }
 

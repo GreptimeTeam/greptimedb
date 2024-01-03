@@ -20,16 +20,16 @@ use common_telemetry::{debug, warn};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, Result};
+use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, RecordsOutOfOrderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::offset::Offset;
-use crate::kafka::record_utils::{decode_from_record, RecordProducer};
+use crate::kafka::util::offset::Offset;
+use crate::kafka::util::record::{Record, RecordProducer, RecordType};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
 /// A log store backed by Kafka.
@@ -72,11 +72,14 @@ impl LogStore for KafkaLogStore {
 
     /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        let entry_id = RecordProducer::new(entry.ns.clone())
-            .with_entries(vec![entry])
-            .produce(&self.client_manager)
-            .await
-            .map(TryInto::try_into)??;
+        let entry_id = RecordProducer::new(
+            entry.ns.clone(),
+            self.config.max_batch_size.as_bytes() as usize,
+        )
+        .with_entries(vec![entry])
+        .produce(&self.client_manager)
+        .await
+        .map(TryInto::try_into)??;
         Ok(AppendResponse {
             last_entry_id: entry_id,
         })
@@ -96,7 +99,10 @@ impl LogStore for KafkaLogStore {
         for entry in entries {
             producers
                 .entry(entry.ns.region_id)
-                .or_insert(RecordProducer::new(entry.ns.clone()))
+                .or_insert(RecordProducer::new(
+                    entry.ns.clone(),
+                    self.config.max_batch_size.as_bytes() as usize,
+                ))
                 .push(entry);
         }
 
@@ -127,13 +133,10 @@ impl LogStore for KafkaLogStore {
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
-        let topic = ns.topic.clone();
-        let region_id = ns.region_id;
-
         // Gets the client associated with the topic.
         let client = self
             .client_manager
-            .get_or_insert(&topic)
+            .get_or_insert(&ns.topic)
             .await?
             .raw_client
             .clone();
@@ -148,7 +151,7 @@ impl LogStore for KafkaLogStore {
             .context(GetOffsetSnafu { ns: ns.clone() })?
             - 1;
         // Reads entries with offsets in the range [start_offset, end_offset).
-        let start_offset = Offset::try_from(entry_id)?.0;
+        let start_offset: i64 = Offset::try_from(entry_id)?.0;
 
         // Abort if there're no new entries.
         // FIXME(niebayes): how come this case happens?
@@ -170,39 +173,64 @@ impl LogStore for KafkaLogStore {
             ns, start_offset, end_offset
         );
 
+        // Key: entry id, Value: the records associated with the entry.
+        let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
         let ns_clone = ns.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
-                // Each next will prdoce a `RecordAndOffset` and a high watermark offset.
+                // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
                 // The high watermark offset is the end offset of the latest record in the partition.
-                let (record, high_watermark) = consume_result.context(ConsumeRecordSnafu {
-                    ns: ns_clone.clone(),
-                })?;
-                let record_offset = record.offset;
+                let (record_and_offset, high_watermark) =
+                    consume_result.context(ConsumeRecordSnafu {
+                        ns: ns_clone.clone(),
+                    })?;
+                let (record, offset) = (record_and_offset.record, record_and_offset.offset);
+
                 debug!(
                     "Read a record at offset {} for ns {}, high watermark: {}",
-                    record_offset, ns_clone, high_watermark
+                    offset, ns_clone, high_watermark
                 );
 
-                // Ignores noop records.
-                if record.record.value.is_none() {
+                // Ignores no-op records.
+                if record.value.is_none() {
                     continue;
                 }
-                let entries = decode_from_record(record.record)?;
 
-                // Filters entries by region id.
-                if let Some(entry) = entries.first()
-                    && entry.ns.region_id == region_id
+                // Tries to construct an entry from records consumed so far.
+                let mut entry = None;
+                let record = Record::try_from(record)?;
+                match record.tp {
+                    RecordType::Full => {
+                        entry = Some(EntryImpl::try_from(vec![record])?);
+                    }
+                    RecordType::Last => {
+                        let mut records = entry_records
+                            .remove(&record.entry_id)
+                            .context(RecordsOutOfOrderSnafu)?;
+                        records.push(record);
+                        entry = Some(EntryImpl::try_from(records)?);
+                    }
+                    _ => {
+                        entry_records
+                            .entry(record.entry_id)
+                            .or_default()
+                            .push(record);
+                    }
+                }
+
+                // Filters entries by namespace.
+                if let Some(entry) = entry
+                    && entry.ns == ns_clone
                 {
-                    yield Ok(entries);
+                    yield Ok(vec![entry]);
                 }
 
                 // Terminates the stream if the entry with the end offset was read.
-                if record_offset >= end_offset {
+                if offset >= end_offset {
                     debug!(
                         "Stream consumer for ns {} terminates at offset {}",
-                        ns_clone, record_offset
+                        ns_clone, offset
                     );
                     break;
                 }

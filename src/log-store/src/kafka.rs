@@ -14,8 +14,7 @@
 
 mod client_manager;
 pub mod log_store;
-mod offset;
-mod record_utils;
+mod util;
 
 use std::fmt::Display;
 
