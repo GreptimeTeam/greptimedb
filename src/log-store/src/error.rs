@@ -196,6 +196,9 @@ pub enum Error {
         last_index: u64,
         attempt_index: u64,
     },
+
+    #[snafu(display("Duplicate log entry, region: {}, attempt index: {}", region_id, index,))]
+    DuplicateLogIndex { region_id: RegionId, index: u64 },
 }
 
 impl ErrorExt for Error {
