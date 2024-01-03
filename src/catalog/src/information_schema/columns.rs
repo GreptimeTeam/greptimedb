@@ -173,7 +173,6 @@ impl InformationSchemaColumnsBuilder {
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
-
         let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
@@ -204,22 +203,14 @@ impl InformationSchemaColumnsBuilder {
                             SEMANTIC_TYPE_FIELD
                         };
 
-                        let row = [
-                            ("catalog_name", &Value::from(catalog_name.as_str())),
-                            ("schema_name", &Value::from(schema_name.as_str())),
-                            ("table_name", &Value::from(table_name.as_str())),
-                            ("semantic_type", &Value::from(semantic_type)),
-                        ];
-
-                        if predicates.eval(&row) {
-                            self.add_column(
-                                &catalog_name,
-                                &schema_name,
-                                &table_name,
-                                semantic_type,
-                                column,
-                            );
-                        }
+                        self.add_column(
+                            &predicates,
+                            &catalog_name,
+                            &schema_name,
+                            &table_name,
+                            semantic_type,
+                            column,
+                        );
                     }
                 } else {
                     unreachable!();
@@ -232,6 +223,7 @@ impl InformationSchemaColumnsBuilder {
 
     fn add_column(
         &mut self,
+        predicates: &Predicates,
         catalog_name: &str,
         schema_name: &str,
         table_name: &str,
@@ -239,6 +231,18 @@ impl InformationSchemaColumnsBuilder {
         column_schema: &ColumnSchema,
     ) {
         let data_type = &column_schema.data_type.name();
+
+        let row = [
+            ("catalog_name", &Value::from(catalog_name)),
+            ("schema_name", &Value::from(schema_name)),
+            ("table_name", &Value::from(table_name)),
+            ("semantic_type", &Value::from(semantic_type)),
+            ("data_type", &Value::from(data_type.as_str())),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
 
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));

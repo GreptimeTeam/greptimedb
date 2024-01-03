@@ -25,6 +25,7 @@ use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder};
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -33,7 +34,7 @@ use super::KEY_COLUMN_USAGE;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::InformationTable;
+use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
@@ -123,14 +124,14 @@ impl InformationTable for InformationSchemaKeyColumnUsage {
         self.schema.clone()
     }
 
-    fn to_stream(&self, _requets: ScanRequest) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_key_column_usage()
+                    .make_key_column_usage(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -192,14 +193,14 @@ impl InformationSchemaKeyColumnUsageBuilder {
     }
 
     /// Construct the `information_schema.KEY_COLUMN_USAGE` virtual table
-    async fn make_key_column_usage(&mut self) -> Result<RecordBatch> {
+    async fn make_key_column_usage(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
 
-        let mut time_index_constraints = vec![];
         let mut primary_constraints = vec![];
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
@@ -223,11 +224,15 @@ impl InformationSchemaKeyColumnUsageBuilder {
 
                     for (idx, column) in schema.column_schemas().iter().enumerate() {
                         if column.is_time_index() {
-                            time_index_constraints.push((
-                                schema_name.clone(),
-                                table_name.clone(),
-                                column.name.clone(),
-                            ));
+                            self.add_key_column_usage(
+                                &predicates,
+                                &schema_name,
+                                "TIME INDEX",
+                                &schema_name,
+                                &table_name,
+                                &column.name,
+                                1, //always 1 for time index
+                            );
                         }
                         if keys.contains(&idx) {
                             primary_constraints.push((
@@ -245,21 +250,10 @@ impl InformationSchemaKeyColumnUsageBuilder {
         }
 
         for (i, (schema_name, table_name, column_name)) in
-            time_index_constraints.into_iter().enumerate()
-        {
-            self.add_key_column_usage(
-                &schema_name,
-                "TIME INDEX",
-                &schema_name,
-                &table_name,
-                &column_name,
-                i as u32 + 1,
-            );
-        }
-        for (i, (schema_name, table_name, column_name)) in
             primary_constraints.into_iter().enumerate()
         {
             self.add_key_column_usage(
+                &predicates,
                 &schema_name,
                 "PRIMARY",
                 &schema_name,
@@ -274,8 +268,10 @@ impl InformationSchemaKeyColumnUsageBuilder {
 
     // TODO(dimbtp): Foreign key constraint has not `None` value for last 4
     // fields, but it is not supported yet.
+    #[allow(clippy::too_many_arguments)]
     fn add_key_column_usage(
         &mut self,
+        predicates: &Predicates,
         constraint_schema: &str,
         constraint_name: &str,
         table_schema: &str,
@@ -283,6 +279,19 @@ impl InformationSchemaKeyColumnUsageBuilder {
         column_name: &str,
         ordinal_position: u32,
     ) {
+        let row = [
+            ("constraint_schema", &Value::from(constraint_schema)),
+            ("constraint_name", &Value::from(constraint_name)),
+            ("table_schema", &Value::from(table_schema)),
+            ("table_name", &Value::from(table_name)),
+            ("column_name", &Value::from(column_name)),
+            ("ordinal_position", &Value::from(ordinal_position)),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
+
         self.constraint_catalog.push(Some("def"));
         self.constraint_schema.push(Some(constraint_schema));
         self.constraint_name.push(Some(constraint_name));
@@ -328,7 +337,7 @@ impl DfPartitionStream for InformationSchemaKeyColumnUsage {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_key_column_usage()
+                    .make_key_column_usage(None)
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
