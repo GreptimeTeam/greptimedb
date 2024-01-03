@@ -93,7 +93,7 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     let table_id = prepare_testing_table(&cluster).await;
 
     // Inserts data
-    let results = insert_datas(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend, logical_timer).await;
     logical_timer += 1000;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
@@ -153,13 +153,13 @@ pub async fn test_region_migration(store_type: StorageType, endpoints: Vec<Strin
     .await;
 
     // Inserts more table.
-    let results = insert_datas(&cluster.frontend, logical_timer).await;
+    let results = insert_values(&cluster.frontend, logical_timer).await;
     for result in results {
         assert!(matches!(result.unwrap(), Output::AffectedRows(1)));
     }
 
     // Asserts the writes.
-    assert_writes(&cluster.frontend).await;
+    assert_values(&cluster.frontend).await;
 }
 
 pub struct ConstNodeSelector {
@@ -185,7 +185,7 @@ async fn wait_condition(timeout: Duration, condition: BoxFuture<'static, ()>) {
     tokio::time::timeout(timeout, condition).await.unwrap();
 }
 
-async fn assert_writes(instance: &Arc<Instance>) {
+async fn assert_values(instance: &Arc<Instance>) {
     let query_ctx = QueryContext::arc();
 
     let result = instance
@@ -248,12 +248,12 @@ async fn find_region_distribution(
         .unwrap()
 }
 
-async fn insert_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
+async fn insert_values(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<Output>> {
     let query_ctx = QueryContext::arc();
 
     let mut results = Vec::new();
     for range in [5, 15, 55] {
-        let result = write_data(
+        let result = insert_value(
             instance,
             &format!("INSERT INTO {TEST_TABLE_NAME} VALUES ({},{})", range, ts),
             query_ctx.clone(),
@@ -265,7 +265,7 @@ async fn insert_datas(instance: &Arc<Instance>, ts: u64) -> Vec<FrontendResult<O
     results
 }
 
-async fn write_data(
+async fn insert_value(
     instance: &Arc<Instance>,
     sql: &str,
     query_ctx: QueryContextRef,
