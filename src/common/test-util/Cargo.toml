@@ -13,5 +13,4 @@ rand.workspace = true
 rskafka.workspace = true
 store-api.workspace = true
 tempfile.workspace = true
-testcontainers = "0.15.0"
 tokio.workspace = true

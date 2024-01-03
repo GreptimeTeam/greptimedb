@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod image;
 pub mod topic_decorator;
 
 use common_config::wal::KafkaWalTopic as Topic;
