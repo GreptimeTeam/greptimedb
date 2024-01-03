@@ -423,7 +423,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
 
-            let map = region_distribution(table_route_value.region_routes().unwrap()).unwrap();
+            let map = region_distribution(table_route_value.region_routes().unwrap());
             assert_eq!(map.len(), 2);
             assert_eq!(map.get(&2), Some(&vec![1, 3]));
             assert_eq!(map.get(&3), Some(&vec![2, 4]));

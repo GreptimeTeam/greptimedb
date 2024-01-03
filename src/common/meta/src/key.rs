@@ -427,7 +427,7 @@ impl TableMetadataManager {
                 &region_storage_path,
                 region_options,
                 region_wal_options,
-                region_distribution(&x.region_routes)?,
+                region_distribution(&x.region_routes),
             )?;
             txn = txn.merge(create_datanode_table_txn);
         }
@@ -483,7 +483,7 @@ impl TableMetadataManager {
             .build_delete_txn(table_id, table_info_value)?;
 
         // Deletes datanode table key value pairs.
-        let distribution = region_distribution(table_route_value.region_routes()?)?;
+        let distribution = region_distribution(table_route_value.region_routes()?);
         let delete_datanode_txn = self
             .datanode_table_manager()
             .build_delete_txn(table_id, distribution)?;
@@ -608,8 +608,8 @@ impl TableMetadataManager {
     ) -> Result<()> {
         // Updates the datanode table key value pairs.
         let current_region_distribution =
-            region_distribution(current_table_route_value.region_routes()?)?;
-        let new_region_distribution = region_distribution(&new_region_routes)?;
+            region_distribution(current_table_route_value.region_routes()?);
+        let new_region_distribution = region_distribution(&new_region_routes);
 
         let update_datanode_table_txn = self.datanode_table_manager().build_update_txn(
             table_id,
@@ -1191,7 +1191,7 @@ mod tests {
         table_id: u32,
         region_routes: &[RegionRoute],
     ) {
-        let region_distribution = region_distribution(region_routes).unwrap();
+        let region_distribution = region_distribution(region_routes);
         for (datanode, regions) in region_distribution {
             let got = table_metadata_manager
                 .datanode_table_manager()
