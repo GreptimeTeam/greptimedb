@@ -87,7 +87,7 @@ impl Predicate {
             }
         }
 
-        // Can't evaluate predicate on the row
+        // Can't evaluate predicate with the row
         None
     }
 
@@ -208,7 +208,7 @@ impl Predicates {
         }
     }
 
-    /// Evaluate the predicates with the columns and values,
+    /// Evaluate the predicates with the row.
     /// returns true when all the predicates are satisfied or can't be evaluated.
     pub fn eval(&self, row: &[(&str, &Value)]) -> bool {
         // fast path
@@ -223,7 +223,7 @@ impl Predicates {
                 Some(b) => {
                     result = result && b;
                 }
-                // The predicate can't evalute on the row, continue
+                // The predicate can't evaluate with the row, continue
                 None => continue,
             }
 
