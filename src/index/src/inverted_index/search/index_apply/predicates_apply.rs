@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::mem::size_of;
+
 use async_trait::async_trait;
 use common_base::BitVec;
 use greptime_proto::v1::index::InvertedIndexMetas;
@@ -79,6 +81,16 @@ impl IndexApplier for PredicatesIndexApplier {
         }
 
         Ok(bitmap.iter_ones().collect())
+    }
+
+    /// Returns the memory usage of the applier.
+    fn memory_usage(&self) -> usize {
+        let mut size = self.fst_appliers.capacity() * size_of::<(IndexName, Box<dyn FstApplier>)>();
+        for (name, fst_applier) in &self.fst_appliers {
+            size += name.capacity();
+            size += fst_applier.memory_usage();
+        }
+        size
     }
 }
 
@@ -342,5 +354,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_index_applier_memory_usage() {
+        let mut mock_fst_applier = MockFstApplier::new();
+        mock_fst_applier.expect_memory_usage().returning(|| 100);
+
+        let applier = PredicatesIndexApplier {
+            fst_appliers: vec![(s("tag-0"), Box::new(mock_fst_applier))],
+        };
+
+        assert_eq!(
+            applier.memory_usage(),
+            size_of::<(IndexName, Box<dyn FstApplier>)>() + 5 + 100
+        );
     }
 }

@@ -30,4 +30,7 @@ pub trait FstApplier: Send + Sync {
     ///
     /// Returns a `Vec<u64>`, with each u64 being a value from the FstMap.
     fn apply(&self, fst: &FstMap) -> Vec<u64>;
+
+    /// Returns the memory usage of the applier.
+    fn memory_usage(&self) -> usize;
 }
