@@ -30,7 +30,7 @@ use crate::error::{
     Result,
 };
 use crate::metrics::{
-    INDEX_APPLY_COST_TIME, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
+    INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE, INDEX_PUFFIN_READ_BYTES_TOTAL,
     INDEX_PUFFIN_READ_OP_TOTAL, INDEX_PUFFIN_SEEK_OP_TOTAL,
 };
 use crate::sst::file::FileId;
@@ -70,7 +70,7 @@ impl SstIndexApplier {
 
     /// Applies predicates to the provided SST file id and returns the relevant row group ids
     pub async fn apply(&self, file_id: FileId) -> Result<BTreeSet<usize>> {
-        let _timer = INDEX_APPLY_COST_TIME.start_timer();
+        let _timer = INDEX_APPLY_ELAPSED.start_timer();
 
         let mut puffin_reader = self.puffin_reader(file_id).await?;
         let blob_reader = Self::index_blob_reader(&mut puffin_reader).await?;

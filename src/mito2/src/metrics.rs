@@ -149,9 +149,9 @@ lazy_static! {
 
     // Index metrics.
     /// Timer of index application.
-    pub static ref INDEX_APPLY_COST_TIME: Histogram = register_histogram!(
-        "index_apply_cost_time",
-        "index apply cost time",
+    pub static ref INDEX_APPLY_ELAPSED: Histogram = register_histogram!(
+        "index_apply_elapsed",
+        "index apply elapsed",
     )
     .unwrap();
     /// Gauge of index apply memory usage.
