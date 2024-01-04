@@ -35,7 +35,7 @@ impl Predicate {
     /// Evaluate the predicate with the row, returns:
     /// - None when the predicate can't evaluate with the row.
     /// - Some(true) when the predicate is satisfied,
-    /// - Some(false) when the predicate is satisfied,
+    /// - Some(false) when the predicate is not satisfied,
     fn eval(&self, row: &[(&str, &Value)]) -> Option<bool> {
         match self {
             Predicate::Eq(c, v) => {
@@ -243,6 +243,10 @@ fn is_all_scalars(list: &[DfExpr]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::common::{Column, ScalarValue};
+    use datafusion::logical_expr::expr::InList;
+    use datafusion::logical_expr::BinaryExpr;
+
     use super::*;
 
     #[test]
@@ -320,18 +324,153 @@ mod tests {
             .is_none());
     }
 
+    fn column(name: &str) -> DfExpr {
+        DfExpr::Column(Column {
+            relation: None,
+            name: name.to_string(),
+        })
+    }
+
+    fn string_literal(v: &str) -> DfExpr {
+        DfExpr::Literal(ScalarValue::Utf8(Some(v.to_string())))
+    }
+
+    fn match_string_value(v: &Value, expected: &str) -> bool {
+        matches!(v, Value::String(bs) if bs.as_utf8() == expected)
+    }
+
+    fn match_string_values(vs: &[Value], expected: &[&str]) -> bool {
+        assert_eq!(vs.len(), expected.len());
+
+        let mut result = true;
+        for (i, v) in vs.iter().enumerate() {
+            result = result && match_string_value(v, expected[i]);
+        }
+
+        result
+    }
+
+    fn mock_exprs() -> (DfExpr, DfExpr) {
+        let expr1 = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(column("a")),
+            op: Operator::Eq,
+            right: Box::new(string_literal("a_value")),
+        });
+
+        let expr2 = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(column("b")),
+            op: Operator::NotEq,
+            right: Box::new(string_literal("b_value")),
+        });
+
+        (expr1, expr2)
+    }
+
     #[test]
     fn test_predicate_from_expr() {
-        todo!()
+        let (expr1, expr2) = mock_exprs();
+
+        let p1 = Predicate::from_expr(expr1.clone()).unwrap();
+        assert!(matches!(&p1, Predicate::Eq(column, v) if column == "a"
+                         && match_string_value(v, "a_value")));
+
+        let p2 = Predicate::from_expr(expr2.clone()).unwrap();
+        assert!(matches!(&p2, Predicate::NotEq(column, v) if column == "b"
+                         && match_string_value(v, "b_value")));
+
+        let and_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(expr1.clone()),
+            op: Operator::And,
+            right: Box::new(expr2.clone()),
+        });
+        let or_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(expr1.clone()),
+            op: Operator::Or,
+            right: Box::new(expr2.clone()),
+        });
+        let not_expr = DfExpr::Not(Box::new(expr1.clone()));
+
+        let and_p = Predicate::from_expr(and_expr).unwrap();
+        assert!(matches!(and_p, Predicate::And(left, right) if *left == p1 && *right == p2));
+        let or_p = Predicate::from_expr(or_expr).unwrap();
+        assert!(matches!(or_p, Predicate::Or(left, right) if *left == p1 && *right == p2));
+        let not_p = Predicate::from_expr(not_expr).unwrap();
+        assert!(matches!(not_p, Predicate::Not(p) if *p == p1));
+
+        let inlist_expr = DfExpr::InList(InList {
+            expr: Box::new(column("a")),
+            list: vec![string_literal("a1"), string_literal("a2")],
+            negated: false,
+        });
+
+        let inlist_p = Predicate::from_expr(inlist_expr).unwrap();
+        assert!(matches!(&inlist_p, Predicate::InList(c, values) if c == "a"
+                         && match_string_values(values, &["a1", "a2"])));
+
+        let inlist_expr = DfExpr::InList(InList {
+            expr: Box::new(column("a")),
+            list: vec![string_literal("a1"), string_literal("a2")],
+            negated: true,
+        });
+        let inlist_p = Predicate::from_expr(inlist_expr).unwrap();
+        assert!(matches!(inlist_p, Predicate::Not(p) if
+                         matches!(&*p,
+                                  Predicate::InList(c, values) if c == "a"
+                                  && match_string_values(values, &["a1", "a2"]))));
     }
 
     #[test]
     fn test_predicates_from_scan_request() {
-        todo!()
+        let predicates = Predicates::from_scan_request(&None);
+        assert!(predicates.predicates.is_empty());
+
+        let (expr1, expr2) = mock_exprs();
+
+        let request = ScanRequest {
+            filters: vec![expr1.into(), expr2.into()],
+            ..Default::default()
+        };
+        let predicates = Predicates::from_scan_request(&Some(request));
+
+        assert_eq!(2, predicates.predicates.len());
+        assert!(
+            matches!(&predicates.predicates[0], Predicate::Eq(column, v) if column == "a"
+                         && match_string_value(v, "a_value"))
+        );
+        assert!(
+            matches!(&predicates.predicates[1], Predicate::NotEq(column, v) if column == "b"
+                         && match_string_value(v, "b_value"))
+        );
     }
 
     #[test]
     fn test_predicates_eval_row() {
-        todo!()
+        let wrong_row = [
+            ("a", &Value::from("a_value")),
+            ("b", &Value::from("b_value")),
+            ("c", &Value::from("c_value")),
+        ];
+        let row = [
+            ("a", &Value::from("a_value")),
+            ("b", &Value::from("not_b_value")),
+            ("c", &Value::from("c_value")),
+        ];
+        let c_row = [("c", &Value::from("c_value"))];
+
+        // test empty predicates, always returns true
+        let predicates = Predicates::from_scan_request(&None);
+        assert!(predicates.eval(&row));
+        assert!(predicates.eval(&wrong_row));
+        assert!(predicates.eval(&c_row));
+
+        let (expr1, expr2) = mock_exprs();
+        let request = ScanRequest {
+            filters: vec![expr1.into(), expr2.into()],
+            ..Default::default()
+        };
+        let predicates = Predicates::from_scan_request(&Some(request));
+        assert!(predicates.eval(&row));
+        assert!(!predicates.eval(&wrong_row));
+        assert!(predicates.eval(&c_row));
     }
 }
