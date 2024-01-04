@@ -306,6 +306,7 @@ impl TwcsCompactionTask {
             let metadata = self.metadata.clone();
             let sst_layer = self.sst_layer.clone();
             let region_id = self.region_id;
+            let file_id = output.output_file_id;
             let cache_manager = self.cache_manager.clone();
             let storage = self.storage.clone();
             futs.push(async move {
@@ -314,21 +315,32 @@ impl TwcsCompactionTask {
                 let file_meta_opt = sst_layer
                     .write_sst(
                         SstWriteRequest {
-                            file_id: output.output_file_id,
+                            file_id,
                             metadata,
                             source: Source::Reader(reader),
-                            cache_manager,
+                            cache_manager: cache_manager.clone(),
                             storage,
                         },
                         &write_opts,
                     )
                     .await?
-                    .map(|sst_info| FileMeta {
-                        region_id,
-                        file_id: output.output_file_id,
-                        time_range: sst_info.time_range,
-                        level: output.output_level,
-                        file_size: sst_info.file_size,
+                    .map(|sst_info| {
+                        // Add parquet metadata to cache
+                        sst_info.file_metadata.map(|metadata| {
+                            cache_manager.put_parquet_meta_data(
+                                region_id,
+                                file_id,
+                                Arc::new(metadata),
+                            );
+                        });
+
+                        FileMeta {
+                            region_id,
+                            file_id,
+                            time_range: sst_info.time_range,
+                            level: output.output_level,
+                            file_size: sst_info.file_size,
+                        }
                     });
                 Ok(file_meta_opt)
             });
