@@ -87,6 +87,8 @@ pub struct MitoConfig {
     pub scan_parallelism: usize,
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
+    /// Whether to allow stale entries read during replay.
+    pub allow_stale_entries: bool,
 }
 
 impl Default for MitoConfig {
@@ -110,6 +112,7 @@ impl Default for MitoConfig {
             sst_write_buffer_size: ReadableSize::mb(8),
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,
+            allow_stale_entries: false,
         }
     }
 }

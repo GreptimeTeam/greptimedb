@@ -735,6 +735,7 @@ experimental_write_cache_path = ""
 experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
+allow_stale_entries = false
 
 [[datanode.region_engine]]
 

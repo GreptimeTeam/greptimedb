@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -28,9 +29,9 @@ use store_api::logstore::namespace::{Id as NamespaceId, Namespace as NamespaceTr
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
 use crate::error::{
-    AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, DuplicateLogIndexSnafu, Error,
-    FetchEntrySnafu, IllegalNamespaceSnafu, IllegalStateSnafu, OverrideCompactedEntrySnafu,
-    RaftEngineSnafu, Result, StartGcTaskSnafu, StopGcTaskSnafu,
+    AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, Error, FetchEntrySnafu,
+    IllegalNamespaceSnafu, IllegalStateSnafu, OverrideCompactedEntrySnafu, RaftEngineSnafu, Result,
+    StartGcTaskSnafu, StopGcTaskSnafu,
 };
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl as Namespace};
@@ -124,63 +125,57 @@ impl RaftEngineLogStore {
         entries: Vec<EntryImpl>,
     ) -> Result<(LogBatch, HashMap<NamespaceId, EntryId>)> {
         // Records the last entry id for each region's entries.
-        let mut entry_ids: HashMap<NamespaceId, BTreeSet<EntryId>> =
-            HashMap::with_capacity(entries.len());
-
+        let mut entry_ids: HashMap<NamespaceId, EntryId> = HashMap::with_capacity(entries.len());
         let mut batch = LogBatch::with_capacity(entries.len());
 
         for e in entries {
             let ns_id = e.namespace_id;
-            if !entry_ids.entry(ns_id).or_default().insert(e.id) {
-                return DuplicateLogIndexSnafu {
-                    region_id: ns_id,
-                    index: e.id,
+            match entry_ids.entry(ns_id) {
+                Entry::Occupied(mut o) => {
+                    let prev = *o.get();
+                    ensure!(
+                        e.id == prev + 1,
+                        DiscontinuousLogIndexSnafu {
+                            region_id: ns_id,
+                            last_index: prev,
+                            attempt_index: e.id
+                        }
+                    );
+                    o.insert(e.id);
                 }
-                .fail();
+                Entry::Vacant(v) => {
+                    // this entry is the first in batch of given region.
+                    if let Some(first_index) = self.engine.first_index(ns_id) {
+                        // ensure the first in batch does not override compacted entry.
+                        ensure!(
+                            e.id >= first_index,
+                            OverrideCompactedEntrySnafu {
+                                namespace: ns_id,
+                                first_index,
+                                attempt_index: e.id,
+                            }
+                        );
+                    }
+                    // ensure the first in batch does not form a hole in raft-engine.
+                    if let Some(last_index) = self.engine.last_index(ns_id) {
+                        ensure!(
+                            e.id == last_index + 1,
+                            DiscontinuousLogIndexSnafu {
+                                region_id: ns_id,
+                                last_index,
+                                attempt_index: e.id
+                            }
+                        );
+                    }
+                    v.insert(e.id);
+                }
             }
             batch
                 .add_entries::<MessageType>(ns_id, &[e])
                 .context(AddEntryLogBatchSnafu)?;
         }
 
-        let mut last_entry_ids = HashMap::with_capacity(entry_ids.len());
-        for (region, ids) in entry_ids {
-            let first_in_batch = *ids.first().unwrap();
-            let last_in_batch = *ids.last().unwrap();
-            ensure!(
-                (last_in_batch - first_in_batch) == ids.len() as u64 - 1,
-                DiscontinuousLogIndexSnafu {
-                    region_id: region,
-                    last_index: first_in_batch,
-                    attempt_index: last_in_batch
-                }
-            );
-
-            if let Some(first_index) = self.engine.first_index(region) {
-                ensure!(
-                    first_in_batch >= first_index,
-                    OverrideCompactedEntrySnafu {
-                        namespace: region,
-                        first_index,
-                        attempt_index: first_in_batch,
-                    }
-                );
-            }
-
-            if let Some(last_index) = self.engine.last_index(region) {
-                ensure!(
-                    first_in_batch == last_index + 1,
-                    DiscontinuousLogIndexSnafu {
-                        region_id: region,
-                        last_index,
-                        attempt_index: first_in_batch
-                    }
-                );
-            }
-            last_entry_ids.insert(region, last_in_batch);
-        }
-
-        Ok((batch, last_entry_ids))
+        Ok((batch, entry_ids))
     }
 }
 

@@ -269,6 +269,7 @@ impl RegionOpener {
                 region_id,
                 flushed_entry_id,
                 &version_control,
+                config.allow_stale_entries,
             )
             .await?;
         } else {
@@ -377,6 +378,7 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     region_id: RegionId,
     flushed_entry_id: EntryId,
     version_control: &VersionControlRef,
+    allow_stale_entries: bool,
 ) -> Result<EntryId> {
     let mut rows_replayed = 0;
     // Last entry id should start from flushed entry id since there might be no
@@ -388,14 +390,18 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     let mut wal_stream = wal.scan(region_id, replay_from_entry_id, wal_options)?;
     while let Some(res) = wal_stream.next().await {
         let (entry_id, entry) = res?;
-        ensure!(
-            entry_id > flushed_entry_id,
-            StaleLogEntrySnafu {
-                region_id,
-                flushed_entry_id,
-                unexpected_entry_id: entry_id
-            }
-        );
+        if entry_id <= flushed_entry_id {
+            ensure!(
+                allow_stale_entries,
+                StaleLogEntrySnafu {
+                    region_id,
+                    flushed_entry_id,
+                    unexpected_entry_id: entry_id,
+                }
+            );
+            warn!("Stale WAL entries read during replay, region id: {}, flushed entry id: {}, entry id read: {}", region_id, flushed_entry_id, entry_id);
+        }
+
         last_entry_id = last_entry_id.max(entry_id);
         for mutation in entry.mutations {
             rows_replayed += mutation
@@ -410,6 +416,12 @@ pub(crate) async fn replay_memtable<S: LogStore>(
     // set next_entry_id and write to memtable.
     region_write_ctx.set_next_entry_id(last_entry_id + 1);
     region_write_ctx.write_memtable();
+
+    if allow_stale_entries {
+        wal.obsolete(region_id, flushed_entry_id, wal_options)
+            .await?;
+        info!("Force obsolete WAL entries, region id: {}, flushed entry id: {}, last entry id read: {}", region_id, flushed_entry_id, last_entry_id);
+    }
 
     info!(
         "Replay WAL for region: {}, rows recovered: {}, last entry id: {}",
