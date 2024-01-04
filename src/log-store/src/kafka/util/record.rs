@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
@@ -192,17 +192,35 @@ fn check_records(records: &[Record]) -> Result<()> {
         }
     );
 
-    let (sequence, matched): (Vec<_>, Vec<_>) = records
-        .iter()
-        .map(|record| {
-            (
-                i32::from(record.tp),
-                record.checksum == crc32fast::hash(&record.data),
-            )
-        })
-        .unzip();
+    let mut sequence = Vec::with_capacity(len);
+    let mut entry_ids = HashSet::with_capacity(len);
+    let mut namespaces = HashSet::with_capacity(len);
+    let mut checksum_matched = HashSet::with_capacity(len);
+    for record in records {
+        sequence.push(i32::from(record.tp));
+        entry_ids.insert(record.entry_id);
+        namespaces.insert(&record.ns);
+        checksum_matched.insert(record.checksum == crc32fast::hash(&record.data));
+    }
 
-    ensure!(matched.into_iter().all(|ok| ok), ChecksumMismatchedSnafu);
+    ensure!(
+        entry_ids.len() == 1,
+        IllegalSequenceSnafu {
+            error: "Non-unique entry ids"
+        }
+    );
+
+    ensure!(
+        namespaces.len() == 1,
+        IllegalSequenceSnafu {
+            error: "Non-unique namespaces"
+        }
+    );
+
+    ensure!(
+        checksum_matched.len() == 1 && checksum_matched.contains(&true),
+        ChecksumMismatchedSnafu
+    );
 
     if len == 1 {
         // A sequence with a single record must contain only a Full record.
@@ -305,10 +323,7 @@ pub fn maybe_emit_entry(
 }
 
 #[cfg(test)]
-#[allow(unused)]
 mod tests {
-    use rand::Rng;
-
     use super::*;
 
     // Implements some utility methods for testing.
@@ -330,37 +345,33 @@ mod tests {
 
     impl Record {
         /// Overrides tp.
-        pub(crate) fn with_tp(&self, tp: RecordType) -> Self {
+        fn with_tp(&self, tp: RecordType) -> Self {
             Self { tp, ..self.clone() }
         }
 
         /// Overrides data with the given data.
-        pub(crate) fn with_data(&self, data: &[u8]) -> Self {
+        fn with_data(&self, data: &[u8]) -> Self {
             Self {
                 data: data.to_vec(),
                 ..self.clone()
             }
         }
 
-        /// Overrides data with random data.
-        pub(crate) fn with_random_data(&self) -> Self {
-            let data = rand::thread_rng().gen_range(0..u32::MAX).to_string();
-            Self {
-                data: data.as_bytes().to_vec(),
-                ..self.clone()
-            }
-        }
-
         /// Overrides entry id.
-        pub(crate) fn with_entry_id(&self, entry_id: EntryId) -> Self {
+        fn with_entry_id(&self, entry_id: EntryId) -> Self {
             Self {
                 entry_id,
                 ..self.clone()
             }
         }
 
+        /// Overrides namespace.
+        fn with_ns(&self, ns: NamespaceImpl) -> Self {
+            Self { ns, ..self.clone() }
+        }
+
         /// Overrides checksum.
-        pub(crate) fn with_checksum(&self, checksum: u32) -> Self {
+        fn with_checksum(&self, checksum: u32) -> Self {
             Self {
                 checksum,
                 ..self.clone()
@@ -384,6 +395,35 @@ mod tests {
         let got = check_records(&[]).unwrap_err();
         let expected = IllegalSequenceSnafu {
             error: "Empty sequence",
+        }
+        .build();
+        assert_eq!(got.to_string(), expected.to_string());
+
+        // On non-unique entry ids.
+        let template = Record::default();
+        let got =
+            check_records(&[template.with_entry_id(0), template.with_entry_id(1)]).unwrap_err();
+        let expected = IllegalSequenceSnafu {
+            error: "Non-unique entry ids",
+        }
+        .build();
+        assert_eq!(got.to_string(), expected.to_string());
+
+        // On non-unique namespaces.
+        let template = Record::default();
+        let got = check_records(&[
+            template.with_ns(NamespaceImpl {
+                region_id: 1,
+                topic: "greptimedb_wal_topic".to_string(),
+            }),
+            template.with_ns(NamespaceImpl {
+                region_id: 2,
+                topic: "greptimedb_wal_topic".to_string(),
+            }),
+        ])
+        .unwrap_err();
+        let expected = IllegalSequenceSnafu {
+            error: "Non-unique namespaces",
         }
         .build();
         assert_eq!(got.to_string(), expected.to_string());
@@ -534,9 +574,96 @@ mod tests {
 
     /// Tests that the reconstruction of an entry behaves as expected.
     #[test]
-    fn test_reconstruct_entry() {}
+    fn test_reconstruct_entry() {
+        let template = Record::default();
+        let records = vec![
+            template
+                .with_data(b"111")
+                .with_checksum(crc32fast::hash(b"111"))
+                .with_tp(RecordType::First),
+            template
+                .with_data(b"222")
+                .with_checksum(crc32fast::hash(b"222"))
+                .with_tp(RecordType::Middle(1)),
+            template
+                .with_data(b"333")
+                .with_checksum(crc32fast::hash(b"333"))
+                .with_tp(RecordType::Last),
+        ];
+        let entry = EntryImpl::try_from(records.clone()).unwrap();
+        assert_eq!(records[0].entry_id, entry.id);
+        assert_eq!(records[0].ns, entry.ns);
+        assert_eq!(
+            entry.data,
+            records
+                .into_iter()
+                .flat_map(|record| record.data)
+                .collect::<Vec<_>>()
+        );
+    }
 
     /// Tests that `maybe_emit_entry` works as expected.
+    /// This test does not check for illegal record sequences since they're already tested in the `test_check_records` test.
     #[test]
-    fn test_maybe_emit_entry() {}
+    fn test_maybe_emit_entry() {
+        let ns = NamespaceImpl {
+            region_id: 1,
+            topic: "greptimedb_wal_topic".to_string(),
+        };
+        let template = Record::default().with_ns(ns.clone());
+        let mut entry_records = HashMap::from([
+            (
+                2,
+                vec![template.with_entry_id(2).with_tp(RecordType::First)],
+            ),
+            (
+                3,
+                vec![
+                    template.with_entry_id(3).with_tp(RecordType::First),
+                    template.with_entry_id(3).with_tp(RecordType::Middle(1)),
+                ],
+            ),
+        ]);
+
+        // A Full record arrives.
+        let got = maybe_emit_entry(
+            template.with_entry_id(0).with_tp(RecordType::Full),
+            &ns,
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_some());
+
+        // A First record arrives.
+        let got = maybe_emit_entry(
+            template.with_entry_id(1).with_tp(RecordType::First),
+            &ns,
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_none());
+
+        // A Middle record arrives.
+        let got = maybe_emit_entry(
+            template.with_entry_id(2).with_tp(RecordType::Middle(1)),
+            &ns,
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_none());
+
+        // A Last record arrives.
+        let got = maybe_emit_entry(
+            template.with_entry_id(3).with_tp(RecordType::Last),
+            &ns,
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_some());
+
+        // Check state.
+        assert_eq!(entry_records.len(), 2);
+        assert!(entry_records.contains_key(&1));
+        assert!(entry_records.contains_key(&2));
+    }
 }
