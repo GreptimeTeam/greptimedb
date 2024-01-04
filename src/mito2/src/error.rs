@@ -429,35 +429,30 @@ pub enum Error {
 
     #[snafu(display("Failed to build index applier"))]
     BuildIndexApplier {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
-        #[snafu(source)]
         source: datatypes::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to apply index"))]
     ApplyIndex {
-        #[snafu(source)]
         source: index::inverted_index::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
 
     #[snafu(display("Failed to read puffin blob"))]
     PuffinReadBlob {
-        #[snafu(source)]
         source: puffin::error::Error,
         location: Location,
     },
@@ -465,6 +460,14 @@ pub enum Error {
     #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
     PuffinBlobTypeNotFound {
         blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to clean dir {dir}"))]
+    CleanDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
         location: Location,
     },
 }
@@ -555,6 +558,7 @@ impl ErrorExt for Error {
             PuffinReadMetadata { source, .. } | PuffinReadBlob { source, .. } => {
                 source.status_code()
             }
+            CleanDir { .. } => StatusCode::Unexpected,
         }
     }
 
