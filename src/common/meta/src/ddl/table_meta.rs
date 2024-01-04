@@ -175,6 +175,7 @@ impl TableMetadataAllocator {
         };
         Ok(table_route)
     }
+
     pub async fn create(
         &self,
         ctx: &TableMetadataAllocatorContext,
