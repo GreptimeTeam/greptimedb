@@ -26,9 +26,9 @@ use std::{env, path};
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
-use object_store::layers::{LoggingLayer, LruCacheLayer, RetryLayer, TracingLayer};
+use object_store::layers::{LruCacheLayer, RetryLayer};
 use object_store::services::Fs;
-use object_store::util::{join_dir, normalize_dir};
+use object_store::util::{join_dir, normalize_dir, with_instrument_layers};
 use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
@@ -60,16 +60,7 @@ pub(crate) async fn new_object_store(
         object_store
     };
 
-    let store = object_store
-        .layer(
-            LoggingLayer::default()
-                // Print the expected error only in DEBUG level.
-                // See https://docs.rs/opendal/latest/opendal/layers/struct.LoggingLayer.html#method.with_error_level
-                .with_error_level(Some("debug"))
-                .expect("input error level must be valid"),
-        )
-        .layer(TracingLayer)
-        .layer(object_store::layers::PrometheusMetricsLayer);
+    let store = with_instrument_layers(object_store);
     Ok(store)
 }
 
