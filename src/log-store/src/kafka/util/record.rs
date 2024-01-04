@@ -482,7 +482,36 @@ mod tests {
 
     /// Tests that the `build_records` works as expected.
     #[test]
-    fn test_build_records() {}
+    fn test_build_records() {
+        let max_record_size = 128;
+
+        // On a small entry.
+        let ns = NamespaceImpl {
+            region_id: 1,
+            topic: "greptimedb_wal_topic".to_string(),
+        };
+        let entry = new_test_entry([b'1'; 100], 0, ns.clone());
+        let records = build_records(entry.clone(), max_record_size);
+        assert!(records.len() == 1);
+        assert_eq!(entry.data, records[0].data);
+
+        // On a large entry.
+        let entry = new_test_entry([b'1'; 150], 0, ns.clone());
+        let records = build_records(entry.clone(), max_record_size);
+        assert!(records.len() == 2);
+        assert_eq!(&records[0].data, &[b'1'; 128]);
+        assert_eq!(&records[1].data, &[b'1'; 22]);
+
+        // On a way-too large entry.
+        let entry = new_test_entry([b'1'; 5000], 0, ns.clone());
+        let records = build_records(entry.clone(), max_record_size);
+        let matched = entry
+            .data
+            .chunks(max_record_size)
+            .enumerate()
+            .all(|(i, chunk)| records[i].data == chunk);
+        assert!(matched);
+    }
 
     /// Tests that Record and KafkaRecord are able to be converted back and forth.
     #[test]
