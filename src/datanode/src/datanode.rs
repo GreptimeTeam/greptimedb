@@ -42,7 +42,7 @@ use metric_engine::engine::MetricEngine;
 use mito2::config::MitoConfig;
 use mito2::engine::MitoEngine;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
-use object_store::util::normalize_dir;
+use object_store::util::{join_dir, normalize_dir};
 use query::QueryEngineFactory;
 use servers::export_metrics::ExportMetricsTask;
 use servers::grpc::{GrpcServer, GrpcServerConfig};
@@ -458,8 +458,14 @@ impl DatanodeBuilder {
     async fn build_mito_engine(
         opts: &DatanodeOptions,
         object_store_manager: ObjectStoreManagerRef,
-        config: MitoConfig,
+        mut config: MitoConfig,
     ) -> Result<MitoEngine> {
+        // Sets write cache path if it is empty.
+        if config.write_cache_path.is_empty() {
+            config.write_cache_path = join_dir(&opts.storage.data_home, "write_cache");
+            info!("Sets write cache path to {}", config.write_cache_path);
+        }
+
         let mito_engine = match &opts.wal {
             WalConfig::RaftEngine(raft_engine_config) => MitoEngine::new(
                 config,

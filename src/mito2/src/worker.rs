@@ -264,11 +264,16 @@ async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
 ) -> Result<Option<WriteCacheRef>> {
-    let Some(path) = &config.write_cache_path else {
+    if config.write_cache_size.as_bytes() == 0 || config.write_cache_path.is_empty() {
         return Ok(None);
-    };
+    }
 
-    let cache = WriteCache::new_fs(path, object_store_manager, config.write_cache_size).await?;
+    let cache = WriteCache::new_fs(
+        &config.write_cache_path,
+        object_store_manager,
+        config.write_cache_size,
+    )
+    .await?;
     Ok(Some(Arc::new(cache)))
 }
 
