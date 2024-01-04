@@ -18,6 +18,8 @@ mod grpc;
 mod http;
 #[macro_use]
 mod sql;
+#[macro_use]
+mod region_migration;
 // #[macro_use]
 // mod region_failover;
 
@@ -25,5 +27,7 @@ grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 // region_failover_tests!(File, S3, S3WithCache, Oss, Azblob);
 sql_tests!(File);
+
+region_migration_tests!(File);
 
 // TODO(niebayes): add integration tests for remote wal.
