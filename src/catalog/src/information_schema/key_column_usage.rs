@@ -39,6 +39,7 @@ use crate::CatalogManager;
 
 const CONSTRAINT_SCHEMA: &str = "constraint_schema";
 const CONSTRAINT_NAME: &str = "constraint_name";
+const TABLE_CATALOG: &str = "table_catalog";
 const TABLE_SCHEMA: &str = "table_schema";
 const TABLE_NAME: &str = "table_name";
 const COLUMN_NAME: &str = "column_name";
@@ -73,7 +74,7 @@ impl InformationSchemaKeyColumnUsage {
                 false,
             ),
             ColumnSchema::new(CONSTRAINT_NAME, ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),

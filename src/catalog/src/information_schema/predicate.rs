@@ -51,7 +51,7 @@ impl Predicate {
                     return Some(v == *value);
                 }
             }
-            Predicate::Like(c, pattern, case_insenstive) => {
+            Predicate::Like(c, pattern, case_insensitive) => {
                 for (column, value) in row {
                     if c != column {
                         continue;
@@ -61,7 +61,7 @@ impl Predicate {
                         continue;
                     };
 
-                    return like_utf8(bs.as_utf8(), pattern, case_insenstive);
+                    return like_utf8(bs.as_utf8(), pattern, case_insensitive);
                 }
             }
             Predicate::NotEq(c, v) => {
@@ -240,12 +240,12 @@ impl Predicate {
 /// Perform SQL left LIKE right, return `None` if fail to evaluate.
 /// - `s` the target string
 /// - `pattern` the pattern just like '%abc'
-/// - `case_insenstive` whether to perform case-insensitive like or not.
-fn like_utf8(s: &str, pattern: &str, case_insenstive: &bool) -> Option<bool> {
+/// - `case_insensitive` whether to perform case-insensitive like or not.
+fn like_utf8(s: &str, pattern: &str, case_insensitive: &bool) -> Option<bool> {
     let array = StringArray::from(vec![s]);
     let patterns = StringArray::new_scalar(pattern);
 
-    let Ok(booleans) = (if *case_insenstive {
+    let Ok(booleans) = (if *case_insensitive {
         comparison::ilike(&array, &patterns)
     } else {
         comparison::like(&array, &patterns)
@@ -253,7 +253,7 @@ fn like_utf8(s: &str, pattern: &str, case_insenstive: &bool) -> Option<bool> {
         return None;
     };
 
-    // Safty: at least one value in result
+    // Safety: at least one value in result
     Some(booleans.value(0))
 }
 
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn test_predicate_like() {
-        // case insenstive
+        // case insensitive
         let expr = DfExpr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
@@ -435,7 +435,7 @@ mod tests {
         assert!(!p.eval(&unmatch_row).unwrap());
         assert!(p.eval(&[]).is_none());
 
-        // case senstive
+        // case sensitive
         let expr = DfExpr::Like(Like {
             negated: false,
             expr: Box::new(column("a")),
