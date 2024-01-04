@@ -18,7 +18,7 @@ use datatypes::value::Value;
 use store_api::storage::ScanRequest;
 
 type ColumnName = String;
-/// Predicate to filter information_schema tables stream,
+/// Predicate to filter `information_schema` tables stream,
 /// we only support these simple predicates currently.
 /// TODO(dennis): supports more predicate types.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -33,9 +33,9 @@ enum Predicate {
 
 impl Predicate {
     /// Evaluate the predicate with the row, returns:
-    /// - None when the predicate can't evaluate with the row.
-    /// - Some(true) when the predicate is satisfied,
-    /// - Some(false) when the predicate is not satisfied,
+    /// - `None` when the predicate can't evaluate with the row.
+    /// - `Some(true)` when the predicate is satisfied,
+    /// - `Some(false)` when the predicate is not satisfied,
     fn eval(&self, row: &[(&str, &Value)]) -> Option<bool> {
         match self {
             Predicate::Eq(c, v) => {
@@ -91,7 +91,7 @@ impl Predicate {
         None
     }
 
-    /// Try to create a predicate from datafusion `Expr`, return None if fails.
+    /// Try to create a predicate from datafusion [`Expr`], return None if fails.
     fn from_expr(expr: DfExpr) -> Option<Predicate> {
         match expr {
             // NOT expr
@@ -189,7 +189,7 @@ pub struct Predicates {
 }
 
 impl Predicates {
-    /// Try its best to create predicates from `ScanRequest`.
+    /// Try its best to create predicates from [`ScanRequest`].
     pub fn from_scan_request(request: &Option<ScanRequest>) -> Predicates {
         if let Some(request) = request {
             let mut predicates = Vec::with_capacity(request.filters.len());
@@ -236,7 +236,7 @@ impl Predicates {
     }
 }
 
-/// Returns true when the values are all `ScalarValue`.
+/// Returns true when the values are all [`DfExpr::Literal`].
 fn is_all_scalars(list: &[DfExpr]) -> bool {
     list.iter().all(|v| matches!(v, DfExpr::Literal(_)))
 }
