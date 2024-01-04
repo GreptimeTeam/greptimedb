@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::key::datanode_table::RegionInfo;
-use common_meta::rpc::router::RegionRoute;
+use common_meta::rpc::router::{region_distribution, RegionRoute};
 use common_telemetry::{info, warn};
 use snafu::{ensure, OptionExt, ResultExt};
 
@@ -144,6 +144,12 @@ impl UpdateMetadata {
         } = datanode_table_value.region_info.clone();
         let table_route_value = ctx.get_table_route_value().await?;
 
+        let region_distribution = region_distribution(&region_routes);
+        info!(
+            "Trying to update region routes to {:?} for table: {}",
+            region_distribution,
+            region_id.table_id()
+        );
         if let Err(err) = table_metadata_manager
             .update_table_route(
                 region_id.table_id(),
