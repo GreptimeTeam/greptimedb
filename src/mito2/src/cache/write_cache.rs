@@ -60,7 +60,7 @@ impl WriteCache {
     }
 
     /// Writes SST to the cache and then uploads it to the remote object store.
-    pub(crate) async fn write_and_upload_sst(
+    pub async fn write_and_upload_sst(
         &self,
         request: SstUploadRequest,
         write_opts: &WriteOptions,
@@ -74,13 +74,13 @@ impl WriteCache {
 }
 
 /// Request to write and upload a SST.
-pub(crate) struct SstUploadRequest {
-    pub(crate) file_id: FileId,
-    pub(crate) metadata: RegionMetadataRef,
-    pub(crate) source: Source,
-    pub(crate) storage: Option<String>,
+pub struct SstUploadRequest {
+    pub file_id: FileId,
+    pub metadata: RegionMetadataRef,
+    pub source: Source,
+    pub storage: Option<String>,
     /// Path to upload the file.
-    pub(crate) upload_path: String,
+    pub upload_path: String,
     /// Remote object store to upload.
-    pub(crate) remote_store: ObjectStore,
+    pub remote_store: ObjectStore,
 }
