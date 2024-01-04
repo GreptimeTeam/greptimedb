@@ -167,7 +167,7 @@ impl RecordProducer {
         // Stores the offset of the last successfully produced record.
         let mut last_offset = None;
         for entry in self.entries {
-            for record in build_records(entry, self.max_record_size) {
+            for record in build_records(entry, self.max_record_size >> 1) {
                 let kafka_record: KafkaRecord = record.try_into()?;
                 // Records of a certain region cannot be produced in parallel since their order must be static.
                 let offset = producer.produce(kafka_record).await.map(Offset).context(
@@ -181,8 +181,6 @@ impl RecordProducer {
         // Safety: there must be at least one record produced when the entries are guaranteed not empty.
         Ok(last_offset.unwrap())
     }
-
-    // pub(crate) async fn record(&self, record: record, producer: )
 }
 
 fn check_records(records: &[Record]) -> Result<()> {
@@ -241,36 +239,31 @@ fn record_type(seq: usize, num_records: usize) -> RecordType {
 }
 
 fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
-    let payload = entry.data.len();
-    let checksum = crc32fast::hash(&entry.data);
-
-    if payload <= max_record_size {
+    if entry.data.len() <= max_record_size {
         let record = Record {
             version: VERSION,
             tp: RecordType::Full,
+            checksum: crc32fast::hash(&entry.data),
             data: entry.data,
             entry_id: entry.id,
             ns: entry.ns,
-            checksum,
         };
         return vec![record];
     }
 
-    let num_records = (payload + max_record_size - 1) / max_record_size;
-    let mut records = Vec::with_capacity(num_records);
-    for i in 0..num_records {
-        let end = max_record_size.min(payload - i);
-        let record = Record {
+    let chunks = entry.data.chunks(max_record_size);
+    let num_chunks = chunks.len();
+    chunks
+        .enumerate()
+        .map(|(i, chunk)| Record {
             version: VERSION,
-            tp: record_type(i, num_records),
-            data: entry.data[i..end].to_vec(),
+            tp: record_type(i, num_chunks),
+            data: chunk.to_vec(),
             entry_id: entry.id,
             ns: entry.ns.clone(),
-            checksum,
-        };
-        records.push(record);
-    }
-    records
+            checksum: crc32fast::hash(chunk),
+        })
+        .collect()
 }
 
 pub fn maybe_emit_entry(
