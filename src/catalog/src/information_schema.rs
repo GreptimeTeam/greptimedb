@@ -15,7 +15,7 @@
 mod columns;
 mod key_column_usage;
 mod memory_table;
-pub(crate) mod predicate;
+mod predicate;
 mod schemata;
 mod table_names;
 mod tables;
