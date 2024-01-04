@@ -91,7 +91,7 @@ impl Predicate {
         None
     }
 
-    // Try to create a predicate from datafusion `Expr`, return None if fails.
+    /// Try to create a predicate from datafusion `Expr`, return None if fails.
     fn from_expr(expr: DfExpr) -> Option<Predicate> {
         match expr {
             // NOT expr
