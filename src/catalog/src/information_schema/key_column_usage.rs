@@ -37,6 +37,13 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
+const CONSTRAINT_SCHEMA: &str = "constraint_schema";
+const CONSTRAINT_NAME: &str = "constraint_name";
+const TABLE_SCHEMA: &str = "table_schema";
+const TABLE_NAME: &str = "table_name";
+const COLUMN_NAME: &str = "column_name";
+const ORDINAL_POSITION: &str = "ordinal_position";
+
 /// The virtual table implementation for `information_schema.KEY_COLUMN_USAGE`.
 pub(super) struct InformationSchemaKeyColumnUsage {
     schema: SchemaRef,
@@ -61,24 +68,16 @@ impl InformationSchemaKeyColumnUsage {
                 false,
             ),
             ColumnSchema::new(
-                "constraint_schema",
+                CONSTRAINT_SCHEMA,
                 ConcreteDataType::string_datatype(),
                 false,
             ),
-            ColumnSchema::new(
-                "constraint_name",
-                ConcreteDataType::string_datatype(),
-                false,
-            ),
+            ColumnSchema::new(CONSTRAINT_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("column_name", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(
-                "ordinal_position",
-                ConcreteDataType::uint32_datatype(),
-                false,
-            ),
+            ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(COLUMN_NAME, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(ORDINAL_POSITION, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(
                 "position_in_unique_constraint",
                 ConcreteDataType::uint32_datatype(),
@@ -280,12 +279,12 @@ impl InformationSchemaKeyColumnUsageBuilder {
         ordinal_position: u32,
     ) {
         let row = [
-            ("constraint_schema", &Value::from(constraint_schema)),
-            ("constraint_name", &Value::from(constraint_name)),
-            ("table_schema", &Value::from(table_schema)),
-            ("table_name", &Value::from(table_name)),
-            ("column_name", &Value::from(column_name)),
-            ("ordinal_position", &Value::from(ordinal_position)),
+            (CONSTRAINT_SCHEMA, &Value::from(constraint_schema)),
+            (CONSTRAINT_NAME, &Value::from(constraint_name)),
+            (TABLE_SCHEMA, &Value::from(table_schema)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (COLUMN_NAME, &Value::from(column_name)),
+            (ORDINAL_POSITION, &Value::from(ordinal_position)),
         ];
 
         if !predicates.eval(&row) {

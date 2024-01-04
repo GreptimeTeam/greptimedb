@@ -10,6 +10,7 @@ testing = []
 [dependencies]
 api.workspace = true
 arc-swap = "1.0"
+arrow.workspace = true
 arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait = "0.1"

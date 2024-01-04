@@ -38,6 +38,13 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
+const TABLE_CATALOG: &str = "table_catalog";
+const TABLE_SCHEMA: &str = "table_schema";
+const TABLE_NAME: &str = "table_name";
+const TABLE_TYPE: &str = "table_type";
+const TABLE_ID: &str = "table_id";
+const ENGINE: &str = "engine";
+
 pub(super) struct InformationSchemaTables {
     schema: SchemaRef,
     catalog_name: String,
@@ -55,12 +62,12 @@ impl InformationSchemaTables {
 
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_type", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("table_id", ConcreteDataType::uint32_datatype(), true),
-            ColumnSchema::new("engine", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(TABLE_CATALOG, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_SCHEMA, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_NAME, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_TYPE, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(TABLE_ID, ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
         ]))
     }
 
@@ -204,10 +211,10 @@ impl InformationSchemaTablesBuilder {
         };
 
         let row = [
-            ("table_catalog", &Value::from(catalog_name)),
-            ("table_schema", &Value::from(schema_name)),
-            ("table_name", &Value::from(table_name)),
-            ("table_type", &Value::from(table_type)),
+            (TABLE_CATALOG, &Value::from(catalog_name)),
+            (TABLE_SCHEMA, &Value::from(schema_name)),
+            (TABLE_NAME, &Value::from(table_name)),
+            (TABLE_TYPE, &Value::from(table_type)),
         ];
 
         if !predicates.eval(&row) {

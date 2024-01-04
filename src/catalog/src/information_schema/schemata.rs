@@ -37,6 +37,11 @@ use crate::error::{
 use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
 
+const CATALOG_NAME: &str = "catalog_name";
+const SCHEMA_NAME: &str = "schema_name";
+const DEFAULT_CHARACTER_SET_NAME: &str = "default_character_set_name";
+const DEFAULT_COLLATION_NAME: &str = "default_collation_name";
+
 /// The `information_schema.schemata` table implementation.
 pub(super) struct InformationSchemaSchemata {
     schema: SchemaRef,
@@ -55,15 +60,15 @@ impl InformationSchemaSchemata {
 
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new("catalog_name", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("schema_name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(CATALOG_NAME, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(SCHEMA_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
-                "default_character_set_name",
+                DEFAULT_CHARACTER_SET_NAME,
                 ConcreteDataType::string_datatype(),
                 false,
             ),
             ColumnSchema::new(
-                "default_collation_name",
+                DEFAULT_COLLATION_NAME,
                 ConcreteDataType::string_datatype(),
                 false,
             ),
@@ -172,10 +177,10 @@ impl InformationSchemaSchemataBuilder {
 
     fn add_schema(&mut self, predicates: &Predicates, catalog_name: &str, schema_name: &str) {
         let row = [
-            ("catalog_name", &Value::from(catalog_name)),
-            ("schema_name", &Value::from(schema_name)),
-            ("default_character_set_name", &Value::from("utf8")),
-            ("default_collation_name", &Value::from("utf8_bin")),
+            (CATALOG_NAME, &Value::from(catalog_name)),
+            (SCHEMA_NAME, &Value::from(schema_name)),
+            (DEFAULT_CHARACTER_SET_NAME, &Value::from("utf8")),
+            (DEFAULT_COLLATION_NAME, &Value::from("utf8_bin")),
         ];
 
         if !predicates.eval(&row) {

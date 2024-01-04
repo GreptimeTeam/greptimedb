@@ -12,7 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use arrow::array::StringArray;
+use arrow::compute::kernels::comparison;
 use common_query::logical_plan::DfExpr;
+use datafusion::common::ScalarValue;
+use datafusion::logical_expr::expr::Like;
 use datafusion::logical_expr::Operator;
 use datatypes::value::Value;
 use store_api::storage::ScanRequest;
@@ -24,6 +28,7 @@ type ColumnName = String;
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Predicate {
     Eq(ColumnName, Value),
+    Like(ColumnName, String, bool),
     NotEq(ColumnName, Value),
     InList(ColumnName, Vec<Value>),
     And(Box<Predicate>, Box<Predicate>),
@@ -46,6 +51,19 @@ impl Predicate {
                     return Some(v == *value);
                 }
             }
+            Predicate::Like(c, pattern, case_insenstive) => {
+                for (column, value) in row {
+                    if c != column {
+                        continue;
+                    }
+
+                    let Value::String(bs) = value else {
+                        continue;
+                    };
+
+                    return like_utf8(bs.as_utf8(), pattern, case_insenstive);
+                }
+            }
             Predicate::NotEq(c, v) => {
                 for (column, value) in row {
                     if c != column {
@@ -63,17 +81,29 @@ impl Predicate {
                 }
             }
             Predicate::And(left, right) => {
-                return match (left.eval(row), right.eval(row)) {
+                let left = left.eval(row);
+
+                // short-circuit
+                if matches!(left, Some(false)) {
+                    return Some(false);
+                }
+
+                return match (left, right.eval(row)) {
                     (Some(left), Some(right)) => Some(left && right),
-                    (Some(false), None) => Some(false),
                     (None, Some(false)) => Some(false),
                     _ => None,
                 };
             }
             Predicate::Or(left, right) => {
-                return match (left.eval(row), right.eval(row)) {
+                let left = left.eval(row);
+
+                // short-circuit
+                if matches!(left, Some(true)) {
+                    return Some(true);
+                }
+
+                return match (left, right.eval(row)) {
                     (Some(left), Some(right)) => Some(left || right),
-                    (Some(true), None) => Some(true),
                     (None, Some(true)) => Some(true),
                     _ => None,
                 };
@@ -101,6 +131,30 @@ impl Predicate {
                 };
 
                 Some(Predicate::Not(Box::new(p)))
+            }
+            // expr LIKE pattern
+            DfExpr::Like(Like {
+                negated,
+                expr,
+                pattern,
+                case_insensitive,
+                ..
+            }) if is_column(&expr) && is_string_literal(&pattern) => {
+                // Safety: ensured by gurad
+                let DfExpr::Column(c) = *expr else {
+                    unreachable!();
+                };
+                let DfExpr::Literal(ScalarValue::Utf8(Some(pattern))) = *pattern else {
+                    unreachable!();
+                };
+
+                let p = Predicate::Like(c.name, pattern, case_insensitive);
+
+                if negated {
+                    Some(Predicate::Not(Box::new(p)))
+                } else {
+                    Some(p)
+                }
             }
             // left OP right
             DfExpr::BinaryExpr(bin) => match (*bin.left, bin.op, *bin.right) {
@@ -181,6 +235,34 @@ impl Predicate {
             _ => None,
         }
     }
+}
+
+/// Perform SQL left LIKE right, return `None` if fail to evaluate.
+/// - `s` the target string
+/// - `pattern` the pattern just like '%abc'
+/// - `case_insenstive` whether to perform case-insensitive like or not.
+fn like_utf8(s: &str, pattern: &str, case_insenstive: &bool) -> Option<bool> {
+    let array = StringArray::from(vec![s]);
+    let patterns = StringArray::new_scalar(pattern);
+
+    let Ok(booleans) = (if *case_insenstive {
+        comparison::ilike(&array, &patterns)
+    } else {
+        comparison::like(&array, &patterns)
+    }) else {
+        return None;
+    };
+
+    // Safty: at least one value in result
+    Some(booleans.value(0))
+}
+
+fn is_string_literal(expr: &DfExpr) -> bool {
+    matches!(expr, DfExpr::Literal(ScalarValue::Utf8(Some(_))))
+}
+
+fn is_column(expr: &DfExpr) -> bool {
+    matches!(expr, DfExpr::Column(_))
 }
 
 /// A list of predicate
@@ -324,6 +406,70 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn test_predicate_like() {
+        // case insenstive
+        let expr = DfExpr::Like(Like {
+            negated: false,
+            expr: Box::new(column("a")),
+            pattern: Box::new(string_literal("%abc")),
+            case_insensitive: true,
+            escape_char: None,
+        });
+
+        let p = Predicate::from_expr(expr).unwrap();
+        assert!(
+            matches!(&p, Predicate::Like(c, pattern, case_insensitive) if
+                         c == "a"
+                         && pattern == "%abc"
+                         && *case_insensitive)
+        );
+
+        let match_row = [
+            ("a", &Value::from("hello AbC")),
+            ("b", &Value::from("b value")),
+        ];
+        let unmatch_row = [("a", &Value::from("bca")), ("b", &Value::from("b value"))];
+
+        assert!(p.eval(&match_row).unwrap());
+        assert!(!p.eval(&unmatch_row).unwrap());
+        assert!(p.eval(&[]).is_none());
+
+        // case senstive
+        let expr = DfExpr::Like(Like {
+            negated: false,
+            expr: Box::new(column("a")),
+            pattern: Box::new(string_literal("%abc")),
+            case_insensitive: false,
+            escape_char: None,
+        });
+
+        let p = Predicate::from_expr(expr).unwrap();
+        assert!(
+            matches!(&p, Predicate::Like(c, pattern, case_insensitive) if
+                         c == "a"
+                         && pattern == "%abc"
+                         && !*case_insensitive)
+        );
+        assert!(!p.eval(&match_row).unwrap());
+        assert!(!p.eval(&unmatch_row).unwrap());
+        assert!(p.eval(&[]).is_none());
+
+        // not like
+        let expr = DfExpr::Like(Like {
+            negated: true,
+            expr: Box::new(column("a")),
+            pattern: Box::new(string_literal("%abc")),
+            case_insensitive: true,
+            escape_char: None,
+        });
+
+        let p = Predicate::from_expr(expr).unwrap();
+        assert!(!p.eval(&match_row).unwrap());
+        assert!(p.eval(&unmatch_row).unwrap());
+        assert!(p.eval(&[]).is_none());
+    }
+
     fn column(name: &str) -> DfExpr {
         DfExpr::Column(Column {
             relation: None,
@@ -435,11 +581,11 @@ mod tests {
         assert_eq!(2, predicates.predicates.len());
         assert!(
             matches!(&predicates.predicates[0], Predicate::Eq(column, v) if column == "a"
-                         && match_string_value(v, "a_value"))
+                     && match_string_value(v, "a_value"))
         );
         assert!(
             matches!(&predicates.predicates[1], Predicate::NotEq(column, v) if column == "b"
-                         && match_string_value(v, "b_value"))
+                     && match_string_value(v, "b_value"))
         );
     }
 

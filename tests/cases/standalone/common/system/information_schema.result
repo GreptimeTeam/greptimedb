@@ -338,6 +338,17 @@ order by table_name;
 
 select table_name
 from information_schema.tables
+where table_schema like 'my%'
+order by table_name;
+
++------------+
+| table_name |
++------------+
+| foo        |
++------------+
+
+select table_name
+from information_schema.tables
 where table_schema not in ('my_db', 'information_schema')
 order by table_name;
 
@@ -411,6 +422,22 @@ select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
 +--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | public            | PRIMARY         | def           | public       | numbers    | number      | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
+
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| constraint_catalog | constraint_schema | constraint_name | table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+| def                | my_db             | TIME INDEX      | def           | my_db        | foo        | ts          | 1                |                               |                         |                       |                        |
++--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 
 +--------------------+-------------------+-----------------+---------------+--------------+------------+-------------+------------------+-------------------------------+-------------------------+-----------------------+------------------------+
 | constraint_catalog | constraint_schema | constraint_name | table_catalog | table_schema | table_name | column_name | ordinal_position | position_in_unique_constraint | referenced_table_schema | referenced_table_name | referenced_column_name |

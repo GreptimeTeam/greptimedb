@@ -31,6 +31,11 @@ order by table_name;
 
 select table_name
 from information_schema.tables
+where table_schema like 'my%'
+order by table_name;
+
+select table_name
+from information_schema.tables
 where table_schema not in ('my_db', 'information_schema')
 order by table_name;
 
@@ -67,6 +72,10 @@ use information_schema;
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME = 'TIME INDEX';
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME != 'TIME INDEX';
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME LIKE '%INDEX';
+
+select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME NOT LIKE '%INDEX';
 
 select * from KEY_COLUMN_USAGE where CONSTRAINT_NAME == 'TIME INDEX' AND CONSTRAINT_SCHEMA != 'my_db';
 
