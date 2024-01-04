@@ -46,7 +46,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Utilizes the short circuit evaluation.
         let region = if !is_mutable_empty || region.manifest_manager.has_update().await? {
-            info!("Reopening the region: {region_id}");
+            info!("Reopening the region: {region_id}, empty mutable: {is_mutable_empty}");
             let reopened_region = Arc::new(
                 RegionOpener::new(
                     region_id,
@@ -70,7 +70,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         let flushed_entry_id = region.version_control.current().last_entry_id;
-        info!("Trying to replay memtable for region: {region_id}");
+        info!("Trying to replay memtable for region: {region_id}, flushed entry id: {flushed_entry_id}");
         let timer = Instant::now();
         let last_entry_id = replay_memtable(
             &self.wal,
@@ -81,8 +81,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .await?;
         info!(
-            "Region: {region_id} catchup finished, elapsed: {:?}. last entry id: {last_entry_id}, expected: {:?}.",
-            request.entry_id, timer.elapsed()
+            "Elapsed: {:?}, region: {region_id} catchup finished. last entry id: {last_entry_id}, expected: {:?}.",
+            timer.elapsed(),
+            request.entry_id
         );
         if let Some(expected_last_entry_id) = request.entry_id {
             ensure!(

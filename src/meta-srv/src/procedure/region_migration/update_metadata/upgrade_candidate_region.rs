@@ -146,7 +146,8 @@ impl UpdateMetadata {
 
         let region_distribution = region_distribution(&region_routes);
         info!(
-            "Trying to update region routes to {region_distribution:?} for table: {}",
+            "Trying to update region routes to {:?} for table: {}",
+            region_distribution,
             region_id.table_id()
         );
         if let Err(err) = table_metadata_manager
