@@ -268,6 +268,9 @@ async fn write_cache_from_config(
         return Ok(None);
     }
 
+    // TODO(yingwen): Remove this and document the config once the write cache is ready.
+    warn!("Write cache is an experimental feature");
+
     let cache = WriteCache::new_fs(
         &config.write_cache_path,
         object_store_manager,
