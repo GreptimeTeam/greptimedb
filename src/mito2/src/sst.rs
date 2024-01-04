@@ -16,15 +16,7 @@
 
 pub mod file;
 pub mod file_purger;
-mod index;
+pub mod index;
+pub mod location;
 pub mod parquet;
 pub(crate) mod version;
-
-use object_store::util;
-
-use crate::sst::file::FileId;
-
-/// Returns the `file_path` for the `file_id` in the object store.
-pub(crate) fn sst_file_path(region_dir: &str, file_id: FileId) -> String {
-    util::join_path(region_dir, &file_id.as_parquet())
-}

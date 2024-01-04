@@ -98,7 +98,7 @@ mod tests {
             }
 
             fn lock_key(&self) -> LockKey {
-                LockKey::single("test.submit")
+                LockKey::single_exclusive("test.submit")
             }
         }
 

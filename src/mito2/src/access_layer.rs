@@ -23,10 +23,10 @@ use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
+use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::sst_file_path;
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
@@ -66,7 +66,7 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let path = sst_file_path(&self.region_dir, file_id);
+        let path = location::sst_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&path)
             .await
@@ -86,7 +86,7 @@ impl AccessLayer {
         request: SstWriteRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        let path = sst_file_path(&self.region_dir, request.file_id);
+        let path = location::sst_file_path(&self.region_dir, request.file_id);
 
         if let Some(write_cache) = request.cache_manager.write_cache() {
             // Write to the write cache.
