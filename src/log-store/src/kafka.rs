@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client_manager;
+pub(crate) mod client_manager;
 pub mod log_store;
-mod util;
+pub(crate) mod util;
 
 use std::fmt::Display;
 
@@ -28,8 +28,8 @@ use crate::error::Error;
 /// Kafka Namespace implementation.
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Serialize, Deserialize)]
 pub struct NamespaceImpl {
-    region_id: u64,
-    topic: Topic,
+    pub region_id: u64,
+    pub topic: Topic,
 }
 
 impl Namespace for NamespaceImpl {
