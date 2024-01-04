@@ -326,13 +326,13 @@ impl TwcsCompactionTask {
                     .await?
                     .map(|sst_info| {
                         // Add parquet metadata to cache
-                        sst_info.file_metadata.map(|metadata| {
+                        if let Some(metadata) = sst_info.file_metadata {
                             cache_manager.put_parquet_meta_data(
                                 region_id,
                                 file_id,
                                 Arc::new(metadata),
                             );
-                        });
+                        }
 
                         FileMeta {
                             region_id,
