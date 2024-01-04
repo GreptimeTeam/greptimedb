@@ -313,6 +313,7 @@ fn test_create_alter_region_request() {
         1,
         alter_table_task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(test_data::new_table_info())),
+        None,
         test_data::new_ddl_context(Arc::new(DatanodeClients::default())),
     )
     .unwrap();
@@ -383,6 +384,7 @@ async fn test_submit_alter_region_requests() {
         1,
         alter_table_task,
         DeserializedValueWithBytes::from_inner(TableInfoValue::new(table_info)),
+        None,
         context,
     )
     .unwrap();

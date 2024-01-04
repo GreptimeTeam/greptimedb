@@ -45,6 +45,7 @@ use crate::error::{
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
+use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
@@ -65,6 +66,7 @@ impl AlterTableProcedure {
         cluster_id: u64,
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        physical_table_name: Option<TableName>,
         context: DdlContext,
     ) -> Result<Self> {
         let alter_kind = task
@@ -84,7 +86,13 @@ impl AlterTableProcedure {
 
         Ok(Self {
             context,
-            data: AlterTableData::new(task, table_info_value, cluster_id, next_column_id),
+            data: AlterTableData::new(
+                task,
+                table_info_value,
+                physical_table_name,
+                cluster_id,
+                next_column_id,
+            ),
             kind,
         })
     }
@@ -182,23 +190,33 @@ impl AlterTableProcedure {
 
     pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
+        let table_route_manager = self.context.table_metadata_manager.table_route_manager();
 
-        let table_route = self
-            .context
-            .table_metadata_manager
-            .table_route_manager()
+        let table_route = table_route_manager
             .get(table_id)
             .await?
             .context(TableRouteNotFoundSnafu { table_id })?
             .into_inner();
-        let region_routes = table_route.region_routes()?;
+        let region_routes = match table_route {
+            TableRouteValue::Physical(x) => x.region_routes,
+            TableRouteValue::Logical(x) => {
+                let physical_table_id = x.physical_table_id();
+                let physical_table_route = table_route_manager
+                    .get(physical_table_id)
+                    .await?
+                    .context(TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
+                physical_table_route.region_routes()?.clone()
+            }
+        };
 
-        let leaders = find_leaders(region_routes);
+        let leaders = find_leaders(&region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(region_routes, &datanode);
+            let regions = find_leader_regions(&region_routes, &datanode);
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
@@ -335,13 +353,24 @@ impl AlterTableProcedure {
     }
 
     fn lock_key_inner(&self) -> Vec<String> {
+        let mut lock_key = vec![];
+
+        if let Some(physical_table_name) = self.data.physical_table_name() {
+            let physical_table_key = common_catalog::format_full_table_name(
+                &physical_table_name.catalog_name,
+                &physical_table_name.schema_name,
+                &physical_table_name.table_name,
+            );
+            lock_key.push(physical_table_key);
+        }
+
         let table_ref = self.data.table_ref();
         let table_key = common_catalog::format_full_table_name(
             table_ref.catalog,
             table_ref.schema,
             table_ref.table,
         );
-        let mut lock_key = vec![table_key];
+        lock_key.push(table_key);
 
         if let Ok(Kind::RenameTable(RenameTable { new_table_name })) = self.alter_kind() {
             lock_key.push(common_catalog::format_full_table_name(
@@ -415,6 +444,8 @@ pub struct AlterTableData {
     task: AlterTableTask,
     /// Table info value before alteration.
     table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+    /// Physical table name, if the table to alter is a logical table.
+    physical_table_name: Option<TableName>,
     cluster_id: u64,
     /// Next column id of the table if the task adds columns to the table.
     next_column_id: Option<ColumnId>,
@@ -424,6 +455,7 @@ impl AlterTableData {
     pub fn new(
         task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        physical_table_name: Option<TableName>,
         cluster_id: u64,
         next_column_id: Option<ColumnId>,
     ) -> Self {
@@ -431,6 +463,7 @@ impl AlterTableData {
             state: AlterTableState::Prepare,
             task,
             table_info_value,
+            physical_table_name,
             cluster_id,
             next_column_id,
         }
@@ -446,6 +479,10 @@ impl AlterTableData {
 
     fn table_info(&self) -> &RawTableInfo {
         &self.table_info_value.table_info
+    }
+
+    fn physical_table_name(&self) -> Option<&TableName> {
+        self.physical_table_name.as_ref()
     }
 }
 
