@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -118,6 +119,10 @@ impl RegionEngine for FileRegionEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.state(region_id)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

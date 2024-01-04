@@ -463,7 +463,10 @@ mod test {
         };
 
         let err = manager
-            .verify_table_route(&TableRouteValue::Logical(LogicalTableRouteValue {}), &task)
+            .verify_table_route(
+                &TableRouteValue::Logical(LogicalTableRouteValue::new(0, vec![])),
+                &task,
+            )
             .unwrap_err();
 
         assert_matches!(err, error::Error::Unexpected { .. });
