@@ -282,6 +282,12 @@ pub enum Error {
         source: metric_engine::error::Error,
         location: Location,
     },
+
+    #[snafu(display("Failed to build mito engine"))]
+    BuildMitoEngine {
+        source: mito2::error::Error,
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -352,6 +358,7 @@ impl ErrorExt for Error {
             StopRegionEngine { source, .. } => source.status_code(),
 
             FindLogicalRegions { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } => source.status_code(),
         }
     }
 

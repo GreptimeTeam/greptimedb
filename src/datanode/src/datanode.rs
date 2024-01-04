@@ -60,9 +60,9 @@ use tokio::sync::Notify;
 
 use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
-    CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
-    ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    BuildMitoEngineSnafu, CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu,
+    MissingNodeIdSnafu, OpenLogStoreSnafu, ParseAddrSnafu, Result, RuntimeResourceSnafu,
+    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -466,12 +466,16 @@ impl DatanodeBuilder {
                 Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                     .await?,
                 object_store_manager,
-            ),
+            )
+            .await
+            .context(BuildMitoEngineSnafu)?,
             WalConfig::Kafka(kafka_config) => MitoEngine::new(
                 config,
                 Self::build_kafka_log_store(kafka_config).await?,
                 object_store_manager,
-            ),
+            )
+            .await
+            .context(BuildMitoEngineSnafu)?,
         };
         Ok(mito_engine)
     }

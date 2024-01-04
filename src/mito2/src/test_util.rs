@@ -137,6 +137,8 @@ impl TestEnv {
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         MitoEngine::new(config, logstore, object_store_manager)
+            .await
+            .unwrap()
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.
@@ -145,6 +147,8 @@ impl TestEnv {
         let object_store_manager = self.object_store_manager.as_ref().unwrap().clone();
 
         MitoEngine::new(config, logstore, object_store_manager)
+            .await
+            .unwrap()
     }
 
     /// Creates a new engine with specific config and manager/listener under this env.
@@ -161,6 +165,8 @@ impl TestEnv {
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
+            .await
+            .unwrap()
     }
 
     pub async fn create_engine_with_multiple_object_stores(
@@ -190,6 +196,8 @@ impl TestEnv {
         self.logstore = Some(logstore.clone());
         self.object_store_manager = Some(object_store_manager.clone());
         MitoEngine::new_for_test(config, logstore, object_store_manager, manager, listener)
+            .await
+            .unwrap()
     }
 
     /// Reopen the engine.
@@ -201,6 +209,8 @@ impl TestEnv {
             self.logstore.clone().unwrap(),
             self.object_store_manager.clone().unwrap(),
         )
+        .await
+        .unwrap()
     }
 
     /// Open the engine.
@@ -210,6 +220,8 @@ impl TestEnv {
             self.logstore.clone().unwrap(),
             self.object_store_manager.clone().unwrap(),
         )
+        .await
+        .unwrap()
     }
 
     /// Only initializes the object store manager, returns the default object store.
