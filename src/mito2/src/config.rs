@@ -79,7 +79,6 @@ pub struct MitoConfig {
     /// Capacity of the channel to send data from parallel scan tasks to the main task (default 32).
     pub parallel_scan_channel_size: usize,
 
-    #[serde(flatten)]
     pub inverted_index: InvertedIndexConfig,
 }
 

@@ -807,6 +807,11 @@ page_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"
 parallel_scan_channel_size = 32
 
+[datanode.region_engine.mito.inverted_index]
+disable_creation_on_flush = false
+disable_creation_on_compact = false
+creation_memory_usage_threshold = "128MiB"
+
 [[datanode.region_engine]]
 
 [datanode.region_engine.file]
