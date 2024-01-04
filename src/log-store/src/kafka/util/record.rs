@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     ChecksumMismatchedSnafu, DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu,
-    MissingValueSnafu, ProduceRecordSnafu, RecordsOutOfOrderSnafu, Result,
+    IllegalSequenceSnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::util::offset::Offset;
@@ -46,22 +48,14 @@ pub enum RecordType {
     Last,
 }
 
-impl From<&RecordType> for i32 {
-    fn from(tp: &RecordType) -> Self {
+impl From<RecordType> for i32 {
+    fn from(tp: RecordType) -> Self {
         match tp {
             RecordType::Full => -1,
             RecordType::First => 0,
-            RecordType::Middle(seq) => *seq as i32,
+            RecordType::Middle(seq) => seq as i32,
             RecordType::Last => i32::MAX,
         }
-    }
-}
-
-impl PartialOrd for RecordType {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        let x: i32 = self.into();
-        let y: i32 = other.into();
-        x.partial_cmp(&y)
     }
 }
 
@@ -110,15 +104,7 @@ impl TryFrom<Vec<Record>> for EntryImpl {
     type Error = crate::error::Error;
 
     fn try_from(records: Vec<Record>) -> Result<Self> {
-        let num_records = records.len();
-        assert!(num_records > 0);
-
-        let (sequence, matched): (Vec<_>, Vec<_>) = records
-            .iter()
-            .map(|record| (record.tp, record.checksum == crc32fast::hash(&record.data)))
-            .unzip();
-        ensure!(sequence.is_sorted(), RecordsOutOfOrderSnafu);
-        ensure!(matched.into_iter().all(|ok| ok), ChecksumMismatchedSnafu);
+        check_records(&records)?;
 
         let entry_id = records[0].entry_id;
         let ns = records[0].ns.clone();
@@ -199,6 +185,51 @@ impl RecordProducer {
     // pub(crate) async fn record(&self, record: record, producer: )
 }
 
+fn check_records(records: &[Record]) -> Result<()> {
+    let len = records.len();
+    ensure!(
+        len > 0,
+        IllegalSequenceSnafu {
+            error: "Empty sequence"
+        }
+    );
+
+    let (sequence, matched): (Vec<_>, Vec<_>) = records
+        .iter()
+        .map(|record| {
+            (
+                i32::from(record.tp),
+                record.checksum == crc32fast::hash(&record.data),
+            )
+        })
+        .unzip();
+
+    ensure!(matched.into_iter().all(|ok| ok), ChecksumMismatchedSnafu);
+
+    if len == 1 {
+        // A sequence with a single record must contain only a Full record.
+        if sequence[0] != i32::from(RecordType::Full) {
+            return IllegalSequenceSnafu {
+                error: "Missing Full record",
+            }
+            .fail();
+        }
+    } else {
+        // A sequence with multiple records must start with a First record and end with a Last record.
+        // In addition, the Middle records must in order.
+        let prefix = (0..(len - 1) as i32).collect::<Vec<_>>();
+        ensure!(
+            sequence[0..len - 1] == prefix
+                && sequence.last().unwrap() == &i32::from(RecordType::Last),
+            IllegalSequenceSnafu {
+                error: "Out of order",
+            }
+        );
+    }
+
+    Ok(())
+}
+
 fn record_type(seq: usize, num_records: usize) -> RecordType {
     if seq == 0 {
         RecordType::First
@@ -242,6 +273,44 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
     records
 }
 
+pub fn maybe_emit_entry(
+    record: Record,
+    ns: &NamespaceImpl,
+    entry_records: &mut HashMap<EntryId, Vec<Record>>,
+) -> Result<Option<EntryImpl>> {
+    let mut entry = None;
+    match record.tp {
+        RecordType::Full => {
+            entry = Some(EntryImpl::try_from(vec![record])?);
+        }
+        RecordType::Last => {
+            // There must have a sequence prefix before a Last record is read.
+            let mut records =
+                entry_records
+                    .remove(&record.entry_id)
+                    .context(IllegalSequenceSnafu {
+                        error: "Missing sequence prefix",
+                    })?;
+            records.push(record);
+            entry = Some(EntryImpl::try_from(records)?);
+        }
+        _ => {
+            entry_records
+                .entry(record.entry_id)
+                .or_default()
+                .push(record);
+        }
+    }
+
+    // Filters entries by namespace.
+    if let Some(entry) = entry
+        && &entry.ns == ns
+    {
+        return Ok(Some(entry));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,17 +324,23 @@ mod tests {
         }
     }
 
-    // TODO(niebayes): implement unit tests.
-
-    /// Tests that sorting on RecordTypes behaves as expected.
+    /// Tests that the `check_records` could handle various record sequences.
     #[test]
-    fn test_sort_record_types() {}
+    fn test_check_records() {}
 
-    /// Tests that the Record and KafkaRecord are able to be converted back and forth.
+    /// Tests that the `build_records` works as expected.
+    #[test]
+    fn test_build_records() {}
+
+    /// Tests that Record and KafkaRecord are able to be converted back and forth.
     #[test]
     fn test_record_conversion() {}
 
     /// Tests that the reconstruction of an entry behaves as expected.
     #[test]
     fn test_reconstruct_entry() {}
+
+    /// Tests that `maybe_emit_entry` works as expected.
+    #[test]
+    fn test_maybe_emit_entry() {}
 }

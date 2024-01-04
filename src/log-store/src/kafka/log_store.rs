@@ -20,16 +20,16 @@ use common_telemetry::{debug, warn};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
 use rskafka::client::partition::OffsetAt;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::logstore::entry::Id as EntryId;
 use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, RecordsOutOfOrderSnafu, Result};
+use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
 use crate::kafka::util::offset::Offset;
-use crate::kafka::util::record::{Record, RecordProducer, RecordType};
+use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
 /// A log store backed by Kafka.
@@ -157,7 +157,7 @@ impl LogStore for KafkaLogStore {
         // FIXME(niebayes): how come this case happens?
         if start_offset > end_offset {
             warn!(
-                "No new entries for ns {} in range [{}, {})",
+                "No new entries for ns {} in range [{}, {}]",
                 ns, start_offset, end_offset
             );
             return Ok(futures_util::stream::empty().boxed());
@@ -169,7 +169,7 @@ impl LogStore for KafkaLogStore {
             .build();
 
         debug!(
-            "Built a stream consumer for ns {} to consume entries in range [{}, {})",
+            "Built a stream consumer for ns {} to consume entries in range [{}, {}]",
             ns, start_offset, end_offset
         );
 
@@ -198,30 +198,8 @@ impl LogStore for KafkaLogStore {
                 }
 
                 // Tries to construct an entry from records consumed so far.
-                let mut entry = None;
-                let record = Record::try_from(record)?;
-                match record.tp {
-                    RecordType::Full => {
-                        entry = Some(EntryImpl::try_from(vec![record])?);
-                    }
-                    RecordType::Last => {
-                        let mut records = entry_records
-                            .remove(&record.entry_id)
-                            .context(RecordsOutOfOrderSnafu)?;
-                        records.push(record);
-                        entry = Some(EntryImpl::try_from(records)?);
-                    }
-                    _ => {
-                        entry_records
-                            .entry(record.entry_id)
-                            .or_default()
-                            .push(record);
-                    }
-                }
-
-                // Filters entries by namespace.
-                if let Some(entry) = entry
-                    && entry.ns == ns_clone
+                if let Some(entry) =
+                    maybe_emit_entry(Record::try_from(record)?, &ns_clone, &mut entry_records)?
                 {
                     yield Ok(vec![entry]);
                 }
@@ -232,6 +210,15 @@ impl LogStore for KafkaLogStore {
                         "Stream consumer for ns {} terminates at offset {}",
                         ns_clone, offset
                     );
+
+                    // There must have no incomplete sequences when the stream terminates.
+                    if !entry_records.is_empty() {
+                        yield IllegalSequenceSnafu {
+                            error: "Incomplete record sequences",
+                        }
+                        .fail();
+                    }
+
                     break;
                 }
             }
