@@ -45,6 +45,7 @@ mod set_readonly_test;
 #[cfg(test)]
 mod truncate_test;
 
+use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -302,6 +303,10 @@ impl RegionEngine for MitoEngine {
 
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
         self.inner.role(region_id)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

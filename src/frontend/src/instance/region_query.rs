@@ -22,10 +22,10 @@ use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
 use query::region_query::RegionQueryHandler;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
-use crate::error::{FindDatanodeSnafu, FindTableRouteSnafu, RequestQuerySnafu, Result};
+use crate::error::{FindTableRouteSnafu, RequestQuerySnafu, Result};
 
 pub(crate) struct FrontendRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
@@ -58,17 +58,12 @@ impl FrontendRegionQueryHandler {
     async fn do_get_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let region_id = RegionId::from_u64(request.region_id);
 
-        let table_route = self
+        let peer = &self
             .partition_manager
-            .find_table_route(region_id.table_id())
+            .find_region_leader(region_id)
             .await
             .context(FindTableRouteSnafu {
                 table_id: region_id.table_id(),
-            })?;
-        let peer = table_route
-            .find_region_leader(region_id.region_number())
-            .context(FindDatanodeSnafu {
-                region: region_id.region_number(),
             })?;
 
         let client = self.datanode_manager.datanode(peer).await;

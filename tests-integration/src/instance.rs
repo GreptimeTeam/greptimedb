@@ -221,7 +221,6 @@ mod tests {
                 .region_routes()
                 .expect("region routes should be physical"),
         )
-        .unwrap()
         .iter()
         .map(|(k, v)| (v[0], *k))
         .collect::<HashMap<u32, u64>>();

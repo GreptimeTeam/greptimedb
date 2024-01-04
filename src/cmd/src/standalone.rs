@@ -406,11 +406,18 @@ impl StartCommand {
             opts.wal_meta.clone(),
             kv_backend.clone(),
         ));
-        let table_meta_allocator =
-            TableMetadataAllocator::new(table_id_sequence, wal_options_allocator.clone());
+
+        let table_metadata_manager =
+            Self::create_table_metadata_manager(kv_backend.clone()).await?;
+
+        let table_meta_allocator = TableMetadataAllocator::new(
+            table_id_sequence,
+            wal_options_allocator.clone(),
+            table_metadata_manager.clone(),
+        );
 
         let ddl_task_executor = Self::create_ddl_task_executor(
-            kv_backend.clone(),
+            table_metadata_manager,
             procedure_manager.clone(),
             datanode_manager.clone(),
             table_meta_allocator,
@@ -421,10 +428,6 @@ impl StartCommand {
             .with_plugin(fe_plugins)
             .try_build()
             .await
-            .context(StartFrontendSnafu)?;
-
-        frontend
-            .build_export_metrics_task(&opts.frontend.export_metrics)
             .context(StartFrontendSnafu)?;
 
         frontend
@@ -441,14 +444,11 @@ impl StartCommand {
     }
 
     pub async fn create_ddl_task_executor(
-        kv_backend: KvBackendRef,
+        table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
         datanode_manager: DatanodeManagerRef,
         table_meta_allocator: TableMetadataAllocator,
     ) -> Result<DdlTaskExecutorRef> {
-        let table_metadata_manager =
-            Self::create_table_metadata_manager(kv_backend.clone()).await?;
-
         let ddl_task_executor: DdlTaskExecutorRef = Arc::new(
             DdlManager::try_new(
                 procedure_manager,

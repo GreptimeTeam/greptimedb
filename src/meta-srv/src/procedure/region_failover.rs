@@ -373,7 +373,7 @@ impl Procedure for RegionFailoverProcedure {
     fn lock_key(&self) -> LockKey {
         let region_ident = &self.node.failed_region;
         let region_key = region_lock_key(region_ident.table_id, region_ident.region_number);
-        LockKey::single(region_key)
+        LockKey::single_exclusive(region_key)
     }
 }
 

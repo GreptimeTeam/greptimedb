@@ -62,13 +62,13 @@ impl AccessLayer {
 
     /// Deletes a SST file with given file id.
     pub(crate) async fn delete_sst(&self, file_id: FileId) -> Result<()> {
-        let sst_path = location::sst_file_path(&self.region_dir, &file_id);
+        let sst_path = location::sst_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&sst_path)
             .await
             .context(DeleteSstSnafu { file_id })?;
 
-        let index_path = location::index_file_path(&self.region_dir, &file_id);
+        let index_path = location::index_file_path(&self.region_dir, file_id);
         self.object_store
             .delete(&index_path)
             .await

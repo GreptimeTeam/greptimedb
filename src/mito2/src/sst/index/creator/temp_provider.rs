@@ -23,8 +23,9 @@ use snafu::ResultExt;
 
 use crate::error::Result;
 use crate::metrics::{
-    INDEX_INTERMEDIATE_READ_BYTES_TOTAL, INDEX_INTERMEDIATE_SEEK_TOTAL,
-    INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL,
+    INDEX_INTERMEDIATE_FLUSH_OP_TOTAL, INDEX_INTERMEDIATE_READ_BYTES_TOTAL,
+    INDEX_INTERMEDIATE_READ_OP_TOTAL, INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
+    INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL, INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
 };
 use crate::sst::index::store::InstrumentedStore;
 use crate::sst::location::IntermediateLocation;
@@ -44,7 +45,12 @@ impl ExternalTempFileProvider for TempFileProvider {
         let path = self.location.file_path(column_name, file_id);
         let writer = self
             .store
-            .writer(&path, &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL)
+            .writer(
+                &path,
+                &INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL,
+                &INDEX_INTERMEDIATE_WRITE_OP_TOTAL,
+                &INDEX_INTERMEDIATE_FLUSH_OP_TOTAL,
+            )
             .await
             .map_err(BoxedError::new)
             .context(index_error::ExternalSnafu)?;
@@ -75,7 +81,8 @@ impl ExternalTempFileProvider for TempFileProvider {
                 .reader(
                     entry.path(),
                     &INDEX_INTERMEDIATE_READ_BYTES_TOTAL,
-                    &INDEX_INTERMEDIATE_SEEK_TOTAL,
+                    &INDEX_INTERMEDIATE_READ_OP_TOTAL,
+                    &INDEX_INTERMEDIATE_SEEK_OP_TOTAL,
                 )
                 .await
                 .map_err(BoxedError::new)

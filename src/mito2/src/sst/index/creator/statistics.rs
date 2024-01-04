@@ -14,7 +14,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_COST_TIME, INDEX_CREATE_ROWS_TOTAL};
+use crate::metrics::{INDEX_CREATE_BYTES_TOTAL, INDEX_CREATE_ELAPSED, INDEX_CREATE_ROWS_TOTAL};
 
 enum Stage {
     Update,
@@ -53,16 +53,16 @@ impl Statistics {
     }
 
     fn flush(&self) {
-        INDEX_CREATE_COST_TIME
+        INDEX_CREATE_ELAPSED
             .with_label_values(&["update"])
             .observe(self.update_cost.as_secs_f64());
-        INDEX_CREATE_COST_TIME
+        INDEX_CREATE_ELAPSED
             .with_label_values(&["finish"])
             .observe(self.finish_cost.as_secs_f64());
-        INDEX_CREATE_COST_TIME
+        INDEX_CREATE_ELAPSED
             .with_label_values(&["cleanup"])
             .observe(self.cleanup_cost.as_secs_f64());
-        INDEX_CREATE_COST_TIME
+        INDEX_CREATE_ELAPSED
             .with_label_values(&["total"])
             .observe((self.update_cost + self.finish_cost + self.cleanup_cost).as_secs_f64());
 

@@ -44,10 +44,10 @@ pub struct PredicatesIndexApplier {
 impl IndexApplier for PredicatesIndexApplier {
     /// Applies all `FstApplier`s to the data in the inverted index reader, intersecting the individual
     /// bitmaps obtained for each index to result in a final set of indices.
-    async fn apply(
+    async fn apply<'a>(
         &self,
         context: SearchContext,
-        reader: &mut dyn InvertedIndexReader,
+        reader: &mut (dyn InvertedIndexReader + 'a),
     ) -> Result<BTreeSet<usize>> {
         let metadata = reader.metadata().await?;
 

@@ -35,7 +35,9 @@ use crate::error::{
     IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PuffinFinishSnafu,
     PushIndexValueSnafu, Result,
 };
-use crate::metrics::INDEX_PUFFIN_WRITE_BYTES_TOTAL;
+use crate::metrics::{
+    INDEX_PUFFIN_FLUSH_OP_TOTAL, INDEX_PUFFIN_WRITE_BYTES_TOTAL, INDEX_PUFFIN_WRITE_OP_TOTAL,
+};
 use crate::read::Batch;
 use crate::sst::file::FileId;
 use crate::sst::index::codec::{IndexValueCodec, IndexValuesCodec};
@@ -177,10 +179,15 @@ impl SstIndexCreator {
     async fn do_finish(&mut self) -> Result<()> {
         let mut guard = self.stats.record_finish();
 
-        let file_path = location::index_file_path(&self.region_dir, &self.sst_file_id);
+        let file_path = location::index_file_path(&self.region_dir, self.sst_file_id);
         let file_writer = self
             .store
-            .writer(&file_path, &INDEX_PUFFIN_WRITE_BYTES_TOTAL)
+            .writer(
+                &file_path,
+                &INDEX_PUFFIN_WRITE_BYTES_TOTAL,
+                &INDEX_PUFFIN_WRITE_OP_TOTAL,
+                &INDEX_PUFFIN_FLUSH_OP_TOTAL,
+            )
             .await?;
         let mut puffin_writer = PuffinFileWriter::new(file_writer);
 

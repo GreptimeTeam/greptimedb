@@ -756,10 +756,7 @@ tcp_nodelay = true
 
 [frontend.export_metrics]
 enable = false
-db = ""
 write_interval = "30s"
-
-[frontend.export_metrics.headers]
 
 [datanode]
 mode = "standalone"
@@ -820,10 +817,7 @@ append_stdout = true
 
 [datanode.export_metrics]
 enable = false
-db = ""
 write_interval = "30s"
-
-[datanode.export_metrics.headers]
 
 [logging]
 enable_otlp_tracing = false

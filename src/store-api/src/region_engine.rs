@@ -14,6 +14,7 @@
 
 //! Region Engine's definition
 
+use std::any::Any;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -165,6 +166,8 @@ pub trait RegionEngine: Send + Sync {
     ///
     /// Returns the `None` if the region is not found.
     fn role(&self, region_id: RegionId) -> Option<RegionRole>;
+
+    fn as_any(&self) -> &dyn Any;
 }
 
 pub type RegionEngineRef = Arc<dyn RegionEngine>;

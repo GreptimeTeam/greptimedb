@@ -26,14 +26,15 @@ use crate::inverted_index::format::reader::InvertedIndexReader;
 ///
 /// Applier instances are reusable and work with various `InvertedIndexReader` instances,
 /// avoiding repeated compilation of fixed predicates such as regex patterns.
+#[mockall::automock]
 #[async_trait]
 pub trait IndexApplier: Send + Sync {
     /// Applies the predefined predicates to the data read by the given index reader, returning
     /// a list of relevant indices (e.g., post IDs, group IDs, row IDs).
-    async fn apply(
+    async fn apply<'a>(
         &self,
         context: SearchContext,
-        reader: &mut dyn InvertedIndexReader,
+        reader: &mut (dyn InvertedIndexReader + 'a),
     ) -> Result<BTreeSet<usize>>;
 
     /// Returns the memory usage of the applier.

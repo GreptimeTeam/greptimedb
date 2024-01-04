@@ -152,9 +152,9 @@ lazy_static! {
 
     // Index metrics.
     /// Timer of index application.
-    pub static ref INDEX_APPLY_COST_TIME: Histogram = register_histogram!(
-        "index_apply_cost_time",
-        "index apply cost time",
+    pub static ref INDEX_APPLY_ELAPSED: Histogram = register_histogram!(
+        "index_apply_elapsed",
+        "index apply elapsed",
     )
     .unwrap();
     /// Gauge of index apply memory usage.
@@ -164,9 +164,9 @@ lazy_static! {
     )
     .unwrap();
     /// Timer of index creation.
-    pub static ref INDEX_CREATE_COST_TIME: HistogramVec = register_histogram_vec!(
-        "index_create_cost_time",
-        "index create cost time",
+    pub static ref INDEX_CREATE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "index_create_elapsed",
+        "index create elapsed",
         &[STAGE_LABEL]
     )
     .unwrap();
@@ -190,30 +190,49 @@ lazy_static! {
         &[TYPE_LABEL, FILE_TYPE_LABEL]
     )
     .unwrap();
-    /// Counter of read bytes on intermediate files.
-    pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
-        .with_label_values(&["read", "intermediate"]);
-    /// Counter of write bytes on intermediate files.
-    pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
-        .with_label_values(&["write", "intermediate"]);
     /// Counter of read bytes on puffin files.
     pub static ref INDEX_PUFFIN_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
         .with_label_values(&["read", "puffin"]);
     /// Counter of write bytes on puffin files.
     pub static ref INDEX_PUFFIN_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
         .with_label_values(&["write", "puffin"]);
+    /// Counter of read bytes on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_READ_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["read", "intermediate"]);
+    /// Counter of write bytes on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_WRITE_BYTES_TOTAL: IntCounter = INDEX_IO_BYTES_TOTAL
+        .with_label_values(&["write", "intermediate"]);
 
-    /// Counter of seek operations on index related files.
-    pub static ref INDEX_IO_SEEK_TOTAL: IntCounterVec = register_int_counter_vec!(
-        "index_io_seek_total",
-        "index io seek total",
-        &[FILE_TYPE_LABEL]
-    ).unwrap();
-    /// Counter of seek operations on intermediate files.
-    pub static ref INDEX_INTERMEDIATE_SEEK_TOTAL: IntCounter = INDEX_IO_SEEK_TOTAL
-        .with_label_values(&["intermediate"]);
+    /// Counter of r/w operations on index related IO operations, e.g. read, write, seek and flush.
+    pub static ref INDEX_IO_OP_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "index_io_op_total",
+        "index io op total",
+        &[TYPE_LABEL, FILE_TYPE_LABEL]
+    )
+    .unwrap();
+    /// Counter of read operations on puffin files.
+    pub static ref INDEX_PUFFIN_READ_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["read", "puffin"]);
     /// Counter of seek operations on puffin files.
-    pub static ref INDEX_PUFFIN_SEEK_TOTAL: IntCounter = INDEX_IO_SEEK_TOTAL
-        .with_label_values(&["puffin"]);
+    pub static ref INDEX_PUFFIN_SEEK_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["seek", "puffin"]);
+    /// Counter of write operations on puffin files.
+    pub static ref INDEX_PUFFIN_WRITE_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["write", "puffin"]);
+    /// Counter of flush operations on puffin files.
+    pub static ref INDEX_PUFFIN_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["flush", "puffin"]);
+    /// Counter of read operations on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_READ_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["read", "intermediate"]);
+    /// Counter of seek operations on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_SEEK_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["seek", "intermediate"]);
+    /// Counter of write operations on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_WRITE_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["write", "intermediate"]);
+    /// Counter of flush operations on intermediate files.
+    pub static ref INDEX_INTERMEDIATE_FLUSH_OP_TOTAL: IntCounter = INDEX_IO_OP_TOTAL
+        .with_label_values(&["flush", "intermediate"]);
     // ------- End of index metrics.
 }

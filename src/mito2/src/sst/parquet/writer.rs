@@ -87,7 +87,7 @@ impl ParquetWriter {
         let props_builder = Self::customize_column_config(props_builder, &self.metadata);
         let writer_props = props_builder.build();
 
-        let file_path = location::sst_file_path(&self.region_dir, &self.file_id);
+        let file_path = location::sst_file_path(&self.region_dir, self.file_id);
         let write_format = WriteFormat::new(self.metadata.clone());
         let mut buffered_writer = BufferedWriter::try_new(
             file_path.clone(),

@@ -53,7 +53,8 @@ pub struct PhysicalTableRouteValue {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct LogicalTableRouteValue {
-    // TODO(LFC): Add table route for MetricsEngine table.
+    physical_table_id: TableId,
+    region_ids: Vec<RegionId>,
 }
 
 impl TableRouteValue {
@@ -66,7 +67,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         let version = self.physical_table_route().version;
@@ -84,7 +85,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self.physical_table_route().version)
@@ -95,7 +96,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self
@@ -116,7 +117,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(&self.physical_table_route().region_routes)
@@ -174,12 +175,19 @@ impl PhysicalTableRouteValue {
 }
 
 impl LogicalTableRouteValue {
-    pub fn physical_table_id(&self) -> TableId {
-        todo!()
+    pub fn new(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
+        Self {
+            physical_table_id,
+            region_ids,
+        }
     }
 
-    pub fn region_ids(&self) -> Vec<RegionId> {
-        todo!()
+    pub fn physical_table_id(&self) -> TableId {
+        self.physical_table_id
+    }
+
+    pub fn region_ids(&self) -> &Vec<RegionId> {
+        &self.region_ids
     }
 }
 
@@ -376,7 +384,7 @@ impl TableRouteManager {
     ) -> Result<Option<RegionDistribution>> {
         self.get(table_id)
             .await?
-            .map(|table_route| region_distribution(table_route.region_routes()?))
+            .map(|table_route| Ok(region_distribution(table_route.region_routes()?)))
             .transpose()
     }
 }
