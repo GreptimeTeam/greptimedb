@@ -17,10 +17,12 @@
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use common_telemetry::info;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::access_layer::new_fs_object_store;
 use crate::cache::file_cache::{FileCache, FileCacheRef};
 use crate::error::Result;
 use crate::read::Source;
@@ -43,20 +45,30 @@ pub type WriteCacheRef = Arc<WriteCache>;
 impl WriteCache {
     /// Create the cache with a `local_store` to cache files and a
     /// `object_store_manager` for all object stores.
-    pub fn new(
+    pub async fn new(
         local_store: ObjectStore,
         object_store_manager: ObjectStoreManagerRef,
         cache_capacity: ReadableSize,
-    ) -> Self {
-        Self {
-            file_cache: Arc::new(FileCache::new(local_store, cache_capacity)),
+    ) -> Result<Self> {
+        let file_cache = FileCache::new(local_store, cache_capacity);
+        file_cache.recover().await?;
+
+        Ok(Self {
+            file_cache: Arc::new(file_cache),
             object_store_manager,
-        }
+        })
     }
 
-    /// Recovers the write cache from local store.
-    pub async fn recover(&self) -> Result<()> {
-        self.file_cache.recover().await
+    /// Creates a write cache based on local fs.
+    pub async fn new_fs(
+        cache_dir: &str,
+        object_store_manager: ObjectStoreManagerRef,
+        cache_capacity: ReadableSize,
+    ) -> Result<Self> {
+        info!("Init write cache on {cache_dir}, capacity: {cache_capacity}");
+
+        let local_store = new_fs_object_store(cache_dir).await?;
+        Self::new(local_store, object_store_manager, cache_capacity).await
     }
 
     /// Writes SST to the cache and then uploads it to the remote object store.

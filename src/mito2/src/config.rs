@@ -67,6 +67,10 @@ pub struct MitoConfig {
     pub vector_cache_size: ReadableSize,
     /// Cache size for pages of SST row groups (default 512MB). Setting it to 0 to disable the cache.
     pub page_cache_size: ReadableSize,
+    /// Path for write cache.
+    pub write_cache_path: Option<String>,
+    /// Capacity for write cache.
+    pub write_cache_size: ReadableSize,
 
     // Other configs:
     /// Buffer size for SST writing.
@@ -95,6 +99,8 @@ impl Default for MitoConfig {
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
+            write_cache_path: None,
+            write_cache_size: ReadableSize::mb(512),
             sst_write_buffer_size: ReadableSize::mb(8),
             scan_parallelism: divide_num_cpus(4),
             parallel_scan_channel_size: DEFAULT_SCAN_CHANNEL_SIZE,

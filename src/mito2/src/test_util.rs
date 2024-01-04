@@ -239,6 +239,8 @@ impl TestEnv {
             Arc::new(log_store),
             Arc::new(object_store_manager),
         )
+        .await
+        .unwrap()
     }
 
     /// Returns the log store and object store manager.

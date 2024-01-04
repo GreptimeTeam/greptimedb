@@ -85,7 +85,7 @@ impl MitoEngine {
         config.sanitize();
 
         Ok(MitoEngine {
-            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager)),
+            inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
         })
     }
 
@@ -126,16 +126,16 @@ struct EngineInner {
 
 impl EngineInner {
     /// Returns a new [EngineInner] with specific `config`, `log_store` and `object_store`.
-    fn new<S: LogStore>(
+    async fn new<S: LogStore>(
         config: MitoConfig,
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
-    ) -> EngineInner {
+    ) -> Result<EngineInner> {
         let config = Arc::new(config);
-        EngineInner {
-            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager),
+        Ok(EngineInner {
+            workers: WorkerGroup::start(config.clone(), log_store, object_store_manager).await?,
             config,
-        }
+        })
     }
 
     /// Stop the inner engine.
@@ -332,7 +332,8 @@ impl MitoEngine {
                     object_store_manager,
                     write_buffer_manager,
                     listener,
-                ),
+                )
+                .await?,
                 config,
             }),
         })
