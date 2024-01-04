@@ -170,7 +170,12 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let cache = Some(Arc::new(CacheManager::new(0, 0, 64 * 1024 * 1024)));
+        // Enable page cache.
+        let cache = Some(Arc::new(
+            CacheManager::builder()
+                .page_cache_size(64 * 1024 * 1024)
+                .build(),
+        ));
         let builder = ParquetReaderBuilder::new(FILE_DIR.to_string(), handle.clone(), object_store)
             .cache(cache.clone());
         for _ in 0..3 {

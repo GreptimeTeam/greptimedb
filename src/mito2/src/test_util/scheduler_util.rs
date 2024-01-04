@@ -66,11 +66,7 @@ impl SchedulerEnv {
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
-        CompactionScheduler::new(
-            scheduler,
-            request_sender,
-            Arc::new(CacheManager::new(0, 0, 0)),
-        )
+        CompactionScheduler::new(scheduler, request_sender, Arc::new(CacheManager::default()))
     }
 
     /// Creates a new flush scheduler.

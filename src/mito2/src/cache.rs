@@ -47,9 +47,10 @@ const PAGE_TYPE: &str = "page";
 // Metrics type key for files on the local store.
 const FILE_TYPE: &str = "file";
 
-// TODO(yingwen): Builder for cache manager.
-
 /// Manages cached data for the engine.
+///
+/// All caches are disabled by default.
+#[derive(Default)]
 pub struct CacheManager {
     /// Cache for SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
@@ -58,70 +59,15 @@ pub struct CacheManager {
     /// Cache for SST pages.
     page_cache: Option<PageCache>,
     /// A Cache for writing files to object stores.
-    // TODO(yingwen): Remove this once the cache is ready.
-    #[allow(unused)]
     write_cache: Option<WriteCacheRef>,
 }
 
 pub type CacheManagerRef = Arc<CacheManager>;
 
 impl CacheManager {
-    /// Creates a new manager with specific cache size in bytes.
-    pub fn new(
-        sst_meta_cache_size: u64,
-        vector_cache_size: u64,
-        page_cache_size: u64,
-    ) -> CacheManager {
-        let sst_meta_cache = if sst_meta_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
-                .max_capacity(sst_meta_cache_size)
-                .weigher(meta_cache_weight)
-                .eviction_listener(|k, v, _cause| {
-                    let size = meta_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[SST_META_TYPE])
-                        .sub(size.into());
-                })
-                .build();
-            Some(cache)
-        };
-        let vector_cache = if vector_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
-                .max_capacity(vector_cache_size)
-                .weigher(vector_cache_weight)
-                .eviction_listener(|k, v, _cause| {
-                    let size = vector_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[VECTOR_TYPE])
-                        .sub(size.into());
-                })
-                .build();
-            Some(cache)
-        };
-        let page_cache = if page_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
-                .max_capacity(page_cache_size)
-                .weigher(page_cache_weight)
-                .eviction_listener(|k, v, _cause| {
-                    let size = page_cache_weight(&k, &v);
-                    CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
-                })
-                .build();
-            Some(cache)
-        };
-
-        CacheManager {
-            sst_meta_cache,
-            vector_cache,
-            page_cache,
-            write_cache: None,
-        }
+    /// Returns a builder to build the cache.
+    pub fn builder() -> CacheManagerBuilder {
+        CacheManagerBuilder::default()
     }
 
     /// Gets cached [ParquetMetaData].
@@ -198,6 +144,95 @@ impl CacheManager {
     /// Gets the the write cache.
     pub(crate) fn write_cache(&self) -> Option<&WriteCacheRef> {
         self.write_cache.as_ref()
+    }
+}
+
+/// Builder to construct a [CacheManager].
+#[derive(Default)]
+pub struct CacheManagerBuilder {
+    sst_meta_cache_size: u64,
+    vector_cache_size: u64,
+    page_cache_size: u64,
+    write_cache: Option<WriteCacheRef>,
+}
+
+impl CacheManagerBuilder {
+    /// Sets meta cache size.
+    pub fn sst_meta_cache_size(mut self, bytes: u64) -> Self {
+        self.sst_meta_cache_size = bytes;
+        self
+    }
+
+    /// Sets vector cache size.
+    pub fn vector_cache_size(mut self, bytes: u64) -> Self {
+        self.vector_cache_size = bytes;
+        self
+    }
+
+    /// Sets page cache size.
+    pub fn page_cache_size(mut self, bytes: u64) -> Self {
+        self.page_cache_size = bytes;
+        self
+    }
+
+    /// Sets write cache.
+    pub fn write_cache(mut self, cache: Option<WriteCacheRef>) -> Self {
+        self.write_cache = cache;
+        self
+    }
+
+    /// Builds the [CacheManager].
+    pub fn build(self) -> CacheManager {
+        let sst_meta_cache = if self.sst_meta_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(self.sst_meta_cache_size)
+                .weigher(meta_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = meta_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[SST_META_TYPE])
+                        .sub(size.into());
+                })
+                .build();
+            Some(cache)
+        };
+        let vector_cache = if self.vector_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(self.vector_cache_size)
+                .weigher(vector_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = vector_cache_weight(&k, &v);
+                    CACHE_BYTES
+                        .with_label_values(&[VECTOR_TYPE])
+                        .sub(size.into());
+                })
+                .build();
+            Some(cache)
+        };
+        let page_cache = if self.page_cache_size == 0 {
+            None
+        } else {
+            let cache = Cache::builder()
+                .max_capacity(self.page_cache_size)
+                .weigher(page_cache_weight)
+                .eviction_listener(|k, v, _cause| {
+                    let size = page_cache_weight(&k, &v);
+                    CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
+                })
+                .build();
+            Some(cache)
+        };
+
+        CacheManager {
+            sst_meta_cache,
+            vector_cache,
+            page_cache,
+            write_cache: self.write_cache,
+        }
     }
 }
 
@@ -293,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_disable_cache() {
-        let cache = CacheManager::new(0, 0, 0);
+        let cache = CacheManager::default();
         assert!(cache.sst_meta_cache.is_none());
         assert!(cache.vector_cache.is_none());
         assert!(cache.page_cache.is_none());
@@ -318,11 +353,13 @@ mod tests {
         let pages = Arc::new(PageValue::new(Vec::new()));
         cache.put_pages(key.clone(), pages);
         assert!(cache.get_pages(&key).is_none());
+
+        assert!(cache.write_cache().is_none());
     }
 
     #[test]
     fn test_parquet_meta_cache() {
-        let cache = CacheManager::new(2000, 0, 0);
+        let cache = CacheManager::builder().sst_meta_cache_size(2000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         assert!(cache.get_parquet_meta_data(region_id, file_id).is_none());
@@ -335,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_repeated_vector_cache() {
-        let cache = CacheManager::new(0, 4096, 0);
+        let cache = CacheManager::builder().vector_cache_size(4096).build();
         let value = Value::Int64(10);
         assert!(cache.get_repeated_vector(&value).is_none());
         let vector: VectorRef = Arc::new(Int64Vector::from_slice([10, 10, 10, 10]));
@@ -346,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_page_cache() {
-        let cache = CacheManager::new(0, 0, 1000);
+        let cache = CacheManager::builder().page_cache_size(1000).build();
         let region_id = RegionId::new(1, 1);
         let file_id = FileId::random();
         let key = PageKey {
