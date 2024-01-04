@@ -15,7 +15,8 @@
 use std::{fs, path};
 
 use common_telemetry::logging::info;
-use object_store::services::Fs as FsBuilder;
+use object_store::services::Fs;
+use object_store::util::join_dir;
 use object_store::ObjectStore;
 use snafu::prelude::*;
 
@@ -31,10 +32,10 @@ pub(crate) async fn new_fs_object_store(
         .context(error::CreateDirSnafu { dir: data_home })?;
     info!("The file storage home is: {}", data_home);
 
-    let atomic_write_dir = format!("{data_home}.tmp/");
+    let atomic_write_dir = join_dir(data_home, ".tmp/");
     store::clean_temp_dir(&atomic_write_dir)?;
 
-    let mut builder = FsBuilder::default();
+    let mut builder = Fs::default();
     let _ = builder.root(data_home).atomic_write_dir(&atomic_write_dir);
 
     let object_store = ObjectStore::new(builder)

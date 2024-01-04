@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
-use object_store::services::Oss as OSSBuilder;
+use object_store::services::Oss;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
@@ -29,7 +29,7 @@ pub(crate) async fn new_oss_object_store(oss_config: &OssConfig) -> Result<Objec
         oss_config.bucket, &root
     );
 
-    let mut builder = OSSBuilder::default();
+    let mut builder = Oss::default();
     let _ = builder
         .root(&root)
         .bucket(&oss_config.bucket)

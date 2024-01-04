@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::logging::info;
-use object_store::services::Gcs as GCSBuilder;
+use object_store::services::Gcs;
 use object_store::{util, ObjectStore};
 use secrecy::ExposeSecret;
 use snafu::prelude::*;
@@ -29,7 +29,7 @@ pub(crate) async fn new_gcs_object_store(gcs_config: &GcsConfig) -> Result<Objec
         gcs_config.bucket, &root
     );
 
-    let mut builder = GCSBuilder::default();
+    let mut builder = Gcs::default();
     builder
         .root(&root)
         .bucket(&gcs_config.bucket)

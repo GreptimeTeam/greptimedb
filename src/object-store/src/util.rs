@@ -15,6 +15,7 @@
 use futures::TryStreamExt;
 use opendal::{Entry, Lister};
 
+/// Collect all entries from the [Lister].
 pub async fn collect(stream: Lister) -> Result<Vec<Entry>, opendal::Error> {
     stream.try_collect::<Vec<_>>().await
 }

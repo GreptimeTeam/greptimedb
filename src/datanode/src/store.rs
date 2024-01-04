@@ -27,9 +27,9 @@ use std::{env, path};
 use common_base::readable_size::ReadableSize;
 use common_telemetry::logging::info;
 use object_store::layers::{LoggingLayer, LruCacheLayer, RetryLayer, TracingLayer};
-use object_store::services::Fs as FsBuilder;
-use object_store::util::normalize_dir;
-use object_store::{util, HttpClient, ObjectStore, ObjectStoreBuilder};
+use object_store::services::Fs;
+use object_store::util::{join_dir, normalize_dir};
+use object_store::{HttpClient, ObjectStore, ObjectStoreBuilder};
 use snafu::prelude::*;
 
 use crate::config::{ObjectStoreConfig, DEFAULT_OBJECT_STORE_CACHE_SIZE};
@@ -114,10 +114,9 @@ async fn create_object_store_with_cache(
     };
 
     if let Some(path) = cache_path {
-        let path = util::normalize_dir(path);
-        let atomic_temp_dir = format!("{path}.tmp/");
+        let atomic_temp_dir = join_dir(path, ".tmp/");
         clean_temp_dir(&atomic_temp_dir)?;
-        let cache_store = FsBuilder::default()
+        let cache_store = Fs::default()
             .root(&path)
             .atomic_write_dir(&atomic_temp_dir)
             .build()
