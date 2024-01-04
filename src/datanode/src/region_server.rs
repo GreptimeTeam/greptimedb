@@ -52,7 +52,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::region_engine::{RegionEngineRef, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionCloseRequest, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
@@ -372,7 +372,7 @@ impl RegionServerInner {
         let current_region_status = self.region_map.get(&region_id);
 
         let engine = match region_change {
-            RegionChange::Register(ref engine_type) => match current_region_status {
+            RegionChange::Register(ref engine_type, _) => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
                         return Ok(CurrentEngine::EarlyReturn(0))
@@ -430,8 +430,12 @@ impl RegionServerInner {
             .start_timer();
 
         let region_change = match &request {
-            RegionRequest::Create(create) => RegionChange::Register(create.engine.clone()),
-            RegionRequest::Open(open) => RegionChange::Register(open.engine.clone()),
+            RegionRequest::Create(create) => RegionChange::Register(create.engine.clone(), false),
+            RegionRequest::Open(open) => {
+                let is_opening_physical_region =
+                    open.options.contains_key(PHYSICAL_TABLE_METADATA_KEY);
+                RegionChange::Register(open.engine.clone(), is_opening_physical_region)
+            }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
             RegionRequest::Put(_)
             | RegionRequest::Delete(_)
@@ -482,7 +486,7 @@ impl RegionServerInner {
         region_change: &RegionChange,
     ) {
         match region_change {
-            RegionChange::Register(_) => {
+            RegionChange::Register(_, _) => {
                 self.region_map.insert(
                     region_id,
                     RegionEngineWithStatus::Registering(engine.clone()),
@@ -501,7 +505,7 @@ impl RegionServerInner {
     fn unset_region_status(&self, region_id: RegionId, region_change: RegionChange) {
         match region_change {
             RegionChange::None => {}
-            RegionChange::Register(_) | RegionChange::Deregisters => {
+            RegionChange::Register(_, _) | RegionChange::Deregisters => {
                 self.region_map
                     .remove(&region_id)
                     .map(|(id, engine)| engine.set_writable(id, false));
@@ -518,8 +522,8 @@ impl RegionServerInner {
         let engine_type = engine.name();
         match region_change {
             RegionChange::None => {}
-            RegionChange::Register(_) => {
-                if engine_type == METRIC_ENGINE_NAME {
+            RegionChange::Register(_, is_opening_physical_region) => {
+                if is_opening_physical_region {
                     self.register_logical_regions(&engine, region_id).await?;
                 }
 
@@ -661,7 +665,7 @@ impl RegionServerInner {
 
 enum RegionChange {
     None,
-    Register(String),
+    Register(String, bool),
     Deregisters,
 }
 
@@ -1090,7 +1094,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: None,
-                region_change: RegionChange::Register(engine.name().to_string()),
+                region_change: RegionChange::Register(engine.name().to_string(), false),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::Engine(_));
@@ -1099,7 +1103,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string()),
+                region_change: RegionChange::Register(engine.name().to_string(), false),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::EarlyReturn(_));
@@ -1108,7 +1112,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string()),
+                region_change: RegionChange::Register(engine.name().to_string(), false),
                 assert: Box::new(|result| {
                     let err = result.unwrap_err();
                     assert_eq!(err.status_code(), StatusCode::RegionBusy);
@@ -1117,7 +1121,7 @@ mod tests {
             CurrentEngineTest {
                 region_id,
                 current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
-                region_change: RegionChange::Register(engine.name().to_string()),
+                region_change: RegionChange::Register(engine.name().to_string(), false),
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::Engine(_));
