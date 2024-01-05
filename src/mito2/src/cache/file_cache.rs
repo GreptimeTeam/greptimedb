@@ -23,7 +23,7 @@ use futures::{FutureExt, TryStreamExt};
 use moka::future::Cache;
 use moka::notification::RemovalCause;
 use object_store::util::join_path;
-use object_store::{ErrorKind, Metakey, ObjectStore, Reader, Result as ObjectStoreResult};
+use object_store::{ErrorKind, Metakey, ObjectStore, Reader};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
@@ -100,7 +100,7 @@ impl FileCache {
         self.memory_index.insert(key, value).await;
     }
 
-    pub(crate) async fn get_reader(&self, file_path: &str) -> ObjectStoreResult<Option<Reader>> {
+    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
         if self.local_store.is_exist(file_path).await? {
             Ok(Some(self.local_store.reader(file_path).await?))
         } else {
@@ -126,7 +126,7 @@ impl FileCache {
                     warn!("Failed to get file for key {:?}, err: {}", key, e);
                 }
             }
-            _ => {}
+            Ok(None) => {}
         }
 
         // We removes the file from the index.
