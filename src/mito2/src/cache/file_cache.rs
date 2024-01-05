@@ -210,6 +210,16 @@ pub(crate) struct IndexValue {
     file_size: u32,
 }
 
+impl IndexValue {
+    pub fn new(file_size: u32) -> IndexValue {
+        IndexValue { file_size }
+    }
+
+    pub fn file_size(&self) -> u32 {
+        self.file_size
+    }
+}
+
 /// Generates the path to the cached file.
 ///
 /// The file name format is `{region_id}.{file_id}`

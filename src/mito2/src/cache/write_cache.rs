@@ -16,19 +16,22 @@
 
 use std::sync::Arc;
 
+use api::v1::region;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::ObjectStore;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
 use crate::access_layer::new_fs_object_store;
-use crate::cache::file_cache::{FileCache, FileCacheRef};
-use crate::error::Result;
+use crate::cache::file_cache::{FileCache, FileCacheRef, IndexValue};
+use crate::error::{self, Result};
+use crate::metrics::{UPLOAD_BYTES_TOTAL, WRITE_AND_UPLOAD_ELAPSED_TOTAL};
 use crate::read::Source;
 use crate::sst::file::FileId;
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions, DEFAULT_WRITE_BUFFER_SIZE};
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -77,11 +80,60 @@ impl WriteCache {
         request: SstUploadRequest,
         write_opts: &WriteOptions,
     ) -> Result<Option<SstInfo>> {
-        // TODO(yingwen): Write to the local store and then upload.
-        // Now we write to the remote and ignore local cache.
-        let mut writer =
-            ParquetWriter::new(request.upload_path, request.metadata, request.remote_store);
-        writer.write_all(request.source, write_opts).await
+        let _timer = WRITE_AND_UPLOAD_ELAPSED_TOTAL.start_timer();
+
+        let region_id = request.metadata.region_id;
+        let file_id = request.file_id;
+
+        let cache_path = self.file_cache.cache_file_path((region_id, file_id));
+        // Write to FileCache.
+        let mut writer = ParquetWriter::new(
+            cache_path.clone(),
+            request.metadata,
+            self.file_cache.local_store(),
+        );
+
+        let sst_info = writer.write_all(request.source, write_opts).await?;
+
+        // Upload sst file to remote object store.
+        let upload_path = request.upload_path.clone();
+        let reader = self
+            .file_cache
+            .local_store()
+            .reader(&cache_path)
+            .await
+            .context(error::OpenDalSnafu)?;
+
+        let mut writer = request
+            .remote_store
+            .writer_with(&upload_path)
+            .buffer(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .await
+            .context(error::OpenDalSnafu)?;
+
+        let n = futures::io::copy(reader, &mut writer)
+            .await
+            .context(error::UploadSstSnafu { region_id, file_id })?;
+
+        UPLOAD_BYTES_TOTAL.inc_by(n);
+
+        // Must close to upload all data.
+        writer.close().await.context(error::OpenDalSnafu)?;
+
+        info!(
+            "Upload file to remote, file: {}, upload_path: {}",
+            file_id, upload_path
+        );
+
+        // Register to file cache
+        if let Some(sst_info) = &sst_info {
+            let file_size = sst_info.file_size as u32;
+            self.file_cache
+                .put((region_id, file_id), IndexValue::new(file_size))
+                .await;
+        }
+
+        Ok(sst_info)
     }
 }
 

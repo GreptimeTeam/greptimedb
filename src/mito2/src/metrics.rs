@@ -145,6 +145,18 @@ lazy_static! {
         &[TYPE_LABEL]
     )
     .unwrap();
+    /// Upload bytes counter.
+    pub static ref UPLOAD_BYTES_TOTAL: IntCounter = register_int_counter!(
+        "mito_upload_bytes_total",
+        "mito upload bytes total",
+    )
+    .unwrap();
+    /// Timer of upload.
+    pub static ref WRITE_AND_UPLOAD_ELAPSED_TOTAL: Histogram = register_histogram!(
+        "mito_write_and_upload_elapsed_total",
+        "mito write and upload elapsed total",
+    )
+    .unwrap();
     // ------- End of cache metrics.
 
     // Index metrics.
