@@ -183,9 +183,6 @@ pub enum Error {
 
     #[snafu(display("The record sequence is not legal, error: {}", error))]
     IllegalSequence { location: Location, error: String },
-
-    #[snafu(display("The checksum for a record is incorrect"))]
-    ChecksumMismatched { location: Location },
 }
 
 impl ErrorExt for Error {

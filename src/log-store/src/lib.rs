@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(let_chains, is_sorted)]
+#![feature(let_chains)]
 
 pub mod error;
 pub mod kafka;

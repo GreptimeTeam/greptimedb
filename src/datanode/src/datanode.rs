@@ -1,4 +1,4 @@
-// Copyright 2023 Greptime Team
+// Copyright 2024 Greptime Team
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
 use servers::Mode;
-use snafu::{ensure, OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -63,7 +63,7 @@ use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
     CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
     ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu, TooLargeMaxBatchSizeSnafu,
+    StartServerSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -506,13 +506,6 @@ impl DatanodeBuilder {
 
     /// Builds [KafkaLogStore].
     async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
-        ensure!(
-            config.max_batch_size <= ReadableSize::mb(1),
-            TooLargeMaxBatchSizeSnafu {
-                max_batch_size: config.max_batch_size
-            }
-        );
-
         KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)

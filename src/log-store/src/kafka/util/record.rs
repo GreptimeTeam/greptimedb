@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
-    ChecksumMismatchedSnafu, DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu,
-    IllegalSequenceSnafu, MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
+    DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu, IllegalSequenceSnafu,
+    MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::util::offset::Offset;
@@ -35,10 +35,11 @@ const ESTIMATED_META_SIZE: usize = 256;
 
 /// The type of a record.
 ///
-/// If the entry is able to fit into a Kafka record, it's converted into a Full record.
-/// If the entry is too large to fit into a Kafka record, it's converted into a collection of record.
+/// - If the entry is able to fit into a Kafka record, it's converted into a Full record.
+///
+/// - If the entry is too large to fit into a Kafka record, it's converted into a collection of records.
 /// Those records must contain exactly one First record and one Last record, and potentially several
-/// Middle record. There may be no Middle record.
+/// Middle records. There may be no Middle record.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum RecordType {
     /// The record is self-contained, i.e. an entry's data is fully stored into this record.
@@ -52,17 +53,6 @@ pub enum RecordType {
     Last,
 }
 
-impl From<RecordType> for i32 {
-    fn from(tp: RecordType) -> Self {
-        match tp {
-            RecordType::Full => -1,
-            RecordType::First => 0,
-            RecordType::Middle(seq) => seq as i32,
-            RecordType::Last => i32::MAX,
-        }
-    }
-}
-
 /// The metadata of a record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RecordMeta {
@@ -74,16 +64,14 @@ pub struct RecordMeta {
     pub entry_id: EntryId,
     /// The namespace of the entry the record associated with.
     pub ns: NamespaceImpl,
-    /// The computed checksum of the payload.
-    checksum: u32,
 }
 
 /// The minimal storage unit in the Kafka log store.
 /// Our own Record will be converted into a Kafka record during producing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Record {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Record {
     /// The metadata of the record.
-    pub meta: RecordMeta,
+    pub(crate) meta: RecordMeta,
     /// The payload of the record.
     data: Vec<u8>,
 }
@@ -96,7 +84,7 @@ impl TryFrom<Record> for KafkaRecord {
         Ok(KafkaRecord {
             key: Some(key),
             value: Some(record.data),
-            timestamp: rskafka::chrono::Utc::now(),
+            timestamp: chrono::Utc::now(),
             headers: Default::default(),
         })
     }
@@ -213,7 +201,6 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
                 tp: RecordType::Full,
                 entry_id: entry.id,
                 ns: entry.ns,
-                checksum: crc32fast::hash(&entry.data),
             },
             data: entry.data,
         };
@@ -230,7 +217,6 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
                 tp: record_type(i, num_chunks),
                 entry_id: entry.id,
                 ns: entry.ns.clone(),
-                checksum: crc32fast::hash(chunk),
             },
             data: chunk.to_vec(),
         })
@@ -241,11 +227,6 @@ pub fn maybe_emit_entry(
     record: Record,
     entry_records: &mut HashMap<EntryId, Vec<Record>>,
 ) -> Result<Option<EntryImpl>> {
-    ensure!(
-        record.meta.checksum == crc32fast::hash(&record.data),
-        ChecksumMismatchedSnafu
-    );
-
     let mut entry = None;
     match record.meta.tp {
         RecordType::Full => {
@@ -261,12 +242,12 @@ pub fn maybe_emit_entry(
             entry_records.insert(record.meta.entry_id, vec![record]);
         }
         RecordType::Middle(seq) => {
-            let Some(prefix) = entry_records.get_mut(&record.meta.entry_id) else {
-                return IllegalSequenceSnafu {
-                    error: "Middle record must not be the first",
-                }
-                .fail();
-            };
+            let prefix =
+                entry_records
+                    .get_mut(&record.meta.entry_id)
+                    .context(IllegalSequenceSnafu {
+                        error: "Middle record must not be the first",
+                    })?;
             // Safety: the records are guaranteed not empty if the key exists.
             let last_record = prefix.last().unwrap();
             let legal = match last_record.meta.tp {
@@ -324,7 +305,6 @@ mod tests {
                         topic: "greptimedb_wal_topic".to_string(),
                     },
                     entry_id: 0,
-                    checksum: 0,
                 },
                 data: Vec::new(),
             }
@@ -366,17 +346,6 @@ mod tests {
         fn with_ns(&self, ns: NamespaceImpl) -> Self {
             Self {
                 meta: RecordMeta { ns, ..self.meta },
-                ..self.clone()
-            }
-        }
-
-        /// Overrides checksum.
-        fn with_checksum(&self, checksum: u32) -> Self {
-            Self {
-                meta: RecordMeta {
-                    checksum,
-                    ..self.meta.clone()
-                },
                 ..self.clone()
             }
         }
@@ -435,7 +404,6 @@ mod tests {
                     region_id: 1,
                     topic: "greptimedb_wal_topic".to_string(),
                 },
-                checksum: crc32fast::hash(b"12345".as_slice()),
             },
             data: b"12345".to_vec(),
         };
@@ -449,18 +417,9 @@ mod tests {
     fn test_reconstruct_entry() {
         let template = Record::default();
         let records = vec![
-            template
-                .with_data(b"111")
-                .with_checksum(crc32fast::hash(b"111"))
-                .with_tp(RecordType::First),
-            template
-                .with_data(b"222")
-                .with_checksum(crc32fast::hash(b"222"))
-                .with_tp(RecordType::Middle(1)),
-            template
-                .with_data(b"333")
-                .with_checksum(crc32fast::hash(b"333"))
-                .with_tp(RecordType::Last),
+            template.with_data(b"111").with_tp(RecordType::First),
+            template.with_data(b"222").with_tp(RecordType::Middle(1)),
+            template.with_data(b"333").with_tp(RecordType::Last),
         ];
         let entry = EntryImpl::from(records.clone());
         assert_eq!(records[0].meta.entry_id, entry.id);
@@ -476,7 +435,6 @@ mod tests {
 
     /// Tests that `maybe_emit_entry` works as expected.
     /// This test does not check for illegal record sequences since they're already tested in the `test_check_records` test.
-    // TODO(niebayes): update tests to reveal the update on maybe_emit_entry.
     #[test]
     fn test_maybe_emit_entry() {
         let ns = NamespaceImpl {
@@ -501,15 +459,6 @@ mod tests {
                 ],
             ),
         ]);
-
-        // A record arrives with mismatched checksum.
-        let got = maybe_emit_entry(
-            template
-                .with_data(b"123")
-                .with_checksum(crc32fast::hash(b"123") + 1),
-            &mut entry_records,
-        );
-        assert!(got.is_err());
 
         // A Full record arrives.
         let got = maybe_emit_entry(
