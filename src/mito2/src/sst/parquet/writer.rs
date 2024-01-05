@@ -100,7 +100,7 @@ impl ParquetWriter {
         .context(WriteBufferSnafu)?;
 
         let mut stats = SourceStats::default();
-        let mut index_creator = IndexCreator::new(
+        let mut index = Indexer::new(
             self.file_id,
             self.region_dir.clone(),
             &self.metadata,
@@ -108,19 +108,19 @@ impl ParquetWriter {
             opts,
         );
 
-        while let Some(batch) =
-            Self::write_next_batch(&mut source, &write_format, &mut buffered_writer)
-                .or_else(|err| async {
-                    index_creator.abort().await;
-                    Err(err)
-                })
-                .await?
+        while let Some(batch) = write_next_batch(&mut source, &write_format, &mut buffered_writer)
+            .or_else(|err| async {
+                // abort index creation if error occurs.
+                index.abort().await;
+                Err(err)
+            })
+            .await?
         {
             stats.update(&batch);
-            index_creator.update(&batch).await;
+            index.update(&batch).await;
         }
 
-        let inverted_index_available = index_creator.finish().await;
+        let inverted_index_available = index.finish().await;
 
         if stats.num_rows == 0 {
             debug!("No data written, try to stop the writer: {file_path}");
@@ -147,24 +147,6 @@ impl ParquetWriter {
         }))
     }
 
-    async fn write_next_batch(
-        source: &mut Source,
-        write_format: &WriteFormat,
-        buffered_writer: &mut BufferedWriter,
-    ) -> Result<Option<Batch>> {
-        let Some(batch) = source.next_batch().await? else {
-            return Ok(None);
-        };
-
-        let arrow_batch = write_format.convert_batch(&batch)?;
-        buffered_writer
-            .write(&arrow_batch)
-            .await
-            .context(WriteBufferSnafu)?;
-
-        Ok(Some(batch))
-    }
-
     /// Customizes per-column config according to schema and maybe column cardinality.
     fn customize_column_config(
         builder: WriterPropertiesBuilder,
@@ -183,6 +165,24 @@ impl ParquetWriter {
             .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ts_col, false)
     }
+}
+
+async fn write_next_batch(
+    source: &mut Source,
+    write_format: &WriteFormat,
+    buffered_writer: &mut BufferedWriter,
+) -> Result<Option<Batch>> {
+    let Some(batch) = source.next_batch().await? else {
+        return Ok(None);
+    };
+
+    let arrow_batch = write_format.convert_batch(&batch)?;
+    buffered_writer
+        .write(&arrow_batch)
+        .await
+        .context(WriteBufferSnafu)?;
+
+    Ok(Some(batch))
 }
 
 #[derive(Default)]
@@ -215,13 +215,13 @@ impl SourceStats {
 }
 
 #[derive(Default)]
-struct IndexCreator {
+struct Indexer {
     file_id: FileId,
     region_id: RegionId,
     inner: Option<SstIndexCreator>,
 }
 
-impl IndexCreator {
+impl Indexer {
     fn new(
         file_id: FileId,
         region_dir: String,
