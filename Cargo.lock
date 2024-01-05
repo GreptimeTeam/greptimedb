@@ -1183,6 +1183,7 @@ version = "0.5.0"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow",
  "arrow-schema",
  "async-stream",
  "async-trait",
