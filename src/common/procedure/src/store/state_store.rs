@@ -87,7 +87,7 @@ impl StateStore for ObjectStateStore {
         let mut lister = self
             .store
             .lister_with(path)
-            .delimiter("")
+            .recursive(true)
             .await
             .map_err(|e| {
                 BoxedError::new(PlainError::new(

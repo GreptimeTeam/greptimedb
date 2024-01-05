@@ -100,6 +100,14 @@ impl FileCache {
         self.memory_index.insert(key, value).await;
     }
 
+    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
+        if self.local_store.is_exist(file_path).await? {
+            Ok(Some(self.local_store.reader(file_path).await?))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Reads a file from the cache.
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
         if !self.memory_index.contains_key(&key) {
@@ -108,26 +116,29 @@ impl FileCache {
         }
 
         let file_path = self.cache_file_path(key);
-        match self.local_store.reader(&file_path).await {
-            Ok(reader) => {
+        match self.get_reader(&file_path).await {
+            Ok(Some(reader)) => {
                 CACHE_HIT.with_label_values(&[FILE_TYPE]).inc();
-                Some(reader)
+                return Some(reader);
             }
             Err(e) => {
                 if e.kind() != ErrorKind::NotFound {
                     warn!("Failed to get file for key {:?}, err: {}", key, e);
                 }
-                // We removes the file from the index.
-                self.memory_index.remove(&key).await;
-                CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
-                None
             }
+            Ok(None) => {}
         }
+
+        // We removes the file from the index.
+        self.memory_index.remove(&key).await;
+        CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
+        None
     }
 
     /// Removes a file from the cache explicitly.
     pub(crate) async fn remove(&self, key: IndexKey) {
         let file_path = self.cache_file_path(key);
+        self.memory_index.remove(&key).await;
         if let Err(e) = self.local_store.delete(&file_path).await {
             warn!(e; "Failed to delete a cached file {}", file_path);
         }
