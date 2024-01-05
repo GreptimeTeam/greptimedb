@@ -183,10 +183,8 @@ impl CacheManagerBuilder {
 
     /// Builds the [CacheManager].
     pub fn build(self) -> CacheManager {
-        let sst_meta_cache = if self.sst_meta_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
+        let sst_meta_cache = (self.sst_meta_cache_size != 0).then(|| {
+            Cache::builder()
                 .max_capacity(self.sst_meta_cache_size)
                 .weigher(meta_cache_weight)
                 .eviction_listener(|k, v, _cause| {
@@ -195,13 +193,10 @@ impl CacheManagerBuilder {
                         .with_label_values(&[SST_META_TYPE])
                         .sub(size.into());
                 })
-                .build();
-            Some(cache)
-        };
-        let vector_cache = if self.vector_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
+                .build()
+        });
+        let vector_cache = (self.vector_cache_size != 0).then(|| {
+            Cache::builder()
                 .max_capacity(self.vector_cache_size)
                 .weigher(vector_cache_weight)
                 .eviction_listener(|k, v, _cause| {
@@ -210,22 +205,18 @@ impl CacheManagerBuilder {
                         .with_label_values(&[VECTOR_TYPE])
                         .sub(size.into());
                 })
-                .build();
-            Some(cache)
-        };
-        let page_cache = if self.page_cache_size == 0 {
-            None
-        } else {
-            let cache = Cache::builder()
+                .build()
+        });
+        let page_cache = (self.page_cache_size != 0).then(|| {
+            Cache::builder()
                 .max_capacity(self.page_cache_size)
                 .weigher(page_cache_weight)
                 .eviction_listener(|k, v, _cause| {
                     let size = page_cache_weight(&k, &v);
                     CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
                 })
-                .build();
-            Some(cache)
-        };
+                .build()
+        });
 
         CacheManager {
             sst_meta_cache,
