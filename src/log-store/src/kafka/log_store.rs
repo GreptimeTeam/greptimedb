@@ -88,8 +88,6 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        debug!("LogStore handles append_batch with entries {:?}", entries);
-
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
         }
@@ -120,8 +118,6 @@ impl LogStore for KafkaLogStore {
         .await?
         .into_iter()
         .collect::<HashMap<_, _>>();
-
-        debug!("Append batch result: {:?}", last_entry_ids);
 
         Ok(AppendBatchResponse { last_entry_ids })
     }
