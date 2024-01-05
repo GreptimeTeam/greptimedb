@@ -110,7 +110,7 @@ impl FileCache {
 
     /// Reads a file from the cache.
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
-        if self.memory_index.get(&key).await.is_none() {
+        if !self.memory_index.contains_key(&key) {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }

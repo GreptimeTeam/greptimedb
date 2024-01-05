@@ -251,7 +251,6 @@ impl<C: Accessor + Clone> ReadCache<C> {
     {
         OBJECT_STORE_LRU_CACHE_MISS.inc();
 
-        // The real read will happen after `read_to_end` is invoked.
         let (_, reader) = inner.read(path, args).await?;
         let result = self.try_write_cache::<I>(reader, read_key).await;
 
