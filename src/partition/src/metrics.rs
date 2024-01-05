@@ -17,7 +17,7 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref METRIC_TABLE_ROUTE_GET: Histogram = register_histogram!(
-        "greptimedb_frontend_table_route_get",
+        "greptime_frontend_table_route_get",
         "frontend table route get"
     )
     .unwrap();

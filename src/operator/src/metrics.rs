@@ -17,9 +17,9 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref DIST_CREATE_TABLE: Histogram =
-        register_histogram!("greptimedb_table_operator_create_table", "table operator create table").unwrap();
+        register_histogram!("greptime_table_operator_create_table", "table operator create table").unwrap();
     pub static ref DIST_INGEST_ROW_COUNT: IntCounter =
-        register_int_counter!("greptimedb_table_operator_ingest_rows", "table operator ingest rows").unwrap();
+        register_int_counter!("greptime_table_operator_ingest_rows", "table operator ingest rows").unwrap();
     pub static ref DIST_DELETE_ROW_COUNT: IntCounter =
-        register_int_counter!("greptimedb_table_operator_delete_rows", "table operator delete rows").unwrap();
+        register_int_counter!("greptime_table_operator_delete_rows", "table operator delete rows").unwrap();
 }
