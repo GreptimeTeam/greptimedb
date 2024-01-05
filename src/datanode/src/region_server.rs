@@ -129,7 +129,7 @@ impl RegionServer {
     /// Returns all opened and reportable regions.
     ///
     /// Notes: except all metrics regions.
-    pub async fn reportable_regions(&self) -> Vec<RegionStat> {
+    pub fn reportable_regions(&self) -> Vec<RegionStat> {
         self.inner
             .region_map
             .iter()
