@@ -165,7 +165,7 @@ impl SstIndexCreator {
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
             }
 
-            // non-null value -> Some(enocded_bytes), null value -> None
+            // non-null value -> Some(encoded_bytes), null value -> None
             let v = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
                 .push_with_name_n(column_name, v, n)
