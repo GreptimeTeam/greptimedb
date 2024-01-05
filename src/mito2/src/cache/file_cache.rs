@@ -90,6 +90,10 @@ impl FileCache {
         }
     }
 
+    pub(crate) fn contains_key(&self, key: &IndexKey) -> bool {
+        self.memory_index.contains_key(key)
+    }
+
     /// Puts a file into the cache index.
     ///
     /// The `WriteCache` should ensure the file is in the correct path.

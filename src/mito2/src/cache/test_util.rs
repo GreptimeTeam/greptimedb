@@ -19,6 +19,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use datatypes::arrow::array::{ArrayRef, Int64Array};
 use datatypes::arrow::record_batch::RecordBatch;
+use object_store::services::Fs;
+use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::file::metadata::ParquetMetaData;
@@ -41,4 +43,10 @@ fn parquet_file_data() -> Vec<u8> {
     writer.close().unwrap();
 
     buffer
+}
+
+pub(crate) fn new_fs_store(path: &str) -> ObjectStore {
+    let mut builder = Fs::default();
+    builder.root(path);
+    ObjectStore::new(builder).unwrap().finish()
 }

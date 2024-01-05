@@ -31,7 +31,8 @@ use crate::metrics::{UPLOAD_BYTES_TOTAL, WRITE_AND_UPLOAD_ELAPSED_TOTAL};
 use crate::read::Source;
 use crate::sst::file::FileId;
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{SstInfo, WriteOptions, DEFAULT_WRITE_BUFFER_SIZE};
+use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 
 /// A cache for uploading files to remote object stores.
 ///
@@ -147,4 +148,95 @@ pub struct SstUploadRequest {
     pub upload_path: String,
     /// Remote object store to upload.
     pub remote_store: ObjectStore,
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::OpType;
+    use common_base::readable_size::ReadableSize;
+    use common_test_util::temp_dir::create_temp_dir;
+    use object_store::manager::ObjectStoreManager;
+    use object_store::services::Fs;
+    use object_store::ObjectStore;
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::cache::file_cache::{self, FileCache};
+    use crate::cache::test_util::new_fs_store;
+    use crate::sst::file::FileId;
+    use crate::sst::location::sst_file_path;
+    use crate::test_util::sst_util::{
+        new_batch_by_range, new_source, sst_file_handle, sst_region_metadata,
+    };
+    use crate::test_util::{build_rows, new_batch_builder, CreateRequestBuilder, TestEnv};
+
+    #[tokio::test]
+    async fn test_write_and_upload_sst() {
+        // Create a local object store and FileCache.
+        let local_dir = create_temp_dir("");
+        let local_store = new_fs_store(local_dir.path().to_str().unwrap());
+        let cache = FileCache::new(local_store.clone(), ReadableSize::mb(10));
+        let file_id = FileId::random();
+
+        // Create Source
+        let metadata = Arc::new(sst_region_metadata());
+        let region_id = metadata.region_id;
+        let source = new_source(&[
+            new_batch_by_range(&["a", "d"], 0, 60),
+            new_batch_by_range(&["b", "f"], 0, 40),
+            new_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+
+        // TODO(QuenKar): maybe find a way to create some object server for testing,
+        // and now just use local file system to mock.
+        let mut env = TestEnv::new();
+        let mock_store = env.init_object_store_manager();
+        let upload_path = sst_file_path("test", file_id);
+
+        // Create WriteCache
+        let object_store_manager = Arc::new(ObjectStoreManager::new("mock", mock_store.clone()));
+        let write_cache = WriteCache::new(
+            local_store.clone(),
+            object_store_manager,
+            ReadableSize::mb(10),
+        );
+
+        let request = SstUploadRequest {
+            file_id,
+            metadata,
+            source,
+            storage: Some("mock".to_string()),
+            upload_path: upload_path.clone(),
+            remote_store: mock_store.clone(),
+        };
+
+        let write_opts = WriteOptions {
+            row_group_size: 512,
+            ..Default::default()
+        };
+
+        // Write to cache and upload sst to mock remote store
+        let sst_info = write_cache
+            .write_and_upload_sst(request, &write_opts)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Check write cache contains the key
+        let key = (region_id, file_id);
+        assert!(write_cache.file_cache.contains_key(&key));
+
+        // Check file data
+        let remote_data = mock_store.read(&upload_path).await.unwrap();
+        let cache_data = local_store.read(&cache.cache_file_path(key)).await.unwrap();
+        assert_eq!(remote_data.len(), 3434);
+        assert_eq!(remote_data, cache_data);
+
+        // Delete test files
+        mock_store
+            .delete(&upload_path)
+            .await
+            .expect("delete must succeed");
+        write_cache.file_cache.remove(key);
+    }
 }

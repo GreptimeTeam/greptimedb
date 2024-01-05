@@ -14,7 +14,7 @@
 
 //! Utilities for testing SSTs.
 
-use api::v1::SemanticType;
+use api::v1::{OpType, SemanticType};
 use common_time::Timestamp;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -25,7 +25,7 @@ use store_api::storage::RegionId;
 use crate::read::{Batch, Source};
 use crate::row_converter::{McmpRowCodec, RowCodec, SortField};
 use crate::sst::file::{FileHandle, FileId, FileMeta};
-use crate::test_util::{new_noop_file_purger, VecBatchReader};
+use crate::test_util::{new_batch_builder, new_noop_file_purger, VecBatchReader};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
@@ -109,4 +109,16 @@ pub fn sst_file_handle(start_ms: i64, end_ms: i64) -> FileHandle {
         },
         file_purger,
     )
+}
+
+pub fn new_batch_by_range(tags: &[&str], start: usize, end: usize) -> Batch {
+    assert!(end > start);
+    let pk = new_primary_key(tags);
+    let timestamps: Vec<_> = (start..end).map(|v| v as i64).collect();
+    let sequences = vec![1000; end - start];
+    let op_types = vec![OpType::Put; end - start];
+    let field: Vec<_> = (start..end).map(|v| v as u64).collect();
+    new_batch_builder(&pk, &timestamps, &sequences, &op_types, 2, &field)
+        .build()
+        .unwrap()
 }
