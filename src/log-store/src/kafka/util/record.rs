@@ -717,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_produce_large_entry() {
-        let max_record_size = 1 * 1024 * 1024; // 1MB.
+        let max_record_size = 1024 * 1024; // 1MB.
         let topic = format!("greptimedb_wal_topic_{}", rand::thread_rng().gen::<usize>());
         let ns = NamespaceImpl {
             region_id: 1,
