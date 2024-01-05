@@ -31,11 +31,8 @@ lazy_static! {
     .unwrap();
     pub static ref METRIC_META_CREATE_SCHEMA: Histogram =
         register_histogram!("greptime_meta_create_schema", "meta create schema").unwrap();
-    pub static ref METRIC_META_CREATE_SCHEMA_COUNTER: IntCounter = register_int_counter!(
-        "greptime_meta_create_schema_counter",
-        "meta create schema"
-    )
-    .unwrap();
+    pub static ref METRIC_META_CREATE_SCHEMA_COUNTER: IntCounter =
+        register_int_counter!("greptime_meta_create_schema_counter", "meta create schema").unwrap();
     pub static ref METRIC_META_PROCEDURE_CREATE_TABLE: HistogramVec = register_histogram_vec!(
         "greptime_meta_procedure_create_table",
         "meta procedure create table",
