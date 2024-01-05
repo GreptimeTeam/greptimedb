@@ -335,33 +335,29 @@ async fn handle_alter_table_task(
             table_name: table_ref.to_string(),
         })?;
 
-    let table_route = ddl_manager
-        .table_metadata_manager
+    let physical_table_id = ddl_manager
+        .table_metadata_manager()
         .table_route_manager()
-        .get(table_id)
-        .await?
-        .context(error::TableRouteNotFoundSnafu { table_id })?
-        .into_inner();
+        .get_physical_table_id(table_id)
+        .await?;
 
-    let physical_table_name = match table_route {
-        TableRouteValue::Physical(_) => None,
-        TableRouteValue::Logical(x) => {
-            let physical_table_id = x.physical_table_id();
-            let physical_table_info = &ddl_manager
-                .table_metadata_manager()
-                .table_info_manager()
-                .get(physical_table_id)
-                .await?
-                .with_context(|| error::TableInfoNotFoundSnafu {
-                    table_name: table_ref.to_string(),
-                })?
-                .table_info;
-            Some(TableName {
-                catalog_name: physical_table_info.catalog_name.clone(),
-                schema_name: physical_table_info.schema_name.clone(),
-                table_name: physical_table_info.name.clone(),
-            })
-        }
+    let physical_table_name = if physical_table_id == table_id {
+        None
+    } else {
+        let physical_table_info = &ddl_manager
+            .table_metadata_manager()
+            .table_info_manager()
+            .get(physical_table_id)
+            .await?
+            .with_context(|| error::TableInfoNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .table_info;
+        Some(TableName {
+            catalog_name: physical_table_info.catalog_name.clone(),
+            schema_name: physical_table_info.schema_name.clone(),
+            table_name: physical_table_info.name.clone(),
+        })
     };
 
     let id = ddl_manager

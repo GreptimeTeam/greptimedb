@@ -40,12 +40,9 @@ use table::requests::AlterKind;
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::handle_operate_region_error;
 use crate::ddl::DdlContext;
-use crate::error::{
-    self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result, TableRouteNotFoundSnafu,
-};
+use crate::error::{self, ConvertAlterTableRequestSnafu, InvalidProtoMsgSnafu, Result};
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
-use crate::key::table_route::TableRouteValue;
 use crate::key::DeserializedValueWithBytes;
 use crate::metrics;
 use crate::rpc::ddl::AlterTableTask;
@@ -190,33 +187,19 @@ impl AlterTableProcedure {
 
     pub async fn submit_alter_region_requests(&mut self) -> Result<Status> {
         let table_id = self.data.table_id();
-        let table_route_manager = self.context.table_metadata_manager.table_route_manager();
+        let (_, physical_table_route) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await?;
 
-        let table_route = table_route_manager
-            .get(table_id)
-            .await?
-            .context(TableRouteNotFoundSnafu { table_id })?
-            .into_inner();
-        let region_routes = match table_route {
-            TableRouteValue::Physical(x) => x.region_routes,
-            TableRouteValue::Logical(x) => {
-                let physical_table_id = x.physical_table_id();
-                let physical_table_route = table_route_manager
-                    .get(physical_table_id)
-                    .await?
-                    .context(TableRouteNotFoundSnafu {
-                        table_id: physical_table_id,
-                    })?;
-                physical_table_route.region_routes()?.clone()
-            }
-        };
-
-        let leaders = find_leaders(&region_routes);
+        let leaders = find_leaders(&physical_table_route.region_routes);
         let mut alter_region_tasks = Vec::with_capacity(leaders.len());
 
         for datanode in leaders {
             let requester = self.context.datanode_manager.datanode(&datanode).await;
-            let regions = find_leader_regions(&region_routes, &datanode);
+            let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
 
             for region in regions {
                 let region_id = RegionId::new(table_id, region);
