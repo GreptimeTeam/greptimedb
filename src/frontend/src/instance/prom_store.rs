@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::prom_store::remote::read_request::ResponseType;
 use api::prom_store::remote::{Query, QueryResult, ReadRequest, ReadResponse, WriteRequest};
 use async_trait::async_trait;
@@ -21,10 +23,14 @@ use common_error::ext::BoxedError;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_telemetry::logging;
+use operator::insert::InserterRef;
+use operator::statement::StatementExecutor;
 use prost::Message;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::prom_store::{self, Metrics};
-use servers::query_handler::{PromStoreProtocolHandler, PromStoreResponse};
+use servers::query_handler::{
+    PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
+};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 
@@ -207,5 +213,51 @@ impl PromStoreProtocolHandler for Instance {
 
     async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         todo!();
+    }
+}
+
+/// This handler is mainly used for `frontend` or `standalone` to directly import
+/// the metrics collected by itself, thereby avoiding importing metrics through the network,
+/// thus reducing compression and network transmission overhead,
+/// so only implement `PromStoreProtocolHandler::write` method.
+pub struct ExportMetricHandler {
+    inserter: InserterRef,
+    statement_executor: Arc<StatementExecutor>,
+}
+
+impl ExportMetricHandler {
+    pub fn new_handler(
+        inserter: InserterRef,
+        statement_executor: Arc<StatementExecutor>,
+    ) -> PromStoreProtocolHandlerRef {
+        Arc::new(Self {
+            inserter,
+            statement_executor,
+        })
+    }
+}
+
+#[async_trait]
+impl PromStoreProtocolHandler for ExportMetricHandler {
+    async fn write(&self, request: WriteRequest, ctx: QueryContextRef) -> ServerResult<()> {
+        let (requests, _) = prom_store::to_grpc_row_insert_requests(request)?;
+        self.inserter
+            .handle_row_inserts(requests, ctx, self.statement_executor.as_ref())
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        Ok(())
+    }
+
+    async fn read(
+        &self,
+        _request: ReadRequest,
+        _ctx: QueryContextRef,
+    ) -> ServerResult<PromStoreResponse> {
+        unreachable!();
+    }
+
+    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
+        unreachable!();
     }
 }

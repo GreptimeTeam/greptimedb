@@ -27,18 +27,21 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
-use crate::access_layer::AccessLayerRef;
-use crate::compaction::output::CompactionOutput;
+use crate::access_layer::{AccessLayerRef, SstWriteRequest};
+use crate::cache::CacheManagerRef;
 use crate::compaction::picker::{CompactionTask, Picker};
 use crate::compaction::CompactionRequest;
-use crate::error;
-use crate::error::CompactRegionSnafu;
+use crate::error::{self, CompactRegionSnafu};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_STAGE_ELAPSED};
+use crate::read::projection::ProjectionMapper;
+use crate::read::seq_scan::SeqScan;
+use crate::read::{BoxedBatchReader, Source};
 use crate::request::{
     BackgroundNotify, CompactionFailed, CompactionFinished, OutputTx, WorkerRequest,
 };
-use crate::sst::file::{FileHandle, FileId, FileMeta};
+use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::parquet::WriteOptions;
 use crate::sst::version::LevelMeta;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
@@ -126,6 +129,7 @@ impl Picker for TwcsPicker {
             file_purger,
             start_time,
             sst_write_buffer_size,
+            cache_manager,
         } = req;
 
         let region_metadata = current_version.metadata.clone();
@@ -169,7 +173,7 @@ impl Picker for TwcsPicker {
         }
         let task = TwcsCompactionTask {
             region_id,
-            schema: region_metadata,
+            metadata: region_metadata,
             sst_layer: access_layer,
             outputs,
             expired_ssts,
@@ -179,6 +183,8 @@ impl Picker for TwcsPicker {
             waiters,
             file_purger,
             start_time,
+            cache_manager,
+            storage: current_version.options.storage.clone(),
         };
         Some(Box::new(task))
     }
@@ -228,7 +234,7 @@ fn find_latest_window_in_seconds<'a>(
 
 pub(crate) struct TwcsCompactionTask {
     pub region_id: RegionId,
-    pub schema: RegionMetadataRef,
+    pub metadata: RegionMetadataRef,
     pub sst_layer: AccessLayerRef,
     pub outputs: Vec<CompactionOutput>,
     pub expired_ssts: Vec<FileHandle>,
@@ -241,6 +247,9 @@ pub(crate) struct TwcsCompactionTask {
     pub waiters: Vec<OutputTx>,
     /// Start time of compaction task
     pub start_time: Instant,
+    pub(crate) cache_manager: CacheManagerRef,
+    /// Target storage of the region.
+    pub(crate) storage: Option<String>,
 }
 
 impl Debug for TwcsCompactionTask {
@@ -274,11 +283,8 @@ impl TwcsCompactionTask {
         let mut futs = Vec::with_capacity(self.outputs.len());
         let mut compacted_inputs =
             Vec::with_capacity(self.outputs.iter().map(|o| o.inputs.len()).sum());
-        let region_id = self.region_id;
+
         for output in self.outputs.drain(..) {
-            let schema = self.schema.clone();
-            let sst_layer = self.sst_layer.clone();
-            let sst_write_buffer_size = self.sst_write_buffer_size;
             compacted_inputs.extend(output.inputs.iter().map(FileHandle::meta));
 
             info!(
@@ -293,15 +299,42 @@ impl TwcsCompactionTask {
                 output.output_file_id
             );
 
-            // TODO(hl): Maybe spawn to runtime to exploit in-job parallelism.
+            let write_opts = WriteOptions {
+                write_buffer_size: self.sst_write_buffer_size,
+                ..Default::default()
+            };
+            let metadata = self.metadata.clone();
+            let sst_layer = self.sst_layer.clone();
+            let region_id = self.region_id;
+            let cache_manager = self.cache_manager.clone();
+            let storage = self.storage.clone();
             futs.push(async move {
-                output
-                    .build(region_id, schema, sst_layer, sst_write_buffer_size)
-                    .await
+                let reader =
+                    build_sst_reader(metadata.clone(), sst_layer.clone(), &output.inputs).await?;
+                let file_meta_opt = sst_layer
+                    .write_sst(
+                        SstWriteRequest {
+                            file_id: output.output_file_id,
+                            metadata,
+                            source: Source::Reader(reader),
+                            cache_manager,
+                            storage,
+                        },
+                        &write_opts,
+                    )
+                    .await?
+                    .map(|sst_info| FileMeta {
+                        region_id,
+                        file_id: output.output_file_id,
+                        time_range: sst_info.time_range,
+                        level: output.output_level,
+                        file_size: sst_info.file_size,
+                    });
+                Ok(file_meta_opt)
             });
         }
 
-        let mut outputs = Vec::with_capacity(futs.len());
+        let mut output_files = Vec::with_capacity(futs.len());
         while !futs.is_empty() {
             let mut task_chunk = Vec::with_capacity(MAX_PARALLEL_COMPACTION);
             for _ in 0..MAX_PARALLEL_COMPACTION {
@@ -314,11 +347,11 @@ impl TwcsCompactionTask {
                 .context(error::JoinSnafu)?
                 .into_iter()
                 .collect::<error::Result<Vec<_>>>()?;
-            outputs.extend(metas.into_iter().flatten());
+            output_files.extend(metas.into_iter().flatten());
         }
 
         let inputs = compacted_inputs.into_iter().collect();
-        Ok((outputs, inputs))
+        Ok((output_files, inputs))
     }
 
     async fn handle_compaction(&mut self) -> error::Result<(Vec<FileMeta>, Vec<FileMeta>)> {
@@ -483,6 +516,29 @@ fn get_expired_ssts(
         .iter()
         .flat_map(|l| l.get_expired_files(&expire_time).into_iter())
         .collect()
+}
+
+#[derive(Debug)]
+pub(crate) struct CompactionOutput {
+    pub output_file_id: FileId,
+    /// Compaction output file level.
+    pub output_level: Level,
+    /// Compaction input files.
+    pub inputs: Vec<FileHandle>,
+}
+
+/// Builds [BoxedBatchReader] that reads all SST files and yields batches in primary key order.
+async fn build_sst_reader(
+    metadata: RegionMetadataRef,
+    sst_layer: AccessLayerRef,
+    inputs: &[FileHandle],
+) -> error::Result<BoxedBatchReader> {
+    SeqScan::new(sst_layer, ProjectionMapper::all(&metadata)?)
+        .with_files(inputs.to_vec())
+        // We ignore file not found error during compaction.
+        .with_ignore_file_not_found(true)
+        .build_reader()
+        .await
 }
 
 #[cfg(test)]

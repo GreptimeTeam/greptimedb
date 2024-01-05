@@ -21,11 +21,13 @@ use std::time::Duration;
 use auth::UserProviderRef;
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use common_config::WalConfig;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
 use common_query::Output;
 use common_recordbatch::util;
 use common_runtime::Builder as RuntimeBuilder;
+use common_telemetry::warn;
 use common_test_util::ports;
 use common_test_util::temp_dir::{create_temp_dir, TempDir};
 use datanode::config::{
@@ -35,6 +37,7 @@ use datanode::config::{
 use frontend::frontend::TomlSerializable;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+use futures::future::BoxFuture;
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::ObjectStore;
@@ -52,6 +55,8 @@ use servers::Mode;
 use session::context::QueryContext;
 
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+
+pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum StorageType {
@@ -294,9 +299,11 @@ impl TestGuard {
 }
 
 pub fn create_tmp_dir_and_datanode_opts(
+    mode: Mode,
     default_store_type: StorageType,
     store_provider_types: Vec<StorageType>,
     name: &str,
+    wal_config: WalConfig,
 ) -> (DatanodeOptions, TestGuard) {
     let home_tmp_dir = create_temp_dir(&format!("gt_data_{name}"));
     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
@@ -314,7 +321,7 @@ pub fn create_tmp_dir_and_datanode_opts(
         store_providers.push(store);
         storage_guards.push(StorageGuard(data_tmp_dir))
     }
-    let opts = create_datanode_opts(default_store, store_providers, home_dir);
+    let opts = create_datanode_opts(mode, default_store, store_providers, home_dir, wal_config);
 
     (
         opts,
@@ -326,9 +333,11 @@ pub fn create_tmp_dir_and_datanode_opts(
 }
 
 pub(crate) fn create_datanode_opts(
+    mode: Mode,
     default_store: ObjectStoreConfig,
     providers: Vec<ObjectStoreConfig>,
     home_dir: String,
+    wal_config: WalConfig,
 ) -> DatanodeOptions {
     DatanodeOptions {
         node_id: Some(0),
@@ -339,7 +348,8 @@ pub(crate) fn create_datanode_opts(
             store: default_store,
             ..Default::default()
         },
-        mode: Mode::Standalone,
+        mode,
+        wal: wal_config,
         ..Default::default()
     }
 }
@@ -655,4 +665,23 @@ pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
         )
         .await
         .unwrap();
+}
+
+pub async fn run_test_with_kafka_wal<F>(test: F)
+where
+    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
+{
+    let _ = dotenv::dotenv();
+    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
+    if endpoints.is_empty() {
+        warn!("The endpoints is empty, skipping the test");
+        return;
+    }
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    test(endpoints).await
 }

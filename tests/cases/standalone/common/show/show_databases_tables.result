@@ -31,8 +31,18 @@ show tables;
 | engines                               |
 | events                                |
 | files                                 |
+| global_status                         |
 | key_column_usage                      |
+| optimizer_trace                       |
+| parameters                            |
+| profiling                             |
+| referential_constraints               |
+| routines                              |
+| schema_privileges                     |
 | schemata                              |
+| session_status                        |
+| table_privileges                      |
 | tables                                |
+| triggers                              |
 +---------------------------------------+
 

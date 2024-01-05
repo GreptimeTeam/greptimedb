@@ -94,7 +94,7 @@ impl MetaSrvInstance {
         self.meta_srv.try_start().await?;
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start()
+            t.start(None).context(InitExportMetricsTaskSnafu)?
         }
 
         let (tx, rx) = mpsc::channel::<()>(1);

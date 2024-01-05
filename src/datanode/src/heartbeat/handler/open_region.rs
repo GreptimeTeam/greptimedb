@@ -14,6 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
+use common_meta::wal::prepare_wal_option;
 use futures_util::future::BoxFuture;
 use store_api::path_utils::region_dir;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -26,15 +27,14 @@ impl HandlerContext {
         OpenRegion {
             region_ident,
             region_storage_path,
-            region_options,
+            mut region_options,
             region_wal_options,
             skip_wal_replay,
         }: OpenRegion,
     ) -> BoxFuture<'static, InstructionReply> {
         Box::pin(async move {
             let region_id = Self::region_ident_to_region_id(&region_ident);
-            // TODO(niebayes): extends region options with region_wal_options.
-            let _ = region_wal_options;
+            prepare_wal_option(&mut region_options, region_id, &region_wal_options);
             let request = RegionRequest::Open(RegionOpenRequest {
                 engine: region_ident.engine,
                 region_dir: region_dir(&region_storage_path, region_id),
@@ -42,10 +42,8 @@ impl HandlerContext {
                 skip_wal_replay,
             });
             let result = self.region_server.handle_request(region_id, request).await;
-
             let success = result.is_ok();
             let error = result.as_ref().map_err(|e| e.output_msg()).err();
-
             InstructionReply::OpenRegion(SimpleReply {
                 result: success,
                 error,

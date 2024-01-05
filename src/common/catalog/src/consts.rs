@@ -60,6 +60,26 @@ pub const INFORMATION_SCHEMA_FILES_TABLE_ID: u32 = 14;
 pub const INFORMATION_SCHEMA_SCHEMATA_TABLE_ID: u32 = 15;
 /// id for information_schema.KEY_COLUMN_USAGE
 pub const INFORMATION_SCHEMA_KEY_COLUMN_USAGE_TABLE_ID: u32 = 16;
+/// id for information_schema.OPTIMIZER_TRACE
+pub const INFORMATION_SCHEMA_OPTIMIZER_TRACE_TABLE_ID: u32 = 17;
+/// id for information_schema.PARAMETERS
+pub const INFORMATION_SCHEMA_PARAMETERS_TABLE_ID: u32 = 18;
+/// id for information_schema.PROFILING
+pub const INFORMATION_SCHEMA_PROFILING_TABLE_ID: u32 = 19;
+/// id for information_schema.REFERENTIAL_CONSTRAINTS
+pub const INFORMATION_SCHEMA_REFERENTIAL_CONSTRAINTS_TABLE_ID: u32 = 20;
+/// id for information_schema.ROUTINES
+pub const INFORMATION_SCHEMA_ROUTINES_TABLE_ID: u32 = 21;
+/// id for information_schema.SCHEMA_PRIVILEGES
+pub const INFORMATION_SCHEMA_SCHEMA_PRIVILEGES_TABLE_ID: u32 = 22;
+/// id for information_schema.TABLE_PRIVILEGES
+pub const INFORMATION_SCHEMA_TABLE_PRIVILEGES_TABLE_ID: u32 = 23;
+/// id for information_schema.TRIGGERS
+pub const INFORMATION_SCHEMA_TRIGGERS_TABLE_ID: u32 = 24;
+/// id for information_schema.GLOBAL_STATUS
+pub const INFORMATION_SCHEMA_GLOBAL_STATUS_TABLE_ID: u32 = 25;
+/// id for information_schema.SESSION_STATUS
+pub const INFORMATION_SCHEMA_SESSION_STATUS_TABLE_ID: u32 = 26;
 /// ----- End of information_schema tables -----
 
 pub const MITO_ENGINE: &str = "mito";

@@ -1183,6 +1183,7 @@ version = "0.5.0"
 dependencies = [
  "api",
  "arc-swap",
+ "arrow",
  "arrow-schema",
  "async-stream",
  "async-trait",
@@ -4993,8 +4994,10 @@ dependencies = [
  "object-store",
  "parquet",
  "paste",
+ "pin-project",
  "prometheus",
  "prost 0.12.3",
+ "puffin",
  "regex",
  "serde",
  "serde_json",
@@ -5506,9 +5509,9 @@ checksum = "0ab1bc2a289d34bd04a330323ac98a1b4bc82c9d9fcb1e66b63caa84da26b575"
 
 [[package]]
 name = "opendal"
-version = "0.40.0"
+version = "0.44.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddba7299bab261d3ae2f37617fb7f45b19ed872752bb4e22cf93a69d979366c5"
+checksum = "c32736a48ef08a5d2212864e2295c8e54f4d6b352b7f49aa0c29a12fc410ff66"
 dependencies = [
  "anyhow",
  "async-compat",
@@ -5519,15 +5522,15 @@ dependencies = [
  "chrono",
  "flagset",
  "futures",
+ "getrandom",
  "http",
- "hyper",
  "log",
  "md-5",
  "once_cell",
  "parking_lot 0.12.1",
  "percent-encoding",
  "pin-project",
- "quick-xml 0.29.0",
+ "quick-xml 0.30.0",
  "reqsign",
  "reqwest",
  "serde",
@@ -6943,9 +6946,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.29.0"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81b9228215d82c7b61490fec1de287136b5de6f5700f6e58ea9ad61a7964ca51"
+checksum = "eff6510e86862b57b210fd8cbe8ed3f0d7d600b9c2863cd4549a2e033c66e956"
 dependencies = [
  "memchr",
  "serde",

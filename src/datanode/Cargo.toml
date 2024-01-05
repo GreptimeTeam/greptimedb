@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 api.workspace = true
 arrow-flight.workspace = true

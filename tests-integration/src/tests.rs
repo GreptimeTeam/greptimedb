@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod instance_kafka_wal_test;
 mod instance_test;
 mod promql_test;
 mod test_util;

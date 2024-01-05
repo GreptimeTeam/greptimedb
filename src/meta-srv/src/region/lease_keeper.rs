@@ -113,7 +113,9 @@ impl RegionLeaseKeeper {
         Ok(metadata_subset)
     }
 
-    /// Returns [None] if specific region doesn't belong to the datanode.
+    /// Returns [None] if:
+    /// - The region doesn't belong to the datanode.
+    /// - The region belongs to a logical table.
     fn renew_region_lease(
         &self,
         table_metadata: &HashMap<TableId, TableRouteValue>,
@@ -188,7 +190,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::table_route::{LogicalTableRouteValue, TableRouteValue};
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::key::TableMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -360,6 +362,44 @@ mod tests {
 
             assert!(non_exists.is_empty());
             assert_eq!(renewed, HashMap::from([(opening_region_id, role)]));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_renew_unexpected_logic_table() {
+        let region_number = 1u32;
+        let table_id = 1024;
+        let table_info: RawTableInfo = new_test_table_info(table_id, vec![region_number]).into();
+
+        let region_id = RegionId::new(table_id, 1);
+        let keeper = new_test_keeper();
+        let table_metadata_manager = keeper.table_metadata_manager();
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::Logical(LogicalTableRouteValue::new(table_id, vec![region_id])),
+                HashMap::default(),
+            )
+            .await
+            .unwrap();
+
+        for region_id in [region_id, RegionId::new(1024, 2)] {
+            let RenewRegionLeasesResponse {
+                non_exists,
+                renewed,
+            } = keeper
+                .renew_region_leases(
+                    0,
+                    1,
+                    &[
+                        (region_id, RegionRole::Follower),
+                        (region_id, RegionRole::Leader),
+                    ],
+                )
+                .await
+                .unwrap();
+            assert!(renewed.is_empty());
+            assert_eq!(non_exists, HashSet::from([region_id]));
         }
     }
 

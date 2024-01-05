@@ -14,7 +14,7 @@
 
 use common_error::ext::ErrorExt;
 use common_meta::instruction::{InstructionReply, UpgradeRegion, UpgradeRegionReply};
-use common_telemetry::warn;
+use common_telemetry::{info, warn};
 use futures_util::future::BoxFuture;
 use store_api::region_request::{RegionCatchupRequest, RegionRequest};
 
@@ -56,6 +56,7 @@ impl HandlerContext {
                 .try_register(
                     region_id,
                     Box::pin(async move {
+                        info!("Executing region: {region_id} catchup to: last entry id {last_entry_id:?}");
                         region_server_moved
                             .handle_request(
                                 region_id,

@@ -180,6 +180,7 @@ operator = { path = "src/operator" }
 partition = { path = "src/partition" }
 plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
+puffin = { path = "src/puffin" }
 query = { path = "src/query" }
 script = { path = "src/script" }
 servers = { path = "src/servers" }

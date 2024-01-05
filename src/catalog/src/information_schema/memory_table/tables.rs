@@ -227,6 +227,190 @@ pub fn get_schema_columns(table_name: &str) -> (SchemaRef, Vec<VectorRef>) {
             vec![],
         ),
 
+        OPTIMIZER_TRACE => (
+            vec![
+                string_column("QUERY"),
+                string_column("TRACE"),
+                bigint_column("MISSING_BYTES_BEYOND_MAX_MEM_SIZE"),
+                bigint_column("INSUFFICIENT_PRIVILEGES"),
+            ],
+            vec![],
+        ),
+
+        // MySQL(https://dev.mysql.com/doc/refman/8.2/en/information-schema-parameters-table.html)
+        // has the spec that is different from
+        // PostgreSQL(https://www.postgresql.org/docs/current/infoschema-parameters.html).
+        // Follow `MySQL` spec here.
+        PARAMETERS => (
+            vec![
+                string_column("SPECIFIC_CATALOG"),
+                string_column("SPECIFIC_SCHEMA"),
+                string_column("SPECIFIC_NAME"),
+                bigint_column("ORDINAL_POSITION"),
+                string_column("PARAMETER_MODE"),
+                string_column("PARAMETER_NAME"),
+                string_column("DATA_TYPE"),
+                bigint_column("CHARACTER_MAXIMUM_LENGTH"),
+                bigint_column("CHARACTER_OCTET_LENGTH"),
+                bigint_column("NUMERIC_PRECISION"),
+                bigint_column("NUMERIC_SCALE"),
+                bigint_column("DATETIME_PRECISION"),
+                string_column("CHARACTER_SET_NAME"),
+                string_column("COLLATION_NAME"),
+                string_column("DTD_IDENTIFIER"),
+                string_column("ROUTINE_TYPE"),
+            ],
+            vec![],
+        ),
+
+        PROFILING => (
+            vec![
+                bigint_column("QUERY_ID"),
+                bigint_column("SEQ"),
+                string_column("STATE"),
+                bigint_column("DURATION"),
+                bigint_column("CPU_USER"),
+                bigint_column("CPU_SYSTEM"),
+                bigint_column("CONTEXT_VOLUNTARY"),
+                bigint_column("CONTEXT_INVOLUNTARY"),
+                bigint_column("BLOCK_OPS_IN"),
+                bigint_column("BLOCK_OPS_OUT"),
+                bigint_column("MESSAGES_SENT"),
+                bigint_column("MESSAGES_RECEIVED"),
+                bigint_column("PAGE_FAULTS_MAJOR"),
+                bigint_column("PAGE_FAULTS_MINOR"),
+                bigint_column("SWAPS"),
+                string_column("SOURCE_FUNCTION"),
+                string_column("SOURCE_FILE"),
+                bigint_column("SOURCE_LINE"),
+            ],
+            vec![],
+        ),
+
+        // TODO: _Must_ reimplement this table when foreign key constraint is supported.
+        REFERENTIAL_CONSTRAINTS => (
+            vec![
+                string_column("CONSTRAINT_CATALOG"),
+                string_column("CONSTRAINT_SCHEMA"),
+                string_column("CONSTRAINT_NAME"),
+                string_column("UNIQUE_CONSTRAINT_CATALOG"),
+                string_column("UNIQUE_CONSTRAINT_SCHEMA"),
+                string_column("UNIQUE_CONSTRAINT_NAME"),
+                string_column("MATCH_OPTION"),
+                string_column("UPDATE_RULE"),
+                string_column("DELETE_RULE"),
+                string_column("TABLE_NAME"),
+                string_column("REFERENCED_TABLE_NAME"),
+            ],
+            vec![],
+        ),
+
+        ROUTINES => (
+            vec![
+                string_column("SPECIFIC_NAME"),
+                string_column("ROUTINE_CATALOG"),
+                string_column("ROUTINE_SCHEMA"),
+                string_column("ROUTINE_NAME"),
+                string_column("ROUTINE_TYPE"),
+                string_column("DATA_TYPE"),
+                bigint_column("CHARACTER_MAXIMUM_LENGTH"),
+                bigint_column("CHARACTER_OCTET_LENGTH"),
+                bigint_column("NUMERIC_PRECISION"),
+                bigint_column("NUMERIC_SCALE"),
+                bigint_column("DATETIME_PRECISION"),
+                string_column("CHARACTER_SET_NAME"),
+                string_column("COLLATION_NAME"),
+                string_column("DTD_IDENTIFIER"),
+                string_column("ROUTINE_BODY"),
+                string_column("ROUTINE_DEFINITION"),
+                string_column("EXTERNAL_NAME"),
+                string_column("EXTERNAL_LANGUAGE"),
+                string_column("PARAMETER_STYLE"),
+                string_column("IS_DETERMINISTIC"),
+                string_column("SQL_DATA_ACCESS"),
+                string_column("SQL_PATH"),
+                string_column("SECURITY_TYPE"),
+                datetime_column("CREATED"),
+                datetime_column("LAST_ALTERED"),
+                string_column("SQL_MODE"),
+                string_column("ROUTINE_COMMENT"),
+                string_column("DEFINER"),
+                string_column("CHARACTER_SET_CLIENT"),
+                string_column("COLLATION_CONNECTION"),
+                string_column("DATABASE_COLLATION"),
+            ],
+            vec![],
+        ),
+
+        SCHEMA_PRIVILEGES => (
+            vec![
+                string_column("GRANTEE"),
+                string_column("TABLE_CATALOG"),
+                string_column("TABLE_SCHEMA"),
+                string_column("PRIVILEGE_TYPE"),
+                string_column("IS_GRANTABLE"),
+            ],
+            vec![],
+        ),
+
+        TABLE_PRIVILEGES => (
+            vec![
+                string_column("GRANTEE"),
+                string_column("TABLE_CATALOG"),
+                string_column("TABLE_SCHEMA"),
+                string_column("TABLE_NAME"),
+                string_column("PRIVILEGE_TYPE"),
+                string_column("IS_GRANTABLE"),
+            ],
+            vec![],
+        ),
+
+        TRIGGERS => (
+            vec![
+                string_column("TRIGGER_CATALOG"),
+                string_column("TRIGGER_SCHEMA"),
+                string_column("TRIGGER_NAME"),
+                string_column("EVENT_MANIPULATION"),
+                string_column("EVENT_OBJECT_CATALOG"),
+                string_column("EVENT_OBJECT_SCHEMA"),
+                string_column("EVENT_OBJECT_TABLE"),
+                bigint_column("ACTION_ORDER"),
+                string_column("ACTION_CONDITION"),
+                string_column("ACTION_STATEMENT"),
+                string_column("ACTION_ORIENTATION"),
+                string_column("ACTION_TIMING"),
+                string_column("ACTION_REFERENCE_OLD_TABLE"),
+                string_column("ACTION_REFERENCE_NEW_TABLE"),
+                string_column("ACTION_REFERENCE_OLD_ROW"),
+                string_column("ACTION_REFERENCE_NEW_ROW"),
+                datetime_column("CREATED"),
+                string_column("SQL_MODE"),
+                string_column("DEFINER"),
+                string_column("CHARACTER_SET_CLIENT"),
+                string_column("COLLATION_CONNECTION"),
+                string_column("DATABASE_COLLATION"),
+            ],
+            vec![],
+        ),
+
+        // TODO: Considering store internal metrics in `global_status` and
+        // `session_status` tables.
+        GLOBAL_STATUS => (
+            vec![
+                string_column("VARIABLE_NAME"),
+                string_column("VARIABLE_VALUE"),
+            ],
+            vec![],
+        ),
+
+        SESSION_STATUS => (
+            vec![
+                string_column("VARIABLE_NAME"),
+                string_column("VARIABLE_VALUE"),
+            ],
+            vec![],
+        ),
+
         _ => unreachable!("Unknown table in information_schema: {}", table_name),
     };
 

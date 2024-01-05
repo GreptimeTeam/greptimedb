@@ -22,11 +22,12 @@ use std::sync::Arc;
 use catalog::memory::MemoryCatalogManager;
 use common_base::Plugins;
 use common_config::wal::{KafkaConfig, RaftEngineConfig};
-use common_config::{WalConfig, WAL_OPTIONS_KEY};
+use common_config::WalConfig;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_meta::key::datanode_table::{DatanodeTableManager, DatanodeTableValue};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::wal::prepare_wal_option;
 pub use common_procedure::options::ProcedureConfig;
 use common_runtime::Runtime;
 use common_telemetry::{error, info, warn};
@@ -98,7 +99,7 @@ impl Datanode {
         self.start_telemetry();
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start()
+            t.start(None).context(StartServerSnafu)?
         }
 
         self.start_services().await
@@ -538,13 +539,11 @@ async fn open_all_regions(
         for region_number in table_value.regions {
             // Augments region options with wal options if a wal options is provided.
             let mut region_options = table_value.region_info.region_options.clone();
-            table_value
-                .region_info
-                .region_wal_options
-                .get(&region_number.to_string())
-                .and_then(|wal_options| {
-                    region_options.insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
-                });
+            prepare_wal_option(
+                &mut region_options,
+                RegionId::new(table_value.table_id, region_number),
+                &table_value.region_info.region_wal_options,
+            );
 
             regions.push((
                 RegionId::new(table_value.table_id, region_number),

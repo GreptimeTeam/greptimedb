@@ -253,10 +253,6 @@ impl StartCommand {
         .context(StartFrontendSnafu)?;
 
         instance
-            .build_export_metrics_task(&opts.export_metrics)
-            .context(StartFrontendSnafu)?;
-
-        instance
             .build_servers(opts)
             .await
             .context(StartFrontendSnafu)?;

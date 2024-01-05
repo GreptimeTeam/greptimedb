@@ -125,7 +125,8 @@ fn test_writer_reader_with_empty_sync() {
         "Test 1234".to_string(),
     )]));
 
-    writer.finish().unwrap();
+    let written_bytes = writer.finish().unwrap();
+    assert!(written_bytes > 0);
 
     let mut buf = Cursor::new(buf.into_inner());
     let mut reader = PuffinFileReader::new(&mut buf);
@@ -150,7 +151,8 @@ async fn test_writer_reader_empty_async() {
         "Test 1234".to_string(),
     )]));
 
-    writer.finish().await.unwrap();
+    let written_bytes = writer.finish().await.unwrap();
+    assert!(written_bytes > 0);
 
     let mut buf = AsyncCursor::new(buf.into_inner());
     let mut reader = PuffinFileReader::new(&mut buf);
@@ -194,7 +196,8 @@ fn test_writer_reader_sync() {
         "Test 1234".to_string(),
     )]));
 
-    writer.finish().unwrap();
+    let written_bytes = writer.finish().unwrap();
+    assert!(written_bytes > 0);
 
     let mut buf = Cursor::new(buf.into_inner());
     let mut reader = PuffinFileReader::new(&mut buf);
@@ -257,7 +260,8 @@ async fn test_writer_reader_async() {
         "Test 1234".to_string(),
     )]));
 
-    writer.finish().await.unwrap();
+    let written_bytes = writer.finish().await.unwrap();
+    assert!(written_bytes > 0);
 
     let mut buf = AsyncCursor::new(buf.into_inner());
     let mut reader = PuffinFileReader::new(&mut buf);

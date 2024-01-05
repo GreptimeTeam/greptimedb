@@ -24,26 +24,26 @@ pub const REGION_ID: &str = "region_id";
 lazy_static! {
     /// The elapsed time of handling a request in the region_server.
     pub static ref HANDLE_REGION_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
-        "datanode_handle_region_request_elapsed",
+        "greptime_datanode_handle_region_request_elapsed",
         "datanode handle region request elapsed",
         &[REGION_REQUEST_TYPE]
     )
     .unwrap();
     /// The elapsed time since the last received heartbeat.
     pub static ref LAST_RECEIVED_HEARTBEAT_ELAPSED: IntGauge = register_int_gauge!(
-        "last_received_heartbeat_lease_elapsed",
+        "greptime_last_received_heartbeat_lease_elapsed",
         "last received heartbeat lease elapsed",
     )
     .unwrap();
     pub static ref LEASE_EXPIRED_REGION: IntGaugeVec = register_int_gauge_vec!(
-        "lease_expired_region",
+        "greptime_lease_expired_region",
         "lease expired region",
         &[REGION_ID]
     )
     .unwrap();
     /// The received region leases via heartbeat.
     pub static ref HEARTBEAT_REGION_LEASES: IntGaugeVec = register_int_gauge_vec!(
-        "heartbeat_region_leases",
+        "greptime_heartbeat_region_leases",
         "received region leases via heartbeat",
         &[REGION_ROLE]
     )

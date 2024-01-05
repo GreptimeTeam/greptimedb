@@ -187,7 +187,7 @@ impl LogStore for KafkaLogStore {
 
         let mut stream_consumer = StreamConsumerBuilder::new(client, StartOffset::At(start_offset))
             .with_max_batch_size(self.config.max_batch_size.as_bytes() as i32)
-            .with_max_wait_ms(self.config.produce_record_timeout.as_millis() as i32)
+            .with_max_wait_ms(self.config.consumer_wait_timeout.as_millis() as i32)
             .build();
 
         debug!(

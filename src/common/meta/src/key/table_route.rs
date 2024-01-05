@@ -16,12 +16,14 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use super::{DeserializedValueWithBytes, TableMetaValue};
-use crate::error::{Result, SerdeJsonSnafu, UnexpectedLogicalRouteTableSnafu};
+use crate::error::{
+    Result, SerdeJsonSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+};
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
@@ -53,7 +55,8 @@ pub struct PhysicalTableRouteValue {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct LogicalTableRouteValue {
-    // TODO(LFC): Add table route for MetricsEngine table.
+    physical_table_id: TableId,
+    region_ids: Vec<RegionId>,
 }
 
 impl TableRouteValue {
@@ -66,7 +69,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         let version = self.physical_table_route().version;
@@ -84,18 +87,20 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self.physical_table_route().version)
     }
 
-    /// Returns the corresponding [RegionRoute].
+    /// Returns the corresponding [RegionRoute], returns `None` if it's the specific region is not found.
+    ///
+    /// Note: It throws an error if it's a logical table
     pub fn region_route(&self, region_id: RegionId) -> Result<Option<RegionRoute>> {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(self
@@ -116,7 +121,7 @@ impl TableRouteValue {
         ensure!(
             self.is_physical(),
             UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             }
         );
         Ok(&self.physical_table_route().region_routes)
@@ -174,12 +179,19 @@ impl PhysicalTableRouteValue {
 }
 
 impl LogicalTableRouteValue {
-    pub fn physical_table_id(&self) -> TableId {
-        todo!()
+    pub fn new(physical_table_id: TableId, region_ids: Vec<RegionId>) -> Self {
+        Self {
+            physical_table_id,
+            region_ids,
+        }
     }
 
-    pub fn region_ids(&self) -> Vec<RegionId> {
-        todo!()
+    pub fn physical_table_id(&self) -> TableId {
+        self.physical_table_id
+    }
+
+    pub fn region_ids(&self) -> &Vec<RegionId> {
+        &self.region_ids
     }
 }
 
@@ -324,6 +336,54 @@ impl TableRouteManager {
             .transpose()
     }
 
+    pub async fn get_physical_table_id(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<TableId> {
+        let table_route = self
+            .get(logical_or_physical_table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu {
+                table_id: logical_or_physical_table_id,
+            })?
+            .into_inner();
+
+        match table_route {
+            TableRouteValue::Physical(_) => Ok(logical_or_physical_table_id),
+            TableRouteValue::Logical(x) => Ok(x.physical_table_id()),
+        }
+    }
+
+    pub async fn get_physical_table_route(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<(TableId, PhysicalTableRouteValue)> {
+        let table_route = self
+            .get(logical_or_physical_table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu {
+                table_id: logical_or_physical_table_id,
+            })?
+            .into_inner();
+
+        match table_route {
+            TableRouteValue::Physical(x) => Ok((logical_or_physical_table_id, x)),
+            TableRouteValue::Logical(x) => {
+                let physical_table_id = x.physical_table_id();
+                let physical_table_route =
+                    self.get(physical_table_id)
+                        .await?
+                        .context(TableRouteNotFoundSnafu {
+                            table_id: physical_table_id,
+                        })?;
+                Ok((
+                    physical_table_id,
+                    physical_table_route.physical_table_route().clone(),
+                ))
+            }
+        }
+    }
+
     /// It may return a subset of the `table_ids`.
     pub async fn batch_get(
         &self,
@@ -376,7 +436,7 @@ impl TableRouteManager {
     ) -> Result<Option<RegionDistribution>> {
         self.get(table_id)
             .await?
-            .map(|table_route| region_distribution(table_route.region_routes()?))
+            .map(|table_route| Ok(region_distribution(table_route.region_routes()?)))
             .transpose()
     }
 }

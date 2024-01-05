@@ -36,8 +36,8 @@ pub struct PuffinFileWriter<W> {
     /// The metadata of the blobs
     blob_metadata: Vec<BlobMetadata>,
 
-    /// The offset of the next blob
-    next_blob_offset: u64,
+    /// The number of bytes written
+    written_bytes: u64,
 }
 
 impl<W> PuffinFileWriter<W> {
@@ -46,7 +46,7 @@ impl<W> PuffinFileWriter<W> {
             writer,
             properties: HashMap::new(),
             blob_metadata: Vec::new(),
-            next_blob_offset: 0,
+            written_bytes: 0,
         }
     }
 
@@ -59,7 +59,7 @@ impl<W> PuffinFileWriter<W> {
         BlobMetadataBuilder::default()
             .blob_type(typ)
             .properties(properties)
-            .offset(self.next_blob_offset as _)
+            .offset(self.written_bytes as _)
             .length(size as _)
             .build()
             .expect("Required fields are not set")
@@ -79,14 +79,16 @@ impl<W: io::Write> PuffinSyncWriter for PuffinFileWriter<W> {
         let blob_metadata = self.create_blob_metadata(blob.blob_type, blob.properties, size);
         self.blob_metadata.push(blob_metadata);
 
-        self.next_blob_offset += size;
+        self.written_bytes += size;
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<()> {
+    fn finish(&mut self) -> Result<usize> {
         self.write_header_if_needed_sync()?;
         self.write_footer_sync()?;
-        self.writer.flush().context(FlushSnafu)
+        self.writer.flush().context(FlushSnafu)?;
+
+        Ok(self.written_bytes as usize)
     }
 }
 
@@ -106,23 +108,25 @@ impl<W: AsyncWrite + Unpin + Send> PuffinAsyncWriter for PuffinFileWriter<W> {
         let blob_metadata = self.create_blob_metadata(blob.blob_type, blob.properties, size);
         self.blob_metadata.push(blob_metadata);
 
-        self.next_blob_offset += size;
+        self.written_bytes += size;
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<()> {
+    async fn finish(&mut self) -> Result<usize> {
         self.write_header_if_needed_async().await?;
         self.write_footer_async().await?;
         self.writer.flush().await.context(FlushSnafu)?;
-        self.writer.close().await.context(CloseSnafu)
+        self.writer.close().await.context(CloseSnafu)?;
+
+        Ok(self.written_bytes as usize)
     }
 }
 
 impl<W: io::Write> PuffinFileWriter<W> {
     fn write_header_if_needed_sync(&mut self) -> Result<()> {
-        if self.next_blob_offset == 0 {
+        if self.written_bytes == 0 {
             self.writer.write_all(&MAGIC).context(WriteSnafu)?;
-            self.next_blob_offset += MAGIC.len() as u64;
+            self.written_bytes += MAGIC.len() as u64;
         }
         Ok(())
     }
@@ -134,15 +138,17 @@ impl<W: io::Write> PuffinFileWriter<W> {
         )
         .into_footer_bytes()?;
 
-        self.writer.write_all(&bytes).context(WriteSnafu)
+        self.writer.write_all(&bytes).context(WriteSnafu)?;
+        self.written_bytes += bytes.len() as u64;
+        Ok(())
     }
 }
 
 impl<W: AsyncWrite + Unpin> PuffinFileWriter<W> {
     async fn write_header_if_needed_async(&mut self) -> Result<()> {
-        if self.next_blob_offset == 0 {
+        if self.written_bytes == 0 {
             self.writer.write_all(&MAGIC).await.context(WriteSnafu)?;
-            self.next_blob_offset += MAGIC.len() as u64;
+            self.written_bytes += MAGIC.len() as u64;
         }
         Ok(())
     }
@@ -154,6 +160,8 @@ impl<W: AsyncWrite + Unpin> PuffinFileWriter<W> {
         )
         .into_footer_bytes()?;
 
-        self.writer.write_all(&bytes).await.context(WriteSnafu)
+        self.writer.write_all(&bytes).await.context(WriteSnafu)?;
+        self.written_bytes += bytes.len() as u64;
+        Ok(())
     }
 }

@@ -23,6 +23,7 @@ use common_meta::RegionIdent;
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::storage::RegionNumber;
 
 use super::invalidate_cache::InvalidateCache;
 use super::{RegionFailoverContext, State};
@@ -36,7 +37,7 @@ pub(super) struct UpdateRegionMetadata {
     region_storage_path: String,
     region_options: HashMap<String, String>,
     #[serde(default)]
-    region_wal_options: HashMap<String, String>,
+    region_wal_options: HashMap<RegionNumber, String>,
 }
 
 impl UpdateRegionMetadata {
@@ -44,7 +45,7 @@ impl UpdateRegionMetadata {
         candidate: Peer,
         region_storage_path: String,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<String, String>,
+        region_wal_options: HashMap<RegionNumber, String>,
     ) -> Self {
         Self {
             candidate,
@@ -88,7 +89,7 @@ impl UpdateRegionMetadata {
         let mut new_region_routes = table_route_value
             .region_routes()
             .context(error::UnexpectedLogicalRouteTableSnafu {
-                err_msg: "{self:?} is a non-physical TableRouteValue.",
+                err_msg: format!("{self:?} is a non-physical TableRouteValue."),
             })?
             .clone();
 
@@ -422,7 +423,7 @@ mod tests {
                 .unwrap()
                 .into_inner();
 
-            let map = region_distribution(table_route_value.region_routes().unwrap()).unwrap();
+            let map = region_distribution(table_route_value.region_routes().unwrap());
             assert_eq!(map.len(), 2);
             assert_eq!(map.get(&2), Some(&vec![1, 3]));
             assert_eq!(map.get(&3), Some(&vec![2, 4]));

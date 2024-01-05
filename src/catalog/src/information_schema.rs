@@ -15,6 +15,7 @@
 mod columns;
 mod key_column_usage;
 mod memory_table;
+mod predicate;
 mod schemata;
 mod table_names;
 mod tables;
@@ -29,6 +30,7 @@ use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use paste::paste;
+pub(crate) use predicate::Predicates;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
@@ -61,6 +63,16 @@ lazy_static! {
         CHECK_CONSTRAINTS,
         EVENTS,
         FILES,
+        OPTIMIZER_TRACE,
+        PARAMETERS,
+        PROFILING,
+        REFERENTIAL_CONSTRAINTS,
+        ROUTINES,
+        SCHEMA_PRIVILEGES,
+        TABLE_PRIVILEGES,
+        TRIGGERS,
+        GLOBAL_STATUS,
+        SESSION_STATUS,
     ];
 }
 
@@ -149,7 +161,7 @@ impl InformationSchemaProvider {
     fn build_table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
-            let filter_pushdown = FilterPushDownType::Unsupported;
+            let filter_pushdown = FilterPushDownType::Inexact;
             let thin_table = ThinTable::new(table_info, filter_pushdown);
 
             let data_source = Arc::new(InformationTableDataSource::new(table));
@@ -179,6 +191,16 @@ impl InformationSchemaProvider {
             CHECK_CONSTRAINTS => setup_memory_table!(CHECK_CONSTRAINTS),
             EVENTS => setup_memory_table!(EVENTS),
             FILES => setup_memory_table!(FILES),
+            OPTIMIZER_TRACE => setup_memory_table!(OPTIMIZER_TRACE),
+            PARAMETERS => setup_memory_table!(PARAMETERS),
+            PROFILING => setup_memory_table!(PROFILING),
+            REFERENTIAL_CONSTRAINTS => setup_memory_table!(REFERENTIAL_CONSTRAINTS),
+            ROUTINES => setup_memory_table!(ROUTINES),
+            SCHEMA_PRIVILEGES => setup_memory_table!(SCHEMA_PRIVILEGES),
+            TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
+            TRIGGERS => setup_memory_table!(TRIGGERS),
+            GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
+            SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -218,7 +240,7 @@ trait InformationTable {
 
     fn schema(&self) -> SchemaRef;
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
@@ -252,7 +274,7 @@ impl DataSource for InformationTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request.projection;
+        let projection = request.projection.clone();
         let projected_schema = match &projection {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
@@ -260,7 +282,7 @@ impl DataSource for InformationTableDataSource {
 
         let stream = self
             .table
-            .to_stream()
+            .to_stream(request)
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?

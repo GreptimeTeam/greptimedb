@@ -20,7 +20,6 @@ use api::v1::region::{
 };
 use api::v1::{ColumnDef, SemanticType};
 use async_trait::async_trait;
-use common_config::WAL_OPTIONS_KEY;
 use common_error::ext::BoxedError;
 use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
@@ -48,6 +47,7 @@ use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{
     find_leader_regions, find_leaders, operating_leader_regions, RegionRoute,
 };
+use crate::wal::prepare_wal_option;
 
 pub struct CreateTableProcedure {
     pub context: DdlContext,
@@ -349,7 +349,7 @@ impl Procedure for CreateTableProcedure {
             table_ref.table,
         );
 
-        LockKey::single(key)
+        LockKey::single_exclusive(key)
     }
 }
 
@@ -455,13 +455,7 @@ impl CreateRequestBuilder {
         request.region_id = region_id.as_u64();
         request.path = storage_path;
         // Stores the encoded wal options into the request options.
-        region_wal_options
-            .get(&region_id.region_number())
-            .and_then(|wal_options| {
-                request
-                    .options
-                    .insert(WAL_OPTIONS_KEY.to_string(), wal_options.clone())
-            });
+        prepare_wal_option(&mut request.options, region_id, region_wal_options);
 
         if let Some(physical_table_id) = self.physical_table_id {
             // Logical table has the same region numbers with physical table, and they have a one-to-one mapping.
