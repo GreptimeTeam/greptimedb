@@ -62,7 +62,7 @@ impl Client {
 /// Manages client construction and accesses.
 #[derive(Debug)]
 pub(crate) struct ClientManager {
-    config: KafkaConfig,
+    pub(crate) config: KafkaConfig,
     /// Top-level client in kafka. All clients are constructed by this client.
     client_factory: RsKafkaClient,
     /// A pool maintaining a collection of clients.

@@ -72,14 +72,11 @@ impl LogStore for KafkaLogStore {
 
     /// Appends an entry to the log store and returns a response containing the entry id of the appended entry.
     async fn append(&self, entry: Self::Entry) -> Result<AppendResponse> {
-        let entry_id = RecordProducer::new(
-            entry.ns.clone(),
-            self.config.max_batch_size.as_bytes() as usize,
-        )
-        .with_entries(vec![entry])
-        .produce(&self.client_manager)
-        .await
-        .map(TryInto::try_into)??;
+        let entry_id = RecordProducer::new(entry.ns.clone())
+            .with_entries(vec![entry])
+            .produce(&self.client_manager)
+            .await
+            .map(TryInto::try_into)??;
         Ok(AppendResponse {
             last_entry_id: entry_id,
         })
@@ -97,10 +94,7 @@ impl LogStore for KafkaLogStore {
         for entry in entries {
             producers
                 .entry(entry.ns.region_id)
-                .or_insert(RecordProducer::new(
-                    entry.ns.clone(),
-                    self.config.max_batch_size.as_bytes() as usize,
-                ))
+                .or_insert_with(|| RecordProducer::new(entry.ns.clone()))
                 .push(entry);
         }
 
@@ -176,12 +170,12 @@ impl LogStore for KafkaLogStore {
             while let Some(consume_result) = stream_consumer.next().await {
                 // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
-                // The high watermark offset is the end offset of the latest record in the partition.
+                // The high watermark offset is the offset of the last record plus one.
                 let (record_and_offset, high_watermark) =
-                    consume_result.context(ConsumeRecordSnafu {
+                    consume_result.with_context(|_| ConsumeRecordSnafu {
                         ns: ns_clone.clone(),
                     })?;
-                let (record, offset) = (record_and_offset.record, record_and_offset.offset);
+                let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
 
                 debug!(
                     "Read a record at offset {} for ns {}, high watermark: {}",
@@ -189,14 +183,18 @@ impl LogStore for KafkaLogStore {
                 );
 
                 // Ignores no-op records.
-                if record.value.is_none() {
+                if kafka_record.value.is_none() {
+                    continue;
+                }
+
+                // Filters records by namespace.
+                let record = Record::try_from(kafka_record)?;
+                if record.meta.ns != ns_clone {
                     continue;
                 }
 
                 // Tries to construct an entry from records consumed so far.
-                if let Some(entry) =
-                    maybe_emit_entry(Record::try_from(record)?, &ns_clone, &mut entry_records)?
-                {
+                if let Some(entry) = maybe_emit_entry(record, &mut entry_records)? {
                     yield Ok(vec![entry]);
                 }
 

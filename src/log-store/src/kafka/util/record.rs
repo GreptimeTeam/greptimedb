@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rskafka::record::Record as KafkaRecord;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use snafu::{ensure, OptionExt, ResultExt};
 
 use crate::error::{
     ChecksumMismatchedSnafu, DecodeJsonSnafu, EmptyEntriesSnafu, EncodeJsonSnafu, GetClientSnafu,
-    IllegalSequenceSnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
+    IllegalSequenceSnafu, MissingKeySnafu, MissingValueSnafu, ProduceRecordSnafu, Result,
 };
 use crate::kafka::client_manager::ClientManagerRef;
 use crate::kafka::util::offset::Offset;
@@ -83,7 +83,7 @@ pub struct RecordMeta {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Record {
     /// The metadata of the record.
-    meta: RecordMeta,
+    pub meta: RecordMeta,
     /// The payload of the record.
     data: Vec<u8>,
 }
@@ -106,36 +106,28 @@ impl TryFrom<KafkaRecord> for Record {
     type Error = crate::error::Error;
 
     fn try_from(kafka_record: KafkaRecord) -> Result<Self> {
-        let key = kafka_record.key.unwrap();
-        let meta = serde_json::from_slice(&key)
-            .context(DecodeJsonSnafu)
-            .unwrap();
+        let key = kafka_record.key.context(MissingKeySnafu)?;
+        let meta = serde_json::from_slice(&key).context(DecodeJsonSnafu)?;
         let data = kafka_record.value.context(MissingValueSnafu)?;
         Ok(Self { meta, data })
     }
 }
 
-impl TryFrom<Vec<Record>> for EntryImpl {
-    type Error = crate::error::Error;
-
-    fn try_from(records: Vec<Record>) -> Result<Self> {
-        check_records(&records)?;
-
+impl From<Vec<Record>> for EntryImpl {
+    fn from(records: Vec<Record>) -> Self {
         let entry_id = records[0].meta.entry_id;
         let ns = records[0].meta.ns.clone();
         let data = records.into_iter().flat_map(|record| record.data).collect();
-        Ok(EntryImpl {
+        EntryImpl {
             data,
             id: entry_id,
             ns,
-        })
+        }
     }
 }
 
 /// Produces a record to a kafka topic.
 pub(crate) struct RecordProducer {
-    /// The max size (in bytes) of a Kafka record.
-    max_record_size: usize,
     /// The namespace of the entries.
     ns: NamespaceImpl,
     /// Entries are buffered before being built into a record.
@@ -144,9 +136,8 @@ pub(crate) struct RecordProducer {
 
 impl RecordProducer {
     /// Creates a new producer for producing entries with the given namespace.
-    pub(crate) fn new(ns: NamespaceImpl, max_record_size: usize) -> Self {
+    pub(crate) fn new(ns: NamespaceImpl) -> Self {
         Self {
-            max_record_size,
             ns,
             entries: Vec::new(),
         }
@@ -181,18 +172,20 @@ impl RecordProducer {
 
         // Stores the offset of the last successfully produced record.
         let mut last_offset = None;
+        let max_record_size =
+            client_manager.config.max_batch_size.as_bytes() as usize - ESTIMATED_META_SIZE;
         for entry in self.entries {
-            for record in build_records(entry, self.max_record_size - ESTIMATED_META_SIZE) {
+            for record in build_records(entry, max_record_size) {
                 let kafka_record = KafkaRecord::try_from(record)?;
                 // Records of a certain region cannot be produced in parallel since their order must be static.
                 let offset = producer
                     .produce(kafka_record.clone())
                     .await
                     .map(Offset)
-                    .context(ProduceRecordSnafu {
+                    .with_context(|_| ProduceRecordSnafu {
                         topic: &self.ns.topic,
                         size: kafka_record.approximate_size(),
-                        limit: self.max_record_size,
+                        limit: max_record_size,
                     })?;
                 last_offset = Some(offset);
             }
@@ -200,69 +193,6 @@ impl RecordProducer {
         // Safety: there must be at least one record produced when the entries are guaranteed not empty.
         Ok(last_offset.unwrap())
     }
-}
-
-fn check_records(records: &[Record]) -> Result<()> {
-    let len = records.len();
-    ensure!(
-        len > 0,
-        IllegalSequenceSnafu {
-            error: "Empty sequence"
-        }
-    );
-
-    let mut sequence = Vec::with_capacity(len);
-    let mut entry_ids = HashSet::with_capacity(len);
-    let mut namespaces = HashSet::with_capacity(len);
-    let mut checksum_matched = HashSet::with_capacity(len);
-    for record in records {
-        sequence.push(i32::from(record.meta.tp));
-        entry_ids.insert(record.meta.entry_id);
-        namespaces.insert(&record.meta.ns);
-        checksum_matched.insert(record.meta.checksum == crc32fast::hash(&record.data));
-    }
-
-    ensure!(
-        entry_ids.len() == 1,
-        IllegalSequenceSnafu {
-            error: "Non-unique entry ids"
-        }
-    );
-
-    ensure!(
-        namespaces.len() == 1,
-        IllegalSequenceSnafu {
-            error: "Non-unique namespaces"
-        }
-    );
-
-    ensure!(
-        checksum_matched.len() == 1 && checksum_matched.contains(&true),
-        ChecksumMismatchedSnafu
-    );
-
-    if len == 1 {
-        // A sequence with a single record must contain only a Full record.
-        if sequence[0] != i32::from(RecordType::Full) {
-            return IllegalSequenceSnafu {
-                error: "Missing Full record",
-            }
-            .fail();
-        }
-    } else {
-        // A sequence with multiple records must start with a First record and end with a Last record.
-        // In addition, the Middle records must in order.
-        let prefix = (0..(len - 1) as i32).collect::<Vec<_>>();
-        ensure!(
-            sequence[0..len - 1] == prefix
-                && sequence.last().unwrap() == &i32::from(RecordType::Last),
-            IllegalSequenceSnafu {
-                error: "Out of order",
-            }
-        );
-    }
-
-    Ok(())
 }
 
 fn record_type(seq: usize, num_records: usize) -> RecordType {
@@ -309,13 +239,52 @@ fn build_records(entry: EntryImpl, max_record_size: usize) -> Vec<Record> {
 
 pub fn maybe_emit_entry(
     record: Record,
-    ns: &NamespaceImpl,
     entry_records: &mut HashMap<EntryId, Vec<Record>>,
 ) -> Result<Option<EntryImpl>> {
+    ensure!(
+        record.meta.checksum == crc32fast::hash(&record.data),
+        ChecksumMismatchedSnafu
+    );
+
     let mut entry = None;
     match record.meta.tp {
         RecordType::Full => {
-            entry = Some(EntryImpl::try_from(vec![record])?);
+            entry = Some(EntryImpl::from(vec![record]));
+        }
+        RecordType::First => {
+            ensure!(
+                !entry_records.contains_key(&record.meta.entry_id),
+                IllegalSequenceSnafu {
+                    error: "First record must be the first"
+                }
+            );
+            entry_records.insert(record.meta.entry_id, vec![record]);
+        }
+        RecordType::Middle(seq) => {
+            let Some(prefix) = entry_records.get_mut(&record.meta.entry_id) else {
+                return IllegalSequenceSnafu {
+                    error: "Middle record must not be the first",
+                }
+                .fail();
+            };
+            // Safety: the records are guaranteed not empty if the key exists.
+            let last_record = prefix.last().unwrap();
+            let legal = match last_record.meta.tp {
+                // Legal if this record follows a First record.
+                RecordType::First => seq == 1,
+                // Legal if this record follows a Middle record just prior to this record.
+                RecordType::Middle(last_seq) => last_seq + 1 == seq,
+                // Illegal sequence.
+                _ => false,
+            };
+            ensure!(
+                legal,
+                IllegalSequenceSnafu {
+                    error: "Illegal prefix for a Middle record"
+                }
+            );
+
+            prefix.push(record);
         }
         RecordType::Last => {
             // There must have a sequence prefix before a Last record is read.
@@ -323,26 +292,13 @@ pub fn maybe_emit_entry(
                 entry_records
                     .remove(&record.meta.entry_id)
                     .context(IllegalSequenceSnafu {
-                        error: "Missing sequence prefix",
+                        error: "Missing prefix for a Last record",
                     })?;
             records.push(record);
-            entry = Some(EntryImpl::try_from(records)?);
-        }
-        _ => {
-            entry_records
-                .entry(record.meta.entry_id)
-                .or_default()
-                .push(record);
+            entry = Some(EntryImpl::from(records));
         }
     }
-
-    // Filters entries by namespace.
-    if let Some(entry) = entry
-        && &entry.ns == ns
-    {
-        return Ok(Some(entry));
-    }
-    Ok(None)
+    Ok(entry)
 }
 
 #[cfg(test)]
@@ -434,138 +390,6 @@ mod tests {
         }
     }
 
-    /// Tests that the `check_records` could handle various record sequences.
-    #[test]
-    fn test_check_records() {
-        // On empty records.
-        let got = check_records(&[]).unwrap_err();
-        let expected = IllegalSequenceSnafu {
-            error: "Empty sequence",
-        }
-        .build();
-        assert_eq!(got.to_string(), expected.to_string());
-
-        // On non-unique entry ids.
-        let template = Record::default();
-        let got =
-            check_records(&[template.with_entry_id(0), template.with_entry_id(1)]).unwrap_err();
-        let expected = IllegalSequenceSnafu {
-            error: "Non-unique entry ids",
-        }
-        .build();
-        assert_eq!(got.to_string(), expected.to_string());
-
-        // On non-unique namespaces.
-        let template = Record::default();
-        let got = check_records(&[
-            template.with_ns(NamespaceImpl {
-                region_id: 1,
-                topic: "greptimedb_wal_topic".to_string(),
-            }),
-            template.with_ns(NamespaceImpl {
-                region_id: 2,
-                topic: "greptimedb_wal_topic".to_string(),
-            }),
-        ])
-        .unwrap_err();
-        let expected = IllegalSequenceSnafu {
-            error: "Non-unique namespaces",
-        }
-        .build();
-        assert_eq!(got.to_string(), expected.to_string());
-
-        // On mismatched checksums.
-        let template = Record::default()
-            .with_data(b"123")
-            .with_checksum(crc32fast::hash(b"123"));
-        let got = check_records(&[template.with_data(b"234")]).unwrap_err();
-        assert_eq!(got.to_string(), ChecksumMismatchedSnafu.build().to_string());
-
-        // On illegal record sequences.
-        let missing_full_err = IllegalSequenceSnafu {
-            error: "Missing Full record",
-        }
-        .build()
-        .to_string();
-        let out_of_order_err = IllegalSequenceSnafu {
-            error: "Out of order",
-        }
-        .build()
-        .to_string();
-
-        let template = Record::default();
-        let got = check_records(&[template.with_tp(RecordType::First)]).unwrap_err();
-        assert_eq!(got.to_string(), missing_full_err);
-
-        let got = check_records(&[template.with_tp(RecordType::Last)]).unwrap_err();
-        assert_eq!(got.to_string(), missing_full_err);
-
-        let got = check_records(&[template.with_tp(RecordType::Middle(1))]).unwrap_err();
-        assert_eq!(got.to_string(), missing_full_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::Full),
-            template.with_tp(RecordType::First),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(0)),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(1)),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(0)),
-            template.with_tp(RecordType::Last),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(2)),
-            template.with_tp(RecordType::Last),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(2)),
-            template.with_tp(RecordType::Middle(1)),
-            template.with_tp(RecordType::Last),
-        ])
-        .unwrap_err();
-        assert_eq!(got.to_string(), out_of_order_err);
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(1)),
-            template.with_tp(RecordType::Last),
-        ]);
-        assert!(got.is_ok());
-
-        let got = check_records(&[
-            template.with_tp(RecordType::First),
-            template.with_tp(RecordType::Middle(1)),
-            template.with_tp(RecordType::Middle(2)),
-            template.with_tp(RecordType::Middle(3)),
-            template.with_tp(RecordType::Last),
-        ]);
-        assert!(got.is_ok());
-    }
-
     /// Tests that the `build_records` works as expected.
     #[test]
     fn test_build_records() {
@@ -620,7 +444,7 @@ mod tests {
         assert_eq!(record, got);
     }
 
-    /// Tests that the reconstruction of an entry behaves as expected.
+    /// Tests that the reconstruction of an entry works as expected.
     #[test]
     fn test_reconstruct_entry() {
         let template = Record::default();
@@ -638,7 +462,7 @@ mod tests {
                 .with_checksum(crc32fast::hash(b"333"))
                 .with_tp(RecordType::Last),
         ];
-        let entry = EntryImpl::try_from(records.clone()).unwrap();
+        let entry = EntryImpl::from(records.clone());
         assert_eq!(records[0].meta.entry_id, entry.id);
         assert_eq!(records[0].meta.ns, entry.ns);
         assert_eq!(
@@ -652,14 +476,19 @@ mod tests {
 
     /// Tests that `maybe_emit_entry` works as expected.
     /// This test does not check for illegal record sequences since they're already tested in the `test_check_records` test.
+    // TODO(niebayes): update tests to reveal the update on maybe_emit_entry.
     #[test]
     fn test_maybe_emit_entry() {
         let ns = NamespaceImpl {
             region_id: 1,
             topic: "greptimedb_wal_topic".to_string(),
         };
-        let template = Record::default().with_ns(ns.clone());
+        let template = Record::default().with_ns(ns);
         let mut entry_records = HashMap::from([
+            (
+                1,
+                vec![template.with_entry_id(1).with_tp(RecordType::First)],
+            ),
             (
                 2,
                 vec![template.with_entry_id(2).with_tp(RecordType::First)],
@@ -673,58 +502,99 @@ mod tests {
             ),
         ]);
 
+        // A record arrives with mismatched checksum.
+        let got = maybe_emit_entry(
+            template
+                .with_data(b"123")
+                .with_checksum(crc32fast::hash(b"123") + 1),
+            &mut entry_records,
+        );
+        assert!(got.is_err());
+
         // A Full record arrives.
         let got = maybe_emit_entry(
             template.with_entry_id(0).with_tp(RecordType::Full),
-            &ns,
             &mut entry_records,
         )
         .unwrap();
         assert!(got.is_some());
 
-        // A First record arrives.
+        // A First record arrives with no prefix.
+        let got = maybe_emit_entry(
+            template.with_entry_id(0).with_tp(RecordType::First),
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_none());
+
+        // A First record arrives with some prefix.
         let got = maybe_emit_entry(
             template.with_entry_id(1).with_tp(RecordType::First),
-            &ns,
             &mut entry_records,
-        )
-        .unwrap();
-        assert!(got.is_none());
+        );
+        assert!(got.is_err());
 
-        // A Middle record arrives.
+        // A Middle record arrives with legal prefix (First).
         let got = maybe_emit_entry(
             template.with_entry_id(2).with_tp(RecordType::Middle(1)),
-            &ns,
             &mut entry_records,
         )
         .unwrap();
         assert!(got.is_none());
 
-        // A Last record arrives.
+        // A Middle record arrives with legal prefix (Middle).
+        let got = maybe_emit_entry(
+            template.with_entry_id(2).with_tp(RecordType::Middle(2)),
+            &mut entry_records,
+        )
+        .unwrap();
+        assert!(got.is_none());
+
+        // A Middle record arrives with illegal prefix.
+        let got = maybe_emit_entry(
+            template.with_entry_id(2).with_tp(RecordType::Middle(1)),
+            &mut entry_records,
+        );
+        assert!(got.is_err());
+
+        // A Middle record arrives with no prefix.
+        let got = maybe_emit_entry(
+            template.with_entry_id(22).with_tp(RecordType::Middle(1)),
+            &mut entry_records,
+        );
+        assert!(got.is_err());
+
+        // A Last record arrives with no prefix.
+        let got = maybe_emit_entry(
+            template.with_entry_id(33).with_tp(RecordType::Last),
+            &mut entry_records,
+        );
+        assert!(got.is_err());
+
+        // A Last record arrives with legal prefix.
         let got = maybe_emit_entry(
             template.with_entry_id(3).with_tp(RecordType::Last),
-            &ns,
             &mut entry_records,
         )
         .unwrap();
         assert!(got.is_some());
 
         // Check state.
-        assert_eq!(entry_records.len(), 2);
-        assert!(entry_records.contains_key(&1));
-        assert!(entry_records.contains_key(&2));
+        assert_eq!(entry_records.len(), 3);
+        assert_eq!(entry_records[&0].len(), 1);
+        assert_eq!(entry_records[&1].len(), 1);
+        assert_eq!(entry_records[&2].len(), 3);
     }
 
     #[tokio::test]
     async fn test_produce_large_entry() {
-        let max_record_size = 1024 * 1024; // 1MB.
         let topic = format!("greptimedb_wal_topic_{}", rand::thread_rng().gen::<usize>());
         let ns = NamespaceImpl {
             region_id: 1,
             topic,
         };
         let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
-        let producer = RecordProducer::new(ns.clone(), max_record_size).with_entries(vec![entry]);
+        let producer = RecordProducer::new(ns.clone()).with_entries(vec![entry]);
 
         // TODO(niebayes): get broker endpoints from env vars.
         let config = KafkaConfig {

@@ -124,6 +124,9 @@ pub enum Error {
         error: String,
     },
 
+    #[snafu(display("Missing required key in a record"))]
+    MissingKey { location: Location },
+
     #[snafu(display("Missing required value in a record"))]
     MissingValue { location: Location },
 
