@@ -25,16 +25,22 @@ use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::value::Value;
 use datatypes::vectors::StringVectorBuilder;
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::TableId;
+use store_api::storage::{ScanRequest, TableId};
 
 use super::SCHEMATA;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::information_schema::InformationTable;
+use crate::information_schema::{InformationTable, Predicates};
 use crate::CatalogManager;
+
+const CATALOG_NAME: &str = "catalog_name";
+const SCHEMA_NAME: &str = "schema_name";
+const DEFAULT_CHARACTER_SET_NAME: &str = "default_character_set_name";
+const DEFAULT_COLLATION_NAME: &str = "default_collation_name";
 
 /// The `information_schema.schemata` table implementation.
 pub(super) struct InformationSchemaSchemata {
@@ -54,15 +60,15 @@ impl InformationSchemaSchemata {
 
     pub(crate) fn schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
-            ColumnSchema::new("catalog_name", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new("schema_name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(CATALOG_NAME, ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(SCHEMA_NAME, ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
-                "default_character_set_name",
+                DEFAULT_CHARACTER_SET_NAME,
                 ConcreteDataType::string_datatype(),
                 false,
             ),
             ColumnSchema::new(
-                "default_collation_name",
+                DEFAULT_COLLATION_NAME,
                 ConcreteDataType::string_datatype(),
                 false,
             ),
@@ -92,14 +98,14 @@ impl InformationTable for InformationSchemaSchemata {
         self.schema.clone()
     }
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream> {
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         let schema = self.schema.arrow_schema().clone();
         let mut builder = self.builder();
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_schemata()
+                    .make_schemata(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)
@@ -147,12 +153,13 @@ impl InformationSchemaSchemataBuilder {
     }
 
     /// Construct the `information_schema.schemata` virtual table
-    async fn make_schemata(&mut self) -> Result<RecordBatch> {
+    async fn make_schemata(&mut self, request: Option<ScanRequest>) -> Result<RecordBatch> {
         let catalog_name = self.catalog_name.clone();
         let catalog_manager = self
             .catalog_manager
             .upgrade()
             .context(UpgradeWeakCatalogManagerRefSnafu)?;
+        let predicates = Predicates::from_scan_request(&request);
 
         for schema_name in catalog_manager.schema_names(&catalog_name).await? {
             if !catalog_manager
@@ -162,13 +169,24 @@ impl InformationSchemaSchemataBuilder {
                 continue;
             }
 
-            self.add_schema(&catalog_name, &schema_name);
+            self.add_schema(&predicates, &catalog_name, &schema_name);
         }
 
         self.finish()
     }
 
-    fn add_schema(&mut self, catalog_name: &str, schema_name: &str) {
+    fn add_schema(&mut self, predicates: &Predicates, catalog_name: &str, schema_name: &str) {
+        let row = [
+            (CATALOG_NAME, &Value::from(catalog_name)),
+            (SCHEMA_NAME, &Value::from(schema_name)),
+            (DEFAULT_CHARACTER_SET_NAME, &Value::from("utf8")),
+            (DEFAULT_COLLATION_NAME, &Value::from("utf8_bin")),
+        ];
+
+        if !predicates.eval(&row) {
+            return;
+        }
+
         self.catalog_names.push(Some(catalog_name));
         self.schema_names.push(Some(schema_name));
         self.charset_names.push(Some("utf8"));
@@ -200,7 +218,7 @@ impl DfPartitionStream for InformationSchemaSchemata {
             schema,
             futures::stream::once(async move {
                 builder
-                    .make_schemata()
+                    .make_schemata(None)
                     .await
                     .map(|x| x.into_df_record_batch())
                     .map_err(Into::into)

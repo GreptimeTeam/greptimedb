@@ -24,9 +24,9 @@ enum Stage {
 
 #[derive(Default)]
 pub(crate) struct Statistics {
-    update_cost: Duration,
-    finish_cost: Duration,
-    cleanup_cost: Duration,
+    update_elapsed: Duration,
+    finish_elapsed: Duration,
+    cleanup_eplased: Duration,
     row_count: usize,
     byte_count: usize,
 }
@@ -55,16 +55,16 @@ impl Statistics {
     fn flush(&self) {
         INDEX_CREATE_ELAPSED
             .with_label_values(&["update"])
-            .observe(self.update_cost.as_secs_f64());
+            .observe(self.update_elapsed.as_secs_f64());
         INDEX_CREATE_ELAPSED
             .with_label_values(&["finish"])
-            .observe(self.finish_cost.as_secs_f64());
+            .observe(self.finish_elapsed.as_secs_f64());
         INDEX_CREATE_ELAPSED
             .with_label_values(&["cleanup"])
-            .observe(self.cleanup_cost.as_secs_f64());
-        INDEX_CREATE_ELAPSED
-            .with_label_values(&["total"])
-            .observe((self.update_cost + self.finish_cost + self.cleanup_cost).as_secs_f64());
+            .observe(self.cleanup_eplased.as_secs_f64());
+        INDEX_CREATE_ELAPSED.with_label_values(&["total"]).observe(
+            (self.update_elapsed + self.finish_elapsed + self.cleanup_eplased).as_secs_f64(),
+        );
 
         INDEX_CREATE_ROWS_TOTAL.inc_by(self.row_count as _);
         INDEX_CREATE_BYTES_TOTAL.inc_by(self.byte_count as _);
@@ -105,13 +105,13 @@ impl Drop for TimerGuard<'_> {
     fn drop(&mut self) {
         match self.stage {
             Stage::Update => {
-                self.stats.update_cost += self.timer.elapsed();
+                self.stats.update_elapsed += self.timer.elapsed();
             }
             Stage::Finish => {
-                self.stats.finish_cost += self.timer.elapsed();
+                self.stats.finish_elapsed += self.timer.elapsed();
             }
             Stage::Cleanup => {
-                self.stats.cleanup_cost += self.timer.elapsed();
+                self.stats.cleanup_eplased += self.timer.elapsed();
             }
         }
     }

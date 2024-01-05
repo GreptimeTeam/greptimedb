@@ -40,7 +40,7 @@ impl DatanodeManager for StandaloneDatanodeManager {
 }
 
 /// Relative to [client::region::RegionRequester]
-struct RegionInvoker {
+pub struct RegionInvoker {
     region_server: RegionServer,
 }
 

@@ -17,34 +17,34 @@ use prometheus::*;
 
 lazy_static! {
     pub static ref METRIC_HANDLE_SQL_ELAPSED: Histogram =
-        register_histogram!("frontend_handle_sql_elapsed", "frontend handle sql elapsed").unwrap();
+        register_histogram!("greptime_frontend_handle_sql_elapsed", "frontend handle sql elapsed").unwrap();
     pub static ref METRIC_HANDLE_PROMQL_ELAPSED: Histogram = register_histogram!(
-        "frontend_handle_promql_elapsed",
+        "greptime_frontend_handle_promql_elapsed",
         "frontend handle promql elapsed"
     )
     .unwrap();
     pub static ref METRIC_EXEC_PLAN_ELAPSED: Histogram =
-        register_histogram!("frontend_exec_plan_elapsed", "frontend exec plan elapsed").unwrap();
+        register_histogram!("greptime_frontend_exec_plan_elapsed", "frontend exec plan elapsed").unwrap();
     pub static ref METRIC_HANDLE_SCRIPTS_ELAPSED: Histogram = register_histogram!(
-        "frontend_handle_scripts_elapsed",
+        "greptime_frontend_handle_scripts_elapsed",
         "frontend handle scripts elapsed"
     )
     .unwrap();
     pub static ref METRIC_RUN_SCRIPT_ELAPSED: Histogram =
-        register_histogram!("frontend_run_script_elapsed", "frontend run script elapsed").unwrap();
+        register_histogram!("greptime_frontend_run_script_elapsed", "frontend run script elapsed").unwrap();
     /// The samples count of Prometheus remote write.
     pub static ref PROM_STORE_REMOTE_WRITE_SAMPLES: IntCounter = register_int_counter!(
-        "frontend_prometheus_remote_write_samples",
+        "greptime_frontend_prometheus_remote_write_samples",
         "frontend prometheus remote write samples"
     )
     .unwrap();
     pub static ref OTLP_METRICS_ROWS: IntCounter = register_int_counter!(
-        "frontend_otlp_metrics_rows",
+        "greptime_frontend_otlp_metrics_rows",
         "frontend otlp metrics rows"
     )
     .unwrap();
     pub static ref OTLP_TRACES_ROWS: IntCounter = register_int_counter!(
-        "frontend_otlp_traces_rows",
+        "greptime_frontend_otlp_traces_rows",
         "frontend otlp traces rows"
     )
     .unwrap();

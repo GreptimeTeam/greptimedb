@@ -133,8 +133,7 @@ impl SstIndexCreator {
         }
 
         let finish_res = self.do_finish().await;
-
-        // clean up garbage no matter finish success or not
+        // clean up garbage no matter finish successfully or not
         if let Err(err) = self.do_cleanup().await {
             warn!(
                 err; "Failed to clean up index creator, region_dir: {}, sst_file_id: {}",
@@ -159,13 +158,14 @@ impl SstIndexCreator {
 
         let n = batch.num_rows();
         guard.inc_row_count(n);
+
         for (column_name, field, value) in self.codec.decode(batch.primary_key())? {
             if let Some(value) = value.as_ref() {
                 self.value_buf.clear();
                 IndexValueCodec::encode_value(value.as_value_ref(), field, &mut self.value_buf)?;
             }
 
-            // null value -> None
+            // non-null value -> Some(enocded_bytes), null value -> None
             let v = value.is_some().then_some(self.value_buf.as_slice());
             self.index_creator
                 .push_with_name_n(column_name, v, n)
@@ -178,6 +178,25 @@ impl SstIndexCreator {
 
     async fn do_finish(&mut self) -> Result<()> {
         let mut guard = self.stats.record_finish();
+
+        // Data flow of finishing index:
+        //
+        // ```text
+        //                               (In Memory Buffer)
+        //                                    ┌──────┐
+        //  ┌─────────────┐                   │ PIPE │
+        //  │             │ write index data  │      │
+        //  │ IndexWriter ├──────────────────►│ tx   │
+        //  │             │                   │      │
+        //  └─────────────┘                   │      │
+        //                  ┌─────────────────┤ rx   │
+        //  ┌─────────────┐ │ read as blob    └──────┘
+        //  │             │ │
+        //  │ PuffinWriter├─┤
+        //  │             │ │ copy to file    ┌──────┐
+        //  └─────────────┘ └────────────────►│ File │
+        //                                    └──────┘
+        // ```
 
         let file_path = location::index_file_path(&self.region_dir, self.sst_file_id);
         let file_writer = self

@@ -15,6 +15,7 @@
 mod columns;
 mod key_column_usage;
 mod memory_table;
+mod predicate;
 mod schemata;
 mod table_names;
 mod tables;
@@ -29,6 +30,7 @@ use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use lazy_static::lazy_static;
 use paste::paste;
+pub(crate) use predicate::Predicates;
 use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::{ScanRequest, TableId};
@@ -159,7 +161,7 @@ impl InformationSchemaProvider {
     fn build_table(&self, name: &str) -> Option<TableRef> {
         self.information_table(name).map(|table| {
             let table_info = Self::table_info(self.catalog_name.clone(), &table);
-            let filter_pushdown = FilterPushDownType::Unsupported;
+            let filter_pushdown = FilterPushDownType::Inexact;
             let thin_table = ThinTable::new(table_info, filter_pushdown);
 
             let data_source = Arc::new(InformationTableDataSource::new(table));
@@ -238,7 +240,7 @@ trait InformationTable {
 
     fn schema(&self) -> SchemaRef;
 
-    fn to_stream(&self) -> Result<SendableRecordBatchStream>;
+    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
     fn table_type(&self) -> TableType {
         TableType::Temporary
@@ -272,7 +274,7 @@ impl DataSource for InformationTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request.projection;
+        let projection = request.projection.clone();
         let projected_schema = match &projection {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
@@ -280,7 +282,7 @@ impl DataSource for InformationTableDataSource {
 
         let stream = self
             .table
-            .to_stream()
+            .to_stream(request)
             .map_err(BoxedError::new)
             .context(TablesRecordBatchSnafu)
             .map_err(BoxedError::new)?
