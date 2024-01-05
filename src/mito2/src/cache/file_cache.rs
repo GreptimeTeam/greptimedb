@@ -100,17 +100,11 @@ impl FileCache {
         self.memory_index.insert(key, value).await;
     }
 
-    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
-        if self.local_store.is_exist(file_path).await? {
-            Ok(Some(self.local_store.reader(file_path).await?))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Reads a file from the cache.
     pub(crate) async fn reader(&self, key: IndexKey) -> Option<Reader> {
-        if !self.memory_index.contains_key(&key) {
+        // We must use `get()` to update the estimator of the cache.
+        // See https://docs.rs/moka/latest/moka/future/struct.Cache.html#method.contains_key
+        if self.memory_index.get(&key).await.is_none() {
             CACHE_MISS.with_label_values(&[FILE_TYPE]).inc();
             return None;
         }
@@ -193,6 +187,14 @@ impl FileCache {
     /// Returns the local store of the file cache.
     pub(crate) fn local_store(&self) -> ObjectStore {
         self.local_store.clone()
+    }
+
+    async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
+        if self.local_store.is_exist(file_path).await? {
+            Ok(Some(self.local_store.reader(file_path).await?))
+        } else {
+            Ok(None)
+        }
     }
 }
 
