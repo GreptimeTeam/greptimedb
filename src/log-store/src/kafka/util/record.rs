@@ -67,7 +67,14 @@ pub struct RecordMeta {
 }
 
 /// The minimal storage unit in the Kafka log store.
-/// Our own Record will be converted into a Kafka record during producing.
+///
+/// An entry will be first converted into several Records before producing.
+/// If an entry is able to fit into a KafkaRecord, it converts to a single Record.
+/// If otherwise an entry cannot fit into a KafkaRecord, it will be split into a collection of Records.
+///
+/// A KafkaRecord is the minimal storage unit used by Kafka client and Kafka server.
+/// The Kafka client produces KafkaRecords and consumes KafkaRecords, and Kafka server stores
+/// a collection of KafkaRecords.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Record {
     /// The metadata of the record.
