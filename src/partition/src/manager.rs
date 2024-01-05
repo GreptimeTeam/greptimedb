@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use api::v1::Rows;
-use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
+use common_meta::key::table_route::TableRouteManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router;
@@ -29,7 +29,7 @@ use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use crate::columns::RangeColumnsPartitionRule;
-use crate::error::{FindLeaderSnafu, InvalidTableRouteDataSnafu, Result};
+use crate::error::{FindLeaderSnafu, Result};
 use crate::partition::{PartitionBound, PartitionDef, PartitionExpr};
 use crate::range::RangePartitionRule;
 use crate::splitter::RowSplitter;
@@ -65,38 +65,13 @@ impl PartitionRuleManager {
         }
     }
 
-    /// Find table route of given table name.
-    async fn find_table_route(&self, table_id: TableId) -> Result<TableRouteValue> {
-        let route = self
-            .table_route_manager
-            .get(table_id)
-            .await
-            .context(error::TableRouteManagerSnafu)?
-            .context(error::FindTableRoutesSnafu { table_id })?
-            .into_inner();
-        Ok(route)
-    }
-
     async fn find_region_routes(&self, table_id: TableId) -> Result<Vec<RegionRoute>> {
-        let table_route = self.find_table_route(table_id).await?;
-
-        let region_routes = match table_route {
-            TableRouteValue::Physical(x) => x.region_routes,
-
-            TableRouteValue::Logical(x) => {
-                let TableRouteValue::Physical(physical_table_route) =
-                    self.find_table_route(x.physical_table_id()).await?
-                else {
-                    return InvalidTableRouteDataSnafu {
-                        table_id: x.physical_table_id(),
-                        err_msg: "expected to be a physical table route",
-                    }
-                    .fail();
-                };
-                physical_table_route.region_routes
-            }
-        };
-        Ok(region_routes)
+        let (_, route) = self
+            .table_route_manager
+            .get_physical_table_route(table_id)
+            .await
+            .context(error::TableRouteManagerSnafu)?;
+        Ok(route.region_routes)
     }
 
     pub async fn find_table_partitions(&self, table_id: TableId) -> Result<Vec<PartitionInfo>> {
