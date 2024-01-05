@@ -331,14 +331,7 @@ impl RegionFlushTask {
                 // No data written.
                 continue;
             };
-            // Add parquet file metadata to cache
-            if let Some(metadata) = sst_info.file_metadata {
-                self.cache_manager.put_parquet_meta_data(
-                    self.region_id,
-                    file_id,
-                    Arc::new(metadata),
-                );
-            }
+
             flushed_bytes += sst_info.file_size;
             let file_meta = FileMeta {
                 region_id: self.region_id,
