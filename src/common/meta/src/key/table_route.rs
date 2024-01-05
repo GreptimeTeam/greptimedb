@@ -16,12 +16,14 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
-use snafu::{ensure, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::storage::{RegionId, RegionNumber};
 use table::metadata::TableId;
 
 use super::{DeserializedValueWithBytes, TableMetaValue};
-use crate::error::{Result, SerdeJsonSnafu, UnexpectedLogicalRouteTableSnafu};
+use crate::error::{
+    Result, SerdeJsonSnafu, TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu,
+};
 use crate::key::{to_removed_key, RegionDistribution, TableMetaKey, TABLE_ROUTE_PREFIX};
 use crate::kv_backend::txn::{Compare, CompareOp, Txn, TxnOp, TxnOpResponse};
 use crate::kv_backend::KvBackendRef;
@@ -332,6 +334,54 @@ impl TableRouteManager {
             .await?
             .map(|kv| DeserializedValueWithBytes::from_inner_slice(&kv.value))
             .transpose()
+    }
+
+    pub async fn get_physical_table_id(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<TableId> {
+        let table_route = self
+            .get(logical_or_physical_table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu {
+                table_id: logical_or_physical_table_id,
+            })?
+            .into_inner();
+
+        match table_route {
+            TableRouteValue::Physical(_) => Ok(logical_or_physical_table_id),
+            TableRouteValue::Logical(x) => Ok(x.physical_table_id()),
+        }
+    }
+
+    pub async fn get_physical_table_route(
+        &self,
+        logical_or_physical_table_id: TableId,
+    ) -> Result<(TableId, PhysicalTableRouteValue)> {
+        let table_route = self
+            .get(logical_or_physical_table_id)
+            .await?
+            .context(TableRouteNotFoundSnafu {
+                table_id: logical_or_physical_table_id,
+            })?
+            .into_inner();
+
+        match table_route {
+            TableRouteValue::Physical(x) => Ok((logical_or_physical_table_id, x)),
+            TableRouteValue::Logical(x) => {
+                let physical_table_id = x.physical_table_id();
+                let physical_table_route =
+                    self.get(physical_table_id)
+                        .await?
+                        .context(TableRouteNotFoundSnafu {
+                            table_id: physical_table_id,
+                        })?;
+                Ok((
+                    physical_table_id,
+                    physical_table_route.physical_table_route().clone(),
+                ))
+            }
+        }
     }
 
     /// It may return a subset of the `table_ids`.

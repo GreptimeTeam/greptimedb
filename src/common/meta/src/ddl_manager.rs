@@ -46,6 +46,8 @@ use crate::rpc::ddl::{
     TruncateTableTask,
 };
 use crate::rpc::router::RegionRoute;
+use crate::table_name::TableName;
+
 pub type DdlManagerRef = Arc<DdlManager>;
 
 /// The [DdlManager] provides the ability to execute Ddl.
@@ -160,11 +162,17 @@ impl DdlManager {
         cluster_id: u64,
         alter_table_task: AlterTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        physical_table_name: Option<TableName>,
     ) -> Result<ProcedureId> {
         let context = self.create_context();
 
-        let procedure =
-            AlterTableProcedure::new(cluster_id, alter_table_task, table_info_value, context)?;
+        let procedure = AlterTableProcedure::new(
+            cluster_id,
+            alter_table_task,
+            table_info_value,
+            physical_table_name,
+            context,
+        )?;
 
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -327,8 +335,38 @@ async fn handle_alter_table_task(
             table_name: table_ref.to_string(),
         })?;
 
+    let physical_table_id = ddl_manager
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_id(table_id)
+        .await?;
+
+    let physical_table_name = if physical_table_id == table_id {
+        None
+    } else {
+        let physical_table_info = &ddl_manager
+            .table_metadata_manager()
+            .table_info_manager()
+            .get(physical_table_id)
+            .await?
+            .with_context(|| error::TableInfoNotFoundSnafu {
+                table_name: table_ref.to_string(),
+            })?
+            .table_info;
+        Some(TableName {
+            catalog_name: physical_table_info.catalog_name.clone(),
+            schema_name: physical_table_info.schema_name.clone(),
+            table_name: physical_table_info.name.clone(),
+        })
+    };
+
     let id = ddl_manager
-        .submit_alter_table_task(cluster_id, alter_table_task, table_info_value)
+        .submit_alter_table_task(
+            cluster_id,
+            alter_table_task,
+            table_info_value,
+            physical_table_name,
+        )
         .await?;
 
     info!("Table: {table_id} is altered via procedure_id {id:?}");
