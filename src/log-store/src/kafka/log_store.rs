@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use common_config::wal::{KafkaConfig, KafkaWalTopic as Topic, WalOptions};
+use common_config::wal::{KafkaConfig, WalOptions};
 use common_telemetry::{debug, warn};
 use futures_util::StreamExt;
 use rskafka::client::consumer::{StartOffset, StreamConsumerBuilder};
@@ -47,26 +47,6 @@ impl KafkaLogStore {
             client_manager: Arc::new(ClientManager::try_new(config).await?),
             config: config.clone(),
         })
-    }
-
-    /// Gets the end offset of the last record in a Kafka topic.
-    /// Warning: this method is intended to be used only in testing.
-    // TODO(niebayes): use this to test that the initial offset is 1 for a Kafka log store in that
-    // a no-op record is successfully appended into each topic.
-    #[allow(unused)]
-    pub async fn get_offset(&self, topic: &Topic) -> EntryId {
-        let client = self
-            .client_manager
-            .get_or_insert(topic)
-            .await
-            .unwrap()
-            .raw_client;
-        client
-            .get_offset(OffsetAt::Latest)
-            .await
-            .map(TryInto::try_into)
-            .unwrap()
-            .unwrap()
     }
 }
 
@@ -287,6 +267,7 @@ impl LogStore for KafkaLogStore {
 
 #[cfg(test)]
 mod tests {
+    use common_config::wal::KafkaWalTopic as Topic;
     use common_test_util::get_broker_endpoints;
     use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
     use common_test_util::wal::kafka::{create_topics, BROKER_ENDPOINTS_KEY};

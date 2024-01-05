@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64 as AtomicEntryId, Ordering};
+use std::sync::Mutex;
 
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
@@ -30,7 +30,7 @@ pub struct EntryBuilder {
     next_entry_id: AtomicEntryId,
     /// A generator for supporting random data generation.
     /// Wrapped with Mutex<Option<_>> to provide interior mutability.
-    rng: RefCell<ThreadRng>,
+    rng: Mutex<Option<ThreadRng>>,
     /// The data pool from which random data is constructed.
     data_pool: Vec<u8>,
 }
@@ -47,7 +47,7 @@ impl EntryBuilder {
         Self {
             ns,
             next_entry_id: AtomicEntryId::new(0),
-            rng: RefCell::new(thread_rng()),
+            rng: Mutex::new(Some(thread_rng())),
             data_pool,
         }
     }
@@ -85,10 +85,11 @@ impl EntryBuilder {
     }
 
     fn make_random_data(&self) -> Vec<u8> {
-        let mut rng = self.rng.borrow_mut();
+        let mut guard = self.rng.lock().unwrap();
+        let rng = guard.as_mut().unwrap();
         let amount = rng.gen_range(0..self.data_pool.len());
         self.data_pool
-            .choose_multiple(&mut *rng, amount)
+            .choose_multiple(rng, amount)
             .copied()
             .collect()
     }
