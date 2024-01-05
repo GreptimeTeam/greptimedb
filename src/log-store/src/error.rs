@@ -130,9 +130,16 @@ pub enum Error {
     #[snafu(display("Cannot build a record from empty entries"))]
     EmptyEntries { location: Location },
 
-    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
+    #[snafu(display(
+        "Failed to produce records to Kafka, topic: {}, size: {}, limit: {}",
+        topic,
+        size,
+        limit,
+    ))]
     ProduceRecord {
         topic: KafkaWalTopic,
+        size: usize,
+        limit: usize,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::producer::Error,

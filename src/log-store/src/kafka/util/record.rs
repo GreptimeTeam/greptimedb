@@ -29,6 +29,10 @@ use crate::kafka::{EntryId, EntryImpl, NamespaceImpl};
 /// The current version of Record.
 pub(crate) const VERSION: u32 = 0;
 
+/// The estimated size in bytes of a serialized RecordMeta.
+/// A record is guaranteed to have sizeof(meta) + sizeof(data) <= max_batch_size - ESTIMATED_META_SIZE.
+const ESTIMATED_META_SIZE: usize = 256;
+
 /// The type of a record.
 ///
 /// If the entry is able to fit into a Kafka record, it's converted into a Full record.
@@ -178,14 +182,18 @@ impl RecordProducer {
         // Stores the offset of the last successfully produced record.
         let mut last_offset = None;
         for entry in self.entries {
-            for record in build_records(entry, self.max_record_size >> 1) {
-                let kafka_record: KafkaRecord = record.try_into()?;
+            for record in build_records(entry, self.max_record_size - ESTIMATED_META_SIZE) {
+                let kafka_record = KafkaRecord::try_from(record)?;
                 // Records of a certain region cannot be produced in parallel since their order must be static.
-                let offset = producer.produce(kafka_record).await.map(Offset).context(
-                    ProduceRecordSnafu {
+                let offset = producer
+                    .produce(kafka_record.clone())
+                    .await
+                    .map(Offset)
+                    .context(ProduceRecordSnafu {
                         topic: &self.ns.topic,
-                    },
-                )?;
+                        size: kafka_record.approximate_size(),
+                        limit: self.max_record_size,
+                    })?;
                 last_offset = Some(offset);
             }
         }
@@ -709,18 +717,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_produce_large_entry() {
-        let max_record_size = 1024;
+        let max_record_size = 1 * 1024 * 1024; // 1MB.
         let topic = format!("greptimedb_wal_topic_{}", rand::thread_rng().gen::<usize>());
         let ns = NamespaceImpl {
             region_id: 1,
             topic,
         };
-        let entry = new_test_entry([b'1'; 4096], 0, ns.clone());
+        let entry = new_test_entry([b'1'; 2000000], 0, ns.clone());
         let producer = RecordProducer::new(ns.clone(), max_record_size).with_entries(vec![entry]);
 
+        // TODO(niebayes): get broker endpoints from env vars.
         let config = KafkaConfig {
             broker_endpoints: vec!["localhost:9092".to_string()],
-            max_batch_size: ReadableSize::kb(1),
+            max_batch_size: ReadableSize::mb(1),
             ..Default::default()
         };
         let manager = Arc::new(ClientManager::try_new(&config).await.unwrap());

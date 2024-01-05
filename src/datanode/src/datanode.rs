@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
+use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::wal::{KafkaConfig, RaftEngineConfig};
 use common_config::WalConfig;
@@ -50,7 +51,7 @@ use servers::http::HttpServerBuilder;
 use servers::metrics_handler::MetricsHandler;
 use servers::server::{start_server, ServerHandler, ServerHandlers};
 use servers::Mode;
-use snafu::{OptionExt, ResultExt};
+use snafu::{ensure, OptionExt, ResultExt};
 use store_api::path_utils::{region_dir, WAL_DIR};
 use store_api::region_engine::RegionEngineRef;
 use store_api::region_request::{RegionOpenRequest, RegionRequest};
@@ -62,7 +63,7 @@ use crate::config::{DatanodeOptions, RegionEngineConfig};
 use crate::error::{
     CreateDirSnafu, GetMetadataSnafu, MissingKvBackendSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
     ParseAddrSnafu, Result, RuntimeResourceSnafu, ShutdownInstanceSnafu, ShutdownServerSnafu,
-    StartServerSnafu,
+    StartServerSnafu, TooLargeMaxBatchSizeSnafu,
 };
 use crate::event_listener::{
     new_region_server_event_channel, NoopRegionServerEventListener, RegionServerEventListenerRef,
@@ -505,6 +506,13 @@ impl DatanodeBuilder {
 
     /// Builds [KafkaLogStore].
     async fn build_kafka_log_store(config: &KafkaConfig) -> Result<Arc<KafkaLogStore>> {
+        ensure!(
+            config.max_batch_size <= ReadableSize::mb(1),
+            TooLargeMaxBatchSizeSnafu {
+                max_batch_size: config.max_batch_size
+            }
+        );
+
         KafkaLogStore::try_new(config)
             .await
             .map_err(Box::new)
