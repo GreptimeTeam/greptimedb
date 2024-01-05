@@ -184,12 +184,18 @@ impl LogStore for KafkaLogStore {
 
                 // Ignores no-op records.
                 if kafka_record.value.is_none() {
+                    if check_termination(offset, end_offset, &entry_records)? {
+                        break;
+                    }
                     continue;
                 }
 
                 // Filters records by namespace.
                 let record = Record::try_from(kafka_record)?;
                 if record.meta.ns != ns_clone {
+                    if check_termination(offset, end_offset, &entry_records)? {
+                        break;
+                    }
                     continue;
                 }
 
@@ -198,21 +204,7 @@ impl LogStore for KafkaLogStore {
                     yield Ok(vec![entry]);
                 }
 
-                // Terminates the stream if the entry with the end offset was read.
-                if offset >= end_offset {
-                    debug!(
-                        "Stream consumer for ns {} terminates at offset {}",
-                        ns_clone, offset
-                    );
-
-                    // There must have no incomplete sequences when the stream terminates.
-                    if !entry_records.is_empty() {
-                        yield IllegalSequenceSnafu {
-                            error: "Incomplete record sequences",
-                        }
-                        .fail();
-                    }
-
+                if check_termination(offset, end_offset, &entry_records)? {
                     break;
                 }
             }
@@ -259,5 +251,26 @@ impl LogStore for KafkaLogStore {
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+fn check_termination(
+    offset: i64,
+    end_offset: i64,
+    entry_records: &HashMap<EntryId, Vec<Record>>,
+) -> Result<bool> {
+    // Terminates the stream if the entry with the end offset was read.
+    if offset >= end_offset {
+        debug!("Stream consumer terminates at offset {}", offset);
+        // There must have no records when the stream terminates.
+        if !entry_records.is_empty() {
+            return IllegalSequenceSnafu {
+                error: "Found records leftover",
+            }
+            .fail();
+        }
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
