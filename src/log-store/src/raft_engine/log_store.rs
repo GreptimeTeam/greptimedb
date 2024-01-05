@@ -148,7 +148,7 @@ impl RaftEngineLogStore {
                     if let Some(first_index) = self.engine.first_index(ns_id) {
                         // ensure the first in batch does not override compacted entry.
                         ensure!(
-                            e.id >= first_index,
+                            e.id > first_index,
                             OverrideCompactedEntrySnafu {
                                 namespace: ns_id,
                                 first_index,
@@ -210,7 +210,7 @@ impl LogStore for RaftEngineLogStore {
 
         if let Some(first_index) = self.engine.first_index(namespace_id) {
             ensure!(
-                entry_id >= first_index,
+                entry_id > first_index,
                 OverrideCompactedEntrySnafu {
                     namespace: namespace_id,
                     first_index,
