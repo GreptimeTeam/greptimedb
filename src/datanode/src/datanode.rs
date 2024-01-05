@@ -100,7 +100,7 @@ impl Datanode {
         self.start_telemetry();
 
         if let Some(t) = self.export_metrics_task.as_ref() {
-            t.start()
+            t.start(None).context(StartServerSnafu)?
         }
 
         self.start_services().await

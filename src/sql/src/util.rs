@@ -21,8 +21,8 @@ use sqlparser::ast::{ObjectName, SqlOption, Value};
 
 static SQL_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        Regex::new(r#"(?i)access_key_id=["'](\w*)["'].*"#).unwrap(),
-        Regex::new(r#"(?i)secret_access_key=["'](\w*)["'].*"#).unwrap(),
+        Regex::new(r#"(?i)access_key_id=["']([^"']*)["'].*"#).unwrap(),
+        Regex::new(r#"(?i)secret_access_key=["']([^"']*)["'].*"#).unwrap(),
     ]
 });
 
@@ -90,6 +90,12 @@ mod test {
         assert_eq!(
             redact_sql_secrets(
                 r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='my_key_id', SECRET_ACCESS_KEY="my_access_key");"#
+            ),
+            r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='******', SECRET_ACCESS_KEY="******");"#
+        );
+        assert_eq!(
+            redact_sql_secrets(
+                r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='@scoped/key_id', SECRET_ACCESS_KEY="@scoped/access_key");"#
             ),
             r#"COPY 'my_table' FROM '/test.orc' WITH (FORMAT = 'orc') CONNECTION(ENDPOINT = 's3.storage.site', REGION = 'hz', ACCESS_KEY_ID='******', SECRET_ACCESS_KEY="******");"#
         );

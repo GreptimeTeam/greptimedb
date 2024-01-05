@@ -394,7 +394,7 @@ impl Procedure for AlterTableProcedure {
     fn lock_key(&self) -> LockKey {
         let key = self.lock_key_inner();
 
-        LockKey::new(key)
+        LockKey::new_exclusive(key)
     }
 }
 

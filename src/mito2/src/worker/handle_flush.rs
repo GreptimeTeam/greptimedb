@@ -137,7 +137,6 @@ impl<S> RegionWorkerLoop<S> {
         row_group_size: Option<usize>,
         engine_config: Arc<MitoConfig>,
     ) -> RegionFlushTask {
-        // TODO(yingwen): metrics for flush requested.
         RegionFlushTask {
             region_id: region.region_id,
             reason,
@@ -149,6 +148,7 @@ impl<S> RegionWorkerLoop<S> {
             listener: self.listener.clone(),
             engine_config,
             row_group_size,
+            cache_manager: self.cache_manager.clone(),
         }
     }
 }

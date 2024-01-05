@@ -11,11 +11,3 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-use lazy_static::lazy_static;
-use prometheus::*;
-
-lazy_static! {
-    pub static ref METRIC_TABLE_ROUTE_GET: Histogram =
-        register_histogram!("frontend_table_route_get", "frontend table route get").unwrap();
-}

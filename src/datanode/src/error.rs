@@ -274,6 +274,16 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display(
+        "Failed to find logical regions in physical region {}",
+        physical_region_id
+    ))]
+    FindLogicalRegions {
+        physical_region_id: RegionId,
+        source: metric_engine::error::Error,
+        location: Location,
+    },
+
     #[snafu(display("Too large max_batch_size which should be less than 1MB as Kafka requires, max_batch_size: {}", max_batch_size))]
     TooLargeMaxBatchSize {
         max_batch_size: ReadableSize,
@@ -348,6 +358,8 @@ impl ErrorExt for Error {
             }
             HandleRegionRequest { source, .. } => source.status_code(),
             StopRegionEngine { source, .. } => source.status_code(),
+
+            FindLogicalRegions { source, .. } => source.status_code(),
         }
     }
 

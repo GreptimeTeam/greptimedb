@@ -86,11 +86,10 @@ provider = "raft_engine"
 # [export_metrics]
 # whether enable export metrics, default is false
 # enable = false
-# The url of metrics export endpoint, default is `frontend` default HTTP endpoint.
-# endpoint = "127.0.0.1:4000"
-# The database name of exported metrics stores, user needs to specify a valid database
-# db = ""
 # The interval of export metrics
 # write_interval = "30s"
+# [export_metrics.remote_write]
+# The url the metrics send to. The url is empty by default, url example: `http://127.0.0.1:4000/v1/prometheus/write?db=information_schema`
+# url = ""
 # HTTP headers of Prometheus remote-write carry
 # headers = {}
