@@ -461,9 +461,12 @@ impl DatanodeBuilder {
         mut config: MitoConfig,
     ) -> Result<MitoEngine> {
         // Sets write cache path if it is empty.
-        if config.write_cache_path.is_empty() {
-            config.write_cache_path = join_dir(&opts.storage.data_home, "write_cache");
-            info!("Sets write cache path to {}", config.write_cache_path);
+        if config.experimental_write_cache_path.is_empty() {
+            config.experimental_write_cache_path = join_dir(&opts.storage.data_home, "write_cache");
+            info!(
+                "Sets write cache path to {}",
+                config.experimental_write_cache_path
+            );
         }
 
         let mito_engine = match &opts.wal {

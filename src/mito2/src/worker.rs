@@ -264,7 +264,9 @@ async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
 ) -> Result<Option<WriteCacheRef>> {
-    if config.write_cache_size.as_bytes() == 0 || config.write_cache_path.is_empty() {
+    if config.experimental_write_cache_size.as_bytes() == 0
+        || config.experimental_write_cache_path.is_empty()
+    {
         return Ok(None);
     }
 
@@ -272,9 +274,9 @@ async fn write_cache_from_config(
     warn!("Write cache is an experimental feature");
 
     let cache = WriteCache::new_fs(
-        &config.write_cache_path,
+        &config.experimental_write_cache_path,
         object_store_manager,
-        config.write_cache_size,
+        config.experimental_write_cache_size,
     )
     .await?;
     Ok(Some(Arc::new(cache)))
