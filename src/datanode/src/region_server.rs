@@ -126,7 +126,10 @@ impl RegionServer {
         self.inner.handle_read(request).await
     }
 
-    pub fn opened_regions(&self) -> Vec<RegionStat> {
+    /// Returns all opened and reportable regions.
+    ///
+    /// Notes: except all metrics regions.
+    pub fn reportable_regions(&self) -> Vec<RegionStat> {
         self.inner
             .region_map
             .iter()

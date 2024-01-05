@@ -44,7 +44,7 @@ impl MetricEngineInner {
         let is_putting_physical_region = self
             .state
             .read()
-            .await
+            .unwrap()
             .physical_regions()
             .contains_key(&region_id);
 
@@ -68,7 +68,7 @@ impl MetricEngineInner {
         let physical_region_id = *self
             .state
             .read()
-            .await
+            .unwrap()
             .logical_regions()
             .get(&logical_region_id)
             .with_context(|| LogicalRegionNotFoundSnafu {
