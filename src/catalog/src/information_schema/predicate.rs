@@ -298,23 +298,10 @@ impl Predicates {
             return true;
         }
 
-        let mut result = true;
-
-        for predicate in &self.predicates {
-            match predicate.eval(row) {
-                Some(b) => {
-                    result = result && b;
-                }
-                // The predicate can't evaluate with the row, continue
-                None => continue,
-            }
-
-            if !result {
-                break;
-            }
-        }
-
-        result
+        self.predicates
+            .iter()
+            .filter_map(|p| p.eval(row))
+            .all(|b| b)
     }
 }
 
