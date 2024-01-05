@@ -29,14 +29,9 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: RegionAlterRequest,
     ) -> Result<AffectedRows> {
-        let is_altering_logical_region = self
-            .state
-            .read()
-            .await
-            .physical_regions()
-            .contains_key(&region_id);
+        let is_altering_physical_region = self.is_physical_region(region_id);
 
-        let result = if is_altering_logical_region {
+        let result = if is_altering_physical_region {
             self.alter_physical_region(region_id, request).await
         } else {
             self.alter_logical_region(region_id, request).await
@@ -51,7 +46,7 @@ impl MetricEngineInner {
         request: RegionAlterRequest,
     ) -> Result<()> {
         let physical_region_id = {
-            let state = &self.state.read().await;
+            let state = &self.state.read().unwrap();
             state.get_physical_region_id(region_id).with_context(|| {
                 error!("Trying to alter an nonexistent region {region_id}");
                 LogicalRegionNotFoundSnafu { region_id }
