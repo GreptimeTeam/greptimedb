@@ -229,7 +229,7 @@ impl IndexCreator {
         object_store: ObjectStore,
         opts: &WriteOptions,
     ) -> Self {
-        let Some(option) = &opts.inverted_index_options else {
+        let Some(option) = &opts.inverted_index else {
             debug!(
                 "Skip creating index due to config, region_id: {}, file_id: {}",
                 metadata.region_id, file_id,
@@ -258,7 +258,7 @@ impl IndexCreator {
             file_id,
             metadata,
             object_store,
-            option.memory_usage_threshold,
+            option.creation_memory_usage_threshold,
             row_group_size,
         );
 

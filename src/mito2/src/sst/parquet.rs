@@ -43,7 +43,7 @@ pub struct WriteOptions {
     /// Row group size.
     pub row_group_size: usize,
     /// Inverted index options. If it's None, inverted index will not be created.
-    pub inverted_index_options: Option<InvertedIndexCreateOptions>,
+    pub inverted_index: Option<InvertedIndexOptions>,
 }
 
 impl Default for WriteOptions {
@@ -51,16 +51,16 @@ impl Default for WriteOptions {
         WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
-            inverted_index_options: Some(InvertedIndexCreateOptions::default()),
+            inverted_index: Some(InvertedIndexOptions::default()),
         }
     }
 }
 
 #[derive(Debug, Default)]
-pub struct InvertedIndexCreateOptions {
+pub struct InvertedIndexOptions {
     /// The memory usage threshold for inverted index creation.
     /// Set to non-none value to enable external sort during inverted index creation
-    pub memory_usage_threshold: Option<usize>,
+    pub creation_memory_usage_threshold: Option<usize>,
 }
 
 /// Parquet SST info returned by the writer.
@@ -125,7 +125,12 @@ mod tests {
             ..Default::default()
         };
 
-        let mut writer = ParquetWriter::new(FILE_DIR.to_string(), handle.file_id(), metadata, object_store.clone());
+        let mut writer = ParquetWriter::new(
+            FILE_DIR.to_string(),
+            handle.file_id(),
+            metadata,
+            object_store.clone(),
+        );
         let info = writer
             .write_all(source, &write_opts)
             .await
@@ -173,7 +178,12 @@ mod tests {
             ..Default::default()
         };
         // Prepare data.
-        let mut writer = ParquetWriter::new(FILE_DIR.to_string(), handle.file_id(), metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            FILE_DIR.to_string(),
+            handle.file_id(),
+            metadata.clone(),
+            object_store.clone(),
+        );
         writer
             .write_all(source, &write_opts)
             .await
@@ -236,7 +246,12 @@ mod tests {
 
         // write the sst file and get sst info
         // sst info contains the parquet metadata, which is converted from FileMetaData
-        let mut writer = ParquetWriter::new(FILE_DIR.to_string(), handle.file_id(), metadata.clone(), object_store.clone());
+        let mut writer = ParquetWriter::new(
+            FILE_DIR.to_string(),
+            handle.file_id(),
+            metadata.clone(),
+            object_store.clone(),
+        );
         let sst_info = writer
             .write_all(source, &write_opts)
             .await

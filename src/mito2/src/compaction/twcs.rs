@@ -42,7 +42,7 @@ use crate::request::{
 };
 use crate::sst::file::{FileHandle, FileId, FileMeta, Level};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::parquet::{InvertedIndexCreateOptions, WriteOptions};
+use crate::sst::parquet::{InvertedIndexOptions, WriteOptions};
 use crate::sst::version::LevelMeta;
 
 const MAX_PARALLEL_COMPACTION: usize = 8;
@@ -301,16 +301,16 @@ impl TwcsCompactionTask {
             );
 
             let index_config = &self.engine_config.inverted_index;
-            let inverted_index_options =
-                (!index_config.disable_creation_on_compact).then(|| InvertedIndexCreateOptions {
-                    memory_usage_threshold: index_config
+            let inverted_index =
+                (!index_config.disable_creation_on_compact).then(|| InvertedIndexOptions {
+                    creation_memory_usage_threshold: index_config
                         .creation_memory_usage_threshold
                         .map(|size| size.as_bytes() as _),
                 });
 
             let write_opts = WriteOptions {
                 write_buffer_size: self.engine_config.sst_write_buffer_size,
-                inverted_index_options,
+                inverted_index,
                 ..Default::default()
             };
             let metadata = self.metadata.clone();

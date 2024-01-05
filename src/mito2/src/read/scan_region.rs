@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use common_recordbatch::SendableRecordBatchStream;
-use common_telemetry::{debug, logging};
+use common_telemetry::{debug, warn};
 use common_time::range::TimestampRange;
 use store_api::storage::ScanRequest;
 use table::predicate::{Predicate, TimeRangePredicateBuilder};
@@ -243,7 +243,7 @@ impl ScanRegion {
             self.version.metadata.as_ref(),
         )
         .build(&self.request.filters)
-        .inspect_err(|e| logging::warn!("Failed to build index applier: {}", e))
+        .inspect_err(|err| warn!(err; "Failed to build index applier"))
         .ok()
         .flatten()
         .map(Arc::new)
