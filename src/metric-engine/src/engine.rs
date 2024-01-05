@@ -22,7 +22,7 @@ mod region_metadata;
 mod state;
 
 use std::any::Any;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -35,7 +35,6 @@ use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use store_api::region_engine::{RegionEngine, RegionRole, SetReadonlyResponse};
 use store_api::region_request::{AffectedRows, RegionRequest};
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::RwLock;
 
 use self::state::MetricEngineState;
 use crate::data_region::DataRegion;
@@ -159,8 +158,14 @@ impl RegionEngine for MetricEngine {
     }
 
     /// Retrieves region's disk usage.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     async fn region_disk_usage(&self, region_id: RegionId) -> Option<i64> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.region_disk_usage(region_id).await
+        } else {
+            None
+        }
     }
 
     /// Stops the engine
@@ -192,8 +197,15 @@ impl RegionEngine for MetricEngine {
         self.inner.mito.set_readonly_gracefully(region_id).await
     }
 
+    /// Returns the physical region role.
+    ///
+    /// Note: Returns `None` if it's a logical region.
     fn role(&self, region_id: RegionId) -> Option<RegionRole> {
-        todo!()
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.role(region_id)
+        } else {
+            None
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -295,5 +307,37 @@ mod test {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_role() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env.metric().role(logical_region_id).is_none());
+        assert!(env.metric().role(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_region_disk_usage() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env
+            .metric()
+            .region_disk_usage(logical_region_id)
+            .await
+            .is_none());
+        assert!(env
+            .metric()
+            .region_disk_usage(physical_region_id)
+            .await
+            .is_some());
     }
 }

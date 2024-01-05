@@ -130,7 +130,7 @@ impl MetricEngineInner {
             .await?;
         let logical_region_num = logical_regions.len();
 
-        let mut state = self.state.write().await;
+        let mut state = self.state.write().unwrap();
         // recover physical column names
         let physical_column_names = physical_columns
             .into_iter()

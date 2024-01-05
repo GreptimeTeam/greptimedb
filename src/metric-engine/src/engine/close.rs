@@ -44,21 +44,21 @@ impl MetricEngineInner {
         if self
             .state
             .read()
-            .await
+            .unwrap()
             .physical_regions()
             .contains_key(&data_region_id)
         {
             self.close_physical_region(data_region_id).await?;
             self.state
                 .write()
-                .await
+                .unwrap()
                 .remove_physical_region(data_region_id)?;
 
             Ok(0)
         } else if self
             .state
             .read()
-            .await
+            .unwrap()
             .logical_regions()
             .contains_key(&region_id)
         {

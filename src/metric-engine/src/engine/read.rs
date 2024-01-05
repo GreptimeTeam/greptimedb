@@ -39,12 +39,7 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<SendableRecordBatchStream> {
-        let is_reading_physical_region = self
-            .state
-            .read()
-            .await
-            .physical_regions()
-            .contains_key(&region_id);
+        let is_reading_physical_region = self.is_physical_region(region_id);
 
         if is_reading_physical_region {
             info!(
@@ -88,7 +83,7 @@ impl MetricEngineInner {
         let is_reading_physical_region = self
             .state
             .read()
-            .await
+            .unwrap()
             .physical_regions()
             .contains_key(&region_id);
 
@@ -104,8 +99,17 @@ impl MetricEngineInner {
         }
     }
 
+    /// Returns true if it's a physical region.
+    pub fn is_physical_region(&self, region_id: RegionId) -> bool {
+        self.state
+            .read()
+            .unwrap()
+            .physical_regions()
+            .contains_key(&region_id)
+    }
+
     async fn get_physical_region_id(&self, logical_region_id: RegionId) -> Result<RegionId> {
-        let state = &self.state.read().await;
+        let state = &self.state.read().unwrap();
         state
             .get_physical_region_id(logical_region_id)
             .with_context(|| {

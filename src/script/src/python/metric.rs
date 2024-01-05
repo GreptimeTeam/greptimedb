@@ -16,12 +16,18 @@ use lazy_static::lazy_static;
 use prometheus::*;
 
 lazy_static! {
-    pub static ref METRIC_RSPY_INIT_ELAPSED: Histogram =
-        register_histogram!("script_rspy_init_elapsed", "script rspy init elapsed").unwrap();
-    pub static ref METRIC_RSPY_EXEC_ELAPSED: Histogram =
-        register_histogram!("script_rspy_exec_elapsed", "script rspy exec elapsed").unwrap();
+    pub static ref METRIC_RSPY_INIT_ELAPSED: Histogram = register_histogram!(
+        "greptime_script_rspy_init_elapsed",
+        "script rspy init elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_RSPY_EXEC_ELAPSED: Histogram = register_histogram!(
+        "greptime_script_rspy_exec_elapsed",
+        "script rspy exec elapsed"
+    )
+    .unwrap();
     pub static ref METRIC_RSPY_EXEC_TOTAL_ELAPSED: Histogram = register_histogram!(
-        "script_rspy_exec_total_elapsed",
+        "greptime_script_rspy_exec_total_elapsed",
         "script rspy exec total elapsed"
     )
     .unwrap();
@@ -29,12 +35,18 @@ lazy_static! {
 
 #[cfg(feature = "pyo3_backend")]
 lazy_static! {
-    pub static ref METRIC_PYO3_EXEC_ELAPSED: Histogram =
-        register_histogram!("script_pyo3_exec_elapsed", "script pyo3 exec elapsed").unwrap();
-    pub static ref METRIC_PYO3_INIT_ELAPSED: Histogram =
-        register_histogram!("script_pyo3_init_elapsed", "script pyo3 init elapsed").unwrap();
+    pub static ref METRIC_PYO3_EXEC_ELAPSED: Histogram = register_histogram!(
+        "greptime_script_pyo3_exec_elapsed",
+        "script pyo3 exec elapsed"
+    )
+    .unwrap();
+    pub static ref METRIC_PYO3_INIT_ELAPSED: Histogram = register_histogram!(
+        "greptime_script_pyo3_init_elapsed",
+        "script pyo3 init elapsed"
+    )
+    .unwrap();
     pub static ref METRIC_PYO3_EXEC_TOTAL_ELAPSED: Histogram = register_histogram!(
-        "script_pyo3_exec_total_elapsed",
+        "greptime_script_pyo3_exec_total_elapsed",
         "script pyo3 exec total elapsed"
     )
     .unwrap();

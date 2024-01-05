@@ -91,7 +91,9 @@ impl TableRouteValue {
         Ok(self.physical_table_route().version)
     }
 
-    /// Returns the corresponding [RegionRoute].
+    /// Returns the corresponding [RegionRoute], returns `None` if it's the specific region is not found.
+    ///
+    /// Note: It throws an error if it's a logical table
     pub fn region_route(&self, region_id: RegionId) -> Result<Option<RegionRoute>> {
         ensure!(
             self.is_physical(),
