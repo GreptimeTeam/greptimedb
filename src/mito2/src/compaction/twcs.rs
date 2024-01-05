@@ -318,7 +318,7 @@ impl TwcsCompactionTask {
                             file_id,
                             metadata,
                             source: Source::Reader(reader),
-                            cache_manager: cache_manager.clone(),
+                            cache_manager,
                             storage,
                         },
                         &write_opts,
