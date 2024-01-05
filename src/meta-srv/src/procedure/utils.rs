@@ -18,7 +18,7 @@ pub fn region_lock_key(table_id: TableId, region_number: RegionNumber) -> String
     format!("{}/region-{}", table_id, region_number)
 }
 
-#[cfg(test)]
+#[cfg(feature = "mock")]
 pub mod mock {
     use std::io::Error;
     use std::sync::Arc;
