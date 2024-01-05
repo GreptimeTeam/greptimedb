@@ -804,6 +804,7 @@ global_write_buffer_reject_size = "2GiB"
 sst_meta_cache_size = "128MiB"
 vector_cache_size = "512MiB"
 page_cache_size = "512MiB"
+enable_experimental_write_cache = false
 experimental_write_cache_path = ""
 experimental_write_cache_size = "512MiB"
 sst_write_buffer_size = "8MiB"

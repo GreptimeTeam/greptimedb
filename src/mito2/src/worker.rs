@@ -264,9 +264,7 @@ async fn write_cache_from_config(
     config: &MitoConfig,
     object_store_manager: ObjectStoreManagerRef,
 ) -> Result<Option<WriteCacheRef>> {
-    if config.experimental_write_cache_size.as_bytes() == 0
-        || config.experimental_write_cache_path.is_empty()
-    {
+    if !config.enable_experimental_write_cache {
         return Ok(None);
     }
 

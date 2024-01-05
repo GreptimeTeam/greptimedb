@@ -82,7 +82,7 @@ impl MitoEngine {
         log_store: Arc<S>,
         object_store_manager: ObjectStoreManagerRef,
     ) -> Result<MitoEngine> {
-        config.sanitize();
+        config.sanitize()?;
 
         Ok(MitoEngine {
             inner: Arc::new(EngineInner::new(config, log_store, object_store_manager).await?),
@@ -321,7 +321,7 @@ impl MitoEngine {
         write_buffer_manager: Option<crate::flush::WriteBufferManagerRef>,
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> Result<MitoEngine> {
-        config.sanitize();
+        config.sanitize()?;
 
         let config = Arc::new(config);
         Ok(MitoEngine {

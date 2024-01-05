@@ -470,6 +470,9 @@ pub enum Error {
         error: std::io::Error,
         location: Location,
     },
+
+    #[snafu(display("Invalid config, {reason}"))]
+    InvalidConfig { reason: String, location: Location },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -559,6 +562,7 @@ impl ErrorExt for Error {
                 source.status_code()
             }
             CleanDir { .. } => StatusCode::Unexpected,
+            InvalidConfig { .. } => StatusCode::InvalidArguments,
         }
     }
 
