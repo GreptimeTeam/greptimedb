@@ -79,7 +79,7 @@ pub struct SstIndexCreator {
 
 impl SstIndexCreator {
     /// Creates a new `SstIndexCreator`.
-    /// Should ensure that tag columns is not empty.
+    /// Should ensure that the number of tag columns is greater than 0.
     pub fn new(
         region_dir: String,
         sst_file_id: FileId,
@@ -90,17 +90,16 @@ impl SstIndexCreator {
     ) -> Self {
         let store = InstrumentedStore::new(object_store);
 
-        // memory_usage_threshold is the total memory usage threshold of the index creation,
+        // `memory_usage_threshold` is the total memory usage threshold of the index creation,
         // so we need to divide it by the number of columns
-        let memory_usage_threshold = memory_usage_threshold.map(|threshold| {
+        let memory_threshold = memory_usage_threshold.map(|threshold| {
             (threshold / metadata.primary_key.len()).max(MIN_MEMORY_USAGE_THRESHOLD)
         });
         let temp_file_provider = Arc::new(TempFileProvider::new(
             IntermediateLocation::new(&region_dir, &sst_file_id),
             store.clone(),
         ));
-        let sorter =
-            ExternalSorter::factory(temp_file_provider.clone() as _, memory_usage_threshold);
+        let sorter = ExternalSorter::factory(temp_file_provider.clone() as _, memory_threshold);
         let index_creator = Box::new(SortIndexCreator::new(sorter, row_group_size));
 
         let codec = IndexValuesCodec::from_tag_columns(metadata.primary_key_columns());
