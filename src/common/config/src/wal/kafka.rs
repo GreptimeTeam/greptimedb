@@ -60,7 +60,8 @@ impl Default for KafkaConfig {
         Self {
             broker_endpoints: vec!["127.0.0.1:9092".to_string()],
             compression: RsKafkaCompression::NoCompression,
-            max_batch_size: ReadableSize::mb(4),
+            // Warning: Kafka has a default limit of 1MB per message in a topic.
+            max_batch_size: ReadableSize::mb(1),
             linger: Duration::from_millis(200),
             consumer_wait_timeout: Duration::from_millis(100),
             backoff: KafkaBackoffConfig::default(),

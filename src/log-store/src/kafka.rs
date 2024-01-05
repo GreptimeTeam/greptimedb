@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod client_manager;
+pub(crate) mod client_manager;
 pub mod log_store;
-mod offset;
-mod record_utils;
+pub(crate) mod util;
 
 use std::fmt::Display;
 

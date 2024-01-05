@@ -26,10 +26,10 @@ use store_api::logstore::entry_stream::SendableEntryStream;
 use store_api::logstore::namespace::Id as NamespaceId;
 use store_api::logstore::{AppendBatchResponse, AppendResponse, LogStore};
 
-use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, Result};
+use crate::error::{ConsumeRecordSnafu, Error, GetOffsetSnafu, IllegalSequenceSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::offset::Offset;
-use crate::kafka::record_utils::{decode_from_record, RecordProducer};
+use crate::kafka::util::offset::Offset;
+use crate::kafka::util::record::{maybe_emit_entry, Record, RecordProducer};
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
 /// A log store backed by Kafka.
@@ -85,8 +85,6 @@ impl LogStore for KafkaLogStore {
     /// Appends a batch of entries and returns a response containing a map where the key is a region id
     /// while the value is the id of the last successfully written entry of the region.
     async fn append_batch(&self, entries: Vec<Self::Entry>) -> Result<AppendBatchResponse> {
-        debug!("LogStore handles append_batch with entries {:?}", entries);
-
         if entries.is_empty() {
             return Ok(AppendBatchResponse::default());
         }
@@ -96,7 +94,7 @@ impl LogStore for KafkaLogStore {
         for entry in entries {
             producers
                 .entry(entry.ns.region_id)
-                .or_insert(RecordProducer::new(entry.ns.clone()))
+                .or_insert_with(|| RecordProducer::new(entry.ns.clone()))
                 .push(entry);
         }
 
@@ -115,8 +113,6 @@ impl LogStore for KafkaLogStore {
         .into_iter()
         .collect::<HashMap<_, _>>();
 
-        debug!("Append batch result: {:?}", last_entry_ids);
-
         Ok(AppendBatchResponse { last_entry_ids })
     }
 
@@ -127,13 +123,10 @@ impl LogStore for KafkaLogStore {
         ns: &Self::Namespace,
         entry_id: EntryId,
     ) -> Result<SendableEntryStream<Self::Entry, Self::Error>> {
-        let topic = ns.topic.clone();
-        let region_id = ns.region_id;
-
         // Gets the client associated with the topic.
         let client = self
             .client_manager
-            .get_or_insert(&topic)
+            .get_or_insert(&ns.topic)
             .await?
             .raw_client
             .clone();
@@ -175,47 +168,48 @@ impl LogStore for KafkaLogStore {
             ns, start_offset, end_offset
         );
 
+        // Key: entry id, Value: the records associated with the entry.
+        let mut entry_records: HashMap<_, Vec<_>> = HashMap::new();
         let ns_clone = ns.clone();
         let stream = async_stream::stream!({
             while let Some(consume_result) = stream_consumer.next().await {
-                // Each next will prdoce a `RecordAndOffset` and a high watermark offset.
+                // Each next on the stream consumer produces a `RecordAndOffset` and a high watermark offset.
                 // The `RecordAndOffset` contains the record data and its start offset.
-                // The high watermark offset is the end offset of the latest record in the partition.
-                let (record, high_watermark) = consume_result.context(ConsumeRecordSnafu {
-                    ns: ns_clone.clone(),
-                })?;
-                let record_offset = record.offset;
+                // The high watermark offset is the offset of the last record plus one.
+                let (record_and_offset, high_watermark) =
+                    consume_result.with_context(|_| ConsumeRecordSnafu {
+                        ns: ns_clone.clone(),
+                    })?;
+                let (kafka_record, offset) = (record_and_offset.record, record_and_offset.offset);
+
                 debug!(
                     "Read a record at offset {} for ns {}, high watermark: {}",
-                    record_offset, ns_clone, high_watermark
+                    offset, ns_clone, high_watermark
                 );
 
-                // Ignores noop records.
-                if record.record.value.is_none() {
+                // Ignores no-op records.
+                if kafka_record.value.is_none() {
+                    if check_termination(offset, end_offset, &entry_records)? {
+                        break;
+                    }
                     continue;
                 }
-                let entries = decode_from_record(record.record)?;
 
-                // Filters entries by region id.
-                if let Some(entry) = entries.first()
-                    && entry.ns.region_id == region_id
-                {
-                    debug!("{} entries are yielded for ns {}", entries.len(), ns_clone);
-                    yield Ok(entries);
-                } else {
-                    debug!(
-                        "{} entries are filtered out for ns {}",
-                        entries.len(),
-                        ns_clone
-                    );
+                // Filters records by namespace.
+                let record = Record::try_from(kafka_record)?;
+                if record.meta.ns != ns_clone {
+                    if check_termination(offset, end_offset, &entry_records)? {
+                        break;
+                    }
+                    continue;
                 }
 
-                // Terminates the stream if the entry with the end offset was read.
-                if record_offset >= end_offset {
-                    debug!(
-                        "Stream consumer for ns {} terminates at offset {}",
-                        ns_clone, record_offset
-                    );
+                // Tries to construct an entry from records consumed so far.
+                if let Some(entry) = maybe_emit_entry(record, &mut entry_records)? {
+                    yield Ok(vec![entry]);
+                }
+
+                if check_termination(offset, end_offset, &entry_records)? {
                     break;
                 }
             }
@@ -262,6 +256,27 @@ impl LogStore for KafkaLogStore {
     /// Stops components of the logstore.
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+fn check_termination(
+    offset: i64,
+    end_offset: i64,
+    entry_records: &HashMap<EntryId, Vec<Record>>,
+) -> Result<bool> {
+    // Terminates the stream if the entry with the end offset was read.
+    if offset >= end_offset {
+        debug!("Stream consumer terminates at offset {}", offset);
+        // There must have no records when the stream terminates.
+        if !entry_records.is_empty() {
+            return IllegalSequenceSnafu {
+                error: "Found records leftover",
+            }
+            .fail();
+        }
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -413,9 +428,4 @@ mod tests {
     async fn test_multi_appends() {
         test_with("test_multi_appends", 32, 256, 16, false).await;
     }
-
-    // TODO(niebayes): implement.
-    // / Appends a way-too large entry and checks the log store could handle it correctly.
-    // #[tokio::test]
-    // async fn test_way_too_large() {}
 }

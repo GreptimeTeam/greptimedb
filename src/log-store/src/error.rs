@@ -18,6 +18,7 @@ use common_config::wal::KafkaWalTopic;
 use common_error::ext::ErrorExt;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 
 use crate::kafka::NamespaceImpl as KafkaNamespace;
@@ -123,20 +124,6 @@ pub enum Error {
         error: String,
     },
 
-    #[snafu(display("Failed to encode a record meta"))]
-    EncodeMeta {
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
-    #[snafu(display("Failed to decode a record meta"))]
-    DecodeMeta {
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
     #[snafu(display("Missing required key in a record"))]
     MissingKey { location: Location },
 
@@ -146,9 +133,16 @@ pub enum Error {
     #[snafu(display("Cannot build a record from empty entries"))]
     EmptyEntries { location: Location },
 
-    #[snafu(display("Failed to produce records to Kafka, topic: {}", topic))]
+    #[snafu(display(
+        "Failed to produce records to Kafka, topic: {}, size: {}, limit: {}",
+        topic,
+        size,
+        limit,
+    ))]
     ProduceRecord {
         topic: KafkaWalTopic,
+        size: usize,
+        limit: usize,
         location: Location,
         #[snafu(source)]
         error: rskafka::client::producer::Error,
@@ -172,6 +166,23 @@ pub enum Error {
 
     #[snafu(display("Failed to do a cast"))]
     Cast { location: Location },
+
+    #[snafu(display("Failed to encode object into json"))]
+    EncodeJson {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("Failed to decode object from json"))]
+    DecodeJson {
+        location: Location,
+        #[snafu(source)]
+        error: JsonError,
+    },
+
+    #[snafu(display("The record sequence is not legal, error: {}", error))]
+    IllegalSequence { location: Location, error: String },
 }
 
 impl ErrorExt for Error {

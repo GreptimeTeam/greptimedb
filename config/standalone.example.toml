@@ -108,7 +108,8 @@ provider = "raft_engine"
 # replication_factor = 1
 
 # The max size of a single producer batch.
-# max_batch_size = "4MB"
+# Warning: Kafka has a default limit of 1MB per message in a topic.
+# max_batch_size = "1MB"
 # The linger duration.
 # linger = "200ms"
 # The consumer wait timeout.

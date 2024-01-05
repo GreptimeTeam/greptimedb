@@ -25,6 +25,7 @@ common-telemetry.workspace = true
 common-test-util.workspace = true
 futures-util.workspace = true
 futures.workspace = true
+itertools.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
 rand.workspace = true

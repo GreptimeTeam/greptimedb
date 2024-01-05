@@ -4516,6 +4516,7 @@ dependencies = [
  "common-test-util",
  "futures",
  "futures-util",
+ "itertools 0.10.5",
  "protobuf",
  "protobuf-build",
  "raft-engine",
