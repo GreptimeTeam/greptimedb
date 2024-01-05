@@ -23,7 +23,6 @@ common-procedure.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
-common-test-util.workspace = true
 common-time.workspace = true
 datatypes.workspace = true
 derive_builder.workspace = true
@@ -50,5 +49,6 @@ tonic.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
 datatypes.workspace = true
 hyper = { version = "0.14", features = ["full"] }

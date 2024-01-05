@@ -4521,6 +4521,7 @@ dependencies = [
  "protobuf-build",
  "raft-engine",
  "rand",
+ "rand_distr",
  "rskafka",
  "serde",
  "serde_json",

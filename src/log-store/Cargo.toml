@@ -29,6 +29,7 @@ itertools.workspace = true
 protobuf = { version = "2", features = ["bytes"] }
 raft-engine.workspace = true
 rand.workspace = true
+rand_distr = "0.4"
 rskafka.workspace = true
 serde.workspace = true
 serde_json.workspace = true

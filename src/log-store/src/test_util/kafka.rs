@@ -15,8 +15,8 @@
 use std::sync::atomic::{AtomicU64 as AtomicEntryId, Ordering};
 use std::sync::Mutex;
 
+use rand::distributions::Alphanumeric;
 use rand::rngs::ThreadRng;
-use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
 use store_api::logstore::EntryId;
 
@@ -31,24 +31,15 @@ pub struct EntryBuilder {
     /// A generator for supporting random data generation.
     /// Wrapped with Mutex<Option<_>> to provide interior mutability.
     rng: Mutex<Option<ThreadRng>>,
-    /// The data pool from which random data is constructed.
-    data_pool: Vec<u8>,
 }
 
 impl EntryBuilder {
     /// Creates an EntryBuilder for the given namespace.
     pub fn new(ns: NamespaceImpl) -> Self {
-        // Makes a data pool with alphabets and numbers.
-        let data_pool = ('a'..='z')
-            .chain('A'..='Z')
-            .chain((0..=9).map(|digit| char::from_digit(digit, 10).unwrap()))
-            .map(|c| c as u8)
-            .collect::<Vec<_>>();
         Self {
             ns,
             next_entry_id: AtomicEntryId::new(0),
             rng: Mutex::new(Some(thread_rng())),
-            data_pool,
         }
     }
 
@@ -87,11 +78,7 @@ impl EntryBuilder {
     fn make_random_data(&self) -> Vec<u8> {
         let mut guard = self.rng.lock().unwrap();
         let rng = guard.as_mut().unwrap();
-        let amount = rng.gen_range(0..self.data_pool.len());
-        self.data_pool
-            .choose_multiple(rng, amount)
-            .copied()
-            .collect()
+        (0..42).map(|_| rng.sample(Alphanumeric)).collect()
     }
 }
 
