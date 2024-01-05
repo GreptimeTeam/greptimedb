@@ -45,8 +45,6 @@ pub struct ParquetWriter {
     region_dir: String,
     /// SST file id.
     file_id: FileId,
-    /// Input data source.
-    source: Source,
     /// Region metadata of the source and the target SST.
     metadata: RegionMetadataRef,
     object_store: ObjectStore,
@@ -58,13 +56,11 @@ impl ParquetWriter {
         region_dir: String,
         file_id: FileId,
         metadata: RegionMetadataRef,
-        source: Source,
         object_store: ObjectStore,
     ) -> ParquetWriter {
         ParquetWriter {
             region_dir,
             file_id,
-            source,
             metadata,
             object_store,
         }
@@ -73,7 +69,11 @@ impl ParquetWriter {
     /// Iterates source and writes all rows to Parquet file.
     ///
     /// Returns the [SstInfo] if the SST is written.
-    pub async fn write_all(&mut self, opts: &WriteOptions) -> Result<Option<SstInfo>> {
+    pub async fn write_all(
+        &mut self,
+        mut source: Source,
+        opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
         let json = self.metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
@@ -108,13 +108,13 @@ impl ParquetWriter {
             opts,
         );
 
-        while let Some(batch) = self
-            .write_next_batch(&write_format, &mut buffered_writer)
-            .or_else(|err| async {
-                index_creator.abort().await;
-                Err(err)
-            })
-            .await?
+        while let Some(batch) =
+            Self::write_next_batch(&mut source, &write_format, &mut buffered_writer)
+                .or_else(|err| async {
+                    index_creator.abort().await;
+                    Err(err)
+                })
+                .await?
         {
             stats.update(&batch);
             index_creator.update(&batch).await;
@@ -148,11 +148,11 @@ impl ParquetWriter {
     }
 
     async fn write_next_batch(
-        &mut self,
+        source: &mut Source,
         write_format: &WriteFormat,
         buffered_writer: &mut BufferedWriter,
     ) -> Result<Option<Batch>> {
-        let Some(batch) = self.source.next_batch().await? else {
+        let Some(batch) = source.next_batch().await? else {
             return Ok(None);
         };
 

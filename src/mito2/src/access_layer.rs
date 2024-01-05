@@ -18,18 +18,22 @@ use object_store::ObjectStore;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 
+use crate::cache::write_cache::SstUploadRequest;
+use crate::cache::CacheManagerRef;
 use crate::error::{DeleteSstSnafu, OpenDalSnafu, Result};
 use crate::read::Source;
 use crate::sst::file::{FileHandle, FileId};
 use crate::sst::location;
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 
 /// A layer to access SST files under the same directory.
 pub struct AccessLayer {
     region_dir: String,
+    /// Target object store.
     object_store: ObjectStore,
 }
 
@@ -82,20 +86,47 @@ impl AccessLayer {
         ParquetReaderBuilder::new(self.region_dir.clone(), file, self.object_store.clone())
     }
 
-    /// Returns a new parquet writer to write the SST for specific `file_id`.
-    // TODO(hl): maybe rename to [sst_writer].
-    pub(crate) fn write_sst(
+    /// Writes a SST with specific `file_id` and `metadata` to the layer.
+    ///
+    /// Returns the info of the SST. If no data written, returns None.
+    pub(crate) async fn write_sst(
         &self,
-        file_id: FileId,
-        metadata: RegionMetadataRef,
-        source: Source,
-    ) -> ParquetWriter {
-        ParquetWriter::new(
+        request: SstWriteRequest,
+        write_opts: &WriteOptions,
+    ) -> Result<Option<SstInfo>> {
+        if let Some(write_cache) = request.cache_manager.write_cache() {
+            // Write to the write cache.
+            return write_cache
+                .write_and_upload_sst(
+                    SstUploadRequest {
+                        file_id: request.file_id,
+                        metadata: request.metadata,
+                        source: request.source,
+                        storage: request.storage,
+                        region_dir: self.region_dir.clone(),
+                        remote_store: self.object_store.clone(),
+                    },
+                    write_opts,
+                )
+                .await;
+        }
+
+        // Write cache is disabled.
+        let mut writer = ParquetWriter::new(
             self.region_dir.clone(),
-            file_id,
-            metadata,
-            source,
+            request.file_id,
+            request.metadata,
             self.object_store.clone(),
-        )
+        );
+        writer.write_all(request.source, write_opts).await
     }
+}
+
+/// Contents to build a SST.
+pub(crate) struct SstWriteRequest {
+    pub(crate) file_id: FileId,
+    pub(crate) metadata: RegionMetadataRef,
+    pub(crate) source: Source,
+    pub(crate) cache_manager: CacheManagerRef,
+    pub(crate) storage: Option<String>,
 }

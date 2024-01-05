@@ -22,6 +22,7 @@ use object_store::ObjectStore;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
+use crate::cache::CacheManager;
 use crate::compaction::CompactionScheduler;
 use crate::flush::FlushScheduler;
 use crate::request::WorkerRequest;
@@ -65,7 +66,11 @@ impl SchedulerEnv {
     ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
-        CompactionScheduler::new(scheduler, request_sender)
+        CompactionScheduler::new(
+            scheduler,
+            request_sender,
+            Arc::new(CacheManager::new(0, 0, 0)),
+        )
     }
 
     /// Creates a new flush scheduler.

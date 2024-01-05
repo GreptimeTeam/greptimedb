@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod output;
 mod picker;
 #[cfg(test)]
 mod test_util;
@@ -29,6 +28,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::{self, Sender};
 
 use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheManagerRef;
 use crate::compaction::twcs::TwcsPicker;
 use crate::config::MitoConfig;
 use crate::error::{
@@ -52,6 +52,8 @@ pub struct CompactionRequest {
     pub(crate) file_purger: FilePurgerRef,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
+
+    pub(crate) cache_manager: CacheManagerRef,
 
     pub(crate) engine_config: Arc<MitoConfig>,
 }
@@ -87,14 +89,20 @@ pub(crate) struct CompactionScheduler {
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
     request_sender: Sender<WorkerRequest>,
+    cache_manager: CacheManagerRef,
 }
 
 impl CompactionScheduler {
-    pub(crate) fn new(scheduler: SchedulerRef, request_sender: Sender<WorkerRequest>) -> Self {
+    pub(crate) fn new(
+        scheduler: SchedulerRef,
+        request_sender: Sender<WorkerRequest>,
+        cache_manager: CacheManagerRef,
+    ) -> Self {
         Self {
             scheduler,
             region_status: HashMap::new(),
             request_sender,
+            cache_manager,
         }
     }
 
@@ -121,8 +129,12 @@ impl CompactionScheduler {
             access_layer.clone(),
             file_purger.clone(),
         );
-        let request =
-            status.new_compaction_request(self.request_sender.clone(), waiter, engine_config);
+        let request = status.new_compaction_request(
+            self.request_sender.clone(),
+            waiter,
+            engine_config,
+            self.cache_manager.clone(),
+        );
         self.region_status.insert(region_id, status);
         self.schedule_compaction_request(request)
     }
@@ -141,6 +153,7 @@ impl CompactionScheduler {
             self.request_sender.clone(),
             OptionOutputTx::none(),
             engine_config,
+            self.cache_manager.clone(),
         );
         // Try to schedule next compaction task for this region.
         if let Err(e) = self.schedule_compaction_request(request) {
@@ -313,6 +326,7 @@ impl CompactionStatus {
         request_sender: Sender<WorkerRequest>,
         waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
+        cache_manager: CacheManagerRef,
     ) -> CompactionRequest {
         let current_version = self.version_control.current().version;
         let start_time = Instant::now();
@@ -323,6 +337,7 @@ impl CompactionStatus {
             waiters: Vec::new(),
             file_purger: self.file_purger.clone(),
             start_time,
+            cache_manager,
             engine_config,
         };
 

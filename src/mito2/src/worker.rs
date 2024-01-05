@@ -286,7 +286,11 @@ impl<S: LogStore> WorkerStarter<S> {
             scheduler: self.scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
             flush_scheduler: FlushScheduler::new(self.scheduler.clone()),
-            compaction_scheduler: CompactionScheduler::new(self.scheduler, sender.clone()),
+            compaction_scheduler: CompactionScheduler::new(
+                self.scheduler,
+                sender.clone(),
+                self.cache_manager.clone(),
+            ),
             stalled_requests: StalledRequests::default(),
             listener: self.listener,
             cache_manager: self.cache_manager,
