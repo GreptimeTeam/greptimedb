@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_base::readable_size::ReadableSize;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
@@ -315,8 +314,7 @@ impl ErrorExt for Error {
             | MissingNodeId { .. }
             | ColumnNoneDefaultValue { .. }
             | MissingWalDirConfig { .. }
-            | MissingKvBackend { .. }
-            | TooLargeMaxBatchSize { .. } => StatusCode::InvalidArguments,
+            | MissingKvBackend { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. } | Unexpected { .. } | WatchAsyncTaskChange { .. } => {
                 StatusCode::Unexpected

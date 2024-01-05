@@ -20,7 +20,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use catalog::memory::MemoryCatalogManager;
-use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_config::wal::{KafkaConfig, RaftEngineConfig};
 use common_config::WalConfig;

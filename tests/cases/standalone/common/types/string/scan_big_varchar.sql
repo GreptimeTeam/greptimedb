@@ -84,6 +84,9 @@ INSERT INTO bigtable SELECT a, to_unixtime(ts) * 79 FROM bigtable;
 
 SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
 
+-- SQLNESS ARG restart=true
+SELECT COUNT(*), COUNT(a), MAX(LENGTH(a)), SUM(LENGTH(a)) FROM bigtable;
+
 
 DROP TABLE test;
 
