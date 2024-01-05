@@ -37,8 +37,8 @@ Our core developers have been building time-series data platforms for years. Bas
 - Optimized columnar layout for handling time-series data; compacted, compressed, and stored on various storage backends, particularly cloud object storage with 50x cost efficiency.
 - Fully open-source distributed cluster architecture that harnesses the power of cloud-native elastic computing resources.
 - Seamless scalability from a standalone binary at edge to a robust, highly available distributed cluster in cloud, with a transparent experience for both developers and administrators.
-- Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down.
 - Native SQL and PromQL for queries, and Python scripting to facilitate complex analytical tasks.
+- Flexible indexing capabilities and distributed, parallel-processing query engine, tackling high cardinality issues down.
 - Widely adopted database protocols and APIs, including MySQL, PostgreSQL, and Prometheus Remote Storage, etc.
 
 ## Quick Start
