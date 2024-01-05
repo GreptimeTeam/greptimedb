@@ -448,6 +448,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to push index value"))]
+    PushIndexValue {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write index completely"))]
+    IndexFinish {
+        source: index::inverted_index::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Operate on aborted index"))]
+    OperateAbortedIndex { location: Location },
+
     #[snafu(display("Failed to read puffin metadata"))]
     PuffinReadMetadata {
         #[snafu(source)]
@@ -465,6 +480,18 @@ pub enum Error {
     #[snafu(display("Blob type not found, blob_type: {blob_type}"))]
     PuffinBlobTypeNotFound {
         blob_type: String,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to write puffin completely"))]
+    PuffinFinish {
+        source: puffin::error::Error,
+        location: Location,
+    },
+
+    #[snafu(display("Failed to add blob to puffin file"))]
+    PuffinAddBlob {
+        source: puffin::error::Error,
         location: Location,
     },
 }
@@ -504,6 +531,7 @@ impl ErrorExt for Error {
             | RegionCorrupted { .. }
             | CreateDefault { .. }
             | InvalidParquet { .. }
+            | OperateAbortedIndex { .. }
             | PuffinBlobTypeNotFound { .. }
             | UnexpectedReplay { .. } => StatusCode::Unexpected,
             RegionNotFound { .. } => StatusCode::RegionNotFound,
@@ -551,10 +579,14 @@ impl ErrorExt for Error {
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ArrowReader { .. } => StatusCode::StorageUnavailable,
             ConvertValue { source, .. } => source.status_code(),
-            BuildIndexApplier { source, .. } | ApplyIndex { source, .. } => source.status_code(),
-            PuffinReadMetadata { source, .. } | PuffinReadBlob { source, .. } => {
-                source.status_code()
-            }
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyIndex { source, .. }
+            | IndexFinish { source, .. } => source.status_code(),
+            PuffinReadMetadata { source, .. }
+            | PuffinReadBlob { source, .. }
+            | PuffinFinish { source, .. }
+            | PuffinAddBlob { source, .. } => source.status_code(),
         }
     }
 
