@@ -20,13 +20,13 @@ pub const THREAD_NAME_LABEL: &str = "thread_name";
 
 lazy_static! {
     pub static ref METRIC_RUNTIME_THREADS_ALIVE: IntGaugeVec = register_int_gauge_vec!(
-        "runtime_threads_alive",
+        "greptime_runtime_threads_alive",
         "runtime threads alive",
         &[THREAD_NAME_LABEL]
     )
     .unwrap();
     pub static ref METRIC_RUNTIME_THREADS_IDLE: IntGaugeVec = register_int_gauge_vec!(
-        "runtime_threads_idle",
+        "greptime_runtime_threads_idle",
         "runtime threads idle",
         &[THREAD_NAME_LABEL]
     )

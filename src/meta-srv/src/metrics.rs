@@ -18,31 +18,31 @@ use prometheus::*;
 lazy_static! {
     /// Elapsed time to responding kv requests.
     pub static ref METRIC_META_KV_REQUEST_ELAPSED: HistogramVec = register_histogram_vec!(
-        "meta_kv_request_elapsed",
+        "greptime_meta_kv_request_elapsed",
         "meta kv request",
         &["target", "op", "cluster_id"]
     )
     .unwrap();
     /// The heartbeat connection gauge.
     pub static ref METRIC_META_HEARTBEAT_CONNECTION_NUM: IntGauge = register_int_gauge!(
-        "meta_heartbeat_connection_num",
+        "greptime_meta_heartbeat_connection_num",
         "meta heartbeat connection num"
     )
     .unwrap();
     /// Elapsed time to execution of heartbeat handlers.
     pub static ref METRIC_META_HANDLER_EXECUTE: HistogramVec =
-        register_histogram_vec!("meta_handler_execute", "meta handler execute", &["name"]).unwrap();
+        register_histogram_vec!("greptime_meta_handler_execute", "meta handler execute", &["name"]).unwrap();
     /// Inactive region gauge.
     pub static ref METRIC_META_INACTIVE_REGIONS: IntGauge =
-        register_int_gauge!("meta_inactive_regions", "meta inactive regions").unwrap();
+        register_int_gauge!("greptime_meta_inactive_regions", "meta inactive regions").unwrap();
     /// Elapsed time to leader cache kv.
     pub static ref METRIC_META_LEADER_CACHED_KV_LOAD_ELAPSED: HistogramVec =
-        register_histogram_vec!("meta_leader_cache_kv_load", "meta load cache", &["prefix"])
+        register_histogram_vec!("greptime_meta_leader_cache_kv_load", "meta load cache", &["prefix"])
             .unwrap();
     /// Meta kv cache hit counter.
     pub static ref METRIC_META_KV_CACHE_HIT: IntCounterVec =
-        register_int_counter_vec!("meta_kv_cache_hit", "meta kv cache hit", &["op"]).unwrap();
+        register_int_counter_vec!("greptime_meta_kv_cache_hit", "meta kv cache hit", &["op"]).unwrap();
     /// Meta kv cache miss counter.
     pub static ref METRIC_META_KV_CACHE_MISS: IntCounterVec =
-        register_int_counter_vec!("meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
+        register_int_counter_vec!("greptime_meta_kv_cache_miss", "meta kv cache miss", &["op"]).unwrap();
 }
