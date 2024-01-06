@@ -21,11 +21,10 @@ pub async fn run_test_with_kafka_wal<F>(test: F)
 where
     F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
 {
-    let endpoints = env::var("GT_KAFKA_ENDPOINTS").unwrap_or_default();
-    if endpoints.is_empty() {
+    let Ok(endpoints) = env::var("GT_KAFKA_ENDPOINTS") else {
         warn!("The endpoints is empty, skipping the test");
         return;
-    }
+    };
 
     let endpoints = endpoints
         .split(',')

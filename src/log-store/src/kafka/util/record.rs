@@ -300,6 +300,7 @@ mod tests {
     use super::*;
     use crate::kafka::client_manager::ClientManager;
     use crate::kafka::util::test_util::run_test_with_kafka_wal;
+
     // Implements some utility methods for testing.
     impl Default for Record {
         fn default() -> Self {
