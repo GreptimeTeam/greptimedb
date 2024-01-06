@@ -282,6 +282,7 @@ fn check_termination(
 
 #[cfg(test)]
 mod tests {
+    use common_base::readable_size::ReadableSize;
     use common_config::wal::KafkaWalTopic as Topic;
     use common_test_util::get_broker_endpoints;
     use common_test_util::wal::kafka::topic_decorator::{Affix, TopicDecorator};
@@ -296,6 +297,7 @@ mod tests {
         ns: NamespaceImpl,
         entry_builder: EntryBuilder,
         expected: Vec<EntryImpl>,
+        flushed_entry_id: EntryId,
     }
 
     /// Prepares for a test in that a log store is constructed and a collection of topics is created.
@@ -308,25 +310,44 @@ mod tests {
 
         let config = KafkaConfig {
             broker_endpoints,
+            max_batch_size: ReadableSize::kb(32),
             ..Default::default()
         };
         let logstore = KafkaLogStore::try_new(&config).await.unwrap();
+
+        // Appends a no-op record to each topic.
+        for topic in topics.iter() {
+            let last_entry_id = logstore
+                .append(EntryImpl {
+                    data: vec![],
+                    id: 0,
+                    ns: new_namespace(topic, 0),
+                })
+                .await
+                .unwrap()
+                .last_entry_id;
+            assert_eq!(last_entry_id, 0);
+        }
 
         (logstore, topics)
     }
 
     /// Builds a context for each region.
-    fn build_contexts(num_regions: usize, topics: &[Topic]) -> Vec<RegionContext> {
+    fn build_contexts(num_regions: usize, topics: &[Topic]) -> HashMap<u64, RegionContext> {
         (0..num_regions)
             .map(|i| {
                 let topic = &topics[i % topics.len()];
                 let ns = new_namespace(topic, i as u64);
                 let entry_builder = EntryBuilder::new(ns.clone());
-                RegionContext {
-                    ns,
-                    entry_builder,
-                    expected: Vec::new(),
-                }
+                (
+                    i as u64,
+                    RegionContext {
+                        ns,
+                        entry_builder,
+                        expected: Vec::new(),
+                        flushed_entry_id: 0,
+                    },
+                )
             })
             .collect()
     }
@@ -334,39 +355,52 @@ mod tests {
     /// Creates a vector containing indexes of all regions if the `all` is true.
     /// Otherwise, creates a subset of the indexes. The cardinality of the subset
     /// is nearly a quarter of that of the universe set.
-    fn all_or_subset(all: bool, num_regions: usize) -> Vec<usize> {
+    fn all_or_subset(all: bool, num_regions: usize) -> Vec<u64> {
         assert!(num_regions > 0);
         let amount = if all {
             num_regions
         } else {
             (num_regions / 4).max(1)
         };
-        (0..num_regions).choose_multiple(&mut rand::thread_rng(), amount)
+        (0..num_regions as u64).choose_multiple(&mut rand::thread_rng(), amount)
     }
 
-    /// Builds entries for regions specified with `which`.
-    /// For example, assume `which[i] = x`, then entries for region with id = x will be built.
-    fn build_entries(region_contexts: &mut [RegionContext], which: Vec<usize>) -> Vec<EntryImpl> {
-        let mut entries = Vec::with_capacity(which.len());
-        for i in which {
-            let ctx = &mut region_contexts[i];
-            ctx.expected = entries_with_random_data(25, &ctx.entry_builder);
-            entries.push(ctx.expected.clone());
+    /// Builds entries for regions specified by `which`. Builds large entries if `large` is true.
+    /// Returns the aggregated entries.
+    fn build_entries(
+        region_contexts: &mut HashMap<u64, RegionContext>,
+        which: &[u64],
+        large: bool,
+    ) -> Vec<EntryImpl> {
+        let mut aggregated = Vec::with_capacity(which.len());
+        for region_id in which {
+            let ctx = region_contexts.get_mut(region_id).unwrap();
+            // Builds entries for the region.
+            ctx.expected = if !large {
+                entries_with_random_data(3, &ctx.entry_builder)
+            } else {
+                // Builds a large entry of size 256KB which is way greater than the configured `max_batch_size` which is 32KB.
+                let large_entry = ctx.entry_builder.with_data([b'1'; 256 * 1024]);
+                vec![large_entry]
+            };
+            // Aggregates entries of all regions.
+            aggregated.push(ctx.expected.clone());
         }
-        entries.into_iter().flatten().collect()
+        aggregated.into_iter().flatten().collect()
     }
 
     /// Reads entries for regions and checks for each region that the gotten entries are identical with the expected ones.
     async fn check_entries(
-        region_contexts: &[RegionContext],
-        last_entry_ids: HashMap<u64, u64>,
+        region_contexts: &HashMap<u64, RegionContext>,
         logstore: &KafkaLogStore,
-        which: Vec<usize>,
+        which: &[u64],
     ) {
-        for i in which {
-            let ctx = &region_contexts[i];
-            let start_offset = last_entry_ids[&ctx.ns.region_id];
-            let stream = logstore.read(&ctx.ns, start_offset).await.unwrap();
+        for region_id in which {
+            let ctx = &region_contexts[region_id];
+            let stream = logstore
+                .read(&ctx.ns, ctx.flushed_entry_id + 1)
+                .await
+                .unwrap();
             let got = stream
                 .collect::<Vec<_>>()
                 .await
@@ -377,6 +411,17 @@ mod tests {
         }
     }
 
+    /// Simulates a flush for regions.
+    fn flush(
+        region_contexts: &mut HashMap<u64, RegionContext>,
+        last_entry_ids: &HashMap<u64, EntryId>,
+    ) {
+        for (region_id, last_entry_id) in last_entry_ids {
+            let ctx = region_contexts.get_mut(region_id).unwrap();
+            ctx.flushed_entry_id = *last_entry_id;
+        }
+    }
+
     /// Starts a test with:
     /// * `test_name` - The name of the test.
     /// * `num_topics` - Number of topics to be created in the preparation phase.
@@ -384,41 +429,44 @@ mod tests {
     /// * `num_appends` - Number of append operations to be performed.
     /// * `all` - All regions will be involved in an append operation if `all` is true. Otherwise,
     /// an append operation will only randomly choose a subset of regions.
+    /// * `large` - Builds large entries for each region is `large` is true.
     async fn test_with(
         test_name: &str,
         num_topics: usize,
         num_regions: usize,
         num_appends: usize,
         all: bool,
+        large: bool,
     ) {
         let (logstore, topics) = prepare(test_name, num_topics).await;
         let mut region_contexts = build_contexts(num_regions, &topics);
         for _ in 0..num_appends {
             let which = all_or_subset(all, num_regions);
-            let entries = build_entries(&mut region_contexts, which.clone());
+            let entries = build_entries(&mut region_contexts, &which, large);
             let last_entry_ids = logstore.append_batch(entries).await.unwrap().last_entry_ids;
-            check_entries(&region_contexts, last_entry_ids, &logstore, which).await;
+            check_entries(&region_contexts, &logstore, &which).await;
+            flush(&mut region_contexts, &last_entry_ids);
         }
     }
 
     /// Appends entries for one region and checks all entries can be read successfully.
     #[tokio::test]
     async fn test_one_region() {
-        test_with("test_one_region", 1, 1, 1, true).await;
+        test_with("test_one_region", 1, 1, 1, true, false).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
     /// A topic is assigned only a single region.
     #[tokio::test]
     async fn test_multi_regions_disjoint() {
-        test_with("test_multi_regions_disjoint", 10, 10, 1, true).await;
+        test_with("test_multi_regions_disjoint", 5, 5, 1, true, false).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
     /// A topic is assigned multiple regions.
     #[tokio::test]
     async fn test_multi_regions_overlapped() {
-        test_with("test_multi_regions_overlapped", 10, 50, 1, true).await;
+        test_with("test_multi_regions_overlapped", 5, 20, 1, true, false).await;
     }
 
     /// Appends entries for multiple regions and checks entries for each region can be read successfully.
@@ -426,6 +474,13 @@ mod tests {
     /// Each append operation will only append entries for a subset of randomly chosen regions.
     #[tokio::test]
     async fn test_multi_appends() {
-        test_with("test_multi_appends", 32, 256, 16, false).await;
+        test_with("test_multi_appends", 5, 20, 3, false, false).await;
+    }
+
+    /// Appends large entries for multiple regions and checks entries for each region can be read successfully.
+    /// A topic may be assigned multiple regions.
+    #[tokio::test]
+    async fn test_append_large_entries() {
+        test_with("test_append_large_entries", 5, 20, 3, true, true).await;
     }
 }

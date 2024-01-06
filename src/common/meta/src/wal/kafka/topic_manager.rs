@@ -167,7 +167,7 @@ impl TopicManager {
                 vec![Record {
                     key: None,
                     value: None,
-                    timestamp: rskafka::chrono::Utc::now(),
+                    timestamp: chrono::Utc::now(),
                     headers: Default::default(),
                 }],
                 Compression::NoCompression,

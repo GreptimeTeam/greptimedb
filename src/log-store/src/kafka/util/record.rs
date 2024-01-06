@@ -149,6 +149,7 @@ impl RecordProducer {
     }
 
     /// Produces the buffered entries to Kafka sever. Those entries may span several Kafka records.
+    /// Returns the offset of the last successfully produced record.
     pub(crate) async fn produce(self, client_manager: &ClientManagerRef) -> Result<Offset> {
         ensure!(!self.entries.is_empty(), EmptyEntriesSnafu);
 
