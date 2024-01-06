@@ -40,3 +40,4 @@ tokio.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 rand.workspace = true
+uuid.workspace = true

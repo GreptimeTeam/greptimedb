@@ -4522,6 +4522,7 @@ dependencies = [
  "store-api",
  "tokio",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
