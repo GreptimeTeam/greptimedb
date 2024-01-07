@@ -711,6 +711,8 @@ purge_threshold = "4GiB"
 purge_interval = "10m"
 read_batch_size = 128
 sync_write = false
+enable_log_recycle = true
+prefill_log_files = false
 
 [datanode.storage]
 type = "{}"
