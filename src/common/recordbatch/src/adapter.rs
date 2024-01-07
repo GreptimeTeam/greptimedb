@@ -265,7 +265,7 @@ fn collect_metrics(df_plan: &Arc<dyn ExecutionPlan>, result: &mut RecordBatchMet
 /// from datanode to frontend through gRPC
 #[derive(serde::Serialize, serde::Deserialize, Default, Debug)]
 pub struct RecordBatchMetrics {
-    // cpu comsumption in nanoseconds
+    // cpu consumption in nanoseconds
     pub elapsed_compute: usize,
     // memory used by the plan in bytes
     pub memory_usage: usize,
