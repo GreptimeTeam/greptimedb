@@ -9,6 +9,7 @@ testing = []
 
 [dependencies]
 api.workspace = true
+arc-swap = "1.6"
 arrow-flight.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true

@@ -83,6 +83,11 @@ impl FlightRecordBatchStream {
                 }
             }
         }
+        // make last package to pass metrics
+        if let Some(m) = recordbatches.metrics() {
+            let metrics = FlightMessage::Metrics(m);
+            let _ = tx.send(Ok(metrics)).await;
+        }
     }
 }
 

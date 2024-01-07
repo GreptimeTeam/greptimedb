@@ -312,6 +312,7 @@ impl DataSource for InformationTableDataSource {
             schema: projected_schema,
             stream: Box::pin(stream),
             output_ordering: None,
+            metrics: Default::default(),
         };
 
         Ok(Box::pin(stream))

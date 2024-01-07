@@ -295,10 +295,12 @@ impl Database {
                 );
                 Ok(Output::AffectedRows(rows))
             }
-            FlightMessage::Recordbatch(_) => IllegalFlightMessagesSnafu {
-                reason: "The first flight message cannot be a RecordBatch message",
+            FlightMessage::Recordbatch(_) | FlightMessage::Metrics(_) => {
+                IllegalFlightMessagesSnafu {
+                    reason: "The first flight message cannot be a RecordBatch or Metrics message",
+                }
+                .fail()
             }
-            .fail(),
             FlightMessage::Schema(schema) => {
                 let stream = Box::pin(stream!({
                     while let Some(flight_message) = flight_message_stream.next().await {
@@ -319,6 +321,7 @@ impl Database {
                     schema,
                     stream,
                     output_ordering: None,
+                    metrics: Default::default(),
                 };
                 Ok(Output::Stream(Box::pin(record_batch_stream)))
             }
