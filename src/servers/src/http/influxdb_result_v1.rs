@@ -25,7 +25,7 @@ use snafu::ResultExt;
 
 use crate::error::{Error, ToJsonSnafu};
 use crate::http::error_result::ErrorResponse;
-use crate::http::{Epoch, HttpResponse};
+use crate::http::{Epoch, HttpResponse, ResponseFormat};
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SqlQuery {
@@ -125,13 +125,8 @@ impl InfluxdbOutput {
     }
 }
 
-pub(crate) const INFLUXDB_V1_TYPE: &str = "influxdb_v1";
-
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct InfluxdbV1Response {
-    // deprecated - backward compatible
-    r#type: &'static str,
-
     results: Vec<InfluxdbOutput>,
     execution_time_ms: u64,
 }
@@ -148,7 +143,7 @@ impl InfluxdbV1Response {
         epoch: Option<Epoch>,
     ) -> HttpResponse {
         fn make_error_response(error: impl ErrorExt) -> HttpResponse {
-            HttpResponse::Error(ErrorResponse::from_error(INFLUXDB_V1_TYPE, error))
+            HttpResponse::Error(ErrorResponse::from_error(ResponseFormat::InfluxdbV1, error))
         }
 
         // TODO(sunng87): this api response structure cannot represent error well.
@@ -202,7 +197,6 @@ impl InfluxdbV1Response {
         }
 
         HttpResponse::InfluxdbV1(InfluxdbV1Response {
-            r#type: INFLUXDB_V1_TYPE,
             results,
             execution_time_ms: 0,
         })
@@ -219,10 +213,15 @@ impl InfluxdbV1Response {
 
 impl IntoResponse for InfluxdbV1Response {
     fn into_response(self) -> Response {
+        let execution_time = self.execution_time_ms;
         let mut resp = Json(self).into_response();
         resp.headers_mut().insert(
             "X-GreptimeDB-Format",
             HeaderValue::from_static("influxdb_v1"),
+        );
+        resp.headers_mut().insert(
+            "X-GreptimeDB-ExecutionTime",
+            HeaderValue::from(execution_time),
         );
         resp
     }

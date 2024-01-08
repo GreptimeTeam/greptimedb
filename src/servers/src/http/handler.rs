@@ -22,6 +22,8 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::Output;
+use common_recordbatch::util;
 use query::parser::PromQuery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -29,9 +31,12 @@ use session::context::QueryContextRef;
 
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
-use crate::http::influxdb_result_v1::{InfluxdbV1Response, INFLUXDB_V1_TYPE};
-use crate::http::{ApiState, Epoch, GreptimeOptionsConfigState, HttpResponse, ResponseFormat};
+use crate::http::greptime_result_v1::GreptimedbV1Response;
+use crate::http::influxdb_result_v1::InfluxdbV1Response;
+use crate::http::{
+    ApiState, Epoch, GreptimeOptionsConfigState, GreptimeQueryOutput, HttpRecordsOutput,
+    HttpResponse, ResponseFormat,
+};
 use crate::metrics_handler::MetricsHandler;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -97,12 +102,8 @@ pub async fn sql(
 
     let outputs = match result {
         Err((status, msg)) => {
-            let ty = match format {
-                ResponseFormat::InfluxdbV1 => INFLUXDB_V1_TYPE,
-                _ => GREPTIME_V1_TYPE,
-            };
             return HttpResponse::Error(
-                ErrorResponse::from_error_message(ty, status, msg)
+                ErrorResponse::from_error_message(format, status, msg)
                     .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
@@ -116,6 +117,52 @@ pub async fn sql(
     };
 
     resp.with_execution_time(start.elapsed().as_millis() as u64)
+}
+
+/// Create a response from query result
+pub async fn from_output(
+    ty: ResponseFormat,
+    outputs: Vec<crate::error::Result<Output>>,
+) -> Result<Vec<GreptimeQueryOutput>, ErrorResponse> {
+    // TODO(sunng87): this api response structure cannot represent error well.
+    //  It hides successful execution results from error response
+    let mut results = Vec::with_capacity(outputs.len());
+    for out in outputs {
+        match out {
+            Ok(Output::AffectedRows(rows)) => {
+                results.push(GreptimeQueryOutput::AffectedRows(rows));
+            }
+            Ok(Output::Stream(stream)) => {
+                // TODO(sunng87): streaming response
+                match util::collect(stream).await {
+                    Ok(rows) => match HttpRecordsOutput::try_from(rows) {
+                        Ok(rows) => {
+                            results.push(GreptimeQueryOutput::Records(rows));
+                        }
+                        Err(err) => {
+                            return Err(ErrorResponse::from_error(ty, err));
+                        }
+                    },
+                    Err(err) => {
+                        return Err(ErrorResponse::from_error(ty, err));
+                    }
+                }
+            }
+            Ok(Output::RecordBatches(rbs)) => match HttpRecordsOutput::try_from(rbs.take()) {
+                Ok(rows) => {
+                    results.push(GreptimeQueryOutput::Records(rows));
+                }
+                Err(err) => {
+                    return Err(ErrorResponse::from_error(ty, err));
+                }
+            },
+            Err(err) => {
+                return Err(ErrorResponse::from_error(ty, err));
+            }
+        }
+    }
+
+    Ok(results)
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -155,7 +202,7 @@ pub async fn promql(
     let resp = if let Some((status, msg)) =
         validate_schema(sql_handler.clone(), query_ctx.clone()).await
     {
-        let resp = ErrorResponse::from_error_message(GREPTIME_V1_TYPE, status, msg);
+        let resp = ErrorResponse::from_error_message(ResponseFormat::GreptimedbV1, status, msg);
         HttpResponse::Error(resp)
     } else {
         let prom_query = params.into();

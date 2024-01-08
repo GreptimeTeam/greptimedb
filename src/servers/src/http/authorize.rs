@@ -30,14 +30,12 @@ use session::context::QueryContext;
 use snafu::{ensure, OptionExt, ResultExt};
 
 use super::header::GreptimeDbName;
-use super::PUBLIC_APIS;
+use super::{ResponseFormat, PUBLIC_APIS};
 use crate::error::{
     self, InvalidAuthorizationHeaderSnafu, InvalidParameterSnafu, InvisibleASCIISnafu,
     NotFoundInfluxAuthSnafu, Result, UnsupportedAuthSchemeSnafu, UrlDecodeSnafu,
 };
 use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::GREPTIME_V1_TYPE;
-use crate::http::influxdb_result_v1::INFLUXDB_V1_TYPE;
 use crate::http::HTTP_API_PREFIX;
 
 /// AuthState is a holder state for [`UserProviderRef`]
@@ -122,9 +120,9 @@ pub async fn check_http_auth<B>(
 
 fn err_response(is_influxdb: bool, err: impl ErrorExt) -> impl IntoResponse {
     let ty = if is_influxdb {
-        INFLUXDB_V1_TYPE
+        ResponseFormat::InfluxdbV1
     } else {
-        GREPTIME_V1_TYPE
+        ResponseFormat::GreptimedbV1
     };
     (
         StatusCode::UNAUTHORIZED,

@@ -21,18 +21,18 @@ use common_telemetry::logging::{debug, error};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::http::ResponseFormat;
+
 #[derive(Serialize, Deserialize, Debug, JsonSchema)]
 pub struct ErrorResponse {
-    // deprecated - backward compatible
-    r#type: &'static str,
-
+    ty: &'static str,
     code: u32,
     error: String,
     execution_time_ms: u64,
 }
 
 impl ErrorResponse {
-    pub fn from_error(ty: &'static str, error: impl ErrorExt) -> Self {
+    pub fn from_error(ty: ResponseFormat, error: impl ErrorExt) -> Self {
         let code = error.status_code();
 
         if code.should_log_error() {
@@ -44,9 +44,9 @@ impl ErrorResponse {
         Self::from_error_message(ty, code, error.output_msg())
     }
 
-    pub fn from_error_message(ty: &'static str, code: StatusCode, msg: String) -> Self {
+    pub fn from_error_message(ty: ResponseFormat, code: StatusCode, msg: String) -> Self {
         ErrorResponse {
-            r#type: ty,
+            ty: ty.as_str(),
             code: code as u32,
             error: msg,
             execution_time_ms: 0,
@@ -69,10 +69,32 @@ impl ErrorResponse {
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
+        let ty = format!("{:?}", self.ty);
         let code = self.code;
-        let mut resp = Json(self).into_response();
+        let execution_time = self.execution_time_ms;
+
+        #[derive(Serialize, Deserialize, Debug, JsonSchema)]
+        struct Output {
+            code: u32,
+            error: String,
+            execution_time_ms: u64,
+        }
+        let mut resp = Json(Output {
+            code: self.code,
+            execution_time_ms: self.execution_time_ms,
+            error: self.error,
+        })
+        .into_response();
         resp.headers_mut()
             .insert("X-GreptimeDB-Error-Code", HeaderValue::from(code));
+        resp.headers_mut().insert(
+            "X-GreptimeDB-Format",
+            HeaderValue::from_str(&ty).expect("malformed ty {ty}"),
+        );
+        resp.headers_mut().insert(
+            "X-GreptimeDB-ExecutionTime",
+            HeaderValue::from(execution_time),
+        );
         resp
     }
 }

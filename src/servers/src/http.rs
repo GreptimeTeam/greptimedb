@@ -30,6 +30,7 @@ use axum::{routing, BoxError, Extension, Router};
 use common_base::readable_size::ReadableSize;
 use common_base::Plugins;
 use common_error::status_code::StatusCode;
+use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_telemetry::logging::{error, info};
 use common_time::timestamp::TimeUnit;
@@ -52,7 +53,7 @@ use crate::configurator::ConfiguratorRef;
 use crate::error::{AlreadyStartedSnafu, Error, Result, StartHttpSnafu, ToJsonSnafu};
 use crate::http::csv_result::CsvResponse;
 use crate::http::error_result::ErrorResponse;
-use crate::http::greptime_result_v1::{GreptimedbV1Response, GREPTIME_V1_TYPE};
+use crate::http::greptime_result_v1::GreptimedbV1Response;
 use crate::http::influxdb::{influxdb_health, influxdb_ping, influxdb_write_v1, influxdb_write_v2};
 use crate::http::influxdb_result_v1::InfluxdbV1Response;
 use crate::http::prometheus::{
@@ -266,6 +267,14 @@ impl ResponseFormat {
             "greptimedb_v1" => Some(ResponseFormat::GreptimedbV1),
             "influxdb_v1" => Some(ResponseFormat::InfluxdbV1),
             _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResponseFormat::Csv => "csv",
+            ResponseFormat::GreptimedbV1 => "greptimedb_v1",
+            ResponseFormat::InfluxdbV1 => "influxdb_v1",
         }
     }
 }
@@ -791,7 +800,7 @@ impl Server for HttpServer {
 async fn handle_error(err: BoxError) -> Json<HttpResponse> {
     error!(err; "Unhandled internal error");
     Json(HttpResponse::Error(ErrorResponse::from_error_message(
-        GREPTIME_V1_TYPE,
+        ResponseFormat::GreptimedbV1,
         StatusCode::Unexpected,
         format!("Unhandled internal error: {err}"),
     )))
@@ -943,12 +952,8 @@ mod test {
             let outputs = vec![Ok(Output::RecordBatches(recordbatches))];
             let json_resp = match format {
                 ResponseFormat::Csv => unreachable!(),
-                ResponseFormat::GreptimedbV1 => {
-                    HttpResponse::GreptimedbV1(GreptimedbV1Response::from_output(outputs).await)
-                }
-                ResponseFormat::InfluxdbV1 => {
-                    HttpResponse::InfluxdbV1(InfluxdbV1Response::from_output(outputs, None).await)
-                }
+                ResponseFormat::GreptimedbV1 => GreptimedbV1Response::from_output(outputs).await,
+                ResponseFormat::InfluxdbV1 => InfluxdbV1Response::from_output(outputs, None).await,
             };
 
             match json_resp {
@@ -977,6 +982,7 @@ mod test {
                     );
                     assert_eq!(json_output.series[0].values[0][1], serde_json::Value::Null);
                 }
+                _ => unreachable!(),
             }
         }
     }
