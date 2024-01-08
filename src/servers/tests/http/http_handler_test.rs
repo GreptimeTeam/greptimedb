@@ -42,39 +42,26 @@ async fn test_sql_not_provided() {
         script_handler: None,
     };
 
-    for format in ["greptimedb_v1", "influxdb_v1"] {
+    for format in ["greptimedb_v1", "influxdb_v1", "csv"] {
         let query = http_handler::SqlQuery {
             db: None,
             sql: None,
             format: Some(format.to_string()),
             epoch: None,
         };
-        let Json(json) = http_handler::sql(
+
+        let HttpResponse::Error(resp) = http_handler::sql(
             State(api_state.clone()),
             Query(query),
             axum::Extension(ctx.clone()),
             Form(http_handler::SqlQuery::default()),
         )
-        .await;
+        .await
+        else {
+            unreachable!("must be error response")
+        };
 
-        match json {
-            HttpResponse::GreptimedbV1(resp) => {
-                assert!(!resp.success());
-                assert_eq!(
-                    Some(&"sql parameter is required.".to_string()),
-                    resp.error()
-                );
-                assert!(resp.output().is_empty());
-            }
-            HttpResponse::InfluxdbV1(resp) => {
-                assert!(!resp.success());
-                assert_eq!(
-                    Some(&"sql parameter is required.".to_string()),
-                    resp.error()
-                );
-                assert!(resp.results().is_empty());
-            }
-        }
+        assert_eq!("sql parameter is required.", resp.error());
     }
 }
 
@@ -93,7 +80,7 @@ async fn test_sql_output_rows() {
 
     for format in ["greptimedb_v1", "influxdb_v1"] {
         let query = create_query(format);
-        let Json(json) = http_handler::sql(
+        let json = http_handler::sql(
             State(api_state.clone()),
             query,
             axum::Extension(ctx.clone()),
@@ -102,16 +89,13 @@ async fn test_sql_output_rows() {
         .await;
 
         match json {
-            HttpResponse::GreptimedbV1(resp) => {
-                assert!(resp.success(), "{resp:?}");
-                assert!(resp.error().is_none());
-                match &resp.output()[0] {
-                    GreptimeQueryOutput::Records(records) => {
-                        assert_eq!(1, records.num_rows());
-                        let json = serde_json::to_string_pretty(&records).unwrap();
-                        assert_eq!(
-                            json,
-                            r#"{
+            HttpResponse::GreptimedbV1(resp) => match &resp.output()[0] {
+                GreptimeQueryOutput::Records(records) => {
+                    assert_eq!(1, records.num_rows());
+                    let json = serde_json::to_string_pretty(&records).unwrap();
+                    assert_eq!(
+                        json,
+                        r#"{
   "schema": {
     "column_schemas": [
       {
@@ -126,15 +110,11 @@ async fn test_sql_output_rows() {
     ]
   ]
 }"#
-                        );
-                    }
-                    _ => unreachable!(),
+                    );
                 }
-            }
+                _ => unreachable!(),
+            },
             HttpResponse::InfluxdbV1(resp) => {
-                assert!(resp.success(), "{resp:?}");
-                assert!(resp.error().is_none());
-
                 let json = serde_json::to_string_pretty(&resp.results()).unwrap();
                 assert_eq!(
                     json,
@@ -158,6 +138,7 @@ async fn test_sql_output_rows() {
 ]"#
                 );
             }
+            _ => unreachable!(),
         }
     }
 }
@@ -177,7 +158,7 @@ async fn test_sql_form() {
 
     for format in ["greptimedb_v1", "influxdb_v1"] {
         let form = create_form(format);
-        let Json(json) = http_handler::sql(
+        let json = http_handler::sql(
             State(api_state.clone()),
             Query(http_handler::SqlQuery::default()),
             axum::Extension(ctx.clone()),
@@ -186,16 +167,13 @@ async fn test_sql_form() {
         .await;
 
         match json {
-            HttpResponse::GreptimedbV1(resp) => {
-                assert!(resp.success(), "{resp:?}");
-                assert!(resp.error().is_none());
-                match &resp.output()[0] {
-                    GreptimeQueryOutput::Records(records) => {
-                        assert_eq!(1, records.num_rows());
-                        let json = serde_json::to_string_pretty(&records).unwrap();
-                        assert_eq!(
-                            json,
-                            r#"{
+            HttpResponse::GreptimedbV1(resp) => match &resp.output()[0] {
+                GreptimeQueryOutput::Records(records) => {
+                    assert_eq!(1, records.num_rows());
+                    let json = serde_json::to_string_pretty(&records).unwrap();
+                    assert_eq!(
+                        json,
+                        r#"{
   "schema": {
     "column_schemas": [
       {
@@ -210,15 +188,11 @@ async fn test_sql_form() {
     ]
   ]
 }"#
-                        );
-                    }
-                    _ => unreachable!(),
+                    );
                 }
-            }
+                _ => unreachable!(),
+            },
             HttpResponse::InfluxdbV1(resp) => {
-                assert!(resp.success(), "{resp:?}");
-                assert!(resp.error().is_none());
-
                 let json = serde_json::to_string_pretty(&resp.results()).unwrap();
                 assert_eq!(
                     json,
@@ -242,6 +216,7 @@ async fn test_sql_form() {
 ]"#
                 );
             }
+            _ => unreachable!(),
         }
     }
 }
@@ -275,11 +250,10 @@ async fn insert_script(
         body,
     )
     .await;
-    let HttpResponse::GreptimedbV1(json) = json else {
+    let HttpResponse::Error(json) = json else {
         unreachable!()
     };
-    assert!(!json.success(), "{json:?}");
-    assert_eq!(json.error().unwrap(), "invalid schema");
+    assert_eq!(json.error(), "invalid schema");
 
     let body = RawBody(Body::from(script.clone()));
     let exec = create_script_query();
@@ -296,8 +270,6 @@ async fn insert_script(
     let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
     assert!(json.output().is_empty());
 }
 
@@ -328,9 +300,6 @@ def test(n) -> vector[i64]:
     let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-
     match &json.output()[0] {
         GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();
@@ -398,9 +367,6 @@ def test(n, **params)  -> vector[i64]:
     let HttpResponse::GreptimedbV1(json) = json else {
         unreachable!()
     };
-    assert!(json.success(), "{json:?}");
-    assert!(json.error().is_none());
-
     match &json.output()[0] {
         GreptimeQueryOutput::Records(records) => {
             let json = serde_json::to_string_pretty(&records).unwrap();

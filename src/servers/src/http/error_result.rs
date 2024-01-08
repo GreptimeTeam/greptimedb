@@ -65,6 +65,10 @@ impl ErrorResponse {
     pub fn code(&self) -> u32 {
         self.code
     }
+
+    pub fn error(&self) -> &str {
+        &self.error
+    }
 }
 
 impl IntoResponse for ErrorResponse {
