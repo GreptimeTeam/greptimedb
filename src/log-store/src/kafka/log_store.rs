@@ -284,7 +284,6 @@ fn check_termination(
 mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::wal::KafkaWalTopic as Topic;
-    use common_meta::get_broker_endpoints;
     use rand::seq::IteratorRandom;
 
     use super::*;
@@ -301,8 +300,11 @@ mod tests {
     }
 
     /// Prepares for a test in that a log store is constructed and a collection of topics is created.
-    async fn prepare(test_name: &str, num_topics: usize) -> (KafkaLogStore, Vec<Topic>) {
-        let broker_endpoints = get_broker_endpoints!();
+    async fn prepare(
+        test_name: &str,
+        num_topics: usize,
+        broker_endpoints: Vec<String>,
+    ) -> (KafkaLogStore, Vec<Topic>) {
         let topics = create_topics(
             num_topics,
             |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
@@ -387,7 +389,16 @@ mod tests {
         all: bool,
         large: bool,
     ) {
-        let (logstore, topics) = prepare(test_name, num_topics).await;
+        let Ok(broker_endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+            warn!("The endpoints is empty, skipping the test {test_name}");
+            return;
+        };
+        let broker_endpoints = broker_endpoints
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect::<Vec<_>>();
+
+        let (logstore, topics) = prepare(test_name, num_topics, broker_endpoints).await;
         let mut region_contexts = (0..num_regions)
             .map(|i| {
                 let topic = &topics[i % topics.len()];

@@ -29,6 +29,7 @@ datatypes.workspace = true
 derive_builder.workspace = true
 etcd-client.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
 prometheus.workspace = true
@@ -51,5 +52,6 @@ tonic.workspace = true
 chrono.workspace = true
 common-procedure = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
+futures-util.workspace = true
 hyper = { version = "0.14", features = ["full"] }
 uuid.workspace = true

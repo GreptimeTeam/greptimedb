@@ -239,8 +239,8 @@ impl TopicManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::get_broker_endpoints;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::wal::kafka::test_util::run_test_with_kafka_wal;
 
     // Tests that topics can be successfully persisted into the kv backend and can be successfully restored from the kv backend.
     #[tokio::test]
@@ -270,53 +270,57 @@ mod tests {
     /// Tests that the topic manager could allocate topics correctly.
     #[tokio::test]
     async fn test_alloc_topics() {
-        let broker_endpoints = get_broker_endpoints!();
-        // Constructs topics that should be created.
-        let topics = (0..256)
-            .map(|i| format!("test_alloc_topics_{}_{}", i, uuid::Uuid::new_v4()))
-            .collect::<Vec<_>>();
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                // Constructs topics that should be created.
+                let topics = (0..256)
+                    .map(|i| format!("test_alloc_topics_{}_{}", i, uuid::Uuid::new_v4()))
+                    .collect::<Vec<_>>();
 
-        // Creates a topic manager.
-        let config = KafkaConfig {
-            replication_factor: broker_endpoints.len() as i16,
-            broker_endpoints,
-            ..Default::default()
-        };
-        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
-        let mut manager = TopicManager::new(config.clone(), kv_backend);
-        // Replaces the default topic pool with the constructed topics.
-        manager.topic_pool = topics.clone();
-        // Replaces the default selector with a round-robin selector without shuffled.
-        manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
-        manager.start().await.unwrap();
+                // Creates a topic manager.
+                let config = KafkaConfig {
+                    replication_factor: broker_endpoints.len() as i16,
+                    broker_endpoints,
+                    ..Default::default()
+                };
+                let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+                let mut manager = TopicManager::new(config.clone(), kv_backend);
+                // Replaces the default topic pool with the constructed topics.
+                manager.topic_pool = topics.clone();
+                // Replaces the default selector with a round-robin selector without shuffled.
+                manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
+                manager.start().await.unwrap();
 
-        // Selects exactly the number of `num_topics` topics one by one.
-        let got = (0..topics.len())
-            .map(|_| manager.select().unwrap())
-            .cloned()
-            .collect::<Vec<_>>();
-        assert_eq!(got, topics);
+                // Selects exactly the number of `num_topics` topics one by one.
+                let got = (0..topics.len())
+                    .map(|_| manager.select().unwrap())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(got, topics);
 
-        // Selects exactly the number of `num_topics` topics in a batching manner.
-        let got = manager
-            .select_batch(topics.len())
-            .unwrap()
-            .into_iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        assert_eq!(got, topics);
+                // Selects exactly the number of `num_topics` topics in a batching manner.
+                let got = manager
+                    .select_batch(topics.len())
+                    .unwrap()
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                assert_eq!(got, topics);
 
-        // Selects more than the number of `num_topics` topics.
-        let got = manager
-            .select_batch(2 * topics.len())
-            .unwrap()
-            .into_iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let expected = vec![topics.clone(); 2]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        assert_eq!(got, expected);
+                // Selects more than the number of `num_topics` topics.
+                let got = manager
+                    .select_batch(2 * topics.len())
+                    .unwrap()
+                    .into_iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let expected = vec![topics.clone(); 2]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                assert_eq!(got, expected);
+            })
+        })
+        .await;
     }
 }

@@ -1833,6 +1833,7 @@ dependencies = [
  "derive_builder 0.12.0",
  "etcd-client",
  "futures",
+ "futures-util",
  "humantime-serde",
  "hyper",
  "lazy_static",

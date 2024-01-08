@@ -136,15 +136,17 @@ impl ClientManager {
 
 #[cfg(test)]
 mod tests {
-
-    use common_meta::get_broker_endpoints;
+    use common_meta::wal::kafka::test_util::run_test_with_kafka_wal;
 
     use super::*;
     use crate::test_util::kafka::create_topics;
 
     /// Prepares for a test in that a collection of topics and a client manager are created.
-    async fn prepare(test_name: &str, num_topics: usize) -> (ClientManager, Vec<Topic>) {
-        let broker_endpoints = get_broker_endpoints!();
+    async fn prepare(
+        test_name: &str,
+        num_topics: usize,
+        broker_endpoints: Vec<String>,
+    ) -> (ClientManager, Vec<Topic>) {
         let topics = create_topics(
             num_topics,
             |i| format!("{test_name}_{}_{}", i, uuid::Uuid::new_v4()),
@@ -164,42 +166,52 @@ mod tests {
     /// Sends `get_or_insert` requests sequentially to the client manager, and checks if it could handle them correctly.
     #[tokio::test]
     async fn test_sequential() {
-        let (manager, topics) = prepare("test_sequential", 128).await;
-        // Assigns multiple regions to a topic.
-        let region_topic = (0..512)
-            .map(|region_id| (region_id, &topics[region_id % topics.len()]))
-            .collect::<HashMap<_, _>>();
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                let (manager, topics) = prepare("test_sequential", 128, broker_endpoints).await;
+                // Assigns multiple regions to a topic.
+                let region_topic = (0..512)
+                    .map(|region_id| (region_id, &topics[region_id % topics.len()]))
+                    .collect::<HashMap<_, _>>();
 
-        // Gets all clients sequentially.
-        for (_, topic) in region_topic {
-            manager.get_or_insert(topic).await.unwrap();
-        }
+                // Gets all clients sequentially.
+                for (_, topic) in region_topic {
+                    manager.get_or_insert(topic).await.unwrap();
+                }
 
-        // Ensures all clients exist.
-        let client_pool = manager.client_pool.read().await;
-        let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
-        assert!(all_exist);
+                // Ensures all clients exist.
+                let client_pool = manager.client_pool.read().await;
+                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                assert!(all_exist);
+            })
+        })
+        .await;
     }
 
     /// Sends `get_or_insert` requests in parallel to the client manager, and checks if it could handle them correctly.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_parallel() {
-        let (manager, topics) = prepare("test_parallel", 128).await;
-        // Assigns multiple regions to a topic.
-        let region_topic = (0..512)
-            .map(|region_id| (region_id, &topics[region_id % topics.len()]))
-            .collect::<HashMap<_, _>>();
+        run_test_with_kafka_wal(|broker_endpoints| {
+            Box::pin(async {
+                let (manager, topics) = prepare("test_parallel", 128, broker_endpoints).await;
+                // Assigns multiple regions to a topic.
+                let region_topic = (0..512)
+                    .map(|region_id| (region_id, &topics[region_id % topics.len()]))
+                    .collect::<HashMap<_, _>>();
 
-        // Gets all clients in parallel.
-        let tasks = region_topic
-            .values()
-            .map(|topic| manager.get_or_insert(topic))
-            .collect::<Vec<_>>();
-        futures::future::try_join_all(tasks).await.unwrap();
+                // Gets all clients in parallel.
+                let tasks = region_topic
+                    .values()
+                    .map(|topic| manager.get_or_insert(topic))
+                    .collect::<Vec<_>>();
+                futures::future::try_join_all(tasks).await.unwrap();
 
-        // Ensures all clients exist.
-        let client_pool = manager.client_pool.read().await;
-        let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
-        assert!(all_exist);
+                // Ensures all clients exist.
+                let client_pool = manager.client_pool.read().await;
+                let all_exist = topics.iter().all(|topic| client_pool.contains_key(topic));
+                assert!(all_exist);
+            })
+        })
+        .await;
     }
 }

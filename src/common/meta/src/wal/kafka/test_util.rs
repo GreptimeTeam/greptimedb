@@ -12,17 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Gets broker endpoints from environment variables with the given key.
-/// Returns the default ["localhost:9092"] if no environment variables set for broker endpoints.
-#[macro_export]
-macro_rules! get_broker_endpoints {
-    () => {{
-        let broker_endpoints = std::env::var("GT_KAFKA_ENDPOINTS")
-            .unwrap_or("localhost:9092".to_string())
-            .split(',')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        assert!(!broker_endpoints.is_empty());
-        broker_endpoints
-    }};
+use common_telemetry::warn;
+use futures_util::future::BoxFuture;
+
+pub async fn run_test_with_kafka_wal<F>(test: F)
+where
+    F: FnOnce(Vec<String>) -> BoxFuture<'static, ()>,
+{
+    let Ok(endpoints) = std::env::var("GT_KAFKA_ENDPOINTS") else {
+        warn!("The endpoints is empty, skipping the test");
+        return;
+    };
+
+    let endpoints = endpoints
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect::<Vec<_>>();
+
+    test(endpoints).await
 }
