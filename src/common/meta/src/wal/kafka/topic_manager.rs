@@ -14,10 +14,9 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use common_config::wal::kafka::TopicSelectorType;
-use common_telemetry::{debug, error, info};
+use common_telemetry::{error, info};
 use rskafka::client::controller::ControllerClient;
 use rskafka::client::error::Error as RsKafkaError;
 use rskafka::client::error::ProtocolError::TopicAlreadyExists;
@@ -25,7 +24,7 @@ use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use rskafka::BackoffConfig;
-use snafu::{ensure, AsErrorSource, ResultExt};
+use snafu::{ensure, ResultExt};
 
 use crate::error::{
     BuildKafkaClientSnafu, BuildKafkaCtrlClientSnafu, BuildKafkaPartitionClientSnafu,
@@ -239,10 +238,6 @@ impl TopicManager {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-
-    use common_telemetry::info;
-
     use super::*;
     use crate::get_broker_endpoints;
     use crate::kv_backend::memory::MemoryKvBackend;

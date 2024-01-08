@@ -24,21 +24,6 @@ use store_api::logstore::EntryId;
 
 use crate::kafka::{EntryImpl, NamespaceImpl};
 
-/// Gets broker endpoints from environment variables with the given key.
-/// Returns the default ["localhost:9092"] if no environment variables set for broker endpoints.
-#[macro_export]
-macro_rules! get_broker_endpoints {
-    () => {{
-        let broker_endpoints = std::env::var("GT_KAFKA_ENDPOINTS")
-            .unwrap_or("localhost:9092".to_string())
-            .split(',')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        assert!(!broker_endpoints.is_empty());
-        broker_endpoints
-    }};
-}
-
 /// Creates `num_topiocs` number of topics each will be decorated by the given decorator.
 pub async fn create_topics<F>(
     num_topics: usize,

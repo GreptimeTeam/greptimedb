@@ -116,7 +116,7 @@ mod tests {
     async fn test_allocator_with_raft_engine() {
         let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
         let wal_config = WalConfig::RaftEngine;
-        let mut allocator = WalOptionsAllocator::new(wal_config, kv_backend);
+        let allocator = WalOptionsAllocator::new(wal_config, kv_backend);
         allocator.start().await.unwrap();
 
         let num_regions = 32;
@@ -153,7 +153,6 @@ mod tests {
         topic_manager.topic_selector = Arc::new(RoundRobinTopicSelector::default());
 
         // Creates an options allocator.
-        let wal_config = WalConfig::Kafka(config.clone());
         let allocator = WalOptionsAllocator::Kafka(topic_manager);
         allocator.start().await.unwrap();
 

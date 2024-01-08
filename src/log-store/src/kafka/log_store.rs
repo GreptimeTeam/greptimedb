@@ -284,10 +284,10 @@ fn check_termination(
 mod tests {
     use common_base::readable_size::ReadableSize;
     use common_config::wal::KafkaWalTopic as Topic;
+    use common_meta::get_broker_endpoints;
     use rand::seq::IteratorRandom;
 
     use super::*;
-    use crate::get_broker_endpoints;
     use crate::test_util::kafka::{
         create_topics, entries_with_random_data, new_namespace, EntryBuilder,
     };

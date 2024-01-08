@@ -12,10 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use rskafka::client::ClientBuilder;
-
-use crate::wal::kafka::Topic;
-
 /// Gets broker endpoints from environment variables with the given key.
 /// Returns the default ["localhost:9092"] if no environment variables set for broker endpoints.
 #[macro_export]

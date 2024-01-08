@@ -16,7 +16,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use snafu::ensure;
 
 use crate::error::{EmptyTopicPoolSnafu, Result};

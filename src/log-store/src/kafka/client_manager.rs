@@ -137,8 +137,9 @@ impl ClientManager {
 #[cfg(test)]
 mod tests {
 
+    use common_meta::get_broker_endpoints;
+
     use super::*;
-    use crate::get_broker_endpoints;
     use crate::test_util::kafka::create_topics;
 
     /// Prepares for a test in that a collection of topics and a client manager are created.
